@@ -45,6 +45,7 @@ struct ColorTarget {
     bool dccPipeAligned = false;
     std::uint64_t cmaskAddress = 0;
     std::size_t cmaskBytes = 0;
+    bool cmaskFastClear = false;
     std::uint64_t surfaceAddress = 0;
     VkExtent2D surfaceExtent{};
     std::uint32_t mipCount = 1;
@@ -61,7 +62,6 @@ struct ColorTarget {
     bool uintExport = false;
     std::uint32_t pipeBankXor = 0;
     std::uint32_t samples = 1;
-    std::uint64_t cmaskAddress = 0;
 };
 
 struct DepthTarget {
