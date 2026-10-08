@@ -58,6 +58,24 @@ int APS5_VABI pthread_attr_getschedpolicy_nid_postfix(const PthreadAttr* attr, i
     return 0;
 }
 
+int APS5_VABI pthread_attr_getinheritsched_nid_postfix(const PthreadAttr* attr, int* inherit_sched) {
+    if (!Valid(attr) || !inherit_sched) return PosixThread::GUEST_EINVAL;
+    *inherit_sched = (*attr)->_inheritsched;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_getscope_nid_postfix(const PthreadAttr* attr, int* scope) {
+    if (!Valid(attr) || !scope) return PosixThread::GUEST_EINVAL;
+    *scope = (*attr)->_scope;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_getstackaddr_nid_postfix(const PthreadAttr* attr, void** stack_addr) {
+    if (!Valid(attr) || !stack_addr) return PosixThread::GUEST_EINVAL;
+    *stack_addr = (*attr)->stackAddress;
+    return 0;
+}
+
 int APS5_VABI pthread_attr_getstack_nid_postfix(const PthreadAttr* __restrict attr, void** __restrict stack_addr, size_t* __restrict stack_size) {
     if (!Valid(attr) || !stack_addr || !stack_size) return PosixThread::GUEST_EINVAL;
     *stack_addr = (*attr)->stackAddress;
@@ -103,6 +121,12 @@ int APS5_VABI pthread_attr_setschedparam_nid_postfix(PthreadAttr* attr, const Ke
 int APS5_VABI pthread_attr_setschedpolicy_nid_postfix(PthreadAttr* attr, int policy) {
     if (!Valid(attr)) return PosixThread::GUEST_EINVAL;
     (*attr)->_schedpolicy = policy;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_setscope_nid_postfix(PthreadAttr* attr, int scope) {
+    if (!Valid(attr) || (scope != 0 && scope != 2)) return PosixThread::GUEST_EINVAL;
+    (*attr)->_scope = scope;
     return 0;
 }
 

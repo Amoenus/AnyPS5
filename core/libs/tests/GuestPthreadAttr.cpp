@@ -19,6 +19,13 @@ int APS5_VABI scePthreadAttrGetschedparam(const PthreadAttr* attr, KernelSchedPa
 int APS5_VABI scePthreadAttrGetaffinity(const PthreadAttr* attr, KernelCpumask* mask);
 int APS5_VABI scePthreadAttrGetstacksize(const PthreadAttr* attr, std::size_t* stackSize);
 int APS5_VABI scePthreadAttrGetdetachstate(const PthreadAttr* attr, int* state);
+int APS5_VABI pthread_attr_init_nid_postfix(PthreadAttr* attr);
+int APS5_VABI pthread_attr_destroy_nid_postfix(PthreadAttr* attr);
+int APS5_VABI pthread_attr_getinheritsched_nid_postfix(const PthreadAttr* attr, int* inheritSched);
+int APS5_VABI pthread_attr_setinheritsched_nid_postfix(PthreadAttr* attr, int inheritSched);
+int APS5_VABI pthread_attr_getscope_nid_postfix(const PthreadAttr* attr, int* scope);
+int APS5_VABI pthread_attr_setscope_nid_postfix(PthreadAttr* attr, int scope);
+int APS5_VABI pthread_attr_getstackaddr_nid_postfix(const PthreadAttr* attr, void** stackAddress);
 int APS5_VABI pthread_attr_setstacksize_nid_postfix(PthreadAttr* attr, std::size_t stackSize);
 }
 
@@ -81,6 +88,31 @@ static void* APS5_VABI Worker(void* arg) {
     return nullptr;
 }
 
+static void PosixAttributes() {
+    constexpr int Invalid = 22;
+    PthreadAttr attr = nullptr;
+    Require(pthread_attr_init_nid_postfix(&attr) == 0);
+    int value = -1;
+    Require(pthread_attr_getinheritsched_nid_postfix(&attr, &value) == 0 && value == 4);
+    Require(pthread_attr_setinheritsched_nid_postfix(&attr, EXPLICIT_SCHED) == 0);
+    Require(pthread_attr_getinheritsched_nid_postfix(&attr, &value) == 0 && value == EXPLICIT_SCHED);
+    Require(pthread_attr_getinheritsched_nid_postfix(&attr, nullptr) == Invalid);
+
+    Require(pthread_attr_getscope_nid_postfix(&attr, &value) == 0 && value == 2);
+    Require(pthread_attr_setscope_nid_postfix(&attr, 0) == 0);
+    Require(pthread_attr_getscope_nid_postfix(&attr, &value) == 0 && value == 0);
+    Require(pthread_attr_setscope_nid_postfix(&attr, 1) == Invalid);
+    Require(pthread_attr_getscope_nid_postfix(&attr, &value) == 0 && value == 0);
+
+    void* address = &value;
+    Require(pthread_attr_getstackaddr_nid_postfix(&attr, &address) == 0 && address == nullptr);
+    Require(pthread_attr_getstackaddr_nid_postfix(&attr, nullptr) == Invalid);
+
+    PthreadAttr empty = nullptr;
+    Require(pthread_attr_getscope_nid_postfix(&empty, &value) == Invalid);
+    Require(pthread_attr_destroy_nid_postfix(&attr) == 0);
+}
+
 int main() {
     CheckStackSizeLimit();
     PthreadAttr attr = nullptr;
@@ -135,4 +167,6 @@ int main() {
     Require(reportedAddress == &stackMarker && reportedSize == STACK_SIZE);
     Require(scePthreadAttrDestroy(&stackAttr) == SCE_OK);
     Require(pthread_attr_setstack_nid_postfix(&stackAttr, &stackMarker, STACK_SIZE) == 22);
+
+    PosixAttributes();
 }
