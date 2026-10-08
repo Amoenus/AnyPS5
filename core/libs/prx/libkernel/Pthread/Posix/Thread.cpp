@@ -80,6 +80,10 @@ int APS5_VABI pthread_getname_np_nid_postfix(Pthread thread, char* name) {
     return PosixThread::ToErrno(scePthreadGetname(thread, name));
 }
 
+void APS5_VABI pthread_set_name_np_nid_postfix(Pthread thread, const char* name) {
+    scePthreadRename(thread, name != nullptr ? name : "");
+}
+
 Pthread APS5_VABI pthread_self_nid_postfix(void) {
     return scePthreadSelf();
 }
