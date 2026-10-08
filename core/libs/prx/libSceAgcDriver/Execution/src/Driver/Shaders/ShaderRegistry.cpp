@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstddef>
+#include <span>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -120,6 +121,21 @@ void AwaitRegisteredPreparation(PreparedShaders& prepared, std::unique_lock<std:
 }
 
 }
+
+bool ProgramUsesWorkgroup(const ShaderSnapshot& snapshot, std::size_t codeOffset) {
+    constexpr std::uint8_t Unknown = 0, Unused = 1, Used = 2;
+    if (codeOffset == 0) {
+        const auto cached = snapshot.workgroupUse->load(std::memory_order_acquire);
+        if (cached != Unknown) return cached == Used;
+    }
+    const auto decoded = ShaderRecompiler::RdnaInstructionDecoder{}.Decode(std::span(snapshot.code).subspan(codeOffset));
+    const bool used = std::any_of(decoded.instructions.begin(), decoded.instructions.end(), [](const auto& instruction) {
+        return instruction.family == ShaderRecompiler::RdnaInstructionFamily::DS || instruction.op == ShaderRecompiler::RdnaOpcode::SBarrier;
+    });
+    if (codeOffset == 0) snapshot.workgroupUse->store(used ? Used : Unused, std::memory_order_release);
+    return used;
+}
+
 
 struct ShaderPreparationTransaction::State {
     struct Change {
