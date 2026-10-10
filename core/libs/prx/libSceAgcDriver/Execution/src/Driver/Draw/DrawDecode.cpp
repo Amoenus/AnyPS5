@@ -120,10 +120,11 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     const auto stages = queue.context.find(0x2d5);
     const auto low = queue.shader.find(0xc8);
     const auto high = queue.shader.find(0xc9);
-    if (stages != queue.context.end() && (stages->second & 0x02002024u) == 0x2000u && low != queue.shader.end() && high != queue.shader.end()) {
+    if (submission.shaders->empty() && stages != queue.context.end() && (stages->second & 0x02002024u) == 0x2000u && low != queue.shader.end() && high != queue.shader.end()) {
         const auto address = (static_cast<std::uint64_t>(low->second) << 8u) | (static_cast<std::uint64_t>(high->second & 0xffu) << 40u);
-        const auto front = ProgramSnapshot(*submission.shaders, address);
-        vertexWorkgroup = front->header.empty() && ProgramUsesWorkgroup(*front, static_cast<std::size_t>((address - front->codeAddress) / sizeof(std::uint32_t)));
+        require((high->second & ~0xffu) == 0, "reserved graphics program address bits are set");
+        const auto front = ReadRawShader(address);
+        vertexWorkgroup = ProgramUsesWorkgroup(*front, 0);
     }
     product->state = Graphics::DecodeState(queue, vertexWorkgroup);
     DecodeGraphicsPrograms(*product, queue, *submission.shaders, false, true);

@@ -14,6 +14,7 @@
 
 alignas(256) std::array<std::byte, 64 * 64 * 4> colorMemory{};
 alignas(256) constexpr std::array<std::uint32_t, 64> vertexCode{0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e0602f2u, 0xf80008cfu, 0x03020100u, 0xbf810000u};
+alignas(256) constexpr std::array<std::uint32_t, 64> workgroupCode{0xbf8a0000u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 64> pixelCode{0x7e0002f2u, 0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u};
 AgcDriver::QueueState makeState() {
     AgcDriver::QueueState queue;
@@ -91,7 +92,7 @@ int main(int argc, char** argv) {
             if (!device) return VulkanTestSkipped;
         }
         const std::string_view mode = argc == 2 ? argv[1] : "raw-first";
-        if (mode != "raw-first" && mode != "empty-draw" && mode != "registered" && mode != "registration-before-draw") throw std::runtime_error("unknown raw graphics policy test mode");
+        if (mode != "raw-first" && mode != "empty-draw" && mode != "registered" && mode != "registered-workgroup" && mode != "registration-before-draw") throw std::runtime_error("unknown raw graphics policy test mode");
         auto queue = makeState();
         queue.userConfig[0x24a] = 0;
         const auto bind = [&](const void* code, std::uint32_t program) {
@@ -99,7 +100,7 @@ int main(int argc, char** argv) {
             queue.shader[program] = static_cast<std::uint32_t>(address >> 8u);
             queue.shader[program + 1u] = static_cast<std::uint32_t>(address >> 40u);
         };
-        bind(vertexCode.data(), 0xc8);
+        bind(mode == "registered-workgroup" ? workgroupCode.data() : vertexCode.data(), 0xc8);
         bind(pixelCode.data(), 0x8);
         queue.shader[0x8b] = 0;
         queue.shader[0xb] = 0;
@@ -117,7 +118,7 @@ int main(int argc, char** argv) {
         registers(queue.userConfig, 0x79);
         words.insert(words.end(), {0xc0002f00u, 1, 0xc0012d00u, mode == "empty-draw" ? 0u : 3u, 2});
         Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
-        if (mode == "registered") RegisterCompute();
+        if (mode == "registered" || mode == "registered-workgroup") RegisterCompute();
         if (sceAgcDriverSubmitDcb(&packet) != 0) throw std::runtime_error("draw submission failed");
         if (mode == "registration-before-draw") {
             try {
@@ -129,7 +130,7 @@ int main(int argc, char** argv) {
             gate = 1;
             ExpectFailure([] { AgcDriverWaitIdle_nid_postfix(); }, "raw graphics draw follows shader registration");
             ExpectFailure([] { AgcDriverShutdown_nid_postfix(); }, "raw graphics draw follows shader registration");
-        } else if (mode == "registered") {
+        } else if (mode == "registered" || mode == "registered-workgroup") {
             ExpectFailure([] { AgcDriverWaitIdle_nid_postfix(); }, "registered shader");
             ExpectFailure([] { AgcDriverShutdown_nid_postfix(); }, "registered shader");
         } else {
