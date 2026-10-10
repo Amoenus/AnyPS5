@@ -9,6 +9,9 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 extern "C" char* APS5_VABI getcwd_nid_postfix(char* buffer, std::size_t size);
 
@@ -48,6 +51,16 @@ void DropLastComponent(std::string& result) {
 }
 
 bool IsSeparator(char character) { return Separators.find(character) != std::string_view::npos; }
+
+bool IsHostLink(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+    std::error_code error;
+    return std::filesystem::is_symlink(std::filesystem::symlink_status(path, error));
+#endif
+}
 
 bool ResolveGuest(const char* path, std::string& result, int& error) {
     std::string_view left(path);
@@ -90,7 +103,9 @@ bool ResolveGuest(const char* path, std::string& result, int& error) {
             return false;
         }
         std::error_code code;
-        const auto status = std::filesystem::status(ResolvePath_nid_no_patch(candidate.c_str()), code);
+        const auto host = ResolvePath_nid_no_patch(candidate.c_str());
+        if (IsHostLink(host)) NotImplemented_nid_no_patch("realpath of a symbolic link");
+        const auto status = std::filesystem::status(host, code);
         if (code && code != std::errc::no_such_file_or_directory && code != std::errc::not_a_directory) {
             error = StatusError(code);
             return false;

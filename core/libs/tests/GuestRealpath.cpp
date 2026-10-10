@@ -5,11 +5,16 @@
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <stdexcept>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 extern "C" {
 char* APS5_VABI realpath_nid_postfix(const char*, char*);
@@ -18,7 +23,13 @@ void APS5_VABI free_nid_postfix(void*);
 int* APS5_VABI __error_nid_postfix();
 }
 
-static void Require(bool value) { if (!value) std::abort(); }
+static void Check(bool value, int line) {
+    if (!value) {
+        std::fprintf(stderr, "Realpath check failed at line %d\n", line);
+        std::abort();
+    }
+}
+#define Require(value) Check((value), __LINE__)
 
 static bool Resolves(const std::string& path, const std::string& expected) {
     char out[1024];
@@ -32,6 +43,31 @@ static bool Fails(const char* path, int error, const std::string& trouble = {}) 
     *__error_nid_postfix() = 0;
     if (realpath_nid_postfix(path, out) != nullptr || *__error_nid_postfix() != error) return false;
     return trouble.empty() || trouble == out;
+}
+
+static bool MakeLink(const std::filesystem::path& target, const std::filesystem::path& link, bool directory) {
+#ifdef _WIN32
+    const DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE | (directory ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0);
+    return CreateSymbolicLinkW(link.c_str(), target.c_str(), flags) != 0;
+#else
+    std::error_code error;
+    if (directory) std::filesystem::create_directory_symlink(target, link, error);
+    else std::filesystem::create_symlink(target, link, error);
+    return !error;
+#endif
+}
+
+static void RejectsLink(const std::string& path) {
+    std::array<char, 1024> out;
+    out.fill('x');
+    bool rejected = false;
+    try {
+        realpath_nid_postfix(path.c_str(), out.data());
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()) == "realpath of a symbolic link not implemented";
+    }
+    Require(rejected);
+    for (const auto value : out) Require(value == 'x');
 }
 
 int main() {
@@ -100,6 +136,11 @@ int main() {
 
     *__error_nid_postfix() = 0;
     Require(realpath_nid_postfix((guest + "/missing").c_str(), nullptr) == nullptr && *__error_nid_postfix() == 2);
+
+    Require(MakeLink("file.txt", directory / "file-link", false));
+    Require(MakeLink("sub", directory / "directory-link", true));
+    RejectsLink(guest + "/file-link");
+    RejectsLink(guest + "/directory-link/../file.txt");
 
     std::filesystem::remove_all(directory);
     return 0;
