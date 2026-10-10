@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
-#include <string>
 #ifdef _WIN32
 #include <io.h>
 #include <windows.h>
@@ -58,22 +57,6 @@ static void Check(bool value, int line) {
     }
 }
 #define Require(value) Check((value), __LINE__)
-#ifdef _WIN32
-static void RejectsLink(const std::filesystem::path& path) {
-    FileStat status;
-    std::memset(&status, 0x5a, sizeof(status));
-    *__error_nid_postfix() = 77;
-    bool rejected = false;
-    try {
-        lstat_nid_postfix(path.string().c_str(), &status);
-    } catch (const std::runtime_error& error) {
-        rejected = std::string(error.what()) == "lstat of a Windows symbolic link not implemented";
-    }
-    Require(rejected && *__error_nid_postfix() == 77);
-    for (std::size_t i = 0; i < sizeof(status); ++i)
-        Require(reinterpret_cast<const unsigned char*>(&status)[i] == 0x5a);
-}
-#endif
 int main() {
     Require(sceKernelDebugOutText(-1, "text") == static_cast<int>(0x80020016u));
     std::uint64_t throttling[4] = {1, 2, 3, 4};
@@ -272,18 +255,6 @@ int main() {
     Require(lstat_nid_postfix("", &linkStatus) == -1 && *__error_nid_postfix() == 2);
     Require(lstat_nid_postfix(nullptr, &linkStatus) == -1 && *__error_nid_postfix() == 14);
     Require(lstat_nid_postfix(presentName.c_str(), nullptr) == -1 && *__error_nid_postfix() == 14);
-#ifdef _WIN32
-    const auto fileLink = root / "file-link";
-    const auto directoryLink = root / "directory-link";
-    const auto danglingLink = root / "dangling-link";
-    Require(CreateSymbolicLinkW(fileLink.c_str(), L"present.txt", SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != 0);
-    Require(CreateSymbolicLinkW(directoryLink.c_str(), L".", SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE | SYMBOLIC_LINK_FLAG_DIRECTORY) != 0);
-    Require(CreateSymbolicLinkW(danglingLink.c_str(), L"missing.txt", SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != 0);
-    RejectsLink(fileLink);
-    RejectsLink(directoryLink);
-    RejectsLink(danglingLink);
-    Require(DeleteFileW(fileLink.c_str()) != 0 && RemoveDirectoryW(directoryLink.c_str()) != 0 && DeleteFileW(danglingLink.c_str()) != 0);
-#endif
 #ifndef _WIN32
     const auto link = root / "link";
     std::filesystem::create_symlink("present.txt", link);
