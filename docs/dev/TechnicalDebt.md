@@ -478,3 +478,5 @@ Throughout the project, every function at every stage either **does exactly what
 - [realpath](../../core/libs/prx/libc/src/RealPath.cpp) (libc) throws when a component is a host symbolic link, or any Windows reparse point. Guest-visible link target resolution across root and mount aliases is not implemented; returning the lexical path would leave links unresolved and apply `..` to the wrong directory.
 
 - [symlink](../../core/libs/prx/libkernel_sys/Export.cpp) (libkernel_sys) throws explicitly. Guest link creation and target translation are not implemented; this export only permits import resolution for diagnostic startup runs.
+
+- [lstat](../../core/libs/prx/libkernel/File/src/NativeStat.cpp) (libkernel) throws for Windows reparse points, including symbolic links and junctions. Reporting guest link metadata and translating host link targets are not implemented.
