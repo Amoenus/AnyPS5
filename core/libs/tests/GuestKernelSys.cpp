@@ -13,6 +13,7 @@
 
 extern "C" {
 int APS5_VABI fork_nid_postfix(void);
+int APS5_VABI symlink_nid_postfix(const char*, const char*);
 std::int64_t APS5_VABI readlink_nid_postfix(const char*, char*, std::size_t);
 int* APS5_VABI __error_nid_postfix();
 }
@@ -28,6 +29,17 @@ int Error() {
     return *__error_nid_postfix();
 }
 
+void RejectsSymlink(const char* target, const char* link) {
+    *__error_nid_postfix() = 73;
+    bool unsupported = false;
+    try {
+        symlink_nid_postfix(target, link);
+    } catch (const std::runtime_error& error) {
+        unsupported = std::string_view(error.what()) == "symlink_nid_postfix not implemented";
+    }
+    Require(unsupported && Error() == 73);
+}
+
 int main() {
     *__error_nid_postfix() = 73;
     bool forkUnsupported = false;
@@ -38,6 +50,10 @@ int main() {
     }
     Require(forkUnsupported);
     Require(Error() == 73);
+    RejectsSymlink("target", "link");
+    RejectsSymlink(nullptr, "link");
+    RejectsSymlink("target", nullptr);
+    RejectsSymlink(nullptr, nullptr);
     const auto root = std::filesystem::path("anyps5-kernel-sys-test-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Require(std::filesystem::create_directory(root));
