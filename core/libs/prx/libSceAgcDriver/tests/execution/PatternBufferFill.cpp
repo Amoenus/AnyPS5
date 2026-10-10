@@ -185,6 +185,36 @@ void PartialGroupTests() {
     }
 }
 
+void StartOffsetTest(std::uint32_t axis, std::string_view kind, bool force) {
+    Output.fill(0xcafebabeu);
+    Pattern[0] = 0x12345678u;
+    Control = {256, 0, 0, 0};
+    auto words = Commands(UserData(Output.data(), 256), 128, 64, false, kind == "indirect");
+    const std::array<std::uint32_t, 3> start{0xc0017600u, 0x204u + axis, 1u};
+    words.insert(words.begin(), start.begin(), start.end());
+    if (kind == "partial") {
+        words[5] = 0x00100040u;
+        words[6] = words[7] = 0x00010001u;
+        words.back() |= 0x2u;
+    }
+    if (force) words.back() |= 0x4u;
+    bool rejected = false;
+    try { Submit(words); }
+    catch (const std::exception& error) {
+        Require(!force && std::string_view(error.what()).find("nonzero COMPUTE_START_X/Y/Z") != std::string_view::npos, "unexpected dispatch start refusal");
+        rejected = true;
+    }
+    if (force) {
+        const auto written = kind == "partial" ? 80u : 128u;
+        for (std::size_t i = 0; i < Output.size(); ++i) Require(Output[i] == (i < written ? Pattern[0] : 0xcafebabeu), "forced dispatch start changed its output range");
+    } else {
+        Require(rejected, "a nonzero dispatch start ran from zero");
+        Require(std::all_of(Output.begin(), Output.end(), [](auto value) { return value == 0xcafebabeu; }), "rejected dispatch changed its output");
+        try { AgcDriverShutdown_nid_postfix(); }
+        catch (const std::exception& error) { Require(std::string_view(error.what()).find("nonzero COMPUTE_START_X/Y/Z") != std::string_view::npos, "unexpected shutdown failure"); }
+    }
+}
+
 void Benchmark() {
     constexpr std::size_t bytes = 64u << 20u;
     std::vector<std::uint32_t> storage(bytes / 4 + 4);
@@ -213,7 +243,18 @@ int main(int argc, char** argv) {
             const auto device = OpenVulkanTestDevice();
             if (!device) return VulkanTestSkipped;
         }
-        if (argc == 2 && std::string_view(argv[1]) == "--benchmark") Benchmark();
+        if (argc == 3) {
+            const std::string_view axis(argv[1]), kind(argv[2]);
+            Require(kind == "direct" || kind == "partial" || kind == "indirect", "unknown dispatch start test");
+            if (axis == "force") {
+                for (std::uint32_t i = 0; i < 3; ++i) StartOffsetTest(i, kind, true);
+            } else {
+                Require(axis == "x" || axis == "y" || axis == "z", "unknown start axis");
+                StartOffsetTest(axis == "x" ? 0u : axis == "y" ? 1u : 2u, kind, false);
+                std::puts("nonzero dispatch start rejected without writing output");
+                return 0;
+            }
+        } else if (argc == 2 && std::string_view(argv[1]) == "--benchmark") Benchmark();
         else {
             ExecuteTests();
             PartialGroupTests();

@@ -15,6 +15,12 @@ namespace AgcDriver::DriverDetail {
 
 void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments) {
     PerformanceTimer timing("Driver.Dispatch");
+    if ((packet[4] & 0x4u) == 0) {
+        for (std::uint32_t axis = 0; axis < 3; ++axis) {
+            const auto start = queue.shader.find(0x204u + axis);
+            require(start == queue.shader.end() || start->second == 0, "nonzero COMPUTE_START_X/Y/Z without FORCE_START_AT_000 is not implemented");
+        }
+    }
     const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
     const auto registeredShader = ProgramSnapshot(*submission.shaders, address);
     const auto& snapshot = *registeredShader;
