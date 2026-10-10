@@ -21,6 +21,7 @@ int APS5_VABI sceKernelRename(const char*, const char*);
 int APS5_VABI sceKernelUnlink(const char*);
 int APS5_VABI sceKernelChmod_nid_postfix(const char*, std::uint16_t);
 void APS5_VABI sceKernelSync();
+void APS5_VABI sync_nid_postfix();
 void* APS5_VABI fopen_nid_postfix(const char*, const char*);
 int APS5_VABI fclose_nid_postfix(void*);
 }
@@ -71,5 +72,11 @@ int main() {
     CloseHandle(exclusive);
 #endif
     sceKernelSync();
+    const int synced = sceKernelOpen("kernel_sync_probe/synced.bin", 0x1 | 0x200 | 0x400, 0644);
+    Require(synced >= 0 && sceKernelWrite(synced, "data", 4) == 4 && sceKernelClose(synced) == 0);
+    Require(Recorded("kernel_sync_probe/synced.bin"));
+    Require(sceKernelUnlink("kernel_sync_probe/synced.bin") == 0);
+    sync_nid_postfix();
+    Require(!Recorded("kernel_sync_probe/synced.bin"));
     std::filesystem::remove_all("kernel_sync_probe");
 }

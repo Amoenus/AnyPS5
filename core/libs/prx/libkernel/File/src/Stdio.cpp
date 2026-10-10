@@ -363,9 +363,16 @@ template <typename TCall> static int WithoutParameterHandler(TCall call) {
     _set_thread_local_invalid_parameter_handler(previous);
     return result;
 }
+bool DescriptorIsOpen_nid_no_patch(int descriptor) {
+    return descriptor >= 0 && WithoutParameterHandler([descriptor] { return ::_get_osfhandle(descriptor) == -1 ? -1 : 0; }) == 0;
+}
 static void RejectDirectoryDuplicate(int descriptor, const char* function) {
     if (File::DirectoryDescriptorPath(descriptor))
         throw std::runtime_error(std::string(function) + ": duplicating a directory descriptor is not supported on Windows");
+}
+#else
+bool DescriptorIsOpen_nid_no_patch(int descriptor) {
+    return descriptor >= 0 && ::fcntl(descriptor, F_GETFD) >= 0;
 }
 #endif
 

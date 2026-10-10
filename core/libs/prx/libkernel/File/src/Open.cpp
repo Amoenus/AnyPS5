@@ -11,6 +11,7 @@
 #include "SceTypes.hpp"
 
 #include <cerrno>
+#include <cstdarg>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -107,6 +108,8 @@ static int MapFlags(int sceFlags) {
 #endif
 
 extern "C" int* APS5_VABI __error_nid_postfix();
+extern "C" int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...);
+static constexpr int GuestSetFlags = 4;
 
 static int SceErrorFromErrno(int error) {
     constexpr int GuestEio = 5;
@@ -241,9 +244,29 @@ int APS5_VABI sceKernelUnlink(const char* path) {
     return 0;
 }
 
-int APS5_VABI sceKernelFcntl() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceKernelFcntl(int d, int command, ...) {
+    if (d < GuestSockets::FirstDescriptor) {
+        if (!DescriptorIsOpen_nid_no_patch(d)) return SCE_KERNEL_ERROR_EBADF;
+        throw std::runtime_error(std::string(__func__) + ": file descriptors are not implemented, fd=" + std::to_string(d));
+    }
+    int result;
+    if (command == GuestSetFlags) {
+#ifdef _WIN32
+        __builtin_sysv_va_list arguments;
+        __builtin_sysv_va_start(arguments, command);
+        const int flags = __builtin_va_arg(arguments, int);
+        __builtin_sysv_va_end(arguments);
+#else
+        std::va_list arguments;
+        va_start(arguments, command);
+        const int flags = va_arg(arguments, int);
+        va_end(arguments);
+#endif
+        result = fcntl_nid_postfix(d, command, flags);
+    } else {
+        result = fcntl_nid_postfix(d, command);
+    }
+    return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
 }
 
 }
