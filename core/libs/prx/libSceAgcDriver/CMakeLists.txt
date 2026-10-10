@@ -888,6 +888,8 @@ target_include_directories(agc_driver_prepared_publication_tests PRIVATE $<TARGE
 target_include_directories(agc_driver_prepared_graphics_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 target_link_libraries(agc_driver_interpolation_modes_tests PRIVATE shader_recompiler_agc_driver)
 
+target_include_directories(agc_driver_prepared_unregistered_graphics_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
+
 target_include_directories(agc_driver_prepared_shaders_tests PRIVATE
         $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>
 )
@@ -922,6 +924,16 @@ if(BUILD_TESTING)
         endif()
     endforeach()
     set_tests_properties(agc_driver_provoking_vertex PROPERTIES TIMEOUT 30)
+    foreach(rawGraphicsMode IN ITEMS empty-draw registered registration-before-draw)
+        string(REPLACE "-" "_" rawGraphicsTest "agc_driver_raw_graphics_registration_${rawGraphicsMode}")
+        add_test(NAME ${rawGraphicsTest} COMMAND agc_driver_raw_graphics_registration_tests ${rawGraphicsMode})
+        set_tests_properties(${rawGraphicsTest} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)
+        if(WIN32)
+            set_tests_properties(${rawGraphicsTest} PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
+    set_tests_properties(agc_driver_raw_graphics_registration PROPERTIES TIMEOUT 30)
     set_tests_properties(agc_driver_flat_store PROPERTIES RUN_SERIAL TRUE)
     set_tests_properties(agc_driver_storage_cache_budget PROPERTIES TIMEOUT 30)
     add_test(NAME agc_driver_sampled_cache_budget_memory COMMAND agc_driver_sampled_cache_budget_tests memory)
