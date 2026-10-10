@@ -7,9 +7,12 @@
 #include <filesystem>
 #include <fstream>
 #include <source_location>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 extern "C" {
+int APS5_VABI fork_nid_postfix(void);
 std::int64_t APS5_VABI readlink_nid_postfix(const char*, char*, std::size_t);
 int* APS5_VABI __error_nid_postfix();
 }
@@ -26,6 +29,15 @@ int Error() {
 }
 
 int main() {
+    *__error_nid_postfix() = 73;
+    bool forkUnsupported = false;
+    try {
+        fork_nid_postfix();
+    } catch (const std::runtime_error& error) {
+        forkUnsupported = std::string_view(error.what()) == "fork_nid_postfix not implemented";
+    }
+    Require(forkUnsupported);
+    Require(Error() == 73);
     const auto root = std::filesystem::path("anyps5-kernel-sys-test-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Require(std::filesystem::create_directory(root));

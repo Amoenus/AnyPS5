@@ -30,6 +30,11 @@ int GuestError(const std::error_code& error) {
 
 extern "C" {
 
+int APS5_VABI fork_nid_postfix(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 std::int64_t APS5_VABI readlink_nid_postfix(const char* path, char* buffer, std::size_t size) {
     if (path == nullptr) return Fail(GuestEfault);
     if (*path == '\0') return Fail(GuestEnoent);
