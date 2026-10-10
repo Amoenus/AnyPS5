@@ -1,5 +1,8 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libkernel/Pthread/include/Pthread.hpp"
+#include "prx/libkernel/System/include/GuestSignalMask.hpp"
+#include <array>
 #include <atomic>
 #include <csignal>
 #include <cstddef>
@@ -8,6 +11,7 @@
 #include <stdexcept>
 
 extern "C" int* APS5_VABI __error_nid_postfix();
+extern "C" Pthread APS5_VABI scePthreadSelf();
 extern "C" int APS5_VABI getpid_nid_postfix(void);
 
 struct GuestSignalSet {
@@ -30,9 +34,11 @@ constexpr int SaRestart = 0x2;
 constexpr int SaSiginfo = 0x40;
 std::atomic<GuestHandler> handlers[MaxSignal + 1]{};
 static_assert(std::atomic<GuestHandler>::is_always_lock_free);
-std::atomic<std::uint32_t> blockedMask{0};
-static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 std::mutex registration;
+constexpr std::array<int, 6> MappedSignals{2, 4, 6, 8, 11, 15};
+constexpr std::array<int, 7> MaskedSignals{2, 4, 6, 8, 11, 15, GUEST_RAISED_SIGNAL};
+constexpr std::uint32_t UnblockableSignals = GuestSignalBit(9) | GuestSignalBit(17) | GuestSignalBit(32);
+constexpr std::uintptr_t IgnoredHandler = 1;
 GuestSigaction dispositions[MaxSignal + 1]{};
 int NativeSignal(int guest) {
     switch (guest) {
@@ -45,18 +51,41 @@ int NativeSignal(int guest) {
         default: return 0;
     }
 }
+#ifndef _WIN32
+int HostSignal(int guest) {
+    return guest == GUEST_RAISED_SIGNAL ? HOST_RAISED_SIGNAL : NativeSignal(guest);
+}
+#endif
+void RunHandler(PthreadPrivate* self, int guest, GuestHandler callback) {
+    if (self == nullptr) {
+        callback(guest);
+        return;
+    }
+    const auto interrupted = GuestSignalMask::Stored(*self);
+#ifdef _WIN32
+    auto during = interrupted;
+    during[0] |= GuestSignalBit(guest);
+    GuestSignalMask::Store(*self, during);
+#endif
+    callback(guest);
+    GuestSignalMask::Store(*self, interrupted);
+#ifdef _WIN32
+    GuestSignalMask::DeliverUnblocked(*self);
+#endif
+}
+
 void Dispatch(int native) {
     int guest = 0;
-    for (int candidate : {2, 4, 6, 8, 11, 15})
+    for (int candidate : MappedSignals)
         if (NativeSignal(candidate) == native) { guest = candidate; break; }
     if (!guest) return;
 #ifdef _WIN32
     // Preserve the guest's persistent registration across CRT delivery.
     std::signal(native, Dispatch);
 #endif
-    if ((blockedMask.load() & (1u << (guest - 1))) != 0) return;
     const auto callback = handlers[guest].load();
-    if (reinterpret_cast<std::uintptr_t>(callback) > 1) callback(guest);
+    if (reinterpret_cast<std::uintptr_t>(callback) <= IgnoredHandler) return;
+    RunHandler(CurrentGuestThread(), guest, callback);
 }
 bool Delivered(const GuestSigaction& action) {
     return action.handler > 1 && (action.flags & SaSiginfo) == 0;
@@ -72,7 +101,75 @@ bool Install(int guest, const GuestSigaction& action) {
     }
     return true;
 }
+
+#ifdef _WIN32
+void DeliverCaught(PthreadPrivate& thread, int guest) {
+    GuestSigaction action;
+    {
+        std::lock_guard lock(registration);
+        action = dispositions[guest];
+    }
+    if (action.handler > 1 && !Delivered(action)) throw std::runtime_error("raise: SA_SIGINFO handlers are not delivered");
+    const auto callback = reinterpret_cast<GuestHandler>(action.handler);
+    const auto address = reinterpret_cast<std::uintptr_t>(callback);
+    if (address == IgnoredHandler) return;
+    if (address == 0) std::raise(NativeSignal(guest));
+    else RunHandler(&thread, guest, callback);
 }
+#endif
+
+#ifndef _WIN32
+const sigset_t& GuardedSignals() {
+    static const sigset_t guarded = [] {
+        sigset_t set;
+        sigemptyset(&set);
+        for (const int guest : MaskedSignals) sigaddset(&set, HostSignal(guest));
+        return set;
+    }();
+    return guarded;
+}
+#endif
+}
+
+namespace GuestSignalMask {
+
+Mask Stored(const PthreadPrivate& thread) {
+    Mask mask{};
+    for (std::size_t word = 0; word < mask.size(); ++word) mask[word] = thread.signalMask[word].load();
+    return mask;
+}
+
+void Store(PthreadPrivate& thread, Mask mask) {
+    mask[0] &= ~UnblockableSignals;
+    for (std::size_t word = 0; word < mask.size(); ++word) thread.signalMask[word].store(mask[word]);
+}
+
+#ifdef _WIN32
+void DeliverUnblocked(PthreadPrivate& thread) {
+    for (const int guest : MaskedSignals) {
+        const std::uint32_t bit = GuestSignalBit(guest);
+        if (GuestSignalBlocked(thread, guest) || (thread.pendingSignals.fetch_and(~bit) & bit) == 0) continue;
+        if (guest == GUEST_RAISED_SIGNAL) DeliverRaised(thread);
+        else DeliverCaught(thread, guest);
+    }
+}
+#else
+void ReadHost(const sigset_t& host, Mask& mask) {
+    for (const int guest : MaskedSignals) {
+        if (sigismember(&host, HostSignal(guest)) == 1) mask[0] |= GuestSignalBit(guest);
+        else mask[0] &= ~GuestSignalBit(guest);
+    }
+}
+
+void WriteHost(const Mask& mask, sigset_t& host) {
+    for (const int guest : MaskedSignals) {
+        if ((mask[0] & GuestSignalBit(guest)) != 0) sigaddset(&host, HostSignal(guest));
+        else sigdelset(&host, HostSignal(guest));
+    }
+}
+#endif
+
+}  // namespace GuestSignalMask
 
 struct GuestStack {
     void* sp;
@@ -96,6 +193,10 @@ GuestHandler APS5_VABI signal_nid_postfix(int guest, GuestHandler handler) {
     if (!Install(guest, action)) { *__error_nid_postfix() = 22; return invalid; }
     const auto previous = reinterpret_cast<GuestHandler>(dispositions[guest].handler);
     dispositions[guest] = action;
+#ifdef _WIN32
+    if (action.handler == IgnoredHandler)
+        if (auto* self = CurrentGuestThread()) self->pendingSignals.fetch_and(~GuestSignalBit(guest));
+#endif
     return previous;
 }
 int APS5_VABI sigaction_nid_postfix(int guest, const GuestSigaction* action, GuestSigaction* previous) {
@@ -115,8 +216,16 @@ int APS5_VABI raise_nid_postfix(int guest) {
     if (!native) { *__error_nid_postfix() = 22; return -1; }
     {
         std::lock_guard lock(registration);
+        if (dispositions[guest].handler == IgnoredHandler) return 0;
         if (dispositions[guest].handler > 1 && !Delivered(dispositions[guest])) throw std::runtime_error("raise: SA_SIGINFO handlers are not delivered");
     }
+#ifdef _WIN32
+    auto* self = scePthreadSelf();
+    if (GuestSignalBlocked(*self, guest)) {
+        self->pendingSignals.fetch_or(GuestSignalBit(guest));
+        return 0;
+    }
+#endif
     const int result = std::raise(native);
     if (result) *__error_nid_postfix() = 22;
     return result ? -1 : 0;
@@ -140,27 +249,46 @@ int APS5_VABI sigaltstack_nid_postfix(const GuestStack* stack, GuestStack* previ
     return 0;
 }
 int APS5_VABI _sigprocmask_nid_postfix(int how, const GuestSignalSet* set, GuestSignalSet* previousSet) {
-    std::lock_guard lock(registration);
-    if (previousSet != nullptr) {
-        previousSet->bits[0] = blockedMask.load();
-        previousSet->bits[1] = 0;
-        previousSet->bits[2] = 0;
-        previousSet->bits[3] = 0;
-    }
+    if (set != nullptr && (how < 1 || how > 3)) throw std::invalid_argument("_sigprocmask: invalid how");
+    auto& self = *scePthreadSelf();
+    auto previous = GuestSignalMask::Stored(self);
+#ifdef _WIN32
+    previous[0] = self.signalMask[0].fetch_or(GuestSignalBit(GUEST_RAISED_SIGNAL));
+#else
+    sigset_t host;
+    pthread_sigmask(SIG_BLOCK, &GuardedSignals(), &host);
+    GuestSignalMask::ReadHost(host, previous);
+#endif
+    auto next = previous;
     if (set != nullptr) {
-        switch (how) {
-            case 1: blockedMask.fetch_or(set->bits[0]); break;
-            case 2: blockedMask.fetch_and(~set->bits[0]); break;
-            case 3: blockedMask.store(set->bits[0]); break;
-            default: throw std::invalid_argument("_sigprocmask: invalid how");
+        for (std::size_t word = 0; word < next.size(); ++word) {
+            switch (how) {
+                case 1: next[word] |= set->bits[word]; break;
+                case 2: next[word] &= ~set->bits[word]; break;
+                default: next[word] = set->bits[word]; break;
+            }
         }
     }
+    GuestSignalMask::Store(self, next);
+    if (previousSet != nullptr)
+        for (std::size_t word = 0; word < previous.size(); ++word) previousSet->bits[word] = previous[word];
+#ifdef _WIN32
+    GuestSignalMask::DeliverUnblocked(self);
+#else
+    GuestSignalMask::WriteHost(GuestSignalMask::Stored(self), host);
+    pthread_sigmask(SIG_SETMASK, &host, nullptr);
+#endif
     return 0;
 }
 
 int APS5_VABI sigprocmask_nid_postfix(int how, const void* set, void* previousSet) {
     return _sigprocmask_nid_postfix(how, static_cast<const GuestSignalSet*>(set),
                                     static_cast<GuestSignalSet*>(previousSet));
+}
+
+int APS5_VABI pthread_sigmask_nid_postfix(int how, const GuestSignalSet* set, GuestSignalSet* previousSet) {
+    if (set != nullptr && (how < 1 || how > 3)) return 22;
+    return _sigprocmask_nid_postfix(how, set, previousSet);
 }
 }
 

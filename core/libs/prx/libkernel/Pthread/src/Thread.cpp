@@ -22,6 +22,7 @@
 #ifndef _WIN32
 #include <cerrno>
 #include <csetjmp>
+#include <csignal>
 #include <pthread.h>
 #include <unistd.h>
 #endif
@@ -42,6 +43,9 @@ struct ThreadArgs {
     PthreadEntry entry;
     void* arg;
     PthreadPrivate* self;
+#ifndef _WIN32
+    sigset_t signalMask;
+#endif
 };
 
 static std::atomic<thread_dtors_func_t> threadDtors{nullptr};
@@ -125,6 +129,10 @@ static void RegisterStack(PthreadPrivate* self) {
 static void UnregisterStack(PthreadPrivate* self) {
     std::lock_guard lock(stackLock);
     liveStacks.erase(self);
+}
+
+PthreadPrivate* CurrentGuestThread() {
+    return CurrentGuestState().current;
 }
 
 bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end) {
@@ -329,7 +337,13 @@ static void RunThread(std::unique_ptr<ThreadArgs> args) {
     TimedWait::BindThreadWaitState(&self->waitCount);
     CurrentGuestState().current = self;
     RegisterStack(self);
+#ifndef _WIN32
+    const sigset_t signalMask = args->signalMask;
+#endif
     args.reset();
+#ifndef _WIN32
+    pthread_sigmask(SIG_SETMASK, &signalMask, nullptr);
+#endif
     finishThread(self, entry(arg));
     CurrentGuestState().current = nullptr;
 }
@@ -477,6 +491,8 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
         p->priority.store((*attr)->_schedpriority, std::memory_order_relaxed);
     }
     if (name) p->name = name;
+    if (CurrentGuestState().current)
+        for (std::size_t word = 0; word < p->signalMask.size(); ++word) p->signalMask[word].store(CurrentGuestState().current->signalMask[word].load());
     std::promise<bool> start;
     auto args = std::make_unique<ThreadArgs>(ThreadArgs{entry, arg, p.get()});
 #ifdef _WIN32
@@ -487,10 +503,12 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     const std::size_t nativeStack = (p->stackSize + HOST_STACK_MARGIN + system.dwPageSize - 1) / system.dwPageSize * system.dwPageSize;
     auto native = std::make_unique<NativeThreadArgs>(NativeThreadArgs{std::move(args), start.get_future(), {}});
     auto initialized = native->initialized.get_future();
-    const auto handle = _beginthreadex(nullptr, static_cast<unsigned>(nativeStack), StartNativeThread, native.get(), 0, nullptr);
+    unsigned nativeThreadId = 0;
+    const auto handle = _beginthreadex(nullptr, static_cast<unsigned>(nativeStack), StartNativeThread, native.get(), 0, &nativeThreadId);
     if (handle == 0)
         throw std::system_error(errno, std::generic_category(), "Creating guest thread");
     p->nativeHandle = reinterpret_cast<void*>(handle);
+    p->nativeThreadId = nativeThreadId;
     native.release();
     try {
         initialized.get();
@@ -516,10 +534,15 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     pthread_attr_t nativeAttr;
     if (const int result = pthread_attr_init(&nativeAttr); result != 0)
         throw std::system_error(result, std::generic_category(), "Creating guest thread");
+    sigset_t allSignals;
+    sigfillset(&allSignals);
+    pthread_sigmask(SIG_BLOCK, &allSignals, &native->guest->signalMask);
+    const sigset_t creatorMask = native->guest->signalMask;
     int created = pthread_attr_setstacksize(&nativeAttr, nativeStack);
     if (created == 0)
         created = pthread_create(&p->hostThread, &nativeAttr, StartNativeThread, native.get());
     pthread_attr_destroy(&nativeAttr);
+    pthread_sigmask(SIG_SETMASK, &creatorMask, nullptr);
     if (created != 0)
         throw std::system_error(created, std::generic_category(), "Creating guest thread");
     native.release();
@@ -608,6 +631,7 @@ Pthread APS5_VABI scePthreadSelf() {
         if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
             throw std::system_error(GetLastError(), std::system_category(), "Adopting guest thread");
         adopted->nativeHandle = handle;
+        adopted->nativeThreadId = GetCurrentThreadId();
         adopted->threadId = std::this_thread::get_id();
         adopted->_detached = true;
         adopted->references.store(1, std::memory_order_relaxed);
@@ -622,6 +646,7 @@ Pthread APS5_VABI scePthreadSelf() {
         adoptedThread->_adopted = true;
         BindHostCpuClock(adoptedThread.get());
         adoptedThread->threadId = std::this_thread::get_id();
+        adoptedThread->hostThread = pthread_self();
         SetStackFromHost(adoptedThread.get());
         CurrentGuestState().current = adoptedThread.get();
     }
