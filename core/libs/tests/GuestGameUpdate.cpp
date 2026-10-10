@@ -23,6 +23,8 @@ int main() {
     info.size = sizeof(info);
 
     Require(sceGameUpdateGetAddcontLatestVersion(0, label, &info) == notInitialized);
+    Require(sceGameUpdateGetAddcontLatestVersion(0, nullptr, &info) == invalidArgument);
+    Require(sceGameUpdateGetAddcontLatestVersion(0, label, nullptr) == invalidArgument);
     Require(sceGameUpdateInitialize() == 0);
     Require(sceGameUpdateGetAddcontLatestVersion(0, label, nullptr) == invalidArgument);
 
