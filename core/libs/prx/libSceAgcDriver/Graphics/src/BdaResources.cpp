@@ -121,22 +121,33 @@ std::uint64_t hashRanges(const std::vector<ShaderRecompiler::BdaAbi::Range>& ran
 }
 
 BdaResources::BdaResources(const Context& context) {
+    allocateFault(context, 0);
+}
+
+void BdaResources::allocateFault(const Context& context, std::uint32_t writtenWords) {
     static_assert(std::endian::native == std::endian::little);
-    Require(ShaderRecompiler::BdaAbi::FaultBufferBytes <= context.limits.maxStorageBufferRange, "BDA fault buffer exceeds storage buffer range limit");
-    fault = std::make_unique<Buffer>(context, ShaderRecompiler::BdaAbi::FaultBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const auto bytes = ShaderRecompiler::BdaAbi::FaultBufferBytesForWords(writtenWords);
+    Require(bytes <= context.limits.maxStorageBufferRange, "BDA fault buffer exceeds storage buffer range limit");
+    fault = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     std::memset(fault->Bytes().data(), 0, fault->Bytes().size());
 }
 
-BdaResources::BdaResources(const Context& context, const GuestBufferMemory& memory) : BdaResources(context) {
+BdaResources::BdaResources(const Context& context, const GuestBufferMemory& memory) {
     const auto cached = memory.CachedAddressTable();
-    std::vector<ShaderRecompiler::BdaAbi::Range> built;
-    if (!cached.has_value()) built = memory.AddressRanges();
-    const auto& ranges = cached.has_value() ? *cached->ranges : built;
+    auto ranges = cached.has_value() ? *cached->ranges : memory.AddressRanges();
     const auto serial = cached.has_value() ? cached->serial : 0;
     Require(ranges.size() <= std::numeric_limits<std::uint32_t>::max(), "BDA table range count overflow");
     Require(ranges.size() <= (std::numeric_limits<std::size_t>::max() - sizeof(ShaderRecompiler::BdaAbi::Header)) / sizeof(ShaderRecompiler::BdaAbi::Range), "BDA table size overflow");
     tableBytes = sizeof(ShaderRecompiler::BdaAbi::Header) + ranges.size() * sizeof(ShaderRecompiler::BdaAbi::Range);
     Require(tableBytes <= context.limits.maxStorageBufferRange && ShaderRecompiler::BdaAbi::FaultBufferBytes <= context.limits.maxStorageBufferRange, "BDA descriptors exceed storage buffer range limit");
+    std::uint64_t writtenWords = 0;
+    for (auto& range : ranges) {
+        const auto words = ShaderRecompiler::BdaAbi::WrittenWords(range);
+        Require(words <= std::numeric_limits<std::uint32_t>::max() - writtenWords, "BDA written bitmap size overflow");
+        range.writtenWord = words == 0u ? 0u : static_cast<std::uint32_t>(writtenWords);
+        writtenWords += words;
+    }
+    allocateFault(context, static_cast<std::uint32_t>(writtenWords));
     auto& cache = Tables();
     std::uint64_t hash = 0;
     if (tableCacheEnabled()) {
@@ -193,7 +204,7 @@ BdaResources::BdaResources(const Context& context, const GuestBufferMemory& memo
         }
     }
     table = std::make_shared<Buffer>(context, tableBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    const ShaderRecompiler::BdaAbi::Header header{ShaderRecompiler::BdaAbi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(ShaderRecompiler::BdaAbi::Range), 0};
+    const ShaderRecompiler::BdaAbi::Header header{ShaderRecompiler::BdaAbi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(ShaderRecompiler::BdaAbi::Range), static_cast<std::uint32_t>(writtenWords)};
     std::memcpy(table->Bytes().data(), &header, sizeof(header));
     if (!ranges.empty()) std::memcpy(table->Bytes().data() + sizeof(header), ranges.data(), ranges.size() * sizeof(ranges.front()));
     if (tableCacheEnabled()) {
@@ -203,7 +214,7 @@ BdaResources::BdaResources(const Context& context, const GuestBufferMemory& memo
             cache.entries.clear();
             cache.device = context.device;
         }
-        cache.entries.push_front({hash, cached.has_value() ? ranges : std::move(built), table, serial});
+        cache.entries.push_front({hash, std::move(ranges), table, serial});
         while (cache.entries.size() > tableCacheEntries()) cache.entries.pop_back();
     }
 }
@@ -224,7 +235,7 @@ VkDescriptorBufferInfo BdaResources::Table() const {
 }
 
 VkDescriptorBufferInfo BdaResources::Fault() const {
-    return {fault->Handle(), 0, ShaderRecompiler::BdaAbi::FaultBufferBytes};
+    return {fault->Handle(), 0, fault->Bytes().size()};
 }
 
 namespace {
@@ -276,15 +287,37 @@ namespace AgcDriver::Graphics {
 void BdaResources::markWrittenPages() const {
     namespace Abi = ShaderRecompiler::BdaAbi;
     auto* words = reinterpret_cast<std::uint32_t*>(fault->Bytes().data());
-    Require(words[Abi::WrittenOverflowWord] == 0, "more than " + std::to_string(Abi::WrittenPageSlots) + " pages stored to through the BDA table in one use are not implemented");
-    bool any = false;
-    for (std::uint32_t slot = 0; slot < Abi::WrittenPageSlots; ++slot) {
-        const auto page = words[Abi::WrittenSlotsWord + slot];
-        if (page == 0) continue;
-        GuestMemory::MarkWritten(static_cast<std::uint64_t>(page - 1u) << Abi::WrittenPageShift, std::size_t{1} << Abi::WrittenPageShift);
-        any = true;
+    Require(words[Abi::WrittenErrorWord] == 0, "invalid BDA written bitmap lookup");
+    if (table == nullptr) {
+        Require(fault->Bytes().size() == Abi::FaultBufferBytes, "written bitmap has no BDA table");
+        return;
     }
-    if (any) std::memset(words + Abi::WrittenSlotsWord, 0, Abi::WrittenPageSlots * sizeof(std::uint32_t));
+    const auto tableData = table->Bytes();
+    Abi::Header header{};
+    std::memcpy(&header, tableData.data(), sizeof(header));
+    Require(header.version == Abi::Version && header.entryBytes == sizeof(Abi::Range) && tableData.size() == sizeof(header) + static_cast<std::size_t>(header.count) * sizeof(Abi::Range), "invalid BDA table for written bitmap");
+    Require(fault->Bytes().size() == Abi::FaultBufferBytesForWords(header.writtenWords), "BDA written bitmap size differs from table");
+    std::uint64_t nextWord = 0;
+    for (std::uint32_t index = 0; index < header.count; ++index) {
+        Abi::Range range{};
+        std::memcpy(&range, tableData.data() + sizeof(header) + index * sizeof(range), sizeof(range));
+        const auto needed = Abi::WrittenWords(range);
+        Require((needed == 0u ? range.writtenWord == 0u : range.writtenWord == nextWord) && needed <= header.writtenWords - nextWord, "invalid BDA range written bitmap");
+        nextWord += needed;
+        const auto firstPage = range.begin >> Abi::WrittenPageShift;
+        const auto pages = ((range.end - 1u) >> Abi::WrittenPageShift) - firstPage + 1u;
+        for (std::uint64_t word = 0; word < needed; ++word) {
+            auto bits = words[Abi::WrittenBitmapWord + range.writtenWord + word];
+            while (bits != 0u) {
+                const auto page = word * 32u + std::countr_zero(bits);
+                Require(page < pages, "BDA written bitmap marks a page outside its range");
+                GuestMemory::MarkWritten((firstPage + page) << Abi::WrittenPageShift, std::size_t{1} << Abi::WrittenPageShift);
+                bits &= bits - 1u;
+            }
+        }
+    }
+    Require(nextWord == header.writtenWords, "BDA written bitmap has unused words");
+    if (nextWord != 0u) std::memset(words + Abi::WrittenBitmapWord, 0, static_cast<std::size_t>(nextWord) * sizeof(std::uint32_t));
 }
 
 }

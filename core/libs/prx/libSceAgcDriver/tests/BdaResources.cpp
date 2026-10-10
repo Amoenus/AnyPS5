@@ -569,6 +569,105 @@ void gpuMappingTests(const Context& context) {
     ::operator delete(gpu, std::align_val_t{bytes});
 }
 
+static void RunWrittenBitmapTests(const Context& context, const BdaTestAccess& access) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    if (!GuestArena::GuestArenaAvailable_nid_postfix() || !GuestArena::GuestArenaWriteWatched_nid_postfix()) {
+        std::cout << "guest arena unavailable or not write-watched: written bitmap page stamps not tested\n";
+        return;
+    }
+    constexpr std::size_t pageBytes = std::size_t{1} << Abi::WrittenPageShift;
+    constexpr std::size_t allocationBytes = 128u * pageBytes;
+    void* allocation = GuestArena::GuestArenaAllocate_nid_postfix(allocationBytes, 65536);
+#ifdef _WIN32
+    GuestArena::GuestArenaCommit_nid_postfix(allocation, allocationBytes, PAGE_READWRITE, allocationBytes);
+#endif
+    const auto registry = [&](bool add) {
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, allocation, allocationBytes, true, false, true);
+        else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, allocation);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+    };
+    const auto release = [&] {
+        registry(false);
+#ifdef _WIN32
+        GuestArena::GuestArenaReset_nid_postfix(allocation, allocationBytes);
+#endif
+        GuestArena::GuestArenaRelease_nid_postfix(allocation, allocationBytes);
+    };
+    registry(true);
+    try {
+        const auto base = reinterpret_cast<std::uintptr_t>(allocation);
+        auto importing = context;
+        importing.hostImportAlignment = 65536;
+        std::memset(reinterpret_cast<void*>(base), 0x11, 100u * pageBytes);
+        GuestBufferMemory memory(importing);
+        memory.AddWritable(base, 66u * pageBytes);
+        memory.AddWritable(base + 68u * pageBytes, pageBytes);
+        memory.AddSnapshot({base + 90u * pageBytes, std::span<const std::byte>(reinterpret_cast<const std::byte*>(base + 90u * pageBytes), pageBytes)});
+        memory.Upload(true);
+        BdaResources resources(importing, memory);
+        const auto table = access.bytes(resources.Table().buffer).first(resources.Table().range);
+        const auto fault = access.bytes(resources.Fault().buffer).first(resources.Fault().range);
+        Abi::Header header{};
+        std::memcpy(&header, table.data(), sizeof(header));
+        Require(header.count == 3u && header.writtenWords == 4u && fault.size() == Abi::FaultBufferBytesForWords(4u), "written bitmap range layout differs: " + std::to_string(header.count) + " ranges, " + std::to_string(header.writtenWords) + " words, " + std::to_string(fault.size()) + " bytes");
+        const auto before = AgcDriver::GuestMemory::CollectWritesUncached(base, 100u * pageBytes);
+        Require(before != 0u, "written bitmap test allocation is not watched");
+        auto* words = reinterpret_cast<std::uint32_t*>(fault.data());
+        words[Abi::WrittenBitmapWord] = 1u | (1u << 31u);
+        words[Abi::WrittenBitmapWord + 1u] = 1u;
+        words[Abi::WrittenBitmapWord + 2u] = 2u;
+        words[Abi::WrittenBitmapWord + 3u] = 1u;
+        resources.CheckFault();
+        for (std::size_t page = 0; page < 100u; ++page) {
+            const bool expected = page == 0u || page == 31u || page == 32u || page == 65u || page == 68u;
+            Require(AgcDriver::GuestMemory::StoredOver(base + page * pageBytes, pageBytes, before) == expected, "written bitmap stamped an incorrect guest page");
+        }
+        Require(std::all_of(fault.begin(), fault.end(), [](auto byte) { return byte == std::byte{}; }), "written bitmap was not consumed and cleared");
+        const auto after = AgcDriver::GuestMemory::TrackerGeneration();
+        resources.CheckFault();
+        Require(AgcDriver::GuestMemory::TrackerGeneration() == after, "empty written bitmap stamped guest pages twice");
+        words[Abi::WrittenBitmapWord + 2u] = 4u;
+        reject([&] { resources.CheckFault(); }, "page outside its range");
+        std::memset(fault.data(), 0, fault.size());
+        const auto saved = std::vector<std::byte>(table.begin(), table.end());
+        words[Abi::WrittenErrorWord] = 1u;
+        reject([&] { resources.CheckFault(); }, "invalid BDA written bitmap lookup");
+        words[Abi::WrittenErrorWord] = 0u;
+        auto damaged = header;
+        damaged.version = 1u;
+        std::memcpy(table.data(), &damaged, sizeof(damaged));
+        reject([&] { resources.CheckFault(); }, "invalid BDA table for written bitmap");
+        std::memcpy(table.data(), saved.data(), saved.size());
+        damaged = header;
+        damaged.writtenWords = 3u;
+        std::memcpy(table.data(), &damaged, sizeof(damaged));
+        reject([&] { resources.CheckFault(); }, "bitmap size differs");
+        std::memcpy(table.data(), saved.data(), saved.size());
+        Abi::Range first{};
+        std::memcpy(&first, table.data() + sizeof(header), sizeof(first));
+        first.writtenWord = 1u;
+        std::memcpy(table.data() + sizeof(header), &first, sizeof(first));
+        reject([&] { resources.CheckFault(); }, "invalid BDA range written bitmap");
+        std::memcpy(table.data(), saved.data(), saved.size());
+        {
+            GuestBufferMemory large(importing);
+            large.AddWritable(base, 100u * pageBytes);
+            large.Upload(true);
+            auto limited = importing;
+            limited.limits.maxStorageBufferRange = sizeof(Abi::Header) + sizeof(Abi::Range);
+            reject([&] { BdaResources refused(limited, large); }, "fault buffer exceeds storage buffer range limit");
+            large.WriteBack();
+        }
+        memory.WriteBack();
+        std::cout << "written bitmap page stamps and refusal controls passed\n";
+    } catch (...) {
+        release();
+        throw;
+    }
+    release();
+}
+
 void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     alignas(64) std::array<std::uint32_t, 16> guest{};
     guest[0] = 123;
@@ -723,6 +822,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
         const auto dropped = AddressSpaceCounters();
         if (dropped.enabled) Require(dropped.waiterDrops == after.waiterDrops + 1 && LeaseCounters().cacheDrops == dropped.waiterDrops, "the free did not drop the cached address space");
     }
+    RunWrittenBitmapTests(context, access);
     importCrossingTests(context, access);
     heapMirrorTests(context, access);
     importedHeapMirrorTests(context, access);
