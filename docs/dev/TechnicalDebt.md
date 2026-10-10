@@ -480,3 +480,5 @@ Throughout the project, every function at every stage either **does exactly what
 - [symlink](../../core/libs/prx/libkernel_sys/Export.cpp) (libkernel_sys) throws explicitly. Guest link creation and target translation are not implemented; this export only permits import resolution for diagnostic startup runs.
 
 - [lstat](../../core/libs/prx/libkernel/File/src/NativeStat.cpp) (libkernel) throws for Windows reparse points, including symbolic links and junctions. Reporting guest link metadata and translating host link targets are not implemented.
+
+- [pthread contention scope](../../core/libs/prx/libkernel/Pthread/Posix/Attr.cpp) (libkernel) stores FreeBSD scope values 0 and 2 in attributes. Only system-scope threads are represented; creation with explicit process scope throws. Inherited scheduling uses the represented parent system scope, and thread attribute queries replace the destination scope with 2. Console scope behavior and process-scope scheduling are not verified or implemented.

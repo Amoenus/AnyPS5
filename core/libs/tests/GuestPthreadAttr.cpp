@@ -2,6 +2,8 @@
 #include <cstddef>
 #include <cstdlib>
 #include <future>
+#include <stdexcept>
+#include <string_view>
 
 extern "C" {
 int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name);
@@ -26,6 +28,10 @@ int APS5_VABI pthread_attr_setinheritsched_nid_postfix(PthreadAttr* attr, int in
 int APS5_VABI pthread_attr_getscope_nid_postfix(const PthreadAttr* attr, int* scope);
 int APS5_VABI pthread_attr_setscope_nid_postfix(PthreadAttr* attr, int scope);
 int APS5_VABI pthread_attr_getstackaddr_nid_postfix(const PthreadAttr* attr, void** stackAddress);
+int APS5_VABI pthread_attr_get_np_nid_postfix(Pthread thread, PthreadAttr* attr);
+int APS5_VABI pthread_create_nid_postfix(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg);
+int APS5_VABI pthread_join_nid_postfix(Pthread thread, void** result);
+int* APS5_VABI __error_nid_postfix();
 int APS5_VABI pthread_attr_setstacksize_nid_postfix(PthreadAttr* attr, std::size_t stackSize);
 }
 
@@ -88,6 +94,11 @@ static void* APS5_VABI Worker(void* arg) {
     return nullptr;
 }
 
+static void* APS5_VABI MarkStarted(void* arg) {
+    *static_cast<bool*>(arg) = true;
+    return nullptr;
+}
+
 static void PosixAttributes() {
     constexpr int Invalid = 22;
     PthreadAttr attr = nullptr;
@@ -103,14 +114,64 @@ static void PosixAttributes() {
     Require(pthread_attr_getscope_nid_postfix(&attr, &value) == 0 && value == 0);
     Require(pthread_attr_setscope_nid_postfix(&attr, 1) == Invalid);
     Require(pthread_attr_getscope_nid_postfix(&attr, &value) == 0 && value == 0);
+    Require(pthread_attr_setscope_nid_postfix(&attr, -1) == Invalid);
+    Require(pthread_attr_setscope_nid_postfix(&attr, 3) == Invalid);
+    Require(pthread_attr_getscope_nid_postfix(&attr, &value) == 0 && value == 0);
 
     void* address = &value;
     Require(pthread_attr_getstackaddr_nid_postfix(&attr, &address) == 0 && address == nullptr);
     Require(pthread_attr_getstackaddr_nid_postfix(&attr, nullptr) == Invalid);
+    char marker;
+    Require(pthread_attr_setstack_nid_postfix(&attr, &marker, STACK_SIZE) == 0);
+    Require(pthread_attr_getstackaddr_nid_postfix(&attr, &address) == 0 && address == &marker);
+    Require(pthread_attr_getscope_nid_postfix(&attr, nullptr) == Invalid);
 
     PthreadAttr empty = nullptr;
     Require(pthread_attr_getscope_nid_postfix(&empty, &value) == Invalid);
+    Require(pthread_attr_getscope_nid_postfix(nullptr, &value) == Invalid);
+    Require(pthread_attr_setscope_nid_postfix(&empty, 2) == Invalid);
+    Require(pthread_attr_setscope_nid_postfix(nullptr, 2) == Invalid);
+    Require(pthread_attr_getinheritsched_nid_postfix(&empty, &value) == Invalid);
+    Require(pthread_attr_getinheritsched_nid_postfix(nullptr, &value) == Invalid);
+    Require(pthread_attr_getstackaddr_nid_postfix(&empty, &address) == Invalid);
+    Require(pthread_attr_getstackaddr_nid_postfix(nullptr, &address) == Invalid);
     Require(pthread_attr_destroy_nid_postfix(&attr) == 0);
+}
+
+static void QueriedScope() {
+    PthreadAttr created = nullptr;
+    PthreadAttr queried = nullptr;
+    Require(pthread_attr_init_nid_postfix(&created) == 0);
+    Require(pthread_attr_init_nid_postfix(&queried) == 0);
+    Require(pthread_attr_setscope_nid_postfix(&created, 0) == 0);
+    Require(pthread_attr_setinheritsched_nid_postfix(&created, EXPLICIT_SCHED) == 0);
+    Pthread thread = nullptr;
+    bool started = false;
+    bool rejected = false;
+    *__error_nid_postfix() = 77;
+    try {
+        pthread_create_nid_postfix(&thread, &created, MarkStarted, &started);
+    } catch (const std::runtime_error& error) {
+        rejected = std::string_view(error.what()) == "process contention scope not implemented";
+    }
+    if (thread) Require(pthread_join_nid_postfix(thread, nullptr) == 0);
+    Require(rejected && !started && !thread && *__error_nid_postfix() == 77);
+
+    Require(pthread_attr_setinheritsched_nid_postfix(&created, 4) == 0);
+    std::promise<void> release;
+    auto released = release.get_future();
+    Require(pthread_create_nid_postfix(&thread, &created, Worker, &released) == 0);
+    Require(pthread_attr_setscope_nid_postfix(&queried, 0) == 0);
+    Require(pthread_attr_get_np_nid_postfix(thread, &queried) == 0);
+    int scope = -1;
+    Require(pthread_attr_getscope_nid_postfix(&queried, &scope) == 0 && scope == 2);
+    Require(pthread_attr_setscope_nid_postfix(&queried, 0) == 0);
+    Require(scePthreadAttrGet(thread, &queried) == SCE_OK);
+    Require(pthread_attr_getscope_nid_postfix(&queried, &scope) == 0 && scope == 2);
+    release.set_value();
+    Require(pthread_join_nid_postfix(thread, nullptr) == 0);
+    Require(pthread_attr_destroy_nid_postfix(&created) == 0);
+    Require(pthread_attr_destroy_nid_postfix(&queried) == 0);
 }
 
 int main() {
@@ -169,4 +230,5 @@ int main() {
     Require(pthread_attr_setstack_nid_postfix(&stackAttr, &stackMarker, STACK_SIZE) == 22);
 
     PosixAttributes();
+    QueriedScope();
 }
