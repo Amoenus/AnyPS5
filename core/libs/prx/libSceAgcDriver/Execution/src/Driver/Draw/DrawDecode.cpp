@@ -25,7 +25,7 @@ void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const 
         return (static_cast<std::uint64_t>(ReadGraphicsRegister(queue.shader, base)) << 8u) | (static_cast<std::uint64_t>(high) << 40u);
     };
     const auto lookup = [&](std::uint64_t address, const char* unregistered) -> std::shared_ptr<const ShaderSnapshot> {
-        if (!staticAbi) return ProgramSnapshot(registry, address);
+        if (!staticAbi && registry.empty()) return ReadRawShader(address);
         auto it = registry.upper_bound(address);
         require(it != registry.begin(), unregistered);
         --it;

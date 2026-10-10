@@ -911,6 +911,11 @@ ShaderSnapshot PrepareNullPixelProgram(const VulkanDevice& device) {
 void Driver::RegisterShader(const Shader* shader) {
     PerformanceContext timingContext(FrameTiming::Preparation());
     PerformanceTimer timing("Shader.Register");
+    {
+        std::lock_guard lock(mutex);
+        rethrowFailure();
+        require(!rawGraphicsDrawsStarted, "shader registration after raw graphics draws is unsupported");
+    }
     ShaderPreparationTransaction transaction;
     CheckFailure();
     GuestMemory::CheckRange(shader, sizeof(Shader), 1);
@@ -985,6 +990,7 @@ void Driver::RegisterShader(const Shader* shader) {
     const auto published = std::make_shared<const ShaderSnapshot>(std::move(snapshot));
     std::lock_guard lock(mutex);
     rethrowFailure();
+    require(!rawGraphicsDrawsStarted, "shader registration after raw graphics draws is unsupported");
     PublishRegisteredShader(shaders, published);
     if (shaders->find(NullPixelProgramAddress()) == shaders->end()) {
         PublishRegisteredShader(shaders, std::make_shared<const ShaderSnapshot>(PrepareNullPixelProgram(*localDevice)));

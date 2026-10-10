@@ -79,12 +79,47 @@ void Check(AgcDriver::VulkanDevice& device) {
     Require(!rectangle.control.spirv.empty() && !rectangle.evaluation.spirv.empty(), "unregistered graphics programs did not prepare rectangle shaders");
 }
 
+template<typename TAction>
+void ExpectFailure(TAction action) {
+    try {
+        action();
+    } catch (const std::runtime_error& error) {
+        Require(std::string(error.what()).find("registered shader") != std::string::npos, error.what());
+        return;
+    }
+    throw std::runtime_error("unregistered graphics program was accepted with a nonempty registry or static ABI");
+}
+
+void CheckRegistryPolicy() {
+    using namespace AgcDriver::DriverDetail;
+    AgcDriver::QueueState queue{};
+    Bind(queue, VertexCode.data(), 0xc8u, 0x8bu);
+    DrawDecode decoded{};
+    ExpectFailure([&] { DecodeGraphicsPrograms(decoded, queue, {}, true, false); });
+    ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(VertexCode.data()), 0, 2, {VertexCode.begin(), VertexCode.end()}, {}};
+    snapshot.header.resize(sizeof(Shader));
+    const auto entry = std::make_shared<const ShaderSnapshot>(std::move(snapshot));
+    const ShaderRegistry registry{{entry->codeAddress, entry}};
+    for (const bool staticAbi : {false, true}) {
+        decoded = {};
+        DecodeGraphicsPrograms(decoded, queue, registry, staticAbi, false);
+        Require(decoded.programs.size() == 1 && decoded.programs.front().snapshot == entry, "registered graphics program lost its snapshot");
+    }
+    Bind(queue, PixelCode.data(), 0xc8u, 0x8bu);
+    for (const bool staticAbi : {false, true}) {
+        decoded = {};
+        ExpectFailure([&] { DecodeGraphicsPrograms(decoded, queue, registry, staticAbi, false); });
+    }
+    Require(ProgramSnapshot(registry, reinterpret_cast<std::uintptr_t>(PixelCode.data()))->header.empty(), "raw compute lookup changed with a nonempty registry");
+}
+
 }
 
 int main() {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        CheckRegistryPolicy();
         Check(*device);
         std::cout << "prepared unregistered graphics tests passed\n";
         return 0;

@@ -30,6 +30,11 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     auto drawParameters = Pm4::ResolveDraw(packet, queue);
     bool traceIndirect = false;
     if (const auto verdict = precheckDraw(queue, submission, packet, drawParameters, rejected, traceIndirect)) return *verdict;
+    if (submission.shaders->empty()) {
+        std::lock_guard lock(mutex);
+        require(shaders->empty(), "raw graphics draw follows shader registration");
+        rawGraphicsDrawsStarted = true;
+    }
     phaseTiming.Phase(DrawRowPrecheck);
     using Stage = ShaderRecompiler::ShaderStage;
     using Role = ShaderRecompiler::ProgramRole;
