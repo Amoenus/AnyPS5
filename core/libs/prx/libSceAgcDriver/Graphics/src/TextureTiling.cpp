@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include <string>
 #include <algorithm>
 #include <bit>
@@ -382,6 +383,20 @@ ThickLayout ComputeThickLayout(TextureTileMode tileMode, std::uint32_t format, s
 
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
     SurfaceGeometry geometry;
+    if (descriptor.fragments != 1u) {
+        Require(descriptor.mipCount == 1u && descriptor.baseLevel == 0u && descriptor.lastLevel == 0u, "multisampled texture has mip levels");
+        Require(!IsBlockCompressed(descriptor.format), "multisampled block-compressed texture is unsupported");
+        Require(descriptor.dimension == TextureDimension::k2DMsaa || descriptor.dimension == TextureDimension::k2DMsaaArray, "multisampled texture dimension is not 2D or array");
+        geometry.layers = descriptor.dimension == TextureDimension::k2DMsaaArray ? descriptor.depthOrLastArray + 1u : 1u;
+        geometry.imageLayers = geometry.layers;
+        const auto elementBytes = BytesPerElement(descriptor.format);
+        const MultisampleTextureLayout layout(descriptor.tileMode, elementBytes, descriptor.fragments, descriptor.width, descriptor.height, geometry.layers, descriptor.pipeBankXor);
+        geometry.guestBytes = layout.Bytes();
+        geometry.layerBytes = layout.SliceBytes();
+        geometry.sliceLinearBytes = layout.LinearBytes() / geometry.layers;
+        geometry.mips.push_back({0u, layout.SliceBytes(), 0u, geometry.sliceLinearBytes, descriptor.width, descriptor.height, layout.Pitch() / layout.BlockWidth(), descriptor.width * descriptor.fragments * elementBytes, false, 0u, 0u});
+        return geometry;
+    }
     if (descriptor.dimension == TextureDimension::k3D && (descriptor.tileMode == TextureTileMode::kZ64KBX || descriptor.tileMode == TextureTileMode::kR64KBX)) {
         const auto depth = descriptor.depthOrLastArray + 1u;
         geometry.mips = ComputeMipLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, descriptor.mipCount);
