@@ -12,6 +12,7 @@
 #include <string_view>
 
 extern "C" {
+std::int64_t APS5_VABI pathconf_nid_postfix(const char*, int);
 int APS5_VABI link_nid_postfix(const char*, const char*);
 int APS5_VABI fork_nid_postfix(void);
 int APS5_VABI symlink_nid_postfix(const char*, const char*);
@@ -53,6 +54,22 @@ void RejectsLink(const char* source, const char* destination) {
 }
 
 int main() {
+    char pathconfPath[] = "unchanged-path";
+    const auto rejectsPathconf = [](const char* path, int name) {
+        *__error_nid_postfix() = 71;
+        bool rejected = false;
+        try {
+            static_cast<void>(pathconf_nid_postfix(path, name));
+        } catch (const std::runtime_error& error) {
+            rejected = std::strcmp(error.what(), "pathconf_nid_postfix not implemented") == 0;
+        }
+        return rejected && *__error_nid_postfix() == 71;
+    };
+    Require(rejectsPathconf(pathconfPath, 4));
+    Require(std::strcmp(pathconfPath, "unchanged-path") == 0);
+    Require(rejectsPathconf(nullptr, 4));
+    Require(rejectsPathconf(reinterpret_cast<const char*>(std::uintptr_t{1}), 4));
+    Require(rejectsPathconf(pathconfPath, -1));
     RejectsLink("source", "destination");
     RejectsLink(nullptr, "destination");
     RejectsLink("source", nullptr);
