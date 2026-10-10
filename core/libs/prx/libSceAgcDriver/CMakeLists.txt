@@ -195,6 +195,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureFormat.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DccMetadata.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleTextureLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureDetiler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PassHazards.cpp
@@ -252,6 +253,25 @@ set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceAgcDriver)
 
 if(BUILD_TESTING)
+    add_test_executable(agc_driver_msaa_layout_tests
+            tests/MultisampleTextureLayout.cpp
+            Graphics/src/MultisampleTextureLayout.cpp
+    )
+    target_include_directories(agc_driver_msaa_layout_tests PRIVATE
+            ${LIBS_INCLUDE_DIR}
+            ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+            ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
+    )
+    target_link_libraries(agc_driver_msaa_layout_tests PRIVATE libc)
+    set_target_properties(agc_driver_msaa_layout_tests PROPERTIES CXX_EXTENSIONS OFF)
+    configure_windows_unwind(agc_driver_msaa_layout_tests)
+    add_test(NAME agc_driver_msaa_layout COMMAND agc_driver_msaa_layout_tests)
+    set_tests_properties(agc_driver_msaa_layout PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_driver_msaa_layout PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
     add_test_executable(agc_write_watch_coverage_tests tests/WriteWatchCoverage.cpp)
     target_include_directories(agc_write_watch_coverage_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(agc_write_watch_coverage_tests PRIVATE libc)
