@@ -57,6 +57,19 @@ add_custom_command(
         VERBATIM
 )
 
+set(agcMultisampleUploadShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MultisampleUpload.comp)
+set(agcMultisampleUploadShaderSpv ${agcTextureDetileGeneratedDir}/MultisampleUpload.spv)
+set(agcMultisampleUploadShaderHeader ${agcTextureDetileGeneratedDir}/MultisampleUpload_spv.h)
+add_custom_command(
+        OUTPUT "${agcMultisampleUploadShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcMultisampleUploadShaderSpv}" "${agcMultisampleUploadShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcMultisampleUploadShaderSpv} -DOUTPUT=${agcMultisampleUploadShaderHeader}
+        -DSYMBOL=MULTISAMPLE_UPLOAD_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcMultisampleUploadShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 set(agcMeshArgumentsShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MeshArguments.comp)
 set(agcMeshArgumentsShaderSpv ${agcTextureDetileGeneratedDir}/MeshArguments.spv)
 set(agcMeshArgumentsShaderHeader ${agcTextureDetileGeneratedDir}/MeshArguments_spv.h)
@@ -198,6 +211,9 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleTextureLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureDetiler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureMultisample.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleUpload.cpp
+        ${agcMultisampleUploadShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PassHazards.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/UnitShadow.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
@@ -253,6 +269,17 @@ set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceAgcDriver)
 
 if(BUILD_TESTING)
+    add_test_executable(agc_driver_msaa_runtime_tests tests/MultisampleTexture.cpp)
+    target_include_directories(agc_driver_msaa_runtime_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Headers/include)
+    target_link_libraries(agc_driver_msaa_runtime_tests PRIVATE libSceAgcDriver libc SDL2-static shader_recompiler_agc_driver)
+    set_target_properties(agc_driver_msaa_runtime_tests PROPERTIES CXX_EXTENSIONS OFF)
+    configure_windows_unwind(agc_driver_msaa_runtime_tests)
+    add_test(NAME agc_driver_msaa_runtime COMMAND agc_driver_msaa_runtime_tests)
+    add_test(NAME agc_shader_msaa_shapes COMMAND agc_driver_msaa_runtime_tests --shapes)
+    set_tests_properties(agc_driver_msaa_runtime agc_shader_msaa_shapes PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_driver_msaa_runtime agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    endif()
     add_test_executable(agc_driver_msaa_layout_tests
             tests/MultisampleTextureLayout.cpp
             Graphics/src/MultisampleTextureLayout.cpp
@@ -877,6 +904,10 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/TextureTiling.cpp
         Graphics/src/TextureDetiler.cpp
         Graphics/src/Texture.cpp
+        Graphics/src/TextureMultisample.cpp
+        Graphics/src/MultisampleTextureLayout.cpp
+        Graphics/src/MultisampleUpload.cpp
+        ${agcMultisampleUploadShaderHeader}
         Graphics/src/PassHazards.cpp
         Graphics/src/UnitShadow.cpp
         Graphics/src/Sampler.cpp
