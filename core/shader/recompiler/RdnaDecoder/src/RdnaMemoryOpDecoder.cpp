@@ -283,6 +283,22 @@ constexpr MemoryOpcodeInfo dsOpcodes[] = {
     {0x71u, RdnaOpcode::DsCmpstRtnF64, 2, 32, false, false, false},
     {0x72u, RdnaOpcode::DsMinRtnF64, 2, 32, false, false, false},
     {0x73u, RdnaOpcode::DsMaxRtnF64, 2, 32, false, false, false},
+    {0x80u, RdnaOpcode::DsAddSrc2U32, 1, 32, false, false, false},
+    {0x81u, RdnaOpcode::DsSubSrc2U32, 1, 32, false, false, false},
+    {0x82u, RdnaOpcode::DsRsubSrc2U32, 1, 32, false, false, false},
+    {0x83u, RdnaOpcode::DsIncSrc2U32, 1, 32, false, false, false},
+    {0x84u, RdnaOpcode::DsDecSrc2U32, 1, 32, false, false, false},
+    {0x85u, RdnaOpcode::DsMinSrc2I32, 1, 32, false, false, false},
+    {0x86u, RdnaOpcode::DsMaxSrc2I32, 1, 32, false, false, false},
+    {0x87u, RdnaOpcode::DsMinSrc2U32, 1, 32, false, false, false},
+    {0x88u, RdnaOpcode::DsMaxSrc2U32, 1, 32, false, false, false},
+    {0x89u, RdnaOpcode::DsAndSrc2B32, 1, 32, false, false, false},
+    {0x8au, RdnaOpcode::DsOrSrc2B32, 1, 32, false, false, false},
+    {0x8bu, RdnaOpcode::DsXorSrc2B32, 1, 32, false, false, false},
+    {0x8du, RdnaOpcode::DsWriteSrc2B32, 1, 32, false, false, false},
+    {0x92u, RdnaOpcode::DsMinSrc2F32, 1, 32, false, false, false},
+    {0x93u, RdnaOpcode::DsMaxSrc2F32, 1, 32, false, false, false},
+    {0x95u, RdnaOpcode::DsAddSrc2F32, 1, 32, false, false, false},
     {0x01u, RdnaOpcode::DsSubU32, 1, 32, false, false, false},
     {0x05u, RdnaOpcode::DsMinI32, 1, 32, false, false, false},
     {0x06u, RdnaOpcode::DsMaxI32, 1, 32, false, false, false},
@@ -554,6 +570,29 @@ bool isDsAtomicOpcode(RdnaOpcode opcode) {
     }
 }
 
+bool isDsSrc2Opcode(RdnaOpcode opcode) {
+    switch (opcode) {
+        case RdnaOpcode::DsAddSrc2U32:
+        case RdnaOpcode::DsSubSrc2U32:
+        case RdnaOpcode::DsRsubSrc2U32:
+        case RdnaOpcode::DsIncSrc2U32:
+        case RdnaOpcode::DsDecSrc2U32:
+        case RdnaOpcode::DsMinSrc2I32:
+        case RdnaOpcode::DsMaxSrc2I32:
+        case RdnaOpcode::DsMinSrc2U32:
+        case RdnaOpcode::DsMaxSrc2U32:
+        case RdnaOpcode::DsAndSrc2B32:
+        case RdnaOpcode::DsOrSrc2B32:
+        case RdnaOpcode::DsXorSrc2B32:
+        case RdnaOpcode::DsWriteSrc2B32:
+        case RdnaOpcode::DsMinSrc2F32:
+        case RdnaOpcode::DsMaxSrc2F32:
+        case RdnaOpcode::DsAddSrc2F32:
+            return true;
+        default: return false;
+    }
+}
+
 std::uint32_t dsSourceCount(RdnaOpcode opcode) {
     switch (opcode) {
         case RdnaOpcode::DsWrxchg2RtnB32:
@@ -657,7 +696,7 @@ void setRawWords(RdnaInstruction& instruction, std::span<const std::uint32_t> co
 void requireTwoWords(std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t programCounter, const char* reason) {
     const std::size_t index = wordIndex;
     if (index >= code.size() || code.size() - index < 2u) {
-        throw std::runtime_error(reason);
+        throw std::out_of_range(reason);
     }
     if (programCounter % 4u != 0u || programCounter > std::numeric_limits<std::uint32_t>::max() - 7u) {
         throw std::runtime_error("invalid memory instruction program counter");
@@ -774,6 +813,9 @@ RdnaInstruction DecodeRdnaMubuf(std::uint32_t programCounter, std::span<const st
         return cacheControlInstruction(RdnaInstructionFamily::MUBUF, cacheOp, opcode, programCounter, code, wordIndex);
     }
     const auto& info = lookupOpcode(mubufOpcodes, opcode, "MUBUF opcode is not supported");
+    if (((word0 >> 16u) & 1u) != 0u) {
+        throw std::runtime_error("unsupported MUBUF lds modifier");
+    }
 
     RdnaInstruction instruction{};
     instruction.programCounter = programCounter;
@@ -975,6 +1017,12 @@ RdnaInstruction DecodeRdnaDs(std::uint32_t programCounter, std::span<const std::
     } else if (instruction.op == RdnaOpcode::DsWrite2st64B64 || instruction.op == RdnaOpcode::DsRead2st64B64 || instruction.op == RdnaOpcode::DsWrxchg2st64RtnB64) {
         instruction.memoryOffset = offset0 * 512u;
         instruction.secondaryOffset = offset1 * 512u;
+    } else if (isDsSrc2Opcode(instruction.op)) {
+        if ((offset1 & 0x80u) != 0u) {
+            throw std::runtime_error("DS src2 operation with the offset taken from the address is not supported");
+        }
+        instruction.memoryOffset = 0u;
+        instruction.secondaryOffset = signExtend(combinedOffset & 0x7fffu, 15u) * 4u;
     }
 
     instruction.destination = d16Half(vectorRegister(vdst), instruction.op);
@@ -991,7 +1039,7 @@ RdnaInstruction DecodeRdnaDs(std::uint32_t programCounter, std::span<const std::
 RdnaInstruction DecodeRdnaMemoryOp(std::span<const std::uint32_t> code, std::uint32_t wordIndex) {
     const auto programCounter = toProgramCounter(wordIndex);
     if (static_cast<std::size_t>(wordIndex) >= code.size()) {
-        throw std::runtime_error("truncated memory instruction");
+        throw std::out_of_range("truncated memory instruction");
     }
     switch (code[wordIndex] >> 26u) {
         case 0x36u: return DecodeRdnaDs(programCounter, code, wordIndex);

@@ -38,14 +38,12 @@ IrShaderStage toIrShaderStage(ShaderStageKind stage) {
 }
 
 void validateTranslateOptions(const TranslateOptions& options) {
+    if (options.embeddedFetch != nullptr && options.stage != ShaderStageKind::Vertex && options.stage != ShaderStageKind::Local) throw std::runtime_error("embedded vertex fetch requires a vertex or local shader");
     if (options.userDataBaseRegister >= NumScalarRegs || options.userDataCount > NumScalarRegs - options.userDataBaseRegister) {
         throw std::runtime_error("shader user data exceeds the scalar register bank");
     }
     if (options.waveSize != 32u && options.waveSize != 64u) {
         throw std::runtime_error("shader translation requires wave32 or wave64, got " + std::to_string(options.waveSize));
-    }
-    if (options.embeddedFetch != nullptr && options.stage != ShaderStageKind::Vertex && options.stage != ShaderStageKind::Local) {
-        throw std::runtime_error("embedded vertex fetch requires a vertex or local shader");
     }
     switch (options.stage) {
     case ShaderStageKind::Vertex:
@@ -92,51 +90,26 @@ bool isCodeTableLoad(const ControlFlowGraph& cfg, std::uint32_t programCounter) 
     return std::find(cfg.codeTableLoadProgramCounters.begin(), cfg.codeTableLoadProgramCounters.end(), programCounter) != cfg.codeTableLoadProgramCounters.end();
 }
 
-const EmbeddedFetchLoad* findEmbeddedFetchLoad(const EmbeddedFetchPlan* plan, std::uint32_t programCounter) {
-    if (plan == nullptr) {
-        return nullptr;
+void translateExternalFetch(TranslationContext& context, const RdnaInstruction& call, const ShaderVertexInputInfo* input) {
+    if (input == nullptr || input->resourcesNum <= 0) {
+        throw std::runtime_error("s_swappc_b64 fetch-shader call at program counter " + std::to_string(call.programCounter) + " has no parsed fetch-shader plan to inline");
     }
-    const auto found = std::find_if(plan->loads.begin(), plan->loads.end(), [programCounter](const EmbeddedFetchLoad& load) {
-        return load.programCounter == programCounter;
-    });
-    return found != plan->loads.end() ? &*found : nullptr;
-}
-
-int resolveEmbeddedFetchResource(const ShaderVertexInputInfo& input, const EmbeddedFetchLoad& load) {
-    if (load.attributeId >= 0 && load.attributeId < input.resourcesNum && input.resourcesDst[load.attributeId].attrId == load.attributeId) {
-        return load.attributeId;
-    }
-    for (int index = 0; index < input.resourcesNum; index++) {
-        const auto& destination = input.resourcesDst[index];
-        if (destination.attrId == load.attributeId && load.componentCount <= static_cast<std::uint32_t>(std::max(destination.registersNum, 1))) {
-            return index;
+    for (int index = 0; index < input->resourcesNum && index < ShaderVertexInputInfo::MaxResources; ++index) {
+        const auto& destination = input->resourcesDst[index];
+        if (destination.attrId < 0 || destination.registersNum <= 0) {
+            continue;
         }
-    }
-    for (int index = 0; index < input.resourcesNum; index++) {
-        if (input.resourcesDst[index].attrId == load.attributeId) {
-            return index;
+        if (destination.registersNum > 4 || destination.registerStart < 0) {
+            throw std::runtime_error("external fetch-shader attribute " + std::to_string(destination.attrId) + " writes " + std::to_string(destination.registersNum) +
+                " registers starting at " + std::to_string(destination.registerStart) + "; the inline model supports one to four");
         }
-    }
-    return -1;
-}
-
-bool isBufferDwordLoad(RdnaOpcode opcode) {
-    switch (opcode) {
-    case RdnaOpcode::BufferLoadFormatX:
-    case RdnaOpcode::BufferLoadFormatXy:
-    case RdnaOpcode::BufferLoadFormatXyz:
-    case RdnaOpcode::BufferLoadFormatXyzw:
-    case RdnaOpcode::BufferLoadDword:
-    case RdnaOpcode::BufferLoadDwordx2:
-    case RdnaOpcode::BufferLoadDwordx3:
-    case RdnaOpcode::BufferLoadDwordx4:
-    case RdnaOpcode::TbufferLoadFormatX:
-    case RdnaOpcode::TbufferLoadFormatXy:
-    case RdnaOpcode::TbufferLoadFormatXyz:
-    case RdnaOpcode::TbufferLoadFormatXyzw:
-        return true;
-    default:
-        return false;
+        RdnaInstruction fetch{};
+        fetch.op = RdnaOpcode::BufferLoadFormatXyzw;
+        fetch.programCounter = call.programCounter;
+        fetch.destination.kind = RdnaOperandKind::VectorRegister;
+        fetch.destination.reg = static_cast<std::uint32_t>(destination.registerStart);
+        fetch.formatted = true;
+        context.TranslateEmbeddedFetch(fetch, static_cast<std::uint32_t>(index), static_cast<std::uint32_t>(destination.registersNum));
     }
 }
 
@@ -190,6 +163,12 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
 
     const auto builtin = [&entryIr](StageInputKind kind, std::uint32_t component = 0u) -> IrValue& {
         return entryIr.Emit(IrOpcode::GetBuiltin, IrOpcodeType(IrOpcode::GetBuiltin), {&entryIr.Constant(static_cast<std::uint32_t>(kind)), &entryIr.Constant(component)});
+    };
+    const auto drawIndex = [&entryIr, &options, &builtin](StageInputKind kind) -> IrValue& {
+        const auto* fetch = options.embeddedFetch;
+        const std::int32_t folded = fetch == nullptr ? -1 : kind == StageInputKind::VertexIndex ? fetch->vertexOffsetSgpr : fetch->instanceOffsetSgpr;
+        IrValue& index = builtin(kind);
+        return folded < 0 ? index : entryIr.ISub(index, entryIr.GetUserData(static_cast<ScalarReg>(folded)));
     };
 
     for (std::uint32_t index = 0; index < options.userDataCount; index++) {
@@ -246,7 +225,7 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
         const auto& mesh = options.inputInfo.vertex->mesh;
         const std::uint32_t size = mesh.InputPrimitiveSize();
         const std::uint32_t stepCount = mesh.InputPrimitiveStep();
-        if (options.waveSize != 64u || mesh.primitivesPerGroup == 0u || mesh.verticesPerGroup != mesh.InputVertexCount(mesh.primitivesPerGroup) || mesh.verticesPerGroup > totalThreads || mesh.primitivesPerGroup > totalThreads || totalThreads % 64u != 0u || totalThreads > 15u * 64u || mesh.esgsItemSize == 0u || mesh.esgsItemSize * mesh.verticesPerGroup > 0xffffu) {
+        if (mesh.primitivesPerGroup == 0u || mesh.verticesPerGroup != mesh.InputVertexCount(mesh.primitivesPerGroup) || mesh.verticesPerGroup > totalThreads || mesh.primitivesPerGroup > totalThreads || totalThreads % options.waveSize != 0u || totalThreads / options.waveSize > 15u || mesh.esgsItemSize == 0u || mesh.esgsItemSize * mesh.verticesPerGroup > 0xffffu) {
             throw std::runtime_error("mesh shader translation configuration is not supported (wave " + std::to_string(options.waveSize) + ", primitives per group " + std::to_string(mesh.primitivesPerGroup) + ", vertices per group " + std::to_string(mesh.verticesPerGroup) + ", threads " + std::to_string(totalThreads) + ", ESGS item size " + std::to_string(mesh.esgsItemSize) + ")");
         }
         constexpr std::uint32_t kTriFanPrimitiveType = 5u;
@@ -277,11 +256,11 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
         IrValue& vertices = minimum(subtractSaturate(indexCount, firstVertex), u32(mesh.verticesPerGroup));
         IrValue& primitives = entryIr.Select(entryIr.ULessThan(vertices, u32(size)), u32(0u), entryIr.IAdd(entryIr.Emit(IrOpcode::UDiv32, IrOpcodeType(IrOpcode::UDiv32), {&subtractSaturate(vertices, u32(size)), &step}), u32(1u)));
         entryIr.SetScalarReg(static_cast<ScalarReg>(2), entryIr.BitwiseOr(entryIr.ShiftLeftLogical(vertices, u32(12u)), entryIr.ShiftLeftLogical(primitives, u32(22u))));
-        IrValue& wave = entryIr.ShiftRightLogical(local, u32(6u));
-        IrValue& waveBase = entryIr.BitwiseAnd(local, u32(~63u));
-        IrValue& vertexCount = minimum(subtractSaturate(vertices, waveBase), u32(64u));
-        IrValue& primitiveCount = minimum(subtractSaturate(primitives, waveBase), u32(64u));
-        IrValue& waveInfo = entryIr.BitwiseOr(entryIr.ShiftLeftLogical(wave, u32(24u)), u32((totalThreads / 64u) << 28u));
+        IrValue& wave = entryIr.ShiftRightLogical(local, u32(options.waveSize == 32u ? 5u : 6u));
+        IrValue& waveBase = entryIr.BitwiseAnd(local, u32(~(options.waveSize - 1u)));
+        IrValue& vertexCount = minimum(subtractSaturate(vertices, waveBase), u32(options.waveSize));
+        IrValue& primitiveCount = minimum(subtractSaturate(primitives, waveBase), u32(options.waveSize));
+        IrValue& waveInfo = entryIr.BitwiseOr(entryIr.ShiftLeftLogical(wave, u32(24u)), u32((totalThreads / options.waveSize) << 28u));
         entryIr.SetScalarReg(static_cast<ScalarReg>(3), entryIr.BitwiseOr(waveInfo, entryIr.BitwiseOr(entryIr.ShiftLeftLogical(primitiveCount, u32(8u)), vertexCount)));
         IrValue& parity = mesh.inputPrimitive == kTriStripPrimitiveType ? entryIr.BitwiseAnd(entryIr.IAdd(firstPrimitive, local), u32(1u)) : u32(0u);
         IrValue& vertex = entryIr.IMul(local, step);
@@ -315,9 +294,9 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
         entryIr.SetVectorReg(static_cast<VectorReg>(8), entryIr.IAdd(draw(2u), builtin(StageInputKind::WorkgroupId, 1u)));
     } else if (options.stage == ShaderStageKind::Local) {
         entryIr.SetScalarReg(static_cast<ScalarReg>(3), entryIr.Constant(64u));
-        entryIr.SetVectorReg(static_cast<VectorReg>(2), builtin(StageInputKind::VertexIndex));
+        entryIr.SetVectorReg(static_cast<VectorReg>(2), drawIndex(StageInputKind::VertexIndex));
         entryIr.SetVectorReg(static_cast<VectorReg>(3), entryIr.Constant(0u));
-        entryIr.SetVectorReg(static_cast<VectorReg>(5), builtin(StageInputKind::InstanceIndex));
+        entryIr.SetVectorReg(static_cast<VectorReg>(5), drawIndex(StageInputKind::InstanceIndex));
     } else if (options.stage == ShaderStageKind::TessellationControl) {
         const auto& tess = options.inputInfo.vertex->tess;
         entryIr.SetScalarReg(static_cast<ScalarReg>(2), entryIr.Emit(IrOpcode::TessellationBase, IrOpcodeType(IrOpcode::TessellationBase), {&entryIr.Constant(0u)}));
@@ -336,13 +315,11 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
         const auto* ps = options.inputInfo.pixel;
         const auto vgpr = [&](PixelInput input) { return ps->psInputVgpr[static_cast<std::uint32_t>(input)]; };
         const auto loaded = [&](PixelInput input) { return vgpr(input) != ShaderPixelInputInfo::NoPixelInputVgpr; };
-        if (options.fragmentShaderBarycentricEnabled) {
-            for (const auto [input, kind] : {std::pair{PixelInput::PerspectiveCenter, StageInputKind::BaryCoordSmooth}, std::pair{PixelInput::PerspectiveCentroid, StageInputKind::BaryCoordSmooth},
-                                             std::pair{PixelInput::LinearCenter, StageInputKind::BaryCoordNoPerspective}, std::pair{PixelInput::LinearCentroid, StageInputKind::BaryCoordNoPerspective}}) {
-                if (!loaded(input)) continue;
-                entryIr.SetVectorReg(static_cast<VectorReg>(vgpr(input)), builtin(kind, 0u));
-                entryIr.SetVectorReg(static_cast<VectorReg>(vgpr(input) + 1u), builtin(kind, 1u));
-            }
+        for (const auto [input, kind] : {std::pair{PixelInput::PerspectiveCenter, StageInputKind::BaryCoordSmooth}, std::pair{PixelInput::PerspectiveCentroid, StageInputKind::BaryCoordSmooth},
+                                         std::pair{PixelInput::LinearCenter, StageInputKind::BaryCoordNoPerspective}, std::pair{PixelInput::LinearCentroid, StageInputKind::BaryCoordNoPerspective}}) {
+            if (!loaded(input)) continue;
+            entryIr.SetVectorReg(static_cast<VectorReg>(vgpr(input)), builtin(kind, 0u));
+            entryIr.SetVectorReg(static_cast<VectorReg>(vgpr(input) + 1u), builtin(kind, 1u));
         }
         if (loaded(PixelInput::PositionX)) {
             entryIr.SetVectorReg(static_cast<VectorReg>(vgpr(PixelInput::PositionX)), builtin(StageInputKind::FragCoord, 0u));
@@ -364,12 +341,20 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
         if (loaded(PixelInput::Ancillary)) {
             entryIr.SetVectorReg(static_cast<VectorReg>(vgpr(PixelInput::Ancillary)), builtin(StageInputKind::PackedAncillary));
         }
+        if (loaded(PixelInput::LineStipple)) {
+            entryIr.SetVectorReg(static_cast<VectorReg>(vgpr(PixelInput::LineStipple)), entryIr.Constant(0u));
+        }
+        if (loaded(PixelInput::PositionFixedPoint)) {
+            IrValue& x = entryIr.Emit(IrOpcode::ConvertU32F32, IrType::U32, {&entryIr.BitCastF32(builtin(StageInputKind::FragCoord, 0u))});
+            IrValue& y = entryIr.Emit(IrOpcode::ConvertU32F32, IrType::U32, {&entryIr.BitCastF32(builtin(StageInputKind::FragCoord, 1u))});
+            entryIr.SetVectorReg(static_cast<VectorReg>(vgpr(PixelInput::PositionFixedPoint)), entryIr.BitwiseOr(entryIr.BitwiseAnd(x, entryIr.Constant(0xffffu)), entryIr.ShiftLeftLogical(y, entryIr.Constant(16u))));
+        }
     } else if (options.stage == ShaderStageKind::Vertex) {
         if (options.userDataBaseRegister >= 8u) {
             entryIr.SetScalarReg(static_cast<ScalarReg>(3), entryIr.Constant(options.waveSize | (options.waveSize << 8u)));
         }
-        entryIr.SetVectorReg(static_cast<VectorReg>(5), builtin(StageInputKind::VertexIndex));
-        entryIr.SetVectorReg(static_cast<VectorReg>(8), builtin(StageInputKind::InstanceIndex));
+        entryIr.SetVectorReg(static_cast<VectorReg>(5), drawIndex(StageInputKind::VertexIndex));
+        entryIr.SetVectorReg(static_cast<VectorReg>(8), drawIndex(StageInputKind::InstanceIndex));
     }
 }
 
@@ -402,11 +387,12 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
     program.Resources().userDataBase = options.userDataBaseRegister;
     program.Resources().userDataCount = options.userDataCount;
     program.Info().scratchDwords = options.scratchDwords;
+    program.Info().sharedMemoryBytes = options.sharedMemoryBytes;
     if (options.embeddedFetch != nullptr) {
         program.Info().vertexOffsetSgpr = options.embeddedFetch->vertexOffsetSgpr;
         program.Info().instanceOffsetSgpr = options.embeddedFetch->instanceOffsetSgpr;
-        program.Info().vertexOffsetShared = options.embeddedFetch->vertexOffsetShared;
-        program.Info().instanceOffsetShared = options.embeddedFetch->instanceOffsetShared;
+        program.Info().vertexOffsetShared = options.embeddedFetch->vertexOffsetShared || options.embeddedFetch->vertexIndexObserved;
+        program.Info().instanceOffsetShared = options.embeddedFetch->instanceOffsetShared || options.embeddedFetch->instanceIndexObserved;
         program.Info().vertexOffsetConflict = options.embeddedFetch->vertexOffsetConflict;
         program.Info().instanceOffsetConflict = options.embeddedFetch->instanceOffsetConflict;
     }
@@ -460,6 +446,7 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
         const auto typedIndex = blockIndices.at(cfgBlock.id);
         TranslationContext context(program, *blocks[typedIndex], vectorLimit);
         context.SetPixelInput(options.inputInfo.pixel, options.fragmentShaderBarycentricEnabled);
+        context.SetFloatMode(options.floatMode);
         for (std::uint32_t index = cfgBlock.instructionBegin; index < cfgBlock.instructionEnd; index++) {
             const auto& instruction = decoded.instructions[index];
             if (isCodeTableLoad(cfg, instruction.programCounter)) {
@@ -468,19 +455,22 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
                 context.TranslateCodeTableLoad(instruction, *table);
                 continue;
             }
-            const auto* embedded = findEmbeddedFetchLoad(options.embeddedFetch, instruction.programCounter);
-            if (embedded != nullptr && isBufferDwordLoad(instruction.op) && instruction.dataDwordCount == embedded->componentCount && instruction.destination.kind == RdnaOperandKind::VectorRegister) {
-                if (options.inputInfo.vertex == nullptr) {
-                    throw std::runtime_error("embedded vertex fetch requires vertex input metadata");
+            if (options.embeddedFetch != nullptr) {
+                const auto load = std::ranges::find(options.embeddedFetch->loads, instruction.programCounter, &EmbeddedFetchLoad::programCounter);
+                if (load != options.embeddedFetch->loads.end()) {
+                    if (options.inputInfo.vertex == nullptr || instruction.destination.kind != RdnaOperandKind::VectorRegister || instruction.dataDwordCount != load->componentCount) throw std::runtime_error("prepared vertex fetch does not match its instruction");
+                    const auto& vertex = *options.inputInfo.vertex;
+                    std::uint32_t attribute = 0;
+                    while (attribute < static_cast<std::uint32_t>(vertex.resourcesNum) && vertex.resourcesDst[attribute].attrId != load->attributeId) ++attribute;
+                    if (attribute == static_cast<std::uint32_t>(vertex.resourcesNum)) throw std::runtime_error("prepared vertex fetch has no matching semantic");
+                    context.TranslateEmbeddedFetch(instruction, attribute, load->componentCount);
+                    continue;
                 }
-                const auto resource = resolveEmbeddedFetchResource(*options.inputInfo.vertex, *embedded);
-                if (resource < 0 || resource >= options.inputInfo.vertex->resourcesNum) {
-                    throw std::runtime_error("embedded vertex fetch at program counter " + std::to_string(instruction.programCounter) + " has no resource for attribute " + std::to_string(embedded->attributeId));
-                }
-                context.TranslateEmbeddedFetch(instruction, static_cast<std::uint32_t>(resource), embedded->componentCount, options.inputInfo.vertex->resources[resource]);
-                continue;
             }
             context.TranslateInstruction(instruction);
+            if (cfg.hasFetchCall && instruction.programCounter == cfg.fetchCallProgramCounter) {
+                translateExternalFetch(context, instruction, options.inputInfo.vertex);
+            }
         }
         context.AddBranchCondition(cfgBlock, blockInfos[typedIndex]);
     }

@@ -11,12 +11,12 @@
 namespace ShaderRecompiler
 {
 
-void EmitModuleHeader(SpirvModule& module, const IrProgram& program, const BindingAllocationResult& bindings) {
+void EmitModuleHeader(SpirvModule& module, const IrProgram& program, const CompiledBindingLayout& bindings) {
     CheckBindings(program, bindings);
     EmitBaseHeader(module, program);
 }
 
-void EmitModuleHeader(SpirvEmitterState& state, const BindingAllocationResult& bindings) {
+void EmitModuleHeader(SpirvEmitterState& state, const CompiledBindingLayout& bindings) {
     CheckBindings(state.program, bindings);
     DefineModule(state);
 }
@@ -134,7 +134,7 @@ void DefineModule(SpirvEmitterState& state) {
     const bool fragmentBarycentric = StageOf(state) == IrShaderStage::Pixel && std::any_of(state.inputs.begin(), state.inputs.end(), [](const SpirvInputBinding& input) {
         return input.perVertex || input.kind == StageInputKind::BaryCoordSmooth || input.kind == StageInputKind::BaryCoordNoPerspective;
     });
-    if (fragmentBarycentric) {
+    if (fragmentBarycentric && !state.program.Metadata().barycentricEmulation) {
         state.module.EmitCapability(spv::CapabilityFragmentBarycentricKHR);
         state.module.EmitExtension("SPV_KHR_fragment_shader_barycentric");
     }

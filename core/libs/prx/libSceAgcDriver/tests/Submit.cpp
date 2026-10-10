@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "execution/VulkanTestDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libc/include/Shutdown.hpp"
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -440,15 +442,28 @@ void testMultiSubmissions() {
 
 void testShaderHeaderAlignment() {
     alignas(256) static const std::array<std::uint32_t, 64> code{0xbf810000};
-    alignas(8) static std::array<std::byte, 2 * sizeof(Shader)> storage{};
+    struct Header {
+        Shader shader{};
+        std::array<ShaderRegister, 7> registers{};
+        ShaderSpecialRegs specials{};
+    };
+    alignas(8) static std::array<std::byte, sizeof(Header) + 8> storage{};
     Shader shader{};
     shader.file_header = 0x34333231;
     shader.version = 0x18;
-    shader.header_size = sizeof(Shader);
+    shader.header_size = sizeof(Header);
     shader.shader_size = sizeof(code);
     shader.code = code.data();
     const auto at = [](std::size_t offset, const Shader& fields) {
-        std::memcpy(storage.data() + offset, &fields, sizeof(fields));
+        Header header;
+        header.shader = fields;
+        const auto address = reinterpret_cast<std::uintptr_t>(fields.code);
+        header.registers = {{{0x20c, static_cast<std::uint32_t>(address >> 8u)}, {0x20d, static_cast<std::uint32_t>(address >> 40u)}, {0x207, 1}, {0x208, 1}, {0x209, 1}, {0x212, 0}, {0x213, 0}}};
+        header.specials.dispatch_modifier = 0x8000u;
+        header.shader.sh_registers = reinterpret_cast<ShaderRegister*>(storage.data() + offset + offsetof(Header, registers));
+        header.shader.num_sh_registers = header.registers.size();
+        header.shader.specials = reinterpret_cast<ShaderSpecialRegs*>(storage.data() + offset + offsetof(Header, specials));
+        std::memcpy(storage.data() + offset, &header, sizeof(header));
         return reinterpret_cast<const Shader*>(storage.data() + offset);
     };
     for (const std::size_t offset : {0, 4, 1}) AgcDriverRegisterShader_nid_postfix(at(offset, shader));
@@ -464,6 +479,60 @@ void testShaderHeaderAlignment() {
     Shader truncated = shader;
     truncated.header_size = sizeof(Shader) - 4;
     refused(expectFailure([&] { AgcDriverRegisterShader_nid_postfix(at(4, truncated)); }), "smaller than its fixed fields");
+}
+
+void testHeaderWithoutProgramAddress() {
+    alignas(256) static const std::array<std::uint32_t, 64> code{0xbf810000};
+    struct Header {
+        Shader shader{};
+        std::array<ShaderRegister, 3> registers{};
+    };
+    alignas(8) static Header header{};
+    header.shader.file_header = 0x34333231;
+    header.shader.version = 0x18;
+    header.shader.header_size = sizeof(Header);
+    header.shader.shader_size = sizeof(code);
+    header.shader.code = code.data();
+    header.shader.type = 4;
+    header.registers = {{{0x08a, 0x60000002}, {0x08b, 0x00030008}, {0x0ca, 0x03000002}}};
+    header.shader.sh_registers = header.registers.data();
+    header.shader.num_sh_registers = header.registers.size();
+    AgcDriverRegisterShader_nid_postfix(&header.shader);
+}
+
+void testRegisteredFloatMode() {
+    using AgcDriver::DriverDetail::RegisteredFloatMode;
+    using AgcDriver::DriverDetail::ShaderSnapshot;
+    using AgcDriver::DriverDetail::RegisteredShaderState;
+    struct Stage {
+        std::uint8_t type;
+        std::uint32_t rsrc1;
+        std::uint32_t fp16OverflowBit;
+    };
+    constexpr std::array<Stage, 7> stages{{{0, 0x212, 26}, {1, 0x00a, 29}, {2, 0x08a, 31}, {4, 0x08a, 31}, {6, 0x08a, 31}, {5, 0x10a, 30}, {7, 0x10a, 30}}};
+    constexpr std::array<std::uint32_t, 4> otherBits{26, 29, 30, 31};
+    for (const auto& stage : stages) {
+        const auto mode = [&](std::uint32_t value) {
+            ShaderSnapshot snapshot{0x20000, 0, stage.type, {}, {}};
+            auto state = std::make_shared<RegisteredShaderState>();
+            state->shader.emplace(stage.rsrc1, value);
+            snapshot.registeredState = state;
+            return RegisteredFloatMode(snapshot);
+        };
+        const auto name = "stage type " + std::to_string(stage.type);
+        const auto astro = mode((0xc0u << 12u) | (1u << 21u) | 0x3fu);
+        check(astro.has_value() && astro->floatMode == 0xc0u && astro->dx10Clamp && !astro->ieeeMode && !astro->fp16Overflow, (name + ": FLOAT_MODE 0xc0 with DX10_CLAMP decoded wrong").c_str());
+        const auto ieee = mode(1u << 23u);
+        check(ieee && ieee->ieeeMode && ieee->floatMode == 0u && !ieee->dx10Clamp, (name + ": IEEE_MODE decoded wrong").c_str());
+        check(mode(1u << stage.fp16OverflowBit)->fp16Overflow, (name + ": FP16_OVFL not read from bit " + std::to_string(stage.fp16OverflowBit)).c_str());
+        for (const auto bit : otherBits) {
+            if (bit != stage.fp16OverflowBit) check(!mode(1u << bit)->fp16Overflow, (name + ": bit " + std::to_string(bit) + " read as FP16_OVFL").c_str());
+        }
+        ShaderSnapshot missing{0x20000, 0, stage.type, {}, {}};
+        check(!RegisteredFloatMode(missing).has_value(), (name + ": a snapshot without registered state has a float mode").c_str());
+        missing.registeredState = std::make_shared<RegisteredShaderState>();
+        check(!RegisteredFloatMode(missing).has_value(), (name + ": a missing RSRC1 has a float mode").c_str());
+    }
 }
 
 void testWorkerFailure() {
@@ -486,6 +555,8 @@ void testWorkerFailure() {
 
 int main() {
     try {
+        const auto device = OpenVulkanTestDevice();
+        if (!device) return VulkanTestSkipped;
         alignas(256) std::array<std::uint32_t, 64> rawCode{};
         rawCode.fill(0xbf800000);
         rawCode[0] = 0xbe8003ff;
@@ -525,6 +596,13 @@ int main() {
             "raw compute cache eviction lost snapshot lifetime or exceeded its entry limit");
         check(!expectFailure([&] { AgcDriver::DriverDetail::ReadRawComputeShader(rawAddress + 4); }).empty(), "raw compute accepted a misaligned entry");
         check(!expectFailure([] { AgcDriver::DriverDetail::ReadRawComputeShader(0); }).empty(), "raw compute accepted an unmapped entry");
+        alignas(256) std::array<std::uint32_t, 128> straddling{};
+        straddling.fill(0xbf800000);
+        straddling[63] = 0xf4000000;
+        straddling[64] = 0xfa000000;
+        straddling[65] = 0xbf810000;
+        const auto straddled = AgcDriver::DriverDetail::ReadRawComputeShader(reinterpret_cast<std::uintptr_t>(straddling.data()));
+        check(straddled->code.size() == 66 && straddled->code[64] == 0xfa000000, "raw compute stopped at a memory instruction across its first read window");
 #ifdef _WIN32
         auto* mapping = static_cast<std::uint32_t*>(VirtualAlloc(nullptr, 8192, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         check(mapping != nullptr, "cannot allocate raw compute boundary test");
@@ -564,6 +642,8 @@ int main() {
         testWaitFreeSubmissionTheCpuWaitsFor();
         testMultiSubmissions();
         testShaderHeaderAlignment();
+        testHeaderWithoutProgramAddress();
+        testRegisteredFloatMode();
         testWorkerFailure();
         check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find("required shader register") != std::string::npos, "shutdown lost worker failure");
         std::puts("AGC driver submit tests passed");

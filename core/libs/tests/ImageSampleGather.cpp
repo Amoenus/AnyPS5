@@ -2,6 +2,7 @@
 #include "RdnaDecoder/RdnaImageOpDecoder.hpp"
 #include <array>
 #include <stdexcept>
+#include <string_view>
 
 using namespace ShaderRecompiler;
 static void Require(bool value) { if (!value) throw std::runtime_error("image sample/gather regression"); }
@@ -16,6 +17,36 @@ static void Check(std::uint32_t encoding, RdnaOpcode opcode, std::uint32_t dmask
     program.SetEntryBlock(block);
     TranslationContext context(program, block, 256);
     context.TranslateInstruction(instruction);
+}
+static void CheckPck(std::uint32_t encoding, RdnaOpcode opcode, std::uint32_t dmask, std::uint32_t dataComponents) {
+    const std::array<std::uint32_t, 2> code{(0x3cu << 26u) | (encoding << 18u) | (dmask << 8u) | (1u << 3u), 0u};
+    const RdnaInstruction instruction = DecodeRdnaMimg(0u, code, 0u);
+    Require(instruction.op == opcode);
+    Require(instruction.imageOpcodeId == encoding);
+    Require(instruction.imageDmask == dmask);
+    Require(instruction.dataComponents == dataComponents);
+    Require(instruction.dataDwordCount == dataComponents);
+    Require(IsImageOpcode(instruction.op));
+}
+static void CheckPckRejectsZeroMask(std::uint32_t encoding) {
+    const std::array<std::uint32_t, 2> code{(0x3cu << 26u) | (encoding << 18u) | (1u << 3u), 0u};
+    bool rejected = false;
+    try {
+        DecodeRdnaMimg(0u, code, 0u);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    Require(rejected);
+}
+static void CheckUnsupportedOpcodeDiagnostic(std::uint32_t encoding, std::string_view expected) {
+    const std::array<std::uint32_t, 2> code{(0x3cu << 26u) | ((encoding & 0x7fu) << 18u) | (encoding >> 7u), 0u};
+    try {
+        DecodeRdnaMimg(0u, code, 0u);
+    } catch (const std::runtime_error& error) {
+        Require(std::string_view(error.what()).find(expected) != std::string_view::npos);
+        return;
+    }
+    Require(false);
 }
 int main() {
     Check(0x26u, RdnaOpcode::ImageSampleBCl, 0xfu);
@@ -61,4 +92,13 @@ int main() {
     Check(0x44u, RdnaOpcode::ImageGather4L, 0x8u);
     Check(0x54u, RdnaOpcode::ImageGather4LO, 0x8u);
     Check(0x50u, RdnaOpcode::ImageGather4O, 0x8u);
+    CheckPck(0x62u, RdnaOpcode::ImageGather4hPck, 0x1u, 1u);
+    CheckPck(0x62u, RdnaOpcode::ImageGather4hPck, 0x3u, 2u);
+    CheckPck(0x62u, RdnaOpcode::ImageGather4hPck, 0xFu, 4u);
+    CheckPck(0x63u, RdnaOpcode::ImageGather8hPck, 0x1u, 1u);
+    CheckPck(0x63u, RdnaOpcode::ImageGather8hPck, 0xFu, 4u);
+    CheckPckRejectsZeroMask(0x62u);
+    CheckPckRejectsZeroMask(0x63u);
+    CheckUnsupportedOpcodeDiagnostic(0x06u, "MIMG opcode 0x06");
+    CheckUnsupportedOpcodeDiagnostic(0xffu, "MIMG opcode 0xff");
 }

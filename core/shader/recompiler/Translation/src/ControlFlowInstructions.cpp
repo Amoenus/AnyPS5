@@ -222,6 +222,12 @@ void TranslationContext::sGetpcB64(const RdnaInstruction& inst) {
     writeU32Pair(inst.destination, extractU64(pc));
 }
 
+void TranslationContext::sSwappcB64(const RdnaInstruction& inst) {
+    IrValue& base = ir.Emit(IrOpcode::GetShaderBase, IrType::U64, {});
+    const IrU64 link(ir.Emit(IrOpcode::IAdd64, IrType::U64, {&base, &ir.ConstantU64(static_cast<std::uint64_t>(currentProgramCounter) + 4u)}));
+    writeU32Pair(inst.destination, extractU64(link));
+}
+
 void TranslationContext::sCselectB32(const RdnaInstruction& inst) {
     const IrU32 trueValue = readU32(sourceAt(inst, 0u));
     const IrU32 falseValue = readU32(sourceAt(inst, 1u));
@@ -236,6 +242,21 @@ void TranslationContext::scalarSelect64(const RdnaInstruction& inst, const RdnaO
     const IrU32 low(ir.Select(condition, trueValue[0].Value(), falseValue[0].Value()));
     const IrU32 high(ir.Select(condition, trueValue[1].Value(), falseValue[1].Value()));
     writeU32Pair(inst.destination, {low, high});
+}
+
+void TranslationContext::scalarSelectMask64(const RdnaInstruction& inst) {
+    if (inst.destination.kind != RdnaOperandKind::ScalarRegister) {
+        scalarSelect64(inst, sourceAt(inst, 1u));
+        return;
+    }
+    const RdnaOperand& trueSource = sourceAt(inst, 0u);
+    const RdnaOperand& falseSource = sourceAt(inst, 1u);
+    IrValue& valid = ir.LogicalAnd(readMaskValid(trueSource).Value(), readMaskValid(falseSource).Value());
+    IrValue& bit = ir.Emit(IrOpcode::SelectU1, IrType::U1, {&ir.GetScc(), &readMask(trueSource).Value(), &readMask(falseSource).Value()});
+    scalarSelect64(inst, falseSource);
+    const auto dst = static_cast<ScalarReg>(inst.destination.reg);
+    ir.SetThreadBitScalarReg(dst, bit);
+    ir.SetScalarMaskTag(dst, valid);
 }
 
 void TranslationContext::movB32(const RdnaInstruction& inst, bool applyFloatModifiers) {

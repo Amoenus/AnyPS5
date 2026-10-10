@@ -7,24 +7,27 @@
 
 namespace AgcDriver::Graphics {
 
-Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties) : context(context), size(size), capacity(BufferPool::Capacity(size)), usage(usage), properties(properties) {
+Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties) : context(context), size(size), capacity(BufferPool::Capacity(size, properties)), usage(BufferPool::Usage(usage, properties)), properties(properties) {
     Require(size != 0, "zero-sized GPU buffer");
     const bool addressable = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0;
     Require(!addressable || context.bufferDeviceAddress, "buffer device address is not enabled");
     cache = GetBufferPool(context);
-    if (const auto allocation = cache->Take(size, usage, properties)) {
+    if (const auto allocation = cache->Take(size, this->usage, properties)) {
         buffer = allocation->buffer;
         memory = allocation->memory;
         mapping = allocation->mapping;
         deviceAddress = allocation->address;
         allocationBytes = allocation->allocationBytes;
+        capacity = allocation->bytes;
+        offset = allocation->offset;
+        slab = allocation->slab;
         ready = true;
         return;
     }
     try {
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         info.size = capacity;
-        info.usage = usage;
+        info.usage = this->usage;
         info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         Check(context.Function<PFN_vkCreateBuffer>("vkCreateBuffer")(context.device, &info, nullptr, &buffer), "vkCreateBuffer");
         VkMemoryRequirements requirements{};
@@ -46,6 +49,18 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
         } else {
             allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, properties);
         }
+        if ((properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 && BufferPool::SlabEligible(capacity, requirements.alignment, requirements.size, context.limits.nonCoherentAtomSize)) {
+            const auto slot = cache->TakeSlot(context, allocation.memoryTypeIndex, capacity, addressable);
+            memory = slot.memory;
+            offset = slot.offset;
+            slab = true;
+            allocationBytes = capacity;
+            Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, offset), "vkBindBufferMemory slab");
+            initializeAddress(usage);
+            mapping = slot.mapping;
+            ready = true;
+            return;
+        }
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory buffer");
         Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, 0), "vkBindBufferMemory");
         initializeAddress(usage);
@@ -63,7 +78,12 @@ Buffer::~Buffer() {
 
 void Buffer::release() noexcept {
     if (ready && cache) {
-        cache->Put({buffer, memory, mapping, deviceAddress, allocationBytes, capacity, usage, properties});
+        cache->Put({buffer, memory, mapping, deviceAddress, allocationBytes, capacity, usage, properties, offset, slab});
+        return;
+    }
+    if (slab) {
+        if (buffer) context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, buffer, nullptr);
+        cache->PutSlot(memory, offset);
         return;
     }
     if (mapping) context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")(context.device, memory);
@@ -84,23 +104,25 @@ void Buffer::Invalidate() {
     Require(mapping != nullptr, "cannot invalidate an unmapped GPU buffer");
     VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
     range.memory = memory;
-    range.size = VK_WHOLE_SIZE;
+    range.offset = offset;
+    range.size = slab ? static_cast<VkDeviceSize>(capacity) : VK_WHOLE_SIZE;
     Check(context.Function<PFN_vkInvalidateMappedMemoryRanges>("vkInvalidateMappedMemoryRanges")(context.device, 1, &range), "vkInvalidateMappedMemoryRanges");
 }
 
-DeviceBuffer::DeviceBuffer(const Context& context, std::size_t size, VkBufferUsageFlags usage) : context(context), size(size), capacity(BufferPool::Capacity(size)), usage(usage) {
+DeviceBuffer::DeviceBuffer(const Context& context, std::size_t size, VkBufferUsageFlags usage) : context(context), size(size), capacity(BufferPool::Capacity(size, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)), usage(BufferPool::Usage(usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
     Require(size != 0, "zero-sized device buffer");
     cache = GetBufferPool(context);
-    if (const auto allocation = cache->Take(size, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+    if (const auto allocation = cache->Take(size, this->usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
         buffer = allocation->buffer;
         memory = allocation->memory;
         allocationBytes = allocation->allocationBytes;
+        capacity = allocation->bytes;
         return;
     }
     try {
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         info.size = capacity;
-        info.usage = usage;
+        info.usage = this->usage;
         info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         Check(context.Function<PFN_vkCreateBuffer>("vkCreateBuffer")(context.device, &info, nullptr, &buffer), "vkCreateBuffer device");
         VkMemoryRequirements requirements{};
@@ -164,6 +186,21 @@ void FillDeviceFunctions(const Context& context, DeviceFunctions& functions) {
     functions.cmdSetScissor = context.Function<PFN_vkCmdSetScissor>("vkCmdSetScissor");
     functions.cmdSetDepthBounds = context.Function<PFN_vkCmdSetDepthBounds>("vkCmdSetDepthBounds");
     functions.cmdSetDepthBias = context.Function<PFN_vkCmdSetDepthBias>("vkCmdSetDepthBias");
+    if (context.graphicsPipelineLibrary) {
+        functions.cmdBeginRendering = context.Function<PFN_vkCmdBeginRenderingKHR>("vkCmdBeginRenderingKHR");
+        functions.cmdEndRendering = context.Function<PFN_vkCmdEndRenderingKHR>("vkCmdEndRenderingKHR");
+        functions.cmdSetCullMode = context.Function<PFN_vkCmdSetCullModeEXT>("vkCmdSetCullModeEXT");
+        functions.cmdSetFrontFace = context.Function<PFN_vkCmdSetFrontFaceEXT>("vkCmdSetFrontFaceEXT");
+        functions.cmdSetDepthTestEnable = context.Function<PFN_vkCmdSetDepthTestEnableEXT>("vkCmdSetDepthTestEnableEXT");
+        functions.cmdSetDepthWriteEnable = context.Function<PFN_vkCmdSetDepthWriteEnableEXT>("vkCmdSetDepthWriteEnableEXT");
+        functions.cmdSetDepthCompareOp = context.Function<PFN_vkCmdSetDepthCompareOpEXT>("vkCmdSetDepthCompareOpEXT");
+        functions.cmdSetDepthBoundsTestEnable = context.Function<PFN_vkCmdSetDepthBoundsTestEnableEXT>("vkCmdSetDepthBoundsTestEnableEXT");
+        functions.cmdSetStencilTestEnable = context.Function<PFN_vkCmdSetStencilTestEnableEXT>("vkCmdSetStencilTestEnableEXT");
+        functions.cmdSetStencilOp = context.Function<PFN_vkCmdSetStencilOpEXT>("vkCmdSetStencilOpEXT");
+        functions.cmdSetStencilCompareMask = context.Function<PFN_vkCmdSetStencilCompareMask>("vkCmdSetStencilCompareMask");
+        functions.cmdSetStencilWriteMask = context.Function<PFN_vkCmdSetStencilWriteMask>("vkCmdSetStencilWriteMask");
+        functions.cmdSetStencilReference = context.Function<PFN_vkCmdSetStencilReference>("vkCmdSetStencilReference");
+    }
     functions.cmdBindVertexBuffers = context.Function<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers");
     functions.cmdBindIndexBuffer = context.Function<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer");
     functions.cmdDraw = context.Function<PFN_vkCmdDraw>("vkCmdDraw");

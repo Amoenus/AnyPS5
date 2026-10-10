@@ -29,6 +29,7 @@ constexpr std::uint32_t Format8888UNorm = 56;
 constexpr std::uint32_t Type3D = 10;
 constexpr std::uint32_t TileZ64KBX = 0x18;
 constexpr std::uint32_t TileS64KBX = 0x19;
+constexpr std::uint32_t TileD64KBX = 0x1a;
 
 alignas(256) std::array<std::uint32_t, Threads * 4> Input{};
 alignas(256) std::array<float, Threads * 4> Output{};
@@ -43,7 +44,7 @@ alignas(256) constexpr std::array<std::uint32_t, 10> Code{
 
 std::array<std::uint32_t, 4> BufferDescriptor(const void* data, std::uint32_t bytes) {
     const auto address = reinterpret_cast<std::uintptr_t>(data);
-    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), bytes, 0x01016facu};
+    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), bytes, 0x31016facu};
 }
 
 std::array<std::uint32_t, 8> TextureDescriptor(std::uint32_t tileMode) {
@@ -145,6 +146,7 @@ int main() {
         if (!device) return VulkanTestSkipped;
         FillInput();
         Run(*device, TileS64KBX, "thick SW_64KB_S_X volume");
+        Run(*device, TileD64KBX, "thick SW_64KB_D_X volume");
         Run(*device, TileZ64KBX, "thin SW_64KB_Z_X volume");
         std::puts("image XOR swizzle volume tests passed");
         return 0;

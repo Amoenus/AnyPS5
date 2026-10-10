@@ -6,9 +6,11 @@
 #include "prx/libkernel/Time/include/TimedWait.hpp"
 #include <array>
 #include <atomic>
+#include <bit>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -44,6 +46,12 @@ struct PthreadRwlockattrPrivate {
 };
 
 struct PthreadRwlockPrivate {
+    // TODO(technical debt): winpthreads initializes a static rwlock on first use and fails a
+    // concurrent first lock with EINVAL, which shared_timed_mutex ignores. Initialize it here.
+    PthreadRwlockPrivate() {
+        _lock.lock();
+        _lock.unlock();
+    }
     std::shared_timed_mutex _lock;
     std::atomic<std::thread::id> _writer;
 };
@@ -71,6 +79,16 @@ static constexpr int GUEST_RAISED_SIGNAL = 30;
 static constexpr int HOST_RAISED_SIGNAL = SIGUSR1;
 #endif
 static constexpr int DEFAULT_THREAD_PRIORITY = 700;
+static constexpr std::uint32_t CPU_CLOCK_BIT = 0x80000000u;
+static constexpr std::uint32_t CPU_CLOCK_PROCESS_BIT = 0x40000000u;
+static constexpr std::uint32_t CPU_CLOCK_ID_MASK = ~(CPU_CLOCK_BIT | CPU_CLOCK_PROCESS_BIT);
+
+inline int GuestCpuFromHost(unsigned hostCpu, KernelCpumask threadAffinity) {
+    KernelCpumask mask = threadAffinity & DEFAULT_THREAD_AFFINITY;
+    if (mask == 0) mask = DEFAULT_THREAD_AFFINITY;
+    for (auto skip = hostCpu % static_cast<unsigned>(std::popcount(mask)); skip != 0; --skip) mask &= mask - 1;
+    return std::countr_zero(mask);
+}
 
 struct PthreadAttrPrivate {
     void* stackAddress = nullptr;
@@ -84,16 +102,21 @@ struct PthreadAttrPrivate {
     int _solosched = 0;
 };
 
+inline std::atomic<std::int64_t> nextThreadId{100000};
+
 struct PthreadPrivate {
+    std::int64_t tid = nextThreadId.fetch_add(1, std::memory_order_relaxed);
 #ifdef _WIN32
     void* nativeHandle = nullptr;
     unsigned long nativeThreadId = 0;
 #else
-    std::thread _thr;
     pthread_t hostThread{};
 #endif
     std::thread::id threadId;
     std::atomic<unsigned> references{2};
+    std::atomic<bool> inWait{false};
+    std::atomic<int> pendingException{0};
+    void* wakeEvent = nullptr;
     void* stackAddress = nullptr;
     std::size_t stackSize = 0;
     std::atomic<int> waitCount{0};
@@ -103,6 +126,11 @@ struct PthreadPrivate {
 #endif
     std::atomic<KernelCpumask> affinity{DEFAULT_THREAD_AFFINITY};
     std::atomic<int> priority{DEFAULT_THREAD_PRIORITY};
+    int cpuClockThread = 0;
+#ifndef _WIN32
+    clockid_t hostCpuClock{};
+    bool hostCpuClockBound = false;
+#endif
     std::mutex nameLock;
     std::string name;
     std::atomic<bool> _finished;
@@ -110,9 +138,15 @@ struct PthreadPrivate {
     bool _detached;
     bool _adopted;
     std::mutex _join_mtx;
-    std::condition_variable _join_cv;
+    TimedWait::Condition _join_cv;
+    std::atomic<bool> cancelPending{false};
+    std::mutex cancelLock;
+    TimedWait::Condition* cancelWait = nullptr;
 
-    PthreadPrivate() : _finished(false), _retval(nullptr), _detached(false), _adopted(false) {}
+    PthreadPrivate();
+    ~PthreadPrivate();
+    PthreadPrivate(const PthreadPrivate&) = delete;
+    PthreadPrivate& operator=(const PthreadPrivate&) = delete;
 };
 
 bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end);
@@ -125,5 +159,7 @@ constexpr std::uint32_t GuestSignalBit(int signum) {
 inline bool GuestSignalBlocked(const PthreadPrivate& thread, int signum) {
     return (thread.signalMask[static_cast<std::size_t>(signum - 1) >> 5].load() & GuestSignalBit(signum)) != 0;
 }
+int GuestThreadCpuClockId(const PthreadPrivate* thread);
+bool GuestThreadCpuNanos(int cpuClockThread, std::uint64_t* nanos);
 
 #endif

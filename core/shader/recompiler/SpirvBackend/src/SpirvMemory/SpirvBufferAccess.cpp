@@ -1,3 +1,4 @@
+#include "PipelineSpecialization.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvBufferAccess.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
@@ -36,7 +37,9 @@ std::uint32_t EmitShaderDataDwordLoad(SpirvEmitterState& state, std::uint32_t dw
     const auto pointer = state.module.AllocateId();
     const auto value = state.module.AllocateId();
     if (layout.UsesPushData()) {
-        state.module.AddFunction(spv::OpAccessChain, TypePushConstantElementPointer(state), pointer, state.pushConstantVariable, ConstantU32(state, 0), ConstantU32(state, dwordIndex + layout.pushDataStartDword));
+        const auto base = state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::PushDataOffset, layout.pushDataStartDword);
+        const auto index = Binary(state, spv::OpIAdd, TypeU32(state), Binary(state, spv::OpISub, TypeU32(state), base, ConstantU32(state, layout.PushSlotDword())), ConstantU32(state, dwordIndex));
+        state.module.AddFunction(spv::OpAccessChain, TypePushConstantElementPointer(state), pointer, state.pushConstantVariable, ConstantU32(state, 0), index);
     } else if (state.shaderDataStorageVariable != 0) {
         state.module.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), pointer, state.shaderDataStorageVariable, ConstantU32(state, 0), ConstantU32(state, dwordIndex));
     } else {
@@ -44,20 +47,6 @@ std::uint32_t EmitShaderDataDwordLoad(SpirvEmitterState& state, std::uint32_t dw
     }
     state.module.AddFunction(spv::OpLoad, TypeU32(state), value, pointer);
     return value;
-}
-
-std::uint32_t StorageBufferPackedStride(const SpirvEmitterState& state, const MemoryInfo& mem) {
-    if (mem.resource >= state.program.Info().buffers.size()) {
-        ExitDescriptorBindingFailure(state, DescriptorBindingKind::Buffers, mem.resource, "buffer specialization is missing");
-    }
-    return state.program.Info().buffers[mem.resource].packedStride;
-}
-
-IrBufferFormat StorageBufferFormat(const SpirvEmitterState& state, const MemoryInfo& mem) {
-    if (mem.resource >= state.program.Info().buffers.size()) {
-        ExitDescriptorBindingFailure(state, DescriptorBindingKind::Buffers, mem.resource, "buffer specialization is missing");
-    }
-    return state.program.Info().buffers[mem.resource].descriptorFormat;
 }
 
 void EmitMemoryOffsets(SpirvEmitterState& state) {
@@ -76,9 +65,45 @@ std::uint32_t LdsDwordCount(const SpirvEmitterState& state) {
     return state.requirements.functionLdsDwords != 0u ? state.requirements.functionLdsDwords : FunctionLdsDwordLimit;
 }
 
+bool LdsInDeviceMemory(const SpirvEmitterState& state) {
+    return state.program.Info().sharedMemoryBytes != 0u;
+}
+
+std::uint32_t LdsMemorySemantics(const SpirvEmitterState& state) {
+    return spv::MemorySemanticsWorkgroupMemoryMask | (LdsInDeviceMemory(state) ? spv::MemorySemanticsUniformMemoryMask : 0u);
+}
+
+void EmitLdsBufferBase(SpirvEmitterState& state) {
+    if (!LdsInDeviceMemory(state)) {
+        return;
+    }
+    if (state.ldsBufferVariable == 0u || state.numWorkgroupsVariable == 0u) {
+        FailEmit("device memory LDS was not declared before function emission");
+    }
+    if (ShaderWorkgroupInput(state) == nullptr || state.program.Resources().stage != IrShaderStage::Compute || state.program.Info().sharedMemoryBytes != LdsDwordCount(state) * 4u) {
+        FailEmit("device memory LDS does not match the compute program's LDS size");
+    }
+    const auto groups = [&](std::uint32_t component) {
+        const auto pointer = state.module.AllocateId();
+        const auto value = state.module.AllocateId();
+        state.module.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassInput, TypeU32(state)), pointer, state.numWorkgroupsVariable, ConstantU32(state, component));
+        state.module.AddFunction(spv::OpLoad, TypeU32(state), value, pointer);
+        return value;
+    };
+    const auto group = [&](std::uint32_t component) { return EmitInputComponentU32(state, StageInputKind::WorkgroupId, component); };
+    const auto plane = EmitAddU32(state, EmitBinaryU32(state, spv::OpIMul, group(2u), groups(1u)), group(1u));
+    const auto linear = EmitAddU32(state, EmitBinaryU32(state, spv::OpIMul, plane, groups(0u)), group(0u));
+    state.ldsBufferBase = EmitBinaryU32(state, spv::OpIMul, linear, ConstantU32(state, WorkgroupMemoryStrideDwords(state.program.Info())));
+}
+
 std::uint32_t EmitLdsLockPointer(SpirvEmitterState& state) {
     if (!state.requirements.ldsLock) {
         FailEmit("LDS lock was not requested by the program analysis");
+    }
+    if (LdsInDeviceMemory(state)) {
+        const auto pointer = state.module.AllocateId();
+        state.module.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), pointer, state.ldsBufferVariable, ConstantU32(state, 0u), EmitAddU32(state, state.ldsBufferBase, ConstantU32(state, LdsDwordCount(state))));
+        return pointer;
     }
     EnsureLdsStorage(state);
     const auto pointer = state.module.AllocateId();
@@ -86,31 +111,19 @@ std::uint32_t EmitLdsLockPointer(SpirvEmitterState& state) {
     return pointer;
 }
 
-MemoryResourceAccess PrepareStorageBufferResourceAccess(SpirvEmitterState& state, const MemoryInfo& mem, std::uint32_t variable, std::uint32_t pointerType) {
-    if (variable == 0) {
-        ExitDescriptorBindingFailure(state, DescriptorBindingKind::Buffers, mem.resource, "storage buffer descriptor array was not emitted");
-    }
-    const auto arrayIndex = ResourceForDescriptor(state, DescriptorBindingKind::Buffers, mem.resource);
-    MemoryResourceAccess access;
-    access.kind = mem.kind;
-    access.objectPointer = state.module.AllocateId();
-    state.module.AddFunction(spv::OpAccessChain, pointerType, access.objectPointer, variable, ConstantU32(state, arrayIndex));
-    access.byteOffset = state.memoryByteOffsets.at(arrayIndex);
-    access.memoryAccess = mem.coherent ? spv::MemoryAccessVolatileMask : 0u;
-    access.length = state.module.AllocateId();
-    state.module.AddFunction(spv::OpArrayLength, TypeU32(state), access.length, access.objectPointer, 0u);
-    if (mem.resource < state.program.Info().buffers.size()) {
-        if (state.program.Info().buffers[mem.resource].empty) access.length = ConstantU32(state, 0u);
-        access.misalignment = state.program.Info().buffers[mem.resource].baseMisalignment;
-    }
-    return access;
-}
-
 MemoryResourceAccess PrepareMemoryResourceAccess(SpirvEmitterState& state, const MemoryInfo& mem) {
     MemoryResourceAccess access;
     access.kind = mem.kind;
     switch (mem.kind) {
     case ResourceKind::Lds:
+        if (LdsInDeviceMemory(state)) {
+            if (state.ldsBufferVariable == 0u || state.ldsBufferBase == 0u) {
+                FailEmit("device memory LDS was not prepared at function entry");
+            }
+            access.objectPointer = state.ldsBufferVariable;
+            access.length = ConstantU32(state, LdsDwordCount(state));
+            return access;
+        }
         EnsureLdsStorage(state);
         access.objectPointer = state.ldsVariable;
         access.length = ConstantU32(state, LdsDwordCount(state));
@@ -138,10 +151,7 @@ MemoryResourceAccess PrepareMemoryResourceAccess(SpirvEmitterState& state, const
         FailEmit("physical address memory must use the BDA emitter");
     case ResourceKind::ScalarBuffer:
     case ResourceKind::Buffer:
-        access = PrepareStorageBufferResourceAccess(state, mem, state.storageBufferVariable, TypeStorageBufferPointer(state));
-        access.indexOffset = EmitBinaryU32(state, spv::OpShiftRightLogical, access.byteOffset, ConstantU32(state, 2u));
-        access.addIndexOffset = true;
-        return access;
+        FailEmit("buffer memory must use the runtime V# emitter");
     default:
         FailEmit("unsupported memory resource kind " + std::to_string(static_cast<std::uint32_t>(mem.kind)));
     }
@@ -159,6 +169,9 @@ std::uint32_t EmitMemoryElementInBounds(SpirvEmitterState& state, const MemoryRe
 }
 
 std::uint32_t EmitMemoryElementPointer(SpirvEmitterState& state, const MemoryResourceAccess& access, std::uint32_t index) {
+    if (access.kind == ResourceKind::Lds && LdsInDeviceMemory(state)) {
+        return EmitStorageBufferElementPointer(state, access, EmitAddU32(state, state.ldsBufferBase, index), TypeStorageBufferElementPointer(state));
+    }
     if (access.kind == ResourceKind::Lds || access.kind == ResourceKind::Scratch) {
         const auto pointer = state.module.AllocateId();
         const std::uint32_t storageClass = access.kind == ResourceKind::Scratch ? spv::StorageClassFunction : ShaderWorkgroupInput(state) != nullptr ? spv::StorageClassWorkgroup : spv::StorageClassFunction;

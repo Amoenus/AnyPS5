@@ -53,9 +53,16 @@ public:
     void SuspendPoint();
     void RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output);
     void UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output);
+    void AttachWindow(const PresentationWindow& window);
     void Present(const PresentationWindow& window, const DisplayBuffer* buffer, bool opaque, void (*gpuReady)(void*), void* context);
     void ReleaseWindow(void* window);
     void RegisterShader(const Shader* shader);
+    void ResolveShaderAbi(const Shader* shader, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive);
+    void ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive);
+    void ResolveGraphicsAbi(const Shader* vertex, const Shader* pixel, std::uint32_t primitiveType);
+    static void FoldDrawOffsets(const ShaderRecompiler::RecompileResult& result, const DrawProgram& program, Pm4::DrawParameters& parameters);
+    static std::optional<Graphics::IndirectDrawPath> ClassifyIndirectDraw(const ShaderRecompiler::RecompileResult& result, const Graphics::State& graphics, const DrawProgram& frontProgram, const std::shared_ptr<VulkanDevice>& localDevice, Pm4::DrawParameters& drawParameters, bool traceIndirect);
+    static std::string dumpRequest(std::uint64_t address, const ShaderRecompiler::RecompileRequest& request);
 
 private:
     friend class SampledReadScope;
@@ -70,6 +77,10 @@ private:
     static bool copySegment(Submission& submission, const std::uint32_t* guest, std::size_t words, std::size_t& budget);
     static void readRegisterLists(Submission& submission);
     void waitForFlipRoom(const Submission& submission);
+    void holdFlipBehindWorker(const Submission& submission);
+    bool awaitsTitle(std::uint64_t awaited) const;
+    void noteAwaitingTitle(std::uint32_t queue, std::uint64_t awaited);
+    void releaseFlipHold();
     void reserveOutputs(Submission& submission);
     void executeRewindTail(const Submission& stalled);
     void enqueue(Submission submission);
@@ -94,7 +105,7 @@ private:
     void lookupDispatch(std::uint64_t address, const Submission& submission, std::uint64_t key, bool noDispatchCache, bool traceCache, bool profile, std::span<const ShaderRecompiler::MemoryRegion> memory, DispatchPhaseTiming& phaseTiming, std::array<double, DriverPhaseCount>& phaseMs, std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, std::shared_ptr<DispatchVariant>& keepVariant, std::vector<ShaderRecompiler::MemoryRegion>& captured, std::vector<std::uint32_t>& liveWords, bool& dataHit, bool& cached, bool& validated, std::shared_ptr<DispatchEntry>& missedEntry, bool& missedDiffering);
     void insertDispatch(std::uint64_t address, std::uint64_t key, bool noDispatchCache, bool profile, const std::shared_ptr<const ShaderSnapshot>& registeredShader, std::uint64_t forgetAtCapture, std::span<const ShaderRecompiler::MemoryRegion> memory, const std::shared_ptr<ShaderMemory>& shaderMemory, const std::vector<ShaderRecompiler::MemoryRegion>& captured, const std::shared_ptr<const ShaderRecompiler::ResourceCapture>& capture, const std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, const std::shared_ptr<DispatchEntry>& missedEntry, bool missedDiffering, std::shared_ptr<DispatchVariant>& attachVariant, DispatchPhaseTiming& phaseTiming);
     void dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments = 0);
-    void verifyDataHit(const ShaderSnapshot& snapshot, std::size_t codeOffset, std::uint64_t deviceSerial, ShaderRecompiler::RecompileRequest request, std::span<const ShaderRecompiler::MemoryRegion> memory, std::uint64_t address, const DispatchVariant& variant, std::span<const std::uint32_t> liveWords, const ShaderRecompiler::RecompileResult& patched);
+    void verifyDataHit(const ShaderSnapshot& snapshot, std::size_t codeOffset, ShaderRecompiler::RecompileRequest request, std::span<const ShaderRecompiler::MemoryRegion> memory, std::uint64_t address, const DispatchVariant& variant, std::span<const std::uint32_t> liveWords, const ShaderRecompiler::RecompileResult& patched);
     static bool drawEntries();
     static bool verifyDrawEntries();
     static bool registerKeyEnabled();
@@ -111,27 +122,25 @@ private:
     std::shared_ptr<DrawDecode> decodeDraw(const QueueState& queue, const Submission& submission);
     void resolveDrawDecode(const QueueState& queue, const Submission& submission, std::shared_ptr<const DrawDecode>& decode, bool registerKey, std::uint64_t drawKey, bool profile);
     void lookupDraw(const Submission& submission, const std::shared_ptr<VulkanDevice>& localDevice, const Graphics::State& graphics, const ShaderRecompiler::ShaderPixelStageInfo& pixel, const std::vector<DrawProgram>& programs, const std::vector<ShaderRecompiler::ProgramRole>& roles, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, bool useDrawEntries, bool registerKey, bool profile, std::uint64_t& drawKey, std::shared_ptr<DrawEntry>& entry, std::vector<std::shared_ptr<DispatchVariant>>& matched, std::vector<std::vector<ShaderRecompiler::MemoryRegion>>& matchedRegions, bool& drawHit, bool& verifyHit, DrawPhaseTiming& phaseTiming, std::array<double, DrawDriverPhaseCount>& phaseMs);
-    ShaderRecompiler::RecompileResult compileDrawStage(std::size_t i, std::uint32_t pushOffset, const QueueState& queue, const Submission& submission, const std::vector<DrawProgram>& programs, const Graphics::State& graphics, const ShaderRecompiler::ShaderPixelStageInfo& pixel, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, std::vector<ShaderRecompiler::MemoryRegion>& memory, const std::vector<ShaderRecompiler::LinkedProgram>& linked, const Pm4::DrawParameters& drawParameters, const std::shared_ptr<VulkanDevice>& localDevice, ShaderMemory& shaderMemory, std::vector<StageCapture>& stageCaptures, std::vector<bool>& recompiled, bool drawHit, const std::vector<std::shared_ptr<DispatchVariant>>& matched, const std::vector<std::vector<ShaderRecompiler::MemoryRegion>>& matchedRegions, bool profile, std::uint64_t dumpTarget, std::uint64_t dumpSlot1, std::uint64_t& captures, DrawPhaseTiming& phaseTiming, std::array<double, DrawDriverPhaseCount>& phaseMs, std::string& rejected);
+    ShaderRecompiler::RecompileResult materializeDrawStage(std::size_t i, std::uint32_t pushOffset, const QueueState& queue, const Submission& submission, const std::vector<DrawProgram>& programs, const Graphics::State& graphics, const ShaderRecompiler::ShaderPixelStageInfo& pixel, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, std::vector<ShaderRecompiler::MemoryRegion>& memory, const std::vector<ShaderRecompiler::LinkedProgram>& linked, const Pm4::DrawParameters& drawParameters, const std::shared_ptr<VulkanDevice>& localDevice, ShaderMemory& shaderMemory, std::vector<StageCapture>& stageCaptures, std::vector<bool>& recompiled, bool drawHit, const std::vector<std::shared_ptr<DispatchVariant>>& matched, const std::vector<std::vector<ShaderRecompiler::MemoryRegion>>& matchedRegions, bool profile, std::uint64_t dumpTarget, std::uint64_t dumpSlot1, std::uint64_t& captures, DrawPhaseTiming& phaseTiming, std::array<double, DrawDriverPhaseCount>& phaseMs, std::string& rejected);
     void cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawParameters& drawParameters, const std::optional<Graphics::IndirectDrawPath>& indirectCpu, const std::vector<DrawProgram>& programs, const std::vector<StageCapture>& stageCaptures, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, const std::vector<std::vector<Graphics::DecodeRead>>& decodeReads, bool verifyHit, const std::vector<std::shared_ptr<DispatchVariant>>& matched, std::vector<std::shared_ptr<DispatchVariant>>& fresh, std::uint64_t drawKey, bool registerKey, const std::shared_ptr<const DrawDecode>& decode, DrawPhaseTiming& phaseTiming);
     static bool drawPrecheck();
     std::optional<DrawVerdict> precheckDraw(const QueueState& queue, const Submission& submission, std::span<const std::uint32_t> packet, const Pm4::DrawParameters& drawParameters, std::string& rejected, bool& traceIndirect);
     static std::uint32_t drawUserWord(const DrawProgram& program, std::int32_t sgpr);
-    std::optional<Graphics::IndirectDrawPath> classifyIndirectDraw(const ShaderRecompiler::RecompileResult& result, const Graphics::State& graphics, const DrawProgram& frontProgram, const std::shared_ptr<VulkanDevice>& localDevice, Pm4::DrawParameters& drawParameters, bool traceIndirect);
     DrawVerdict draw(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::string& rejected);
     void addDriverPhases(DispatchClass which, const std::array<double, DriverPhaseCount>& ms, bool hit, bool validated);
     static PendingDispatchPhases& pendingDispatchPhases();
     static std::chrono::steady_clock::time_point& packetStartedAt();
     static PendingDrawPhases& pendingDrawPhases();
     void addDrawPhases(const std::array<double, DrawDriverPhaseCount>& ms, bool drawn, std::uint64_t captures);
-    void noteLabelStore(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp);
-    bool storedSince(std::span<const std::uint32_t> packet, std::uint64_t address, std::size_t bytes, std::uint64_t received);
+    void noteLabelStore(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue);
+    bool storedSince(std::span<const std::uint32_t> packet, std::uint64_t address, std::size_t bytes, std::uint64_t received, std::uint32_t* writer = nullptr);
     static void traceLabel(std::span<const std::uint32_t> packet, std::uint32_t queue);
     static std::array<WriteRecord, 16384>& writeHistory();
     static std::size_t& writeCursor();
     static void dumpPackets(std::span<const std::uint32_t> commands, const std::uint32_t* guest = nullptr);
     static void validate(const Submission& submission, const std::uint32_t* guest = nullptr);
     static void reportSkip(const char* kind, const std::string& what);
-    static std::string dumpRequest(std::uint64_t address, const ShaderRecompiler::RecompileRequest& request);
     static bool matchesFillKernel(std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute);
     static bool fillClearEnabled();
     static bool fillClearExactOnly();
@@ -173,6 +182,7 @@ private:
     template<typename TVisit>
     static void forEachWrittenBuffer(const ShaderRecompiler::RecompileResult& compiled, TVisit&& visit);
     void noteWrittenBuffers(std::uint64_t program, std::uint32_t queue, const ShaderRecompiler::RecompileResult& compiled);
+    static void appendWrittenRanges(const ShaderRecompiler::RecompileResult& compiled, std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges);
     void noteForeignWriter(std::uint64_t begin, std::uint64_t end, std::uint32_t queue);
     void noteDrawWriters(std::span<const Graphics::CompiledShader> stages, std::uint32_t queue);
     std::optional<WrittenBuffer> newestWriterLocked(std::uint64_t begin, std::uint64_t end) const;
@@ -191,7 +201,41 @@ private:
     static bool pollReapAll();
     static bool pollTryEach();
     static bool traceLateLabels();
-    void waitMemory(std::span<const std::uint32_t> packet, std::uint32_t queue, const PacketHistory& context, std::uint64_t received, bool heldAtSubmit);
+    void waitMemory(std::span<const std::uint32_t> packet, std::uint32_t queue, const PacketHistory& context, std::uint64_t received, bool heldAtSubmit, bool requireMemory = false);
+    struct PendingWait {
+        std::array<std::uint32_t, 8> words;
+        std::size_t count;
+        std::uint64_t received;
+    };
+    static std::vector<PendingWait>& pendingWaits();
+    static void notePendingWait(std::span<const std::uint32_t> packet, std::uint32_t queue, std::uint64_t received);
+    void landPendingWaits(std::uint32_t queue);
+    struct ResolvedDispatch {
+        std::uint64_t address = 0, key = 0, indirectArguments = 0;
+        std::array<std::uint32_t, 5> packet{};
+        std::shared_ptr<const ShaderSnapshot> registeredShader;
+        std::shared_ptr<const ShaderRecompiler::RecompileResult> compiledResult;
+        std::shared_ptr<DispatchVariant> keepVariant, attachVariant;
+        std::shared_ptr<ShaderMemory> shaderMemory;
+        std::vector<ShaderRecompiler::MemoryRegion> captured;
+        std::vector<std::uint32_t> liveWords;
+        std::shared_ptr<const ShaderRecompiler::ResourceCapture> capture;
+        bool dataHit = false, cached = false, validated = false;
+        std::chrono::steady_clock::time_point resolvedAt{};
+    };
+    struct GroupCaptureStats {
+        std::uint64_t runs = 0, resolved = 0, resolvedHits = 0, adopted = 0, addressMismatches = 0, keyMismatches = 0, failures = 0, stale = 0, labelOverlaps = 0, writtenBefore = 0, deviceRejects = 0;
+        double resolveMs = 0, resolveMaxMs = 0, ageMs = 0, ageMaxMs = 0;
+        std::chrono::steady_clock::time_point reported = std::chrono::steady_clock::now();
+    };
+    static std::map<std::size_t, ResolvedDispatch>& resolvedAhead();
+    static GroupCaptureStats& groupCaptureStats();
+    static std::size_t& currentPacketOffset();
+    static bool& resolvingAhead();
+    static bool& gateOpened();
+    void resolveGroupAhead(const Submission& submission, const QueueState& live, std::size_t from);
+    static void clearResolvedAhead();
+    static void reportGroupCapture(std::uint32_t queue);
     static PollStats& pollStats();
     static WaitOutcomes& waitOutcomes();
     static Graphics::Recorder::LateStatistics& lateCountsSeen();
@@ -216,8 +260,8 @@ private:
     void dumpSampleCounters(std::uint64_t address);
     template <typename TWork>
     static void timed(double WorkerProfile::*bucket, TWork&& work);
-    template <typename TWork>
-    void tolerate(const char* kind, TWork&& work);
+    FrameTiming* frameTiming();
+    FrameTiming* includeTimingSubmission(const Submission& submission, bool firstSegment);
     void execute(const Submission& submission);
     void markCompleted(std::uint64_t serial);
     static const std::atomic<std::uint64_t>*& workerQueued();
@@ -230,6 +274,7 @@ private:
 
     std::map<std::uint32_t, QueueWorker> workers;
     std::uint64_t frameSerial = 0;
+    std::shared_ptr<FrameTiming> pendingFrameTiming;
 
     std::atomic<std::uint64_t> flipsCounted{0};
     std::atomic<std::uint64_t> flipSerial{0};
@@ -297,6 +342,9 @@ private:
     std::atomic<std::uint32_t> orderHolders{0};
     std::atomic<std::uint32_t> runningWorkers{0};
     std::atomic<std::uint64_t> queue0Awaited{0};
+    std::atomic<std::uint32_t> flipsAhead{0};
+    std::atomic<std::uint32_t> flipHolders{0};
+    std::atomic<bool> queue0AwaitsTitle{false};
 
     std::atomic<std::uint64_t> evidenceReads{0};
     std::atomic<std::uint64_t> evidenceValidations{0};
