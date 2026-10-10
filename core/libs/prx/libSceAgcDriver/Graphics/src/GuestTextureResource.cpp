@@ -43,6 +43,8 @@ TextureDimension resolveDimension(std::uint32_t raw) {
         case 11: return TextureDimension::kCube;
         case 12: return TextureDimension::k1DArray;
         case 13: return TextureDimension::k2DArray;
+        case 14: return TextureDimension::k2DMsaa;
+        case 15: return TextureDimension::k2DMsaaArray;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported image type " + std::to_string(raw));
     }
 }
@@ -125,6 +127,11 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     }
     Require(bcSwizzle <= 5u, "guest texture descriptor uses a reserved BC swizzle");
 
+    const bool multisampled = typeRaw == 14u || typeRaw == 15u;
+    if (multisampled) {
+        Require(baseLevel == 0u && minLod == 0u, "multisampled texture descriptor has a nonzero base level or minimum LOD");
+        Require(lastLevel >= 1u && lastLevel <= 3u && maxMip == lastLevel, "multisampled texture fragment count is unsupported or disagrees with MAX_MIP");
+    }
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
 
 
@@ -139,7 +146,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     }
     // Views may name levels past MAX_MIP (a 512x512 view through 1x1 over a 9-level surface); the
     // hardware never addresses them, so the view ends at the surface's last level.
-    if (baseLevel <= maxMip) lastLevel = std::min(lastLevel, maxMip);
+    if (!multisampled && baseLevel <= maxMip) lastLevel = std::min(lastLevel, maxMip);
     std::uint32_t pipeBankXor = 0;
     if (XorSwizzleMode(tileMode) != 0) {
         pipeBankXor = static_cast<std::uint32_t>(baseAddress & (tileMode == TextureTileMode::kS4KBX || tileMode == TextureTileMode::kD4KBX ? 0xfffu : 0xffffu));
@@ -151,6 +158,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
         case TextureDimension::k1D:
             Require(height == 1 && depth == 0 && baseArray == 0, "guest 1D texture descriptor has a nonzero height, depth or base array");
             break;
+        case TextureDimension::k2DMsaa:
         case TextureDimension::k2D:
             Require(depth == 0 && baseArray == 0, "guest 2D texture descriptor has a nonzero depth or base array");
             break;
@@ -158,6 +166,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
             // word4 DEPTH holds the depth minus one; BASE_ARRAY has no meaning for volumes.
             Require(baseArray == 0, "guest 3D texture descriptor has a nonzero base array");
             break;
+        case TextureDimension::k2DMsaaArray:
         case TextureDimension::k2DArray:
             Require(baseArray <= depth, "guest 2D array texture descriptor has a base array past its last array slice");
             break;
@@ -184,10 +193,11 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.height = height;
     result.depthOrLastArray = depth;
     result.baseArray = baseArray;
-    result.mipCount = maxMip + 1u;
-    result.allocatedMipCount = maxMip + 1u;
+    result.fragments = multisampled ? 1u << lastLevel : 1u;
+    result.mipCount = multisampled ? 1u : maxMip + 1u;
+    result.allocatedMipCount = result.mipCount;
     result.baseLevel = baseLevel;
-    result.lastLevel = lastLevel;
+    result.lastLevel = multisampled ? 0u : lastLevel;
     result.tileMode = tileMode;
     result.dimension = dimension;
     result.format = format;
@@ -213,6 +223,7 @@ float EffectiveMinLod(const GuestTextureResource& resource) {
 }
 
 bool DescriptorSingleLevel(std::span<const std::uint32_t> words) {
+    if ((words[3] >> 28u) == 14u || (words[3] >> 28u) == 15u) return true;
     return ((words[3] >> 12u) & 0xfu) == ((words[3] >> 16u) & 0xfu);
 }
 
@@ -224,6 +235,8 @@ bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, Texture
         case ShaderRecompiler::DescriptorImageShape::ImageCube: return dimension == TextureDimension::kCube;
         case ShaderRecompiler::DescriptorImageShape::Image3D: return dimension == TextureDimension::k3D;
         case ShaderRecompiler::DescriptorImageShape::Image1DArray: return dimension == TextureDimension::k1DArray;
+        case ShaderRecompiler::DescriptorImageShape::Image2DMsaa: return dimension == TextureDimension::k2DMsaa;
+        case ShaderRecompiler::DescriptorImageShape::Image2DMsaaArray: return dimension == TextureDimension::k2DMsaaArray;
     }
     throw std::runtime_error("AGC graphics: MatchesGuestDimension encountered an unknown descriptor image shape");
 }
