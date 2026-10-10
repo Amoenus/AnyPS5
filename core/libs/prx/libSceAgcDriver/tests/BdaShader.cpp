@@ -7,7 +7,7 @@
 namespace {
 
 template<typename TEmit>
-std::vector<std::uint32_t> MakeShader(std::uint64_t address, bool coherent, bool stops, const TEmit& emit, std::uint32_t extracted = 0, bool writes = false) {
+std::vector<std::uint32_t> MakeShader(std::uint64_t address, bool coherent, bool stops, const TEmit& emit, std::uint32_t extracted = 0, bool writes = false, std::uint32_t groupStride = 0) {
     using namespace ShaderRecompiler;
     IrProgram program;
     program.Resources().stage = IrShaderStage::Compute;
@@ -34,6 +34,10 @@ std::vector<std::uint32_t> MakeShader(std::uint64_t address, bool coherent, bool
         interfaceVariables.push_back(state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassInput, TypeU32(state)), spv::StorageClassInput));
         state.module.AddAnnotation(spv::OpDecorate, interfaceVariables[0], spv::DecorationBuiltIn, spv::BuiltInLocalInvocationIndex);
     }
+    if (groupStride != 0u) {
+        interfaceVariables.push_back(state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassInput, TypeU32Vector(state, 3u)), spv::StorageClassInput));
+        state.module.AddAnnotation(spv::OpDecorate, interfaceVariables.back(), spv::DecorationBuiltIn, spv::BuiltInWorkgroupId);
+    }
     state.bdaStopsInvocations = stops;
     DefineGetBdaPointer(state);
     const auto main = state.module.AllocateId();
@@ -57,8 +61,16 @@ std::vector<std::uint32_t> MakeShader(std::uint64_t address, bool coherent, bool
         state.module.AddFunction(spv::OpLoad, TypeU32(state), index, interfaceVariables[0]);
         base = Binary(state, spv::OpIAdd, TypeScalarU64(state), base, Unary(state, spv::OpUConvert, TypeScalarU64(state), index));
     }
+    if (groupStride != 0u) {
+        const auto group = state.module.AllocateId();
+        state.module.AddFunction(spv::OpLoad, TypeU32Vector(state, 3u), group, interfaceVariables.back());
+        const auto index = state.module.AllocateId();
+        state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), index, group, 0u);
+        const auto offset = Binary(state, spv::OpIMul, TypeScalarU64(state), Unary(state, spv::OpUConvert, TypeScalarU64(state), index), BdaConstant(state, groupStride));
+        base = Binary(state, spv::OpIAdd, TypeScalarU64(state), base, offset);
+    }
     const auto values = emit(ctx, instruction, base);
-    for (std::uint32_t index = 0; index < values.size(); ++index) state.module.AddFunction(spv::OpStore, BdaWord(state, output, ConstantU32(state, index)), values[index]);
+    for (std::uint32_t index = 0; groupStride == 0u && index < values.size(); ++index) state.module.AddFunction(spv::OpStore, BdaWord(state, output, ConstantU32(state, index)), values[index]);
     state.module.AddFunction(spv::OpReturn);
     state.module.AddFunction(spv::OpFunctionEnd);
     state.module.AddExecutionMode(main, spv::ExecutionModeLocalSize, 1u, 1u, 1u);
@@ -105,4 +117,15 @@ std::vector<std::uint32_t> MakeBdaDwordReadTestShader(std::uint64_t address, std
         const auto values = EmitBdaDwordReads(ctx, instruction, base, 0u, dwords, true);
         return std::vector<std::uint32_t>(values.begin(), values.begin() + dwords);
     });
+}
+
+std::vector<std::uint32_t> MakeBdaPageWriteTestShader(std::uint64_t address) {
+    using namespace ShaderRecompiler;
+    return MakeShader(address, false, true, [&](SpirvValueEmitContext& ctx, const IrValue& instruction, std::uint32_t base) {
+        auto& state = ctx.state;
+        const auto values = state.module.AllocateId();
+        state.module.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 2u), values, ConstantU32(state, 0x11223344u), ConstantU32(state, 0x55667788u));
+        EmitBdaDwordWrites(ctx, instruction, base, 0u, 2u, values);
+        return std::vector<std::uint32_t>{};
+    }, 0u, true, 1u << BdaAbi::WrittenPageShift);
 }

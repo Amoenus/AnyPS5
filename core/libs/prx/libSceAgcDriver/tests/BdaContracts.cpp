@@ -28,6 +28,8 @@ void RunBdaContractTests() {
     ValidateBdaTarget(program, target);
     target.bdaAbiVersion = 0;
     reject([&] { ValidateBdaTarget(program, target); }, "ABI version");
+    target.bdaAbiVersion = 1;
+    reject([&] { ValidateBdaTarget(program, target); }, "ABI version");
     target.bdaAbiVersion = BdaAbi::Version;
     target.supportedCapabilities = {};
     reject([&] { ValidateBdaTarget(program, target); }, "capability");

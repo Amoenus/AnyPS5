@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -90,70 +91,204 @@ private:
 
 }
 
-static void RunBdaDwordWriteTests(const Context& context) {
+static std::uint32_t InitializeWrittenRanges(std::span<ShaderRecompiler::BdaAbi::Range> ranges) {
     namespace Abi = ShaderRecompiler::BdaAbi;
-    constexpr std::uint64_t guest = 0x7fff12340f80ULL;
-    constexpr std::size_t firstBytes = 160;
-    Buffer first(context, firstBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    Buffer second(context, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    Buffer readOnly(context, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    const std::array<Abi::Range, 3> ranges{{
-        {guest, guest + firstBytes, first.DeviceAddress(), Abi::Read | Abi::Write, 0},
-        {guest + firstBytes, guest + firstBytes + 16, second.DeviceAddress(), Abi::Read | Abi::Write, 0},
-        {guest + firstBytes + 16, guest + firstBytes + 32, readOnly.DeviceAddress(), Abi::Read, 0},
-    }};
-    Buffer table(context, sizeof(Abi::Header) + sizeof(ranges), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    Buffer fault(context, Abi::FaultBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    Buffer output(context, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    const std::array<std::uint32_t, 4> values{0x11223344u, 0x55667788u, 0x99aabbccu, 0xddeeff00u};
-    const auto bytesAt = [&](std::uint64_t address) -> std::byte* {
-        for (std::size_t index = 0; index < ranges.size(); ++index) {
-            if (address < ranges[index].begin || address >= ranges[index].end) continue;
-            auto& buffer = index == 0 ? first : index == 1 ? second : readOnly;
-            return buffer.Bytes().data() + (address - ranges[index].begin);
+    std::uint64_t total = 0;
+    for (auto& range : ranges) {
+        const auto words = Abi::WrittenWords(range);
+        Require(words <= std::numeric_limits<std::uint32_t>::max() - total, "test written bitmap is too large");
+        range.writtenWord = words == 0u ? 0u : static_cast<std::uint32_t>(total);
+        total += words;
+    }
+    return static_cast<std::uint32_t>(total);
+}
+
+static void RunBdaWrittenPageOverflowTests(const Context& context) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    for (const std::uint32_t bucket : {0u, 4095u}) {
+        std::vector<std::uint64_t> addresses;
+        for (std::uint32_t page = 0x200000u; addresses.size() < 9u; ++page) {
+            const auto hash = ((page + 1u) * 0x9e3779b1u) >> 20u;
+            if (hash == bucket) addresses.push_back(static_cast<std::uint64_t>(page) << Abi::WrittenPageShift);
         }
-        return nullptr;
-    };
-    const auto noted = [&](std::uint64_t address) {
-        const auto page = static_cast<std::uint32_t>(address >> Abi::WrittenPageShift) + 1u;
-        std::vector<std::uint32_t> slots(Abi::WrittenPageSlots);
-        std::memcpy(slots.data(), fault.Bytes().data() + Abi::WrittenSlotsWord * sizeof(std::uint32_t), slots.size() * sizeof(std::uint32_t));
-        return std::find(slots.begin(), slots.end(), page) != slots.end();
-    };
-    const auto write = [&](std::uint64_t address, std::uint32_t dwords, std::uint32_t storedBytes, Abi::FaultReason reason) {
-        const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(Abi::Range), 0};
+        Buffer memory(context, addresses.size() * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        std::memset(memory.Bytes().data(), 0xa5, memory.Bytes().size());
+        std::vector<Abi::Range> ranges;
+        for (std::size_t index = 0; index < addresses.size(); ++index) {
+            ranges.push_back({addresses[index], addresses[index] + 8u, memory.DeviceAddress() + index * 16u, Abi::Read | Abi::Write, 0});
+        }
+        const auto writtenWords = InitializeWrittenRanges(ranges);
+        Buffer table(context, sizeof(Abi::Header) + ranges.size() * sizeof(Abi::Range), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        Buffer fault(context, Abi::FaultBufferBytesForWords(writtenWords), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        Buffer output(context, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(Abi::Range), writtenWords};
         std::memcpy(table.Bytes().data(), &header, sizeof(header));
-        std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), sizeof(ranges));
+        std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), ranges.size() * sizeof(Abi::Range));
         std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
-        for (auto* buffer : {&first, &second, &readOnly}) std::memset(buffer->Bytes().data(), 0xa5, buffer->Bytes().size());
-        Pipeline pipeline(context, MakeBdaDwordWriteTestShader(address, dwords, values.data()), {&table, &fault, &output});
+        for (std::size_t index = 0; index < addresses.size(); ++index) {
+            const std::array<std::uint32_t, 2> values{static_cast<std::uint32_t>(index + 1u), 0x11223344u};
+            Pipeline pipeline(context, MakeBdaDwordWriteTestShader(addresses[index], values.size(), values.data()), {&table, &fault, &output});
+            pipeline.Run(1);
+            if (index == 0u) pipeline.Run(1);
+            std::array<std::uint32_t, 4> stored{};
+            std::memcpy(stored.data(), memory.Bytes().data() + index * 16u, sizeof(stored));
+            Require(stored[0] == values[0] && stored[1] == values[1] && stored[2] == 0xa5a5a5a5u && stored[3] == 0xa5a5a5a5u, "colliding BDA writes lost data or touched adjacent bytes");
+            Abi::Fault report{};
+            std::memcpy(&report, fault.Bytes().data(), sizeof(report));
+            Require(report.state == Abi::FaultState::Empty, "colliding mapped BDA writes published an access fault");
+            std::vector<std::uint32_t> words(fault.Bytes().size() / sizeof(std::uint32_t));
+            std::memcpy(words.data(), fault.Bytes().data(), fault.Bytes().size());
+            Require(words[Abi::WrittenErrorWord] == 0u, "colliding BDA writes failed bitmap accounting");
+            for (std::size_t range = 0; range < ranges.size(); ++range) {
+                Require(words[Abi::WrittenBitmapWord + ranges[range].writtenWord] == (range <= index ? 1u : 0u), "colliding BDA writes marked incorrect pages");
+            }
+        }
+    }
+    constexpr std::uint32_t pages = 4353;
+    constexpr std::uint64_t guest = 0x407fa00000ULL;
+    constexpr std::size_t pageBytes = std::size_t{1} << Abi::WrittenPageShift;
+    Buffer memory(context, (pages + 1u) * pageBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    std::memset(memory.Bytes().data(), 0xa5, memory.Bytes().size());
+    std::array<Abi::Range, 1> ranges{{{guest, guest + pages * pageBytes, memory.DeviceAddress(), Abi::Read | Abi::Write, 0}}};
+    const auto writtenWords = InitializeWrittenRanges(ranges);
+    Buffer table(context, sizeof(Abi::Header) + sizeof(ranges), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer fault(context, Abi::FaultBufferBytesForWords(writtenWords), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer output(context, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const Abi::Header header{Abi::Version, ranges.size(), sizeof(Abi::Range), writtenWords};
+    std::memcpy(table.Bytes().data(), &header, sizeof(header));
+    std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), sizeof(ranges));
+    std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
+    Pipeline pipeline(context, MakeBdaPageWriteTestShader(guest), {&table, &fault, &output});
+    pipeline.Run(pages);
+    Abi::Fault report{};
+    std::memcpy(&report, fault.Bytes().data(), sizeof(report));
+    Require(report.state == Abi::FaultState::Empty, "large BDA write published an access fault");
+    std::vector<std::uint32_t> words(fault.Bytes().size() / sizeof(std::uint32_t));
+    std::memcpy(words.data(), fault.Bytes().data(), fault.Bytes().size());
+    Require(words[Abi::WrittenErrorWord] == 0u, "large BDA write failed bitmap accounting");
+    for (std::uint32_t word = 0; word < writtenWords; ++word) {
+        const auto remaining = pages - word * 32u;
+        const auto expected = remaining >= 32u ? 0xffffffffu : (1u << remaining) - 1u;
+        Require(words[Abi::WrittenBitmapWord + word] == expected, "large BDA write did not record all pages exactly");
+    }
+    for (std::size_t page = 0; page <= pages; ++page) {
+        const auto bytes = memory.Bytes().subspan(page * pageBytes, pageBytes);
+        if (page < pages) {
+            std::array<std::uint32_t, 2> stored{};
+            std::memcpy(stored.data(), bytes.data(), sizeof(stored));
+            Require(stored == std::array<std::uint32_t, 2>{0x11223344u, 0x55667788u}, "large BDA write lost data");
+        }
+        const auto unchanged = bytes.subspan(page < pages ? 8u : 0u);
+        Require(std::all_of(unchanged.begin(), unchanged.end(), [](auto byte) { return byte == std::byte{0xa5}; }), "large BDA write touched an unwritten byte");
+    }
+}
+
+static void RunBdaWrittenBitmapRefusalTests(const Context& context) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    constexpr std::uint64_t guest = 0x7fff12340000ULL;
+    Buffer stored(context, 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    Buffer table(context, sizeof(Abi::Header) + sizeof(Abi::Range), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer output(context, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const std::array<std::uint32_t, 2> values{0x11223344u, 0x55667788u};
+    const auto reject = [&](Abi::Header header, Abi::Range range, std::size_t faultBytes) {
+        Buffer fault(context, faultBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        std::memcpy(table.Bytes().data(), &header, sizeof(header));
+        std::memcpy(table.Bytes().data() + sizeof(header), &range, sizeof(range));
+        std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
+        std::memset(stored.Bytes().data(), 0xa5, stored.Bytes().size());
+        Pipeline pipeline(context, MakeBdaDwordWriteTestShader(guest, 2, values.data()), {&table, &fault, &output});
         pipeline.Run(1);
         Abi::Fault report{};
         std::memcpy(&report, fault.Bytes().data(), sizeof(report));
-        for (std::uint32_t byte = 0; byte < dwords * 4u; ++byte) {
-            const auto* stored = bytesAt(address + byte);
-            const auto expected = byte < storedBytes ? static_cast<std::byte>(values[byte / 4u] >> ((byte % 4u) * 8u)) : std::byte{0xa5};
-            Require(stored != nullptr && *stored == expected, "BDA dword write stored incorrect bytes at offset " + std::to_string(byte) + " of guest + " + std::to_string(address - guest));
-        }
-        Require(*bytesAt(address - 1) == std::byte{0xa5}, "BDA dword write touched the byte before it");
-        if (address + dwords * 4u < guest + firstBytes + 32) Require(*bytesAt(address + dwords * 4u) == std::byte{0xa5}, "BDA dword write touched the byte after it");
-        if (static_cast<std::uint32_t>(reason) == 0) {
-            Require(report.state == Abi::FaultState::Empty, "a mapped BDA dword write published a fault");
-        } else {
-            Require(report.state == Abi::FaultState::Ready && report.reason == reason && report.instruction == 0x1234, "a BDA dword write did not publish its fault");
-        }
-        if (storedBytes != 0) Require(noted(address) && noted(address + storedBytes - 1u), "a BDA dword write did not note its written pages");
+        Require(report.state == Abi::FaultState::Ready && report.reason == Abi::FaultReason::InvalidTable && report.instruction == 0x1234u, "invalid BDA written bitmap did not publish its fault");
+        Require(std::all_of(stored.Bytes().begin(), stored.Bytes().end(), [](auto byte) { return byte == std::byte{0xa5}; }), "invalid BDA written bitmap allowed a GPU store");
     };
-    write(guest + 16, 4, 16, static_cast<Abi::FaultReason>(0));
-    write(guest + 20, 4, 16, static_cast<Abi::FaultReason>(0));
-    write(guest + 8, 2, 8, static_cast<Abi::FaultReason>(0));
-    write(guest + 12, 2, 8, static_cast<Abi::FaultReason>(0));
-    write(guest + 32, 3, 12, static_cast<Abi::FaultReason>(0));
-    write(guest + 0x78, 4, 16, static_cast<Abi::FaultReason>(0));
-    write(guest + 0x7c, 2, 8, static_cast<Abi::FaultReason>(0));
-    write(guest + 41, 4, 16, static_cast<Abi::FaultReason>(0));
-    write(guest + firstBytes - 8, 4, 16, static_cast<Abi::FaultReason>(0));
-    write(guest + firstBytes + 12, 4, 4, Abi::FaultReason::Permission);
+    const Abi::Header header{Abi::Version, 1, sizeof(Abi::Range), 1};
+    const Abi::Range range{guest, guest + 8, stored.DeviceAddress(), Abi::Read | Abi::Write, 0};
+    auto invalidHeader = header;
+    invalidHeader.version = 1;
+    reject(invalidHeader, range, Abi::FaultBufferBytesForWords(1));
+    invalidHeader = header;
+    invalidHeader.writtenWords = 2;
+    reject(invalidHeader, range, Abi::FaultBufferBytesForWords(1));
+    auto invalidRange = range;
+    invalidRange.writtenWord = 1;
+    reject(header, invalidRange, Abi::FaultBufferBytesForWords(1));
+    invalidRange.writtenWord = std::numeric_limits<std::uint32_t>::max();
+    reject(header, invalidRange, Abi::FaultBufferBytesForWords(1));
+    reject(header, range, sizeof(Abi::Fault));
+}
+
+static void RunBdaDwordWriteTests(const Context& context) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    for (const std::uint64_t guest : {0x7fff12340f80ULL, 0x7fff12340ff1ULL}) {
+        constexpr std::size_t firstBytes = 160;
+        Buffer first(context, firstBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        Buffer second(context, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        Buffer readOnly(context, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        std::array<Abi::Range, 3> ranges{{
+            {guest, guest + firstBytes, first.DeviceAddress(), Abi::Read | Abi::Write, 0},
+            {guest + firstBytes, guest + firstBytes + 16, second.DeviceAddress(), Abi::Read | Abi::Write, 0},
+            {guest + firstBytes + 16, guest + firstBytes + 32, readOnly.DeviceAddress(), Abi::Read, 0},
+        }};
+        const auto writtenWords = InitializeWrittenRanges(ranges);
+        Buffer table(context, sizeof(Abi::Header) + sizeof(ranges), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        Buffer fault(context, Abi::FaultBufferBytesForWords(writtenWords), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        Buffer output(context, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        const std::array<std::uint32_t, 4> values{0x11223344u, 0x55667788u, 0x99aabbccu, 0xddeeff00u};
+        const auto bytesAt = [&](std::uint64_t address) -> std::byte* {
+            for (std::size_t index = 0; index < ranges.size(); ++index) {
+                if (address < ranges[index].begin || address >= ranges[index].end) continue;
+                auto& buffer = index == 0 ? first : index == 1 ? second : readOnly;
+                return buffer.Bytes().data() + (address - ranges[index].begin);
+            }
+            return nullptr;
+        };
+        const auto noted = [&](std::uint64_t address) {
+            for (const auto& range : ranges) {
+                if (address < range.begin || address >= range.end || (range.permissions & Abi::Write) == 0u) continue;
+                const auto relative = (address >> Abi::WrittenPageShift) - (range.begin >> Abi::WrittenPageShift);
+                std::uint32_t word = 0;
+                std::memcpy(&word, fault.Bytes().data() + (Abi::WrittenBitmapWord + range.writtenWord + relative / 32u) * sizeof(word), sizeof(word));
+                return (word & (1u << (relative % 32u))) != 0u;
+            }
+            return false;
+        };
+        const auto write = [&](std::uint64_t address, std::uint32_t dwords, std::uint32_t storedBytes, Abi::FaultReason reason) {
+            const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(Abi::Range), writtenWords};
+            std::memcpy(table.Bytes().data(), &header, sizeof(header));
+            std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), sizeof(ranges));
+            std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
+            for (auto* buffer : {&first, &second, &readOnly}) std::memset(buffer->Bytes().data(), 0xa5, buffer->Bytes().size());
+            Pipeline pipeline(context, MakeBdaDwordWriteTestShader(address, dwords, values.data()), {&table, &fault, &output});
+            pipeline.Run(1);
+            Abi::Fault report{};
+            std::memcpy(&report, fault.Bytes().data(), sizeof(report));
+            for (std::uint32_t byte = 0; byte < dwords * 4u; ++byte) {
+                const auto* stored = bytesAt(address + byte);
+                const auto expected = byte < storedBytes ? static_cast<std::byte>(values[byte / 4u] >> ((byte % 4u) * 8u)) : std::byte{0xa5};
+                Require(stored != nullptr && *stored == expected, "BDA dword write stored incorrect bytes at offset " + std::to_string(byte) + " of guest + " + std::to_string(address - guest));
+            }
+            Require(*bytesAt(address - 1) == std::byte{0xa5}, "BDA dword write touched the byte before it");
+            if (address + dwords * 4u < guest + firstBytes + 32) Require(*bytesAt(address + dwords * 4u) == std::byte{0xa5}, "BDA dword write touched the byte after it");
+            if (static_cast<std::uint32_t>(reason) == 0) {
+                Require(report.state == Abi::FaultState::Empty, "a mapped BDA dword write published a fault");
+            } else {
+                Require(report.state == Abi::FaultState::Ready && report.reason == reason && report.instruction == 0x1234, "a BDA dword write did not publish its fault");
+            }
+            if (storedBytes != 0) Require(noted(address) && noted(address + storedBytes - 1u), "a BDA dword write did not note its written pages");
+        };
+        write(guest + 16, 4, 16, static_cast<Abi::FaultReason>(0));
+        write(guest + 20, 4, 16, static_cast<Abi::FaultReason>(0));
+        write(guest + 8, 2, 8, static_cast<Abi::FaultReason>(0));
+        write(guest + 12, 2, 8, static_cast<Abi::FaultReason>(0));
+        write(guest + 32, 3, 12, static_cast<Abi::FaultReason>(0));
+        write(guest + 0x78, 4, 16, static_cast<Abi::FaultReason>(0));
+        write(guest + 0x7c, 2, 8, static_cast<Abi::FaultReason>(0));
+        write(guest + 41, 4, 16, static_cast<Abi::FaultReason>(0));
+        write(guest + firstBytes - 8, 4, 16, static_cast<Abi::FaultReason>(0));
+        write(guest + firstBytes + 12, 4, 4, Abi::FaultReason::Permission);
+    }
 }
 
 void RunBdaExecutionTests(const Context& context) {
@@ -276,4 +411,6 @@ void RunBdaExecutionTests(const Context& context) {
     ranges[0].permissions = 0;
     run(guest, 8, 0, Abi::FaultReason::Permission);
     RunBdaDwordWriteTests(context);
+    RunBdaWrittenBitmapRefusalTests(context);
+    RunBdaWrittenPageOverflowTests(context);
 }

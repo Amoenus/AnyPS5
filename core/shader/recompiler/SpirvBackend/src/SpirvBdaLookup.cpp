@@ -1,7 +1,6 @@
 #include "SpirvBackend/SpirvBda.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
-#include <bit>
 
 namespace ShaderRecompiler {
 
@@ -17,8 +16,7 @@ void ReturnBdaZeroIf(SpirvEmitterState& state, std::uint32_t condition) {
     EmitLabel(state, next);
 }
 
-// (u64 address, u32 bytes, u32 instruction) -> u64 device address of the range holding all the bytes,
-std::uint32_t DefineBdaLookup(SpirvEmitterState& state, const char* name, bool recordFaults, std::uint32_t permission = BdaAbi::Read) {
+std::uint32_t DefineBdaLookup(SpirvEmitterState& state, const char* name, bool recordFaults, std::uint32_t permission = BdaAbi::Read, bool rangeIndex = false) {
     const auto u32 = TypeU32(state);
     const auto u64 = TypeScalarU64(state);
     const auto boolean = TypeBool(state);
@@ -56,7 +54,6 @@ std::uint32_t DefineBdaLookup(SpirvEmitterState& state, const char* name, bool r
     fail(binary(spv::OpULessThan, boolean, length, constant(4)), BdaAbi::FaultReason::InvalidTable);
     fail(binary(spv::OpINotEqual, boolean, BdaLoadWord(state, constant(0)), constant(BdaAbi::Version)), BdaAbi::FaultReason::InvalidTable);
     fail(binary(spv::OpINotEqual, boolean, BdaLoadWord(state, constant(2)), constant(sizeof(BdaAbi::Range))), BdaAbi::FaultReason::InvalidTable);
-    fail(binary(spv::OpINotEqual, boolean, BdaLoadWord(state, constant(3)), constant(0)), BdaAbi::FaultReason::InvalidTable);
     const auto count = BdaLoadWord(state, constant(1));
     const auto available = binary(spv::OpISub, u32, length, constant(4));
     fail(binary(spv::OpINotEqual, boolean, binary(spv::OpBitwiseAnd, u32, available, constant(7)), constant(0)), BdaAbi::FaultReason::InvalidTable);
@@ -99,17 +96,28 @@ std::uint32_t DefineBdaLookup(SpirvEmitterState& state, const char* name, bool r
     const auto finish = BdaLoadAddress(state, at(2));
     const auto base = BdaLoadAddress(state, at(4));
     const auto permissions = BdaLoadWord(state, at(6));
-    fail(binary(spv::OpINotEqual, boolean, BdaLoadWord(state, at(7)), constant(0)), BdaAbi::FaultReason::InvalidTable);
     fail(binary(spv::OpUGreaterThanEqual, boolean, begin, finish), BdaAbi::FaultReason::InvalidTable);
     fail(binary(spv::OpUGreaterThan, boolean, end, finish), BdaAbi::FaultReason::Unmapped);
     fail(binary(spv::OpINotEqual, boolean, binary(spv::OpBitwiseAnd, u32, permissions, constant(permission)), constant(permission)), BdaAbi::FaultReason::Permission);
     fail(binary(spv::OpIEqual, boolean, base, BdaConstant(state, 0)), BdaAbi::FaultReason::InvalidTable);
+    if ((permission & BdaAbi::Write) != 0u) {
+        const auto faultWords = state.module.AllocateId();
+        state.module.AddFunction(spv::OpArrayLength, u32, faultWords, state.faultBufferVariable, 0u);
+        fail(binary(spv::OpULessThan, boolean, faultWords, constant(BdaAbi::WrittenBitmapWord)), BdaAbi::FaultReason::InvalidTable);
+        const auto writtenWords = BdaLoadWord(state, constant(3));
+        fail(binary(spv::OpINotEqual, boolean, writtenWords, binary(spv::OpISub, u32, faultWords, constant(BdaAbi::WrittenBitmapWord))), BdaAbi::FaultReason::InvalidTable);
+        const auto firstPage = binary(spv::OpShiftRightLogical, u64, begin, BdaConstant(state, BdaAbi::WrittenPageShift));
+        const auto lastPage = binary(spv::OpShiftRightLogical, u64, binary(spv::OpISub, u64, finish, BdaConstant(state, 1u)), BdaConstant(state, BdaAbi::WrittenPageShift));
+        const auto needed = binary(spv::OpShiftRightLogical, u64, binary(spv::OpIAdd, u64, binary(spv::OpISub, u64, lastPage, firstPage), BdaConstant(state, 32u)), BdaConstant(state, 5u));
+        const auto bitmapEnd = binary(spv::OpIAdd, u64, Unary(state, spv::OpUConvert, u64, BdaLoadWord(state, at(7))), needed);
+        fail(binary(spv::OpUGreaterThan, boolean, bitmapEnd, Unary(state, spv::OpUConvert, u64, writtenWords)), BdaAbi::FaultReason::InvalidTable);
+    }
     const auto offset = binary(spv::OpISub, u64, address, begin);
     const auto result = binary(spv::OpIAdd, u64, base, offset);
     fail(binary(spv::OpULessThan, boolean, result, base), BdaAbi::FaultReason::Overflow);
     const auto deviceEnd = binary(spv::OpIAdd, u64, result, Unary(state, spv::OpUConvert, u64, bytes));
     fail(binary(spv::OpULessThanEqual, boolean, deviceEnd, result), BdaAbi::FaultReason::Overflow);
-    state.module.AddFunction(spv::OpReturnValue, result);
+    state.module.AddFunction(spv::OpReturnValue, rangeIndex ? Unary(state, spv::OpUConvert, u64, index) : result);
     state.module.AddFunction(spv::OpFunctionEnd);
     return function;
 }
@@ -118,61 +126,37 @@ std::uint32_t DefineBdaLookup(SpirvEmitterState& state, const char* name, bool r
 
 static std::uint32_t DefineBdaNoteWrite(SpirvEmitterState& state) {
     const auto u32 = TypeU32(state);
-    const auto boolean = TypeBool(state);
+    const auto u64 = TypeScalarU64(state);
     const auto constant = [&](std::uint32_t value) { return ConstantU32(state, value); };
     const auto binary = [&](std::uint32_t op, std::uint32_t type, std::uint32_t left, std::uint32_t right) { return Binary(state, op, type, left, right); };
     const auto voidType = state.module.Type(spv::OpTypeVoid);
     const auto function = state.module.AllocateId();
     state.module.AddName(function, "note_bda_write");
-    state.module.AddFunction(spv::OpFunction, voidType, function, spv::FunctionControlMaskNone, state.module.Type(spv::OpTypeFunction, voidType, TypeScalarU64(state)));
+    state.module.AddFunction(spv::OpFunction, voidType, function, spv::FunctionControlDontInlineMask, state.module.Type(spv::OpTypeFunction, voidType, u64));
     const auto address = state.module.AllocateId();
-    state.module.AddFunction(spv::OpFunctionParameter, TypeScalarU64(state), address);
+    state.module.AddFunction(spv::OpFunctionParameter, u64, address);
     EmitLabel(state, state.module.AllocateId());
-    const auto done = state.module.AllocateId();
-    state.module.AddFunction(spv::OpVariable, TypePointer(state, spv::StorageClassFunction, boolean), done, spv::StorageClassFunction);
-    const auto counter = state.module.AllocateId();
-    state.module.AddFunction(spv::OpVariable, TypePointer(state, spv::StorageClassFunction, u32), counter, spv::StorageClassFunction);
-    state.module.AddFunction(spv::OpStore, done, ConstantBool(state, false));
-    state.module.AddFunction(spv::OpStore, counter, constant(0u));
-    const auto page = binary(spv::OpIAdd, u32, Unary(state, spv::OpUConvert, u32, binary(spv::OpShiftRightLogical, TypeScalarU64(state), address, BdaConstant(state, BdaAbi::WrittenPageShift))), constant(1));
-    const auto hash = binary(spv::OpShiftRightLogical, u32, binary(spv::OpIMul, u32, page, constant(0x9e3779b1u)), constant(32u - static_cast<std::uint32_t>(std::countr_zero(BdaAbi::WrittenPageSlots))));
-    const auto scope = constant(spv::ScopeDevice);
-    const auto relaxed = constant(spv::MemorySemanticsMaskNone);
-    const auto header = state.module.AllocateId();
-    const auto body = state.module.AllocateId();
-    const auto continuation = state.module.AllocateId();
-    const auto merge = state.module.AllocateId();
-    state.module.AddFunction(spv::OpBranch, header);
-    EmitLabel(state, header);
-    const auto probe = state.module.AllocateId();
-    state.module.AddFunction(spv::OpLoad, u32, probe, counter);
+    const auto index = state.module.AllocateId();
+    state.module.AddFunction(spv::OpFunctionCall, u64, index, state.bdaWriteRangeFunction, address, constant(1u), constant(0u));
+    const auto missing = binary(spv::OpIEqual, TypeBool(state), index, BdaConstant(state, 0u));
+    const auto failed = state.module.AllocateId();
     const auto found = state.module.AllocateId();
-    state.module.AddFunction(spv::OpLoad, boolean, found, done);
-    const auto searching = binary(spv::OpLogicalAnd, boolean, Unary(state, spv::OpLogicalNot, boolean, found), binary(spv::OpULessThan, boolean, probe, constant(BdaAbi::WrittenPageProbes)));
-    state.module.AddFunction(spv::OpLoopMerge, merge, continuation, spv::LoopControlMaskNone);
-    state.module.AddFunction(spv::OpBranchConditional, searching, body, merge);
-    EmitLabel(state, body);
-    const auto slot = binary(spv::OpIAdd, u32, constant(BdaAbi::WrittenSlotsWord), binary(spv::OpBitwiseAnd, u32, binary(spv::OpIAdd, u32, hash, probe), constant(BdaAbi::WrittenPageSlots - 1u)));
-    const auto current = state.module.AllocateId();
-    state.module.AddFunction(spv::OpAtomicLoad, u32, current, BdaWord(state, state.faultBufferVariable, slot), scope, relaxed);
-    const auto held = binary(spv::OpIEqual, boolean, current, page);
-    state.module.AddFunction(spv::OpStore, done, held);
-    EmitIfCondition(state, Unary(state, spv::OpLogicalNot, boolean, held), [&] {
-        const auto previous = state.module.AllocateId();
-        state.module.AddFunction(spv::OpAtomicCompareExchange, u32, previous, BdaWord(state, state.faultBufferVariable, slot), scope, relaxed, relaxed, page, constant(0u));
-        const auto taken = binary(spv::OpLogicalOr, boolean, binary(spv::OpIEqual, boolean, previous, constant(0u)), binary(spv::OpIEqual, boolean, previous, page));
-        state.module.AddFunction(spv::OpStore, done, taken);
-    });
-    state.module.AddFunction(spv::OpBranch, continuation);
-    EmitLabel(state, continuation);
-    state.module.AddFunction(spv::OpStore, counter, binary(spv::OpIAdd, u32, probe, constant(1u)));
-    state.module.AddFunction(spv::OpBranch, header);
-    EmitLabel(state, merge);
-    const auto noted = state.module.AllocateId();
-    state.module.AddFunction(spv::OpLoad, boolean, noted, done);
-    EmitIfCondition(state, Unary(state, spv::OpLogicalNot, boolean, noted), [&] {
-        state.module.AddFunction(spv::OpAtomicStore, BdaWord(state, state.faultBufferVariable, constant(BdaAbi::WrittenOverflowWord)), scope, relaxed, constant(1u));
-    });
+    state.module.AddFunction(spv::OpSelectionMerge, found, spv::SelectionControlMaskNone);
+    state.module.AddFunction(spv::OpBranchConditional, missing, failed, found);
+    EmitLabel(state, failed);
+    state.module.AddFunction(spv::OpAtomicStore, BdaWord(state, state.faultBufferVariable, constant(BdaAbi::WrittenErrorWord)), constant(spv::ScopeDevice), constant(spv::MemorySemanticsMaskNone), constant(1u));
+    state.module.AddFunction(spv::OpReturn);
+    EmitLabel(state, found);
+    const auto entry = binary(spv::OpIAdd, u32, constant(4u), binary(spv::OpIMul, u32, binary(spv::OpISub, u32, Unary(state, spv::OpUConvert, u32, index), constant(1u)), constant(8u)));
+    const auto page = binary(spv::OpShiftRightLogical, u64, address, BdaConstant(state, BdaAbi::WrittenPageShift));
+    const auto firstPage = binary(spv::OpShiftRightLogical, u64, BdaLoadAddress(state, entry), BdaConstant(state, BdaAbi::WrittenPageShift));
+    const auto relative = binary(spv::OpISub, u64, page, firstPage);
+    const auto bitmapBase = BdaLoadWord(state, binary(spv::OpIAdd, u32, entry, constant(7u)));
+    const auto bitmapWord = Unary(state, spv::OpUConvert, u32, binary(spv::OpShiftRightLogical, u64, relative, BdaConstant(state, 5u)));
+    const auto slot = binary(spv::OpIAdd, u32, constant(BdaAbi::WrittenBitmapWord), binary(spv::OpIAdd, u32, bitmapBase, bitmapWord));
+    const auto bit = binary(spv::OpBitwiseAnd, u32, Unary(state, spv::OpUConvert, u32, relative), constant(31u));
+    const auto mask = binary(spv::OpShiftLeftLogical, u32, constant(1u), bit);
+    state.module.AddFunction(spv::OpAtomicOr, u32, state.module.AllocateId(), BdaWord(state, state.faultBufferVariable, slot), constant(spv::ScopeDevice), constant(spv::MemorySemanticsMaskNone), mask);
     state.module.AddFunction(spv::OpReturn);
     state.module.AddFunction(spv::OpFunctionEnd);
     return function;
@@ -189,6 +173,7 @@ void DefineGetBdaPointer(SpirvEmitterState& state) {
         state.bdaWritePointerFunction = DefineBdaLookup(state, "get_bda_write_pointer", true, BdaAbi::Write);
         if (!BdaByteReadsForced()) state.bdaWriteProbeFunction = DefineBdaLookup(state, "probe_bda_write_pointer", false, BdaAbi::Write);
         state.bdaAtomicPointerFunction = DefineBdaLookup(state, "get_bda_atomic_pointer", true, BdaAbi::Read | BdaAbi::Write);
+        state.bdaWriteRangeFunction = DefineBdaLookup(state, "get_bda_write_range", false, BdaAbi::Write, true);
         state.bdaNoteWriteFunction = DefineBdaNoteWrite(state);
         DefineBdaByteWriteFunctions(state);
     }

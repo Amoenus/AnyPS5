@@ -41,6 +41,7 @@ private:
     // same device addresses share one buffer while one of them is alive (see the table cache in
     // BdaResources.cpp, which refers to it weakly).
     void markWrittenPages() const;
+    void allocateFault(const Context& context, std::uint32_t writtenWords);
     std::shared_ptr<Buffer> table;
     std::unique_ptr<Buffer> fault;
     std::size_t tableBytes = 0;
