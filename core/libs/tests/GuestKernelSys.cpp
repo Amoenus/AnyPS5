@@ -12,6 +12,7 @@
 #include <string_view>
 
 extern "C" {
+int APS5_VABI link_nid_postfix(const char*, const char*);
 int APS5_VABI fork_nid_postfix(void);
 int APS5_VABI symlink_nid_postfix(const char*, const char*);
 std::int64_t APS5_VABI readlink_nid_postfix(const char*, char*, std::size_t);
@@ -40,7 +41,22 @@ void RejectsSymlink(const char* target, const char* link) {
     Require(unsupported && Error() == 73);
 }
 
+void RejectsLink(const char* source, const char* destination) {
+    *__error_nid_postfix() = 73;
+    bool unsupported = false;
+    try {
+        link_nid_postfix(source, destination);
+    } catch (const std::runtime_error& error) {
+        unsupported = std::string_view(error.what()) == "link_nid_postfix not implemented";
+    }
+    Require(unsupported && Error() == 73);
+}
+
 int main() {
+    RejectsLink("source", "destination");
+    RejectsLink(nullptr, "destination");
+    RejectsLink("source", nullptr);
+    RejectsLink(nullptr, nullptr);
     *__error_nid_postfix() = 73;
     bool forkUnsupported = false;
     try {
