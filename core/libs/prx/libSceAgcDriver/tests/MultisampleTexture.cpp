@@ -354,6 +354,23 @@ void CheckCache(Context context, std::uint32_t fragments) {
     std::printf("fragments=%u sampled cache hit and refresh fetch exact values\n", fragments);
 }
 
+
+bool Supports(const Context& context, std::uint32_t format, std::uint32_t fragments) {
+    VkImageFormatProperties properties{};
+    const auto result = context.imageFormatProperties(context.physical, TextureDetiler::ImageElementFormat(BytesPerElement(format)), VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, &properties);
+    if (result == VK_ERROR_FORMAT_NOT_SUPPORTED) return false;
+    Check(result, "MS test image format query");
+    return (properties.sampleCounts & fragments) != 0u;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL SingleSampleProperties(VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags, VkImageCreateFlags, VkImageFormatProperties* properties) {
+    *properties = {};
+    properties->maxExtent = {16384u, 16384u, 1u};
+    properties->maxArrayLayers = 8192u;
+    properties->sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    return VK_SUCCESS;
+}
+
 void CheckRefusals(Context context) {
     TextureDetiler detiler(context);
     GuestTextureResource descriptor{};
@@ -388,6 +405,10 @@ void CheckRefusals(Context context) {
     disabled = context;
     disabled.storageImageWriteWithoutFormat = false;
     reject(disabled, descriptor, false, "does not enable multisampled");
+    disabled = context;
+    disabled.imageFormatProperties = SingleSampleProperties;
+    Require(!Supports(disabled, 20u, 2u), "MS test selected an unadvertised fragment count");
+    reject(disabled, descriptor, false, "fragment count is unsupported by the device");
     bool rejected = false;
     try { const StorageTexture storage(context, detiler, descriptor, 0u); }
     catch (const std::runtime_error& error) { rejected = std::string(error.what()).find("multisampled storage texture writes") != std::string::npos; }
@@ -429,21 +450,42 @@ void CheckShapes() {
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--shapes") { CheckShapes(); return 0; }
-        Device device;
+        std::unique_ptr<Device> device;
+        try { device = std::make_unique<Device>(); }
+        catch (const std::exception& error) {
+            if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr) throw;
+            std::printf("skipped, no usable Vulkan MS upload device: %s\n", error.what());
+            return 77;
+        }
+        const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        std::uint32_t checked = 0u, unavailable = 0u;
         for (const auto format : {5u, 11u, 20u, 62u, 75u, 71u}) {
             for (const auto fragments : {2u, 4u, 8u}) {
-                for (const bool arrayed : {false, true}) CheckTexture(device.GetContext(), format, fragments, arrayed, false);
+                if (!Supports(context, format, fragments)) {
+                    std::printf("format=%u fragments=%u: device does not advertise sampled/storage support\n", format, fragments);
+                    unavailable += 2u;
+                    continue;
+                }
+                for (const bool arrayed : {false, true}) { CheckTexture(context, format, fragments, arrayed, false); ++checked; }
             }
         }
-        CheckTexture(device.GetContext(), 71u, 8u, true, true);
+        if (Supports(context, 71u, 8u)) { CheckTexture(context, 71u, 8u, true, true); ++checked; }
+        else ++unavailable;
         for (const auto fragments : {2u, 4u, 8u}) {
-            CheckCache(device.GetContext(), fragments);
-            CheckTexture(device.GetContext(), 71u, fragments, true, false, 1u);
-            CheckTexture(device.GetContext(), 71u, fragments, true, false, 1u, true);
-            CheckTexture(device.GetContext(), 71u, fragments, true, false, 0u, false, true);
+            if (Supports(context, 20u, fragments)) { CheckCache(context, fragments); ++checked; }
+            else ++unavailable;
+            if (Supports(context, 71u, fragments)) {
+                CheckTexture(context, 71u, fragments, true, false, 1u);
+                CheckTexture(context, 71u, fragments, true, false, 1u, true);
+                CheckTexture(context, 71u, fragments, true, false, 0u, false, true);
+                checked += 3u;
+            } else unavailable += 3u;
         }
-        CheckRefusals(device.GetContext());
+        Require(checked != 0u, "device advertises no supported MS test cases");
+        if (std::getenv("ANYPS5_REQUIRE_MSAA_ALL") != nullptr) Require(unavailable == 0u, "device did not exercise every required MS case");
+        CheckRefusals(context);
+        std::printf("MS cases checked=%u unavailable=%u\n", checked, unavailable);
         return 0;
     } catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
 }
