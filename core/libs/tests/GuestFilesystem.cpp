@@ -139,6 +139,52 @@ int main() {
     Require(rename_nid_postfix(file.string().c_str(), renamed.string().c_str()) == -1);
     Require(*__error_nid_postfix() == 2);
     Require(rename_nid_postfix(renamed.string().c_str(), file.string().c_str()) == 0);
+    {
+        const auto area = root / "libc_rename";
+        const auto sourceFile = area / "source.txt";
+        const auto targetFile = area / "target.txt";
+        const auto sourceDirectory = area / "source_directory";
+        const auto emptyDirectory = area / "empty_directory";
+        const auto fullDirectory = area / "full_directory";
+        Require(std::filesystem::create_directories(area));
+        { std::ofstream stream(sourceFile); stream << "source"; }
+        { std::ofstream stream(targetFile); stream << "target"; }
+        Require(std::filesystem::create_directories(sourceDirectory / "child"));
+        Require(std::filesystem::create_directories(emptyDirectory));
+        Require(std::filesystem::create_directories(fullDirectory));
+        { std::ofstream stream(fullDirectory / "entry"); stream << "entry"; }
+        const auto name = [](const std::filesystem::path& path) { return path.string(); };
+        const auto missing = name(area / "missing");
+        const auto absentParent = name(area / "absent" / "target");
+        const auto fileParent = name(sourceFile / "target");
+        Require(rename_nid_postfix(missing.c_str(), name(targetFile).c_str()) == -1 && *__error_nid_postfix() == 2);
+        Require(rename_nid_postfix(name(sourceFile).c_str(), absentParent.c_str()) == -1 && *__error_nid_postfix() == 2);
+        Require(rename_nid_postfix(name(sourceFile).c_str(), fileParent.c_str()) == -1 && *__error_nid_postfix() == 20);
+        Require(rename_nid_postfix(name(sourceFile).c_str(), name(fullDirectory).c_str()) == -1 && *__error_nid_postfix() == 21);
+        Require(rename_nid_postfix(name(sourceDirectory).c_str(), name(targetFile).c_str()) == -1 && *__error_nid_postfix() == 20);
+        Require(rename_nid_postfix(name(sourceDirectory).c_str(), name(fullDirectory).c_str()) == -1 && *__error_nid_postfix() == 66);
+        const auto childDestination = name(sourceDirectory / "child" / "moved");
+        Require(rename_nid_postfix(name(sourceDirectory).c_str(), childDestination.c_str()) == -1 && *__error_nid_postfix() == 22);
+        const auto childDirectory = name(sourceDirectory / "child");
+        Require(rename_nid_postfix(name(sourceDirectory).c_str(), childDirectory.c_str()) == -1 && *__error_nid_postfix() == 22);
+        Require(std::filesystem::is_regular_file(sourceFile) && std::filesystem::is_regular_file(fullDirectory / "entry"));
+        Require(rename_nid_postfix(name(sourceFile).c_str(), name(targetFile).c_str()) == 0);
+        { std::ifstream stream(targetFile); std::string contents; std::getline(stream, contents); Require(contents == "source"); }
+        Require(!std::filesystem::exists(sourceFile));
+        Require(rename_nid_postfix(name(targetFile).c_str(), name(targetFile).c_str()) == 0);
+        Require(rename_nid_postfix(name(sourceDirectory).c_str(), name(emptyDirectory).c_str()) == 0);
+        Require(!std::filesystem::exists(sourceDirectory) && std::filesystem::is_directory(emptyDirectory / "child"));
+#ifndef _WIN32
+        const auto dangling = area / "dangling";
+        std::filesystem::create_symlink(area / "nonexistent", dangling);
+        Require(std::filesystem::is_symlink(dangling));
+        const auto replacement = area / "replacement";
+        { std::ofstream stream(replacement); stream << "replacement"; }
+        Require(rename_nid_postfix(name(replacement).c_str(), name(dangling).c_str()) == 0);
+        Require(!std::filesystem::is_symlink(dangling) && std::filesystem::is_regular_file(dangling));
+#endif
+        std::filesystem::remove_all(area);
+    }
     Require(remove_nid_postfix(file.string().c_str()) == 0);
     Require(!std::filesystem::exists(file));
     Require(remove_nid_postfix(file.string().c_str()) == -1 && *__error_nid_postfix() == 2);
@@ -335,6 +381,16 @@ int main() {
     Require(sceKernelRmdir(rootName.c_str()) == static_cast<int>(0x80020042u));
     Require(rmdir_nid_postfix(presentName.c_str()) == -1 && *__error_nid_postfix() == 20);
     Require(rmdir_nid_postfix(missingName.c_str()) == -1 && *__error_nid_postfix() == 2);
+    const auto lockedFile = [&](const char* name) {
+        const auto locked = root / name;
+        { std::ofstream stream(locked); stream << "removable"; }
+        Require(sceKernelChmod_nid_postfix(locked.string().c_str(), 0400) == 0);
+        return locked;
+    };
+    const auto lockedPosix = lockedFile("locked-posix");
+    Require(unlink_nid_postfix(lockedPosix.string().c_str()) == 0 && !std::filesystem::exists(lockedPosix));
+    const auto lockedKernel = lockedFile("locked-kernel");
+    Require(sceKernelUnlink(lockedKernel.string().c_str()) == 0 && !std::filesystem::exists(lockedKernel));
     Require(rmdir_nid_postfix("") == -1 && *__error_nid_postfix() == 2);
     Require(rmdir_nid_postfix(nullptr) == -1 && *__error_nid_postfix() == 14);
     Require(unlink_nid_postfix(missingName.c_str()) == -1 && *__error_nid_postfix() == 2);
