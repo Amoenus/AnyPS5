@@ -885,6 +885,16 @@ int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* iov, int iovcnt, in
 
 #endif
 
+int64_t APS5_VABI preadv_nid_postfix(int d, const KernelIovec* iov, int iovcnt, int64_t offset) {
+    const auto result = sceKernelPreadv(d, iov, iovcnt, offset);
+    return result < 0 ? PosixFailure(static_cast<int>(result) & 0xffff) : result;
+}
+
+int64_t APS5_VABI pwritev_nid_postfix(int d, const KernelIovec* iov, int iovcnt, int64_t offset) {
+    const auto result = sceKernelPwritev(d, iov, iovcnt, offset);
+    return result < 0 ? PosixFailure(static_cast<int>(result) & 0xffff) : result;
+}
+
 int APS5_VABI sceKernelRename(const char* from, const char* to) {
     if (from == nullptr || to == nullptr) throw std::invalid_argument("sceKernelRename: path is null");
     const auto source = ResolvePath_nid_no_patch(from);

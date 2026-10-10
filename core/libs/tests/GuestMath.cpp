@@ -20,6 +20,8 @@ unsigned long long APS5_VABI strtoull_nid_postfix(const char*, char**, int);
 std::uintmax_t APS5_VABI strtoumax_nid_postfix(const char*, char**, int);
 unsigned long long APS5_VABI _Stoull_nid_postfix(const char*, char**, int);
 std::uint64_t APS5_VABI _Stoul_nid_postfix(const char*, char**, int);
+std::int64_t APS5_VABI atol_nid_postfix(const char*);
+long long APS5_VABI atoll_nid_postfix(const char*);
 int* APS5_VABI __error_nid_postfix();
 struct LibcFloatConstant { std::uint32_t bits[4]; };
 extern LibcFloatConstant _FInf_nid_postfix;
@@ -164,6 +166,11 @@ static void CheckIntegerConversions() {
         Require(_Stoull_nid_postfix(text, &end, base) == 0 && end == text + 3);
         Require(_Stoul_nid_postfix(text, &end, base) == 0 && end == text + 3);
     }
+    Require(atol_nid_postfix(" \t-4294967296tail") == -INT64_C(4294967296));
+    Require(atol_nid_postfix("9223372036854775807") == INT64_MAX && atol_nid_postfix("+12") == 12);
+    Require(atol_nid_postfix("0x10") == 0 && atol_nid_postfix("010") == 10 && atol_nid_postfix("") == 0);
+    Require(atoll_nid_postfix("-9223372036854775808") == INT64_MIN && atoll_nid_postfix("4294967297x") == 4294967297LL);
+    Require(atoll_nid_postfix("  -0012") == -12 && atoll_nid_postfix("z1") == 0);
     *__error_nid_postfix() = 13;
     Require(strtol_nid_postfix("-4294967296", nullptr, 10) == -INT64_C(4294967296));
     Require(*__error_nid_postfix() == 13);

@@ -163,6 +163,14 @@ int APS5_VABI atoi_nid_postfix(const char* str) {
     return std::atoi(str);
 }
 
+std::int64_t APS5_VABI atol_nid_postfix(const char* str) {
+    return std::strtoll(str, nullptr, 10);
+}
+
+long long APS5_VABI atoll_nid_postfix(const char* str) {
+    return std::strtoll(str, nullptr, 10);
+}
+
 std::div_t APS5_VABI div_nid_postfix(int numerator, int denominator) {
     return std::div(numerator, denominator);
 }
