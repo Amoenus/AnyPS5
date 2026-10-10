@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -88,6 +89,48 @@ private:
     VkPipeline pipeline = VK_NULL_HANDLE;
 };
 
+}
+
+static void RunBdaWrittenPageOverflowTests(const Context& context) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    for (const std::uint32_t bucket : {0u, Abi::WrittenPageSlots - 1u}) {
+        std::vector<std::uint64_t> addresses;
+        for (std::uint32_t page = 0x200000u; addresses.size() <= Abi::WrittenPageProbes; ++page) {
+            const auto encoded = page + 1u;
+            const auto hash = (encoded * 0x9e3779b1u) >> (32u - std::countr_zero(Abi::WrittenPageSlots));
+            if (hash == bucket) addresses.push_back(static_cast<std::uint64_t>(page) << Abi::WrittenPageShift);
+        }
+        Buffer memory(context, addresses.size() * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        std::memset(memory.Bytes().data(), 0xa5, memory.Bytes().size());
+        std::vector<Abi::Range> ranges;
+        for (std::size_t index = 0; index < addresses.size(); ++index) {
+            ranges.push_back({addresses[index], addresses[index] + 8u, memory.DeviceAddress() + index * 16u, Abi::Read | Abi::Write, 0});
+        }
+        Buffer table(context, sizeof(Abi::Header) + ranges.size() * sizeof(Abi::Range), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        Buffer fault(context, Abi::FaultBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        Buffer output(context, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(Abi::Range), 0};
+        std::memcpy(table.Bytes().data(), &header, sizeof(header));
+        std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), ranges.size() * sizeof(Abi::Range));
+        std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
+        for (std::size_t index = 0; index < addresses.size(); ++index) {
+            const std::array<std::uint32_t, 2> values{static_cast<std::uint32_t>(index + 1u), 0x11223344u};
+            Pipeline pipeline(context, MakeBdaDwordWriteTestShader(addresses[index], values.size(), values.data()), {&table, &fault, &output});
+            pipeline.Run(1);
+            if (index == 0u) pipeline.Run(1);
+            std::array<std::uint32_t, 4> stored{};
+            std::memcpy(stored.data(), memory.Bytes().data() + index * 16u, sizeof(stored));
+            Require(stored[0] == values[0] && stored[1] == values[1] && stored[2] == 0xa5a5a5a5u && stored[3] == 0xa5a5a5a5u, "colliding BDA writes lost data or touched adjacent bytes");
+            Abi::Fault report{};
+            std::memcpy(&report, fault.Bytes().data(), sizeof(report));
+            Require(report.state == Abi::FaultState::Empty, "colliding mapped BDA writes published an access fault");
+            std::vector<std::uint32_t> words(Abi::FaultBufferBytes / sizeof(std::uint32_t));
+            std::memcpy(words.data(), fault.Bytes().data(), fault.Bytes().size());
+            const auto occupied = std::count_if(words.begin() + Abi::WrittenSlotsWord, words.end(), [](auto word) { return word != 0u; });
+            Require(occupied == std::min<std::size_t>(index + 1u, Abi::WrittenPageProbes), "colliding BDA writes occupied an unexpected number of slots");
+            Require(words[Abi::WrittenOverflowWord] == (index >= Abi::WrittenPageProbes ? 1u : 0u), "BDA write tracking did not report its probe limit");
+        }
+    }
 }
 
 static void RunBdaDwordWriteTests(const Context& context) {
@@ -276,4 +319,5 @@ void RunBdaExecutionTests(const Context& context) {
     ranges[0].permissions = 0;
     run(guest, 8, 0, Abi::FaultReason::Permission);
     RunBdaDwordWriteTests(context);
+    RunBdaWrittenPageOverflowTests(context);
 }
