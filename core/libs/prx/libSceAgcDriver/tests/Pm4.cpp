@@ -193,6 +193,9 @@ void testContextAndBases() {
     check(AgcDriver::Pm4::PartialGroupThreads({0, 1, 1}, {0x00100040, 0x00010001, 0x00010001}) == Threads{}, "an empty dispatch reported partial threads");
     expectFailure([] { static_cast<void>(AgcDriver::Pm4::PartialGroupThreads({1, 1, 1}, {0x00000040, 0x00010001, 0x00010001})); }, "partial group size");
     expectFailure([] { static_cast<void>(AgcDriver::Pm4::PartialGroupThreads({1, 1, 1}, {0x00410040, 0x00010001, 0x00010001})); }, "partial group size");
+    expectFailure([] { static_cast<void>(AgcDriver::Pm4::PartialGroupThreads({1, 0, 1}, {0x00100040, 0x00010001, 0x00000001})); }, "partial group size");
+    expectFailure([] { static_cast<void>(AgcDriver::Pm4::PartialGroupThreads({0x10002, 1, 1}, {0x0001ffff, 0x00010001, 0x00010001})); }, "exceeds 32 bits");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x2063}, 2), 0); }, "dispatch modifiers");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x41}, 4), 0); }, "header flags");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x49}), 0); }, "dispatch modifiers");
     execute(state, makePacket(0x13, {32}));

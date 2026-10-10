@@ -64,16 +64,21 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         packet = resolved;
         indirectArguments = 0;
     }
+    std::array<std::uint32_t, 3> partialGroups{};
+    if (indirectArguments == 0 && (packet[4] & 0x2u) != 0) {
+        partialGroups = Pm4::PartialGroupThreads({packet[1], packet[2], packet[3]}, {readRegister(queue.shader, 0x207), readRegister(queue.shader, 0x208), readRegister(queue.shader, 0x209)});
+    }
+    const bool partialLastGroup = partialGroups != std::array<std::uint32_t, 3>{};
     if (resolving) {
-        if (matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
-        if (indirectArguments == 0 && matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
+        if (!partialLastGroup && matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
+        if (!partialLastGroup && indirectArguments == 0 && matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
     } else {
         if (const auto htile = Graphics::HtileDepthClearAddress(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads); htile != 0) Graphics::NoteHtileDepthClear(htile);
-        if (fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
+        if (!partialLastGroup && fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
             pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
             return;
         }
-        if (indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
+        if (!partialLastGroup && indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
             pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
             return;
         }
@@ -84,10 +89,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             if (threads[axis] % compute.numThreads[axis] != 0) compute.partialThreads = threads;
         }
     }
-    if (indirectArguments == 0 && (packet[4] & 0x2u) != 0) {
-        const auto threads = Pm4::PartialGroupThreads({packet[1], packet[2], packet[3]}, {readRegister(queue.shader, 0x207), readRegister(queue.shader, 0x208), readRegister(queue.shader, 0x209)});
-        if (threads != std::array<std::uint32_t, 3>{}) compute.partialThreads = threads;
-    }
+    if (partialLastGroup) compute.partialThreads = partialGroups;
     ShaderRecompiler::RecompileRequest request{
         {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
         {(packet[4] & 0x8000u) != 0 ? 32u : 64u, 0, userData, compute, std::nullopt, std::nullopt, memory, RegisteredFloatMode(snapshot)},
