@@ -93,6 +93,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     const auto dccAlphaPos = ((words[6] >> 22u) & 0x1u) != 0;
     const auto dccColorTransf = ((words[6] >> 23u) & 0x1u) != 0;
     const auto metaAddr = ((static_cast<std::uint64_t>(words[6]) >> 24u) & 0xffu) | (static_cast<std::uint64_t>(words[7]) << 8u);
+    Require(format != 166u || !metaCompress || metaAddr != 0u, "FMASK compressed image has a null CMASK address");
 
     requireValidDstSel(dstSelX);
     requireValidDstSel(dstSelY);

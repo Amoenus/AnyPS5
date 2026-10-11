@@ -1,4 +1,5 @@
 #include "BdaTests.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/FmaskTexture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
@@ -25,6 +26,76 @@ void reject(TAction action) {
 }
 
 void RunColorTargetLayoutTests() {
+    GuestTextureResource fmaskResource{};
+    fmaskResource.format = 166u;
+    fmaskResource.width = 129u;
+    fmaskResource.height = 65u;
+    fmaskResource.dimension = TextureDimension::k2DArray;
+    fmaskResource.depthOrLastArray = 2u;
+    fmaskResource.baseArray = 1u;
+    fmaskResource.mipCount = 1u;
+    fmaskResource.allocatedMipCount = 1u;
+    fmaskResource.tileMode = TextureTileMode::kZ64KBX;
+    fmaskResource.pipeBankXor = 0xcf00u;
+    fmaskResource.dstSelX = 4u;
+    fmaskResource.dccAddress = 0x10000u;
+    fmaskResource.dccPipeAligned = true;
+    const auto rawFmaskGeometry = DescribeSurface(fmaskResource);
+    const auto snapshotResource = FmaskSnapshotResource_nid_no_patch(fmaskResource);
+    Require(snapshotResource.baseArray == 1u && snapshotResource.depthOrLastArray == 2u && snapshotResource.dccAddress == 0u && snapshotResource.format == 20u, "FMASK snapshot loses its array view or integer format");
+    const auto linearFmaskGeometry = DescribeSurface(snapshotResource);
+    std::vector<std::byte> rawFmask(rawFmaskGeometry.guestBytes, std::byte{0x11});
+    const CmaskLayout fmaskMetadata(129u, 65u);
+    std::vector<std::byte> metadata(FmaskCmaskBytes_nid_no_patch(fmaskMetadata, 3u), std::byte{0xff});
+    for (std::uint32_t layer = 0u; layer < 3u; ++layer) {
+        for (std::uint32_t y = 0u; y < fmaskMetadata.TilesY(); ++y) {
+            for (std::uint32_t x = 0u; x < fmaskMetadata.TilesX(); ++x) {
+                if (((x + y + layer) & 1u) == 0u) continue;
+                const auto nibble = FmaskCmaskNibble_nid_no_patch(fmaskMetadata, x, y, layer, 3u, 0xcf00u);
+                const auto shift = (nibble & 1u) * 4u;
+                metadata[nibble / 2u] = static_cast<std::byte>((std::to_integer<std::uint32_t>(metadata[nibble / 2u]) & ~(15u << shift)) | (12u << shift));
+            }
+        }
+    }
+    const auto mixedSnapshot = FmaskSnapshot_nid_no_patch(fmaskResource, rawFmask, metadata);
+    for (std::uint32_t layer = 0u; layer < 3u; ++layer) {
+        for (std::uint32_t y = 0u; y < 65u; ++y) {
+            for (std::uint32_t x = 0u; x < 129u; ++x) {
+                const auto offset = linearFmaskGeometry.GuestLayerOffset(layer) + static_cast<std::uint64_t>(y) * linearFmaskGeometry.mips.front().pitchBytes + x * 4u;
+                std::uint32_t value;
+                std::memcpy(&value, mixedSnapshot.data() + offset, sizeof(value));
+                Require(value == (((x / 8u + y / 8u + layer) & 1u) == 0u ? 0x11111111u : 0u), "FMASK snapshot ignores mixed CMASK state or an array layer");
+            }
+        }
+    }
+    reject([&] { FmaskSnapshot_nid_no_patch(fmaskResource, {}, metadata); });
+    reject([&] { FmaskSnapshot_nid_no_patch(fmaskResource, rawFmask, {}); });
+    std::fill(metadata.begin(), metadata.end(), std::byte{0x11});
+    reject([&] { FmaskSnapshot_nid_no_patch(fmaskResource, rawFmask, metadata); });
+    std::fill(rawFmask.begin(), rawFmask.end(), std::byte{0xff});
+    std::fill(metadata.begin(), metadata.end(), std::byte{0xff});
+    reject([&] { FmaskSnapshot_nid_no_patch(fmaskResource, rawFmask, metadata); });
+    std::fill(metadata.begin(), metadata.end(), std::byte{0xcc});
+    const auto clearSnapshot = FmaskSnapshot_nid_no_patch(fmaskResource, rawFmask, metadata);
+    Require(std::ranges::all_of(clearSnapshot, [](auto byte) { return byte == std::byte{0}; }), "FMASK clear reads stored fragment indices");
+    for (const auto format : {156u, 157u, 158u, 159u, 160u, 161u, 162u, 163u, 164u, 165u, 167u, 168u}) {
+        auto invalid = fmaskResource;
+        invalid.format = format;
+        reject([&] { FmaskSnapshotResource_nid_no_patch(invalid); });
+    }
+    auto invalidFmask = fmaskResource;
+    invalidFmask.dccPipeAligned = false;
+    reject([&] { FmaskSnapshotResource_nid_no_patch(invalidFmask); });
+    invalidFmask = fmaskResource;
+    invalidFmask.dstSelY = 5u;
+    reject([&] { FmaskSnapshotResource_nid_no_patch(invalidFmask); });
+    invalidFmask = fmaskResource;
+    invalidFmask.mipCount = 2u;
+    reject([&] { FmaskSnapshotResource_nid_no_patch(invalidFmask); });
+    invalidFmask = fmaskResource;
+    invalidFmask.dstSelW = 1u;
+    reject([&] { FmaskSnapshotResource_nid_no_patch(invalidFmask); });
+
     Require(DecodeColorTileMode(0x4dc6c000) == ColorTileMode::RenderTarget, "logged color descriptor was rejected");
     Require(DecodeColorTileMode(0x09000000) == ColorTileMode::Linear, "linear descriptor changed");
     Require(DecodeColorTileMode(0x4dc6c001) == ColorTileMode::RenderTarget, "2D array color descriptor with MIP0_DEPTH 1 was rejected");

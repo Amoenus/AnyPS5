@@ -4,6 +4,8 @@
 #include "ThreadOwned.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/FmaskTexture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include <algorithm>
 #include <atomic>
@@ -503,6 +505,24 @@ std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false) {
+    if (resource.format == static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Fmask32_S8_F8)) {
+        Require(!depthCompare, "FMASK comparison sampling is not implemented");
+        const auto snapshotResource = FmaskSnapshotResource_nid_no_patch(resource);
+        const auto geometry = DescribeSurface(resource);
+        const CmaskLayout metadata(resource.width, resource.height);
+        const auto metadataBytes = resource.dccAddress != 0u ? FmaskCmaskBytes_nid_no_patch(metadata, geometry.layers) : 0u;
+        if (auto* recorder = Recorder::Active()) {
+            recorder->BoundKeptBytes();
+            recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+            if (metadataBytes != 0u) recorder->SyncThrough(resource.dccAddress, metadataBytes);
+        }
+        std::vector<std::byte> fmask(geometry.guestBytes);
+        std::vector<std::byte> cmask(metadataBytes);
+        GuestMemory::Read(resource.baseAddress, fmask);
+        if (!cmask.empty()) GuestMemory::Read(resource.dccAddress, cmask);
+        const auto snapshot = FmaskSnapshot_nid_no_patch(resource, fmask, cmask);
+        return std::make_shared<Texture>(context, *context.detiler, snapshotResource, components, snapshot);
+    }
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     if (resource.fragments != 1u) {
