@@ -220,6 +220,7 @@ struct VulkanDevice::State {
     bool sampleRateShading = false;
     bool storageImageMultisample = false;
     bool storageImageWriteWithoutFormat = false;
+    bool storageImageReadWithoutFormat = false;
     bool shaderClock = false;
     bool narrowSubgroupClock = false;
     // VK_EXT_descriptor_indexing with non-uniform image array indexing (bindless image tables in
@@ -1118,6 +1119,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
     state->storageImageWriteWithoutFormat = enabled.shaderStorageImageWriteWithoutFormat == VK_TRUE;
     enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
+    state->storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
     // Gathers with non-constant offsets (ImageGatherExtended).
     enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
     if (enabled.shaderImageGatherExtended) state->capabilities.push_back(spv::CapabilityImageGatherExtended);
@@ -2759,6 +2761,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.sampleRateShading = state->sampleRateShading;
     context.storageImageMultisample = state->storageImageMultisample;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
+    context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.nullDescriptors = state->shaderProfile != nullptr && state->shaderProfile->NullDescriptors();
     context.bufferInt64Atomics = state->bufferInt64Atomics;
     context.primitiveListRestart = state->primitiveListRestart;
