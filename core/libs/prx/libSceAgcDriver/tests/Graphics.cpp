@@ -1779,6 +1779,54 @@ void multisampleTests() {
     queue.context[0x202] = 0xcc0020;
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "multisampled color target");
 
+    for (const auto log2 : {1u, 2u, 3u}) {
+        queue = multisampled();
+        queue.context[0x2f8] = (log2 << 20u) | 0xe000u | log2;
+        queue.context[0x31d] = (log2 << 12u) | (log2 << 15u);
+        const auto word0 = log2 == 1u ? 0x0000cc44u : log2 == 2u ? 0x622ae6aeu : 0xbd153fd1u;
+        for (std::uint32_t pixel = 0u; pixel < 4u; ++pixel) {
+            queue.context[0x2fe + pixel * 4u] = word0;
+            queue.context[0x2ff + pixel * 4u] = log2 == 3u ? 0x9773f95bu : 0u;
+        }
+        std::vector<AgcDriver::Graphics::RegisterRead> sampleReads;
+        AgcDriver::Graphics::RegisterReadLog() = &sampleReads;
+        const auto standard = DecodeState(queue);
+        AgcDriver::Graphics::RegisterReadLog() = nullptr;
+        Require(standard.samples == (1u << log2) && standard.colors[0].samples == standard.samples, "independent standard sample register pattern did not decode");
+        for (const auto read : sampleReads) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a standard sample location register");
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "standard MSAA pattern was refused by the precheck");
+        if (log2 == 3u) {
+            queue.context[0x2ff] = 0x8773f95bu;
+            expectFailure([&] { DecodeState(queue); }, "nonstandard sample locations");
+            queue.context[0x2ff] = 0x9773f95bu;
+        }
+        queue.context[0x2f8] |= 0x20000000u;
+        sampleReads.clear();
+        AgcDriver::Graphics::RegisterReadLog() = &sampleReads;
+        const auto coveredCenter = DecodeState(queue);
+        AgcDriver::Graphics::RegisterReadLog() = nullptr;
+        Require(coveredCenter.samples == (1u << log2), "covered-centroid mode changed the sample count without centroid inputs");
+        for (const auto read : sampleReads) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a covered-centroid register");
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "covered-centroid mode without centroid inputs was refused");
+        for (const auto centroid : {4u, 64u}) {
+            queue.context[0x1b3] = 2u | centroid;
+            queue.context[0x1b4] = 2u | centroid;
+            expectFailure([&] { DecodeState(queue); }, "COVERED_CENTROID_IS_CENTER with active centroid inputs");
+            Require(AgcDriver::Graphics::DrawRejection(queue, false).find("COVERED_CENTROID_IS_CENTER with active centroid inputs") != std::string::npos, "the precheck accepted active covered-centroid interpolation");
+            queue.context[0x1b4] = 2u;
+            Require(DecodeState(queue).samples == (1u << log2), "an unaddressed centroid input changed covered-centroid mode");
+            queue.context[0x1b3] = 2u;
+            queue.context[0x1b4] = 2u | centroid;
+            Require(DecodeState(queue).samples == (1u << log2), "a disabled centroid input changed covered-centroid mode");
+        }
+        queue.context[0x1b3] = 2u;
+        queue.context[0x1b4] = 2u;
+        queue.context[0x2f8] |= 0x10u;
+        expectFailure([&] { DecodeState(queue); }, "coverage conversion or nonstandard multisampling");
+    }
+
+    expectFailure([&] { AgcDriver::Graphics::MultisampleTargetView({}, {}); }, "initial guest contents of a multisampled color target are not imported");
+
     using AgcDriver::Graphics::DccKeys;
     using AgcDriver::Graphics::MultisampledCmask;
     MultisampledCmask cmask(0x10000, 0x1000);

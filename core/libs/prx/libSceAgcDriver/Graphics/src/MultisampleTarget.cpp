@@ -44,6 +44,7 @@ void recordCommands(const Context& context, Record&& record) {
 class MultisampleTarget {
 public:
     MultisampleTarget(const Context& context, const ColorTarget& target) : context(context), target(target), cmask(target.cmaskAddress, target.cmaskBytes) {
+        Require(false, "initial guest contents of a multisampled color target are not imported");
         this->context.bufferPool.reset();
         const auto samples = static_cast<VkSampleCountFlagBits>(target.samples);
         Require((context.limits.framebufferColorSampleCounts & samples) != 0, "the device cannot render color with the target's sample count");

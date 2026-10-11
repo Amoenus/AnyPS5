@@ -309,9 +309,20 @@ constexpr std::array<std::array<std::int8_t, 2>, 2> StandardLocations2{{{4, 4}, 
 constexpr std::array<std::array<std::int8_t, 2>, 4> StandardLocations4{{{-2, -6}, {6, -2}, {-6, 2}, {2, 6}}};
 constexpr std::array<std::array<std::int8_t, 2>, 8> StandardLocations8{{{1, -3}, {-1, 3}, {5, 1}, {-3, -5}, {-5, 5}, {-7, -1}, {3, 7}, {7, -7}}};
 
+constexpr std::uint32_t CoveredCentroidIsCenter = 1u << 29u;
+constexpr std::uint32_t CentroidInputs = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PerspectiveCentroid) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::LinearCentroid);
+
+bool coveredCentroidSupported(const QueueState& queue) {
+    const auto config = find(queue.context, 0x2f8);
+    if (config == queue.context.end() || (config->second & CoveredCentroidIsCenter) == 0 || PixelProgramSkipped(queue)) return true;
+    const auto ena = find(queue.context, 0x1b3);
+    const auto addr = find(queue.context, 0x1b4);
+    return ena != queue.context.end() && addr != queue.context.end() && (ena->second & addr->second & CentroidInputs) == 0;
+}
+
 std::uint32_t decodeSamples(const Registers& cx) {
     const auto config = read(cx, 0x2f8);
-    zero(cx, 0x2f8, ~(0x7u | 0x1e000u | 0x700000u), "coverage conversion or nonstandard multisampling");
+    zero(cx, 0x2f8, ~(0x7u | 0x1e000u | 0x700000u | CoveredCentroidIsCenter), "coverage conversion or nonstandard multisampling");
     const auto log2 = config & 7u;
     if (log2 == 0) {
         Require(((config >> 20u) & 7u) == 0, "exposed samples without multisampling are unsupported");
@@ -611,6 +622,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     zero(cx, 0x207, ~LayerExports, "clip distances, layer, viewport or auxiliary vertex exports");
     result.samples = decodeSamples(cx);
+    Require(coveredCentroidSupported(queue), "COVERED_CENTROID_IS_CENTER with active centroid inputs is not implemented");
     {
         const auto depthControl = read(cx, 0x200);
         const auto renderControl = find(cx, 0x000);
@@ -1088,7 +1100,8 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (value(cx, 0x2dc, word) && word != AlphaToCoverageUndithered) {
         if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage"); !reason.empty()) return reason;
     }
-    if (auto reason = nonzero(cx, 0x2f8, ~(0x7u | 0x1e000u | 0x700000u), "coverage conversion or nonstandard multisampling"); !reason.empty()) return reason;
+    if (auto reason = nonzero(cx, 0x2f8, ~(0x7u | 0x1e000u | 0x700000u | CoveredCentroidIsCenter), "coverage conversion or nonstandard multisampling"); !reason.empty()) return reason;
+    if (!coveredCentroidSupported(queue)) return "AGC graphics: COVERED_CENTROID_IS_CENTER with active centroid inputs is not implemented";
     const bool multisampled = value(cx, 0x2f8, word) && (word & 7u) != 0;
     if (auto reason = nonzero(cx, 0x292, multisampled ? ScanModeMask & ~1u : ScanModeMask, "scan conversion mode"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
