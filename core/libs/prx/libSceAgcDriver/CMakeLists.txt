@@ -270,7 +270,7 @@ configure_windows_unwind(libSceAgcDriver)
 
 if(BUILD_TESTING)
     add_test_executable(agc_driver_msaa_runtime_tests tests/MultisampleTexture.cpp)
-    target_include_directories(agc_driver_msaa_runtime_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Headers/include)
+    target_include_directories(agc_driver_msaa_runtime_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR} ${ANYPS5_SPIRV_HEADERS_INCLUDE_DIR})
     target_link_libraries(agc_driver_msaa_runtime_tests PRIVATE libSceAgcDriver libc SDL2-static shader_recompiler_agc_driver)
     set_target_properties(agc_driver_msaa_runtime_tests PROPERTIES CXX_EXTENSIONS OFF)
     configure_windows_unwind(agc_driver_msaa_runtime_tests)
@@ -288,7 +288,7 @@ if(BUILD_TESTING)
     target_include_directories(agc_driver_msaa_layout_tests PRIVATE
             ${LIBS_INCLUDE_DIR}
             ${CMAKE_SOURCE_DIR}/core/shader/recompiler
-            ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
+            ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
     )
     target_link_libraries(agc_driver_msaa_layout_tests PRIVATE libc)
     set_target_properties(agc_driver_msaa_layout_tests PROPERTIES CXX_EXTENSIONS OFF)
