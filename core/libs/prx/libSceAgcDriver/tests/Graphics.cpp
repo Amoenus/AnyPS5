@@ -1667,9 +1667,31 @@ void multisampleTests() {
             queue.context[0x2ff] = 0x9773f95bu;
         }
         queue.context[0x2f8] |= 0x20000000u;
+        sampleReads.clear();
+        AgcDriver::Graphics::RegisterReadLog() = &sampleReads;
+        const auto coveredCenter = DecodeState(queue);
+        AgcDriver::Graphics::RegisterReadLog() = nullptr;
+        Require(coveredCenter.samples == (1u << log2), "covered-centroid mode changed the sample count without centroid inputs");
+        for (const auto read : sampleReads) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a covered-centroid register");
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "covered-centroid mode without centroid inputs was refused");
+        for (const auto centroid : {4u, 64u}) {
+            queue.context[0x1b3] = 2u | centroid;
+            queue.context[0x1b4] = 2u | centroid;
+            expectFailure([&] { DecodeState(queue); }, "COVERED_CENTROID_IS_CENTER with active centroid inputs");
+            Require(AgcDriver::Graphics::DrawRejection(queue, false).find("COVERED_CENTROID_IS_CENTER with active centroid inputs") != std::string::npos, "the precheck accepted active covered-centroid interpolation");
+            queue.context[0x1b4] = 2u;
+            Require(DecodeState(queue).samples == (1u << log2), "an unaddressed centroid input changed covered-centroid mode");
+            queue.context[0x1b3] = 2u;
+            queue.context[0x1b4] = 2u | centroid;
+            Require(DecodeState(queue).samples == (1u << log2), "a disabled centroid input changed covered-centroid mode");
+        }
+        queue.context[0x1b3] = 2u;
+        queue.context[0x1b4] = 2u;
+        queue.context[0x2f8] |= 0x10u;
         expectFailure([&] { DecodeState(queue); }, "coverage conversion or nonstandard multisampling");
-        Require(AgcDriver::Graphics::DrawRejection(queue, false).find("coverage conversion or nonstandard multisampling") != std::string::npos, "the precheck accepted unimplemented covered-centroid mode");
     }
+
+    expectFailure([&] { AgcDriver::Graphics::MultisampleTargetView({}, {}); }, "initial guest contents of a multisampled color target are not imported");
 
     using AgcDriver::Graphics::DccKeys;
     using AgcDriver::Graphics::MultisampledCmask;
