@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
 #include "SceShaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <array>
@@ -49,6 +50,14 @@ void Check(AgcDriver::VulkanDevice& device) {
     DecodeGraphicsPrograms(draw, queue, registry, false, true);
     Require(draw.programs.size() == 2 && draw.roles.back() == ProgramRole::Fragment, "unregistered graphics programs did not decode as a vertex and a fragment stage");
     for (const auto& program : draw.programs) Require(program.snapshot != nullptr && program.snapshot->header.empty() && program.snapshot->prepared->entries.empty(), "an unregistered graphics program was not read as raw code");
+    Require(RawGraphicsDrawn(), "a draw of unregistered graphics programs was not noted");
+    bool refused = false;
+    try {
+        Driver::Get().RegisterShader(nullptr);
+    } catch (const std::exception& error) {
+        refused = std::string(error.what()).find("registered after graphics programs were drawn") != std::string::npos;
+    }
+    Require(refused, "a shader registration after unregistered graphics draws was accepted");
     const auto target = device.Target();
     std::vector<LinkedProgram> linked;
     std::vector<MemoryRegion> memory;

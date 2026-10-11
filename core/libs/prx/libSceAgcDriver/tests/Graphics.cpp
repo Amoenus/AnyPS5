@@ -672,6 +672,7 @@ void ColorPipeBankXorTests() {
     Require(mipColor.mip == 2 && mipColor.mipCount == 5 && mipColor.extent.width == 64 && mipColor.extent.height == 32 && mipColor.surfaceAddress == mipBase + sliceBytes && mipColor.address == mipBase + sliceBytes + mips[2].tiledOffset && mipColor.mipTail == mips[2].tail && mipColor.pipeBankXor == 0x3200u, "a display XOR color view lost its array slice, mip placement or XOR");
 }
 
+
 void HeaderlessVertexStageTests() {
     const std::array<std::uint32_t, 4> userData{1, 2, 3, 4};
     const auto info = AgcDriver::Graphics::DecodeVertexStageInfo({}, 0, userData);

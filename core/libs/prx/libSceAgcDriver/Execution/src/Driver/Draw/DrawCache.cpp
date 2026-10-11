@@ -118,9 +118,9 @@ void Driver::eraseDrawEntry(std::uint64_t key, const std::shared_ptr<DrawEntry>&
     drawCache.erase(found);
 }
 
-bool DecodeProgramsCurrent(const DrawDecode& decode, const ShaderRegistry& registry) {
+bool DecodeProgramsCurrent(const DrawDecode& decode, const ShaderRegistry&) {
     return std::all_of(decode.programs.begin(), decode.programs.end(), [&](const DrawProgram& program) {
-        return !program.snapshot->header.empty() || ProgramSnapshot(registry, program.snapshot->codeAddress + program.codeOffset * sizeof(std::uint32_t)) == program.snapshot;
+        return !program.snapshot->header.empty() || ReadRawShader(program.snapshot->codeAddress + program.codeOffset * sizeof(std::uint32_t)) == program.snapshot;
     });
 }
 

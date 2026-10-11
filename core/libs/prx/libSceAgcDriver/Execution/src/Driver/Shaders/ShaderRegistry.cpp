@@ -11,6 +11,7 @@
 #include "CompiledVariant.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdio>
 #include <cstddef>
@@ -117,6 +118,24 @@ std::shared_ptr<const ShaderSnapshot> ProgramSnapshot(const ShaderRegistry& shad
         if (result) return result;
     }
     return ReadRawShader(address);
+}
+
+std::shared_ptr<const ShaderSnapshot> ProgramSnapshot(const ShaderRegistry& shaders, std::uint64_t address, std::initializer_list<std::uint8_t> types) {
+    if (auto registered = RegisteredProgram(shaders, address, types)) return registered;
+    require(shaders.empty(), "graphics program does not belong to a compatible registered shader");
+    return ReadRawShader(address);
+}
+
+namespace {
+std::atomic<bool> rawGraphicsDrawn{false};
+}
+
+void NoteRawGraphicsDraw() {
+    rawGraphicsDrawn.store(true, std::memory_order_relaxed);
+}
+
+bool RawGraphicsDrawn() {
+    return rawGraphicsDrawn.load(std::memory_order_relaxed);
 }
 
 namespace {
@@ -304,7 +323,12 @@ void ReportPreparedAtUse(const ShaderSnapshot& snapshot, const ShaderRecompiler:
         if (!snapshot.prepared->deferred) APS5_LOG_ERR("Shader 0x%llx stage %u has no artifact prepared at registration for the state of this draw or dispatch; preparing it at use", static_cast<unsigned long long>(request.shader.codeAddress), static_cast<std::uint32_t>(request.shader.stage));
         return;
     }
-    APS5_LOG_ERR("%s shader 0x%llx was not registered; preparing its artifact at first use", request.shader.stage == ShaderRecompiler::ShaderStage::Compute ? "Compute" : "Graphics", static_cast<unsigned long long>(snapshot.codeAddress));
+    if (request.shader.stage == ShaderRecompiler::ShaderStage::Compute) {
+        if (snapshot.type != 0) throw std::runtime_error("AGC driver: unregistered program is not a compute shader");
+        APS5_LOG_ERR("Compute shader 0x%llx was not registered; preparing its artifact at dispatch", static_cast<unsigned long long>(snapshot.codeAddress));
+        return;
+    }
+    APS5_LOG_ERR("Graphics shader 0x%llx was not registered; preparing its artifact at first use", static_cast<unsigned long long>(snapshot.codeAddress));
 }
 
 }
@@ -991,6 +1015,7 @@ void Driver::RegisterShader(const Shader* shader) {
     }
     ShaderPreparationTransaction transaction;
     CheckFailure();
+    require(!RawGraphicsDrawn(), "a shader was registered after graphics programs were drawn without registration");
     GuestMemory::CheckRange(shader, sizeof(Shader), 1);
     Shader fields;
     std::memcpy(&fields, static_cast<const void*>(shader), sizeof(Shader));

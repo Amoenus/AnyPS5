@@ -173,6 +173,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceHttp>")
     endif()
 
+    add_test_executable(guest_rudp_status_tests tests/GuestRudpStatus.cpp)
+    target_include_directories(guest_rudp_status_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_rudp_status_tests PRIVATE libSceRudp libc)
+    configure_windows_unwind(guest_rudp_status_tests)
+    add_test(NAME guest_rudp_status COMMAND guest_rudp_status_tests)
+    if(WIN32)
+        set_tests_properties(guest_rudp_status PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+
     add_test_executable(guest_system_gesture_tests tests/GuestSystemGesture.cpp)
     target_include_directories(guest_system_gesture_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_system_gesture_tests PRIVATE libSceSystemGesture libc)

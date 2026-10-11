@@ -581,6 +581,8 @@ void testProgramSnapshots() {
     snapshot.header.resize(sizeof(Shader));
     const auto entry = std::make_shared<const AgcDriver::DriverDetail::ShaderSnapshot>(std::move(snapshot));
     shaders[registeredAddress].push_back(entry);
+    check(AgcDriver::DriverDetail::ProgramSnapshot(shaders, registeredAddress, {2}) == entry, "a typed registered program lookup lost its registration");
+    check(!expectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::ProgramSnapshot(shaders, rawAddress, {2})); }).empty(), "a typed graphics lookup accepted raw code with registered shaders");
     check(AgcDriver::DriverDetail::ProgramSnapshot(shaders, registeredAddress) == entry, "a registered program was not resolved to its registration");
     check(AgcDriver::DriverDetail::ProgramSnapshot(shaders, registeredAddress + 4 * 8) == entry, "an entry inside registered code was not resolved to its registration");
     auto conflicting = std::make_shared<AgcDriver::DriverDetail::ShaderSnapshot>(*entry);

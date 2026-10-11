@@ -340,7 +340,15 @@ void testControls() {
     vrrStatus.ident = VIDEO_OUT_EVENT_VRR_STATUS;
     vrrStatus.filter = EVFILT_VIDEO_OUT;
     check(sceVideoOutGetEventId(&vrrStatus) == VIDEO_OUT_EVENT_VRR_STATUS, "VRR status event id rejected");
+    check(sceVideoOutVrrPegToFixedRate(handle, 0, 0) == 0, "VRR peg on an open handle failed");
+    check(sceVideoOutVrrUnpegFromFixedRate(handle) == 0, "VRR unpeg on an open handle failed");
+    expectFailure([&] { sceVideoOutVrrPegToFixedRate(handle, 1, 0); });
+    expectFailure([&] { sceVideoOutVrrPegToFixedRate(handle, 0, 1); });
+    expectFailure([&] { sceVideoOutVrrPegToFixedRate(handle, 0x100000000ull, 0); });
+    expectFailure([&] { sceVideoOutVrrPegToFixedRate(handle, 0, 0x100000000ull); });
     sceVideoOutClose(handle);
+    expectFailure([&] { sceVideoOutVrrPegToFixedRate(handle, 0, 0); });
+    expectFailure([&] { sceVideoOutVrrUnpegFromFixedRate(handle); });
     check(owner->GetTriggeredEvents(&event, 1) == 0, "closed port retained pending events");
     check(sceKernelDeleteEqueue(queue) == 0, "event queue deletion failed");
     LibcRunShutdown_nid_postfix();

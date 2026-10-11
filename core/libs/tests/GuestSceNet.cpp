@@ -1,3 +1,13 @@
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <cerrno>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "SceTypes.hpp"
 #include <algorithm>
@@ -213,6 +223,35 @@ static void CheckAddressText(int family, const char* text) {
 
 static bool ipv6Unavailable = false;
 
+static bool HostIpv6LoopbackUnavailable() {
+    const auto hostSocket = ::socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+#ifdef _WIN32
+    if (hostSocket == INVALID_SOCKET) {
+        const int error = WSAGetLastError();
+        return error == WSAEAFNOSUPPORT || error == WSAEPROTONOSUPPORT;
+    }
+#else
+    if (hostSocket < 0) return errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT;
+#endif
+
+    sockaddr_in6 loopback{};
+    loopback.sin6_family = AF_INET6;
+    loopback.sin6_port = htons(9);
+    loopback.sin6_addr = in6addr_loopback;
+    const char payload = 0;
+    const auto sent = ::sendto(hostSocket, &payload, sizeof(payload), 0,
+        reinterpret_cast<const sockaddr*>(&loopback), sizeof(loopback));
+#ifdef _WIN32
+    const int error = sent < 0 ? WSAGetLastError() : 0;
+    closesocket(hostSocket);
+    return sent < 0 && (error == WSAEADDRNOTAVAIL || error == WSAENETUNREACH || error == WSAEHOSTUNREACH);
+#else
+    const int error = sent < 0 ? errno : 0;
+    close(hostSocket);
+    return sent < 0 && (error == EADDRNOTAVAIL || error == ENETUNREACH || error == EHOSTUNREACH);
+#endif
+}
+
 static void CheckUnspecifiedIpv6() {
     std::array<std::uint8_t, 16> unspecified{};
     Require(sceNetInetPton(28, "::", unspecified.data()) == 1);
@@ -239,7 +278,14 @@ static void CheckUnspecifiedIpv6() {
     Require(sceNetInetPton(28, "::1", address.data() + 8) == 1);
 
     const char payload[] = "IPv6 wildcard receive";
-    Require(sceNetSendto(sender, payload, sizeof(payload), 0, address.data(), address.size()) == sizeof(payload));
+    const auto sent = sceNetSendto(sender, payload, sizeof(payload), 0, address.data(), address.size());
+    if (sent < 0 && *sceNetErrnoLoc() == 51 && HostIpv6LoopbackUnavailable()) {
+        Require(sceNetSocketClose(sender) == 0);
+        Require(sceNetSocketClose(receiver) == 0);
+        ipv6Unavailable = true;
+        return;
+    }
+    Require(sent == sizeof(payload));
     char received[sizeof(payload)]{};
     std::array<std::uint8_t, 28> peer{};
     size = peer.size();
@@ -430,7 +476,7 @@ int main() {
     Require(sceNetCtlGetState(&state) == 0);
     Require(state == 0 || state == 3);
     if (ipv6Unavailable) {
-        std::puts("skipped the IPv6 socket checks, the host has no IPv6");
+        std::puts("skipped the IPv6 socket checks, the host has no usable IPv6 loopback");
         return 77;
     }
 }

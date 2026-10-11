@@ -260,6 +260,13 @@ int APS5_VABI scePadVrControllerRead() {
  return 0;
 }
 
+int APS5_VABI scePadVrControllerReadState(int handle, void* state) {
+ (void)handle;
+ (void)state;
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 int APS5_VABI scePadIsRemoteController(int handle, bool* remote) {
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
  if (remote == nullptr) return PAD_ERROR_INVALID_ARG;
