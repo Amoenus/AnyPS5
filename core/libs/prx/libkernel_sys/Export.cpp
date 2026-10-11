@@ -38,6 +38,18 @@ int GuestError(const std::error_code& error) {
 
 extern "C" {
 
+std::int64_t APS5_VABI pathconf_nid_postfix(const char* path, int name) {
+    static_cast<void>(path);
+    static_cast<void>(name);
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI symlink_nid_postfix(const char*, const char*) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI fork_nid_postfix(void) {
     NotImplemented_nid_no_patch("fork: child processes");
     return -1;
