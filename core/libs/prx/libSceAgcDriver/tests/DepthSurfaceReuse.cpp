@@ -234,13 +234,13 @@ void RunDepthSurfaceReuseTests() {
                 constexpr std::uint64_t depthBase = 0x100000000ull;
                 constexpr std::uint64_t stencilBase = 0x200000000ull;
                 constexpr std::uint64_t metadataBase = 0x300000000ull;
-                DepthSurfaceView(context, {depthBase, stencilBase, extent, formatIndex == 1u ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT, 0.0f, 0, metadataBase, true, samples});
+                const DepthTarget target{depthBase, stencilBase, extent, formatIndex == 1u ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT, 0.0f, 0, metadataBase, true, samples};
                 for (const auto range : {std::array<std::uint64_t, 2>{depthBase, depthBytes}, std::array<std::uint64_t, 2>{stencilBase, stencilBytes}, std::array<std::uint64_t, 2>{metadataBase, metadataBytes}}) {
-                    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, range[0], 1u), "resident multisample plane base was not detected");
-                    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, range[0] + range[1] - 1u, 1u), "resident multisample plane final byte was not detected");
-                    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, range[0] - 1u, 2u), "resident multisample plane overlap from before its base was not detected");
-                    Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, range[0] - 1u, 1u), "adjacent bytes before a multisample plane overlap");
-                    Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, range[0] + range[1], 1u), "adjacent bytes after a multisample plane overlap");
+                    Require(DepthTargetGuestOverlap_nid_no_patch(target, range[0], 1u), "multisample plane base was not detected");
+                    Require(DepthTargetGuestOverlap_nid_no_patch(target, range[0] + range[1] - 1u, 1u), "multisample plane final byte was not detected");
+                    Require(DepthTargetGuestOverlap_nid_no_patch(target, range[0] - 1u, 2u), "multisample plane overlap from before its base was not detected");
+                    Require(!DepthTargetGuestOverlap_nid_no_patch(target, range[0] - 1u, 1u), "adjacent bytes before a multisample plane overlap");
+                    Require(!DepthTargetGuestOverlap_nid_no_patch(target, range[0] + range[1], 1u), "adjacent bytes after a multisample plane overlap");
                 }
                 ClearDepthSurfaces(context.device);
                 ++checked;
@@ -253,5 +253,5 @@ void RunDepthSurfaceReuseTests() {
         try { DepthPlaneBytes_nid_no_patch({16u, 16u}, 4u, samples); } catch (const std::runtime_error&) { rejected = true; }
         Require(rejected, "unsupported depth plane sample count did not throw");
     }
-    std::printf("Resident multisample depth footprint configurations checked=%u\n", checked);
+    std::printf("Multisample depth/stencil footprint configurations checked=%u\n", checked);
 }

@@ -1741,10 +1741,18 @@ void multisampleTests() {
                 depthQueue.context[0x012] = depthQueue.context[0x014] = 0x400000u;
                 depthQueue.context[0x013] = depthQueue.context[0x015] = 0x800000u;
                 depthQueue.context[0x200] = 2u;
+                depthQueue.context[0x2af] = 0x40002u;
                 const auto depthState = DecodeState(depthQueue);
                 Require(depthState.depth && depthState.depth->samples == 8u, "multisample depth slice lost its sample count");
                 Require(depthState.depth->address == 0x40000000ull + layer * AgcDriver::Graphics::DepthPlaneBytes_nid_no_patch(extent, format == 1u ? 2u : 4u, 8u), "multisample depth array slice uses a single-sample stride");
                 Require(depthState.depth->stencilAddress == 0x80000000ull + layer * AgcDriver::Graphics::DepthPlaneBytes_nid_no_patch(extent, 1u, 8u), "multisample stencil array slice uses a single-sample stride");
+                Require(depthState.depth->depthSwizzle == 24u && depthState.depth->pipeBankXor == 0u && depthState.depth->firstSlice == layer && depthState.depth->lastSlice == layer && depthState.depth->iterate256 && depthState.depth->htilePipeAligned && depthState.depth->htileVrsEncoding == 0u && AgcDriver::Graphics::DrawKeyCovers({AgcDriver::Graphics::RegisterBank::Context, 0x2af}), "multisample depth identity or HTILE draw-key coverage was lost");
+                auto xorQueue = depthQueue;
+                xorQueue.context[0x012] |= 0x80u;
+                xorQueue.context[0x014] |= 0x80u;
+                xorQueue.context[0x2af] |= 2u << 19u;
+                const auto xorDepth = DecodeState(xorQueue).depth;
+                Require(xorDepth && xorDepth->address == depthState.depth->address && xorDepth->pipeBankXor == 0x8000u && xorDepth->htileVrsEncoding == 2u, "multisample depth XOR or VRS encoding did not survive decode");
                 auto unsupported = depthQueue;
                 unsupported.context[0x010] &= ~(31u << 4u);
                 expectFailure([&] { DecodeState(unsupported); }, "64KB_Z_X");

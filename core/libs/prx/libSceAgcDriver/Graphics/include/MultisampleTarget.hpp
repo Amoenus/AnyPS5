@@ -35,6 +35,7 @@ VkImageView MultisampleTargetView(const Context& context, const ColorTarget& tar
 std::vector<std::byte> ReadMultisampleTargetSamples(const Context& context, const ColorTarget& target);
 void MarkMultisampleTargetDirty(const Context& context, const ColorTarget& target);
 void SynchronizeMultisampleTargetRead(std::uint64_t address, std::size_t bytes);
+void InstallResidentImageReadGuard_nid_no_patch();
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
 void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
 void ClearMultisampleTargets(VkDevice device);
