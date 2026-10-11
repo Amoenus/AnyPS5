@@ -22,7 +22,8 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         }
     }
     const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
-    const auto registeredShader = ProgramSnapshot(*submission.shaders, address);
+    auto registeredShader = RegisteredProgram(*submission.shaders, address, {0});
+    if (!registeredShader) registeredShader = ReadRawShader(address);
     const auto& snapshot = *registeredShader;
     require(snapshot.type == 0, "compute program refers to a non-compute shader");
     const auto userCount = (readRegister(queue.shader, 0x213) >> 1u) & 0x1fu;

@@ -4,11 +4,17 @@
 #include "prx/libkernel/System/include/GuestSignalMask.hpp"
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
+#include <thread>
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 extern "C" Pthread APS5_VABI scePthreadSelf();
@@ -170,6 +176,72 @@ void WriteHost(const Mask& mask, sigset_t& host) {
 #endif
 
 }  // namespace GuestSignalMask
+
+namespace {
+constexpr int GuestSigalrm = 14;
+struct AlarmState {
+    std::mutex lock;
+    std::condition_variable changed;
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    bool threadStarted = false;
+};
+
+AlarmState& Alarms() {
+    static auto* state = new AlarmState();
+    return *state;
+}
+
+void ExpireAlarm() {
+    std::uintptr_t handler = 0;
+    {
+        std::lock_guard lock(registration);
+        handler = dispositions[GuestSigalrm].handler;
+    }
+    if (handler == 1) return;
+    if (handler == 0) {
+        std::fprintf(stderr, "SIGALRM: the alarm expired with the default disposition; the process terminates\n");
+        std::fflush(stderr);
+        std::_Exit(128 + GuestSigalrm);
+    }
+    throw std::runtime_error("alarm: delivering SIGALRM to a guest handler is not implemented");
+}
+
+void RunAlarms() {
+    auto& alarms = Alarms();
+    std::unique_lock lock(alarms.lock);
+    for (;;) {
+        if (!alarms.deadline) {
+            alarms.changed.wait(lock);
+            continue;
+        }
+        const auto deadline = *alarms.deadline;
+        if (alarms.changed.wait_until(lock, deadline) != std::cv_status::timeout || alarms.deadline != deadline) continue;
+        alarms.deadline.reset();
+        lock.unlock();
+        ExpireAlarm();
+        lock.lock();
+    }
+}
+}
+
+extern "C" unsigned int APS5_VABI GuestAlarm_nid_no_patch(unsigned int seconds) {
+    auto& alarms = Alarms();
+    std::lock_guard lock(alarms.lock);
+    const auto now = std::chrono::steady_clock::now();
+    unsigned int remaining = 0;
+    if (alarms.deadline && *alarms.deadline > now) {
+        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(*alarms.deadline - now).count();
+        remaining = static_cast<unsigned int>((micros + 999999) / 1000000);
+    }
+    if (seconds == 0) alarms.deadline.reset();
+    else alarms.deadline = now + std::chrono::seconds(seconds);
+    if (!alarms.threadStarted) {
+        std::thread(RunAlarms).detach();
+        alarms.threadStarted = true;
+    }
+    alarms.changed.notify_all();
+    return remaining;
+}
 
 struct GuestStack {
     void* sp;
