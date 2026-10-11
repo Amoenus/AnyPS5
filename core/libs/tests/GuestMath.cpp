@@ -23,6 +23,8 @@ std::uint64_t APS5_VABI _Stoul_nid_postfix(const char*, char**, int);
 std::int64_t APS5_VABI atol_nid_postfix(const char*);
 long long APS5_VABI atoll_nid_postfix(const char*);
 int* APS5_VABI __error_nid_postfix();
+double APS5_VABI sqrt_nid_postfix(double);
+float APS5_VABI sqrtf_nid_postfix(float);
 long double APS5_VABI acosl_nid_postfix(long double);
 long double APS5_VABI frexpl_nid_postfix(long double, int*);
 struct LibcFloatConstant { std::uint32_t bits[4]; };
@@ -60,6 +62,17 @@ std::lldiv_t APS5_VABI lldiv_nid_postfix(long long, long long);
 std::lldiv_t APS5_VABI ldiv_nid_postfix(std::int64_t, std::int64_t);
 }
 static void Require(bool value) { if (!value) std::abort(); }
+
+static void CheckSquareRoot() {
+    Require(sqrt_nid_postfix(4.) == 2. && sqrtf_nid_postfix(6.25f) == 2.5f);
+    Require(std::bit_cast<std::uint64_t>(sqrt_nid_postfix(2.)) == 0x3ff6a09e667f3bcdull);
+    Require(std::bit_cast<std::uint32_t>(sqrtf_nid_postfix(2.f)) == 0x3fb504f3u);
+    Require(std::bit_cast<std::uint64_t>(sqrt_nid_postfix(0x1p-1074)) == 0x1e60000000000000ull);
+    Require(std::bit_cast<std::uint64_t>(sqrt_nid_postfix(-0.)) == 0x8000000000000000ull);
+    Require(std::bit_cast<std::uint32_t>(sqrtf_nid_postfix(-0.f)) == 0x80000000u);
+    Require(sqrt_nid_postfix(INFINITY) == INFINITY && sqrtf_nid_postfix(INFINITY) == INFINITY);
+    Require(std::isnan(sqrt_nid_postfix(-1.)) && std::isnan(sqrtf_nid_postfix(-1.f)));
+}
 
 static bool ExtendedBits(long double value, std::uint64_t mantissa, std::uint16_t signExponent) {
     unsigned char bytes[sizeof(long double)]{};
@@ -289,6 +302,7 @@ int main() {
     Require(std::isnan(logbf_nid_postfix(std::numeric_limits<float>::quiet_NaN())));
     Require(exp2_nid_postfix(-3.) == 0.125);
     Require(ldexp_nid_postfix(0.75, 4) == 12.);
+    CheckSquareRoot();
     CheckLongDouble();
     Require(scalbn_nid_postfix(0.75, -2) == 0.1875);
     Require(scalbnf_nid_postfix(0.75f, 4) == 12.f);
