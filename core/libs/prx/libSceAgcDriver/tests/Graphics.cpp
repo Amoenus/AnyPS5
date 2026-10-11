@@ -49,6 +49,7 @@ using AgcDriver::Graphics::Require;
 
 alignas(256) std::array<std::byte, 1024> colorMemory{};
 alignas(256) std::array<std::byte, 2048> sliceMemory{};
+alignas(256) std::array<std::byte, 131072> multisampleColorMemory{};
 
 AgcDriver::QueueState makeState() {
     AgcDriver::QueueState queue;
@@ -1689,12 +1690,29 @@ void multisampleTests() {
         queue.context[0x292] = 3;
         for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0xcc44;
         queue.context[0x31d] = 0x9000;
+        queue.context[0x321] = 0;
         queue.context[0x3b8] |= (0x18u << 19u) | 0x4000000u;
         queue.context[0x1b3] = 2;
         queue.context[0x1b4] = 2;
         return queue;
     };
     auto queue = multisampled();
+    auto dccQueue = queue;
+    const auto multisampleAddress = (reinterpret_cast<std::uintptr_t>(multisampleColorMemory.data()) + 65535u) & ~std::uintptr_t{65535u};
+    dccQueue.context[0x318] = static_cast<std::uint32_t>(multisampleAddress >> 8u);
+    dccQueue.context[0x390] = static_cast<std::uint32_t>(multisampleAddress >> 40u);
+    dccQueue.context[0x3b8] = (dccQueue.context[0x3b8] & ~(31u << 14u)) | (27u << 14u) | (1u << 30u);
+    dccQueue.context[0x31c] |= 0x10000000u;
+    dccQueue.context[0x31e] = 0x100038u;
+    dccQueue.context[0x325] = 0x1234;
+    std::vector<AgcDriver::Graphics::RegisterRead> dccReads;
+    AgcDriver::Graphics::RegisterReadLog() = &dccReads;
+    const auto dccColor = DecodeState(dccQueue).colors.front();
+    AgcDriver::Graphics::RegisterReadLog() = nullptr;
+    Require(dccColor.samples == 2u && dccColor.bytes == 65536u && dccColor.address == multisampleAddress && dccColor.dccAddress == 0x123400u && dccColor.dccControl == 0x100038u && dccColor.dccPipeAligned, "multisampled DCC target state did not decode its footprint or metadata fields");
+    for (const auto read : dccReads) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a multisampled DCC target register");
+    dccQueue.context[0x31e] |= 1u << 10u;
+    expectFailure([&] { DecodeState(dccQueue); }, "lossy modes");
     auto state = DecodeState(queue);
     Require(state.samples == 2 && state.colors.size() == 1 && state.colors[0].samples == 2 && state.colors[0].cmaskAddress == 0, "2x multisampling did not decode");
     const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);

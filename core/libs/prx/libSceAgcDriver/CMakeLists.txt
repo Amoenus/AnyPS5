@@ -202,6 +202,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleTarget.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleDcc.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleInitialContents.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetTransfer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Pipeline.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PipelineLibrary.cpp
@@ -286,6 +287,16 @@ set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceAgcDriver)
 
 if(BUILD_TESTING)
+    add_test_executable(agc_driver_msaa_initial_contents_tests tests/MultisampleInitialContents.cpp)
+    target_include_directories(agc_driver_msaa_initial_contents_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR} ${ANYPS5_SPIRV_HEADERS_INCLUDE_DIR})
+    target_link_libraries(agc_driver_msaa_initial_contents_tests PRIVATE libSceAgcDriver libc shader_recompiler_agc_driver)
+    set_target_properties(agc_driver_msaa_initial_contents_tests PROPERTIES CXX_EXTENSIONS OFF)
+    configure_windows_unwind(agc_driver_msaa_initial_contents_tests)
+    add_test(NAME agc_driver_msaa_initial_contents COMMAND agc_driver_msaa_initial_contents_tests)
+    set_tests_properties(agc_driver_msaa_initial_contents PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_driver_msaa_initial_contents PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    endif()
     add_test_executable(agc_driver_msaa_runtime_tests tests/MultisampleTexture.cpp)
     target_include_directories(agc_driver_msaa_runtime_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR} ${ANYPS5_SPIRV_HEADERS_INCLUDE_DIR})
     target_link_libraries(agc_driver_msaa_runtime_tests PRIVATE libSceAgcDriver libc SDL2-static shader_recompiler_agc_driver)
