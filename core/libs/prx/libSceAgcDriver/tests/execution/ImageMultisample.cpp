@@ -53,7 +53,7 @@ public:
 #ifdef _WIN32
         data = static_cast<std::byte*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
 #else
-        data = static_cast<std::byte*>(std::aligned_alloc(MultisampleTextureLayout::Alignment, bytes));
+        data = static_cast<std::byte*>(std::aligned_alloc(MultisampleTextureLayout::Alignment, ((bytes + MultisampleTextureLayout::Alignment - 1u) / MultisampleTextureLayout::Alignment) * MultisampleTextureLayout::Alignment));
 #endif
         Require(data != nullptr, "cannot allocate the multisampled guest surface");
         GuestAllocations::Mutation().Add(data, bytes, true, true, true);

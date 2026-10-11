@@ -240,13 +240,13 @@ private:
     VkPipeline pipeline = VK_NULL_HANDLE;
 };
 
-void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments, bool arrayed, bool chunks, std::uint32_t baseArray = 0u, bool firstLayer = false, bool recorded = false) {
+void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments, bool arrayed, bool chunks, std::uint32_t baseArray = 0u, bool firstLayer = false, bool recorded = false, TextureTileMode tileMode = TextureTileMode::kR64KBX) {
     const auto width = chunks ? 65u : 5u;
     const auto height = chunks ? 63u : 3u;
     const auto layers = arrayed ? 2u : 1u;
     const auto bytes = BytesPerElement(format);
     const auto count = width * height * layers * fragments;
-    const bool floating = format == 71u;
+    const bool floating = format == 71u || format == 7u || format == 22u;
     if (chunks) {
         context.limits.maxStorageBufferRange = 4096u;
         context.limits.maxComputeWorkGroupCount[0] = 2u;
@@ -259,7 +259,7 @@ void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments
     descriptor.depthOrLastArray = layers - 1u;
     descriptor.mipCount = 1u;
     descriptor.allocatedMipCount = 1u;
-    descriptor.tileMode = TextureTileMode::kR64KBX;
+    descriptor.tileMode = tileMode;
     descriptor.dimension = arrayed ? TextureDimension::k2DMsaaArray : TextureDimension::k2DMsaa;
     descriptor.format = format;
     descriptor.fragments = fragments;
@@ -271,7 +271,12 @@ void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments
     for (std::uint32_t element = 0u; element < count; ++element) {
         auto& values = expected[element];
         values = {0u, 0u, 0u, floating ? std::bit_cast<std::uint32_t>(1.0f) : 1u};
-        if (floating) {
+        if (format == 7u || format == 22u) {
+            const auto value = format == 7u ? static_cast<float>(element & 1u) : static_cast<float>((element * 13u) & 127u) / 128.0f;
+            const auto bits = format == 7u ? (element & 1u) * 65535u : std::bit_cast<std::uint32_t>(value);
+            std::memcpy(linear.data() + element * bytes, &bits, bytes);
+            values[0] = std::bit_cast<std::uint32_t>(value);
+        } else if (floating) {
             for (std::uint32_t component = 0u; component < 4u; ++component) {
                 const float value = static_cast<float>((element / fragments) % 7u) * 16.0f + static_cast<float>(element % fragments) + static_cast<float>(component) * 0.25f;
                 const auto bits = std::bit_cast<std::uint32_t>(value);
@@ -397,7 +402,7 @@ void CheckRefusals(Context context) {
     reject(context, candidate, false, "compressed multisampled");
     candidate = descriptor;
     candidate.tileMode = TextureTileMode::kZ64KBX;
-    reject(context, candidate, false, "multisampled depth");
+    reject(context, candidate, false, "numeric Z depth");
     reject(context, descriptor, true, "multisampled comparison");
     auto disabled = context;
     disabled.storageImageMultisample = false;
@@ -413,7 +418,7 @@ void CheckRefusals(Context context) {
     try { const StorageTexture storage(context, detiler, descriptor, 0u); }
     catch (const std::runtime_error& error) { rejected = std::string(error.what()).find("multisampled storage texture writes") != std::string::npos; }
     Require(rejected, "multisampled storage texture writes were not refused");
-    std::puts("compressed/depth/storage MS paths and disabled upload features refused");
+    std::puts("compressed/unsupported depth/storage MS paths and disabled upload features refused");
 }
 
 void CheckShapes() {
@@ -481,6 +486,15 @@ int main(int argc, char** argv) {
                 CheckTexture(context, 71u, fragments, true, false, 0u, false, true);
                 checked += 3u;
             } else unavailable += 3u;
+        }
+        for (const auto format : {7u, 22u}) {
+            for (const auto fragments : {2u, 4u, 8u}) {
+                if (!Supports(context, format, fragments)) { unavailable += 2u; continue; }
+                for (const bool arrayed : {false, true}) {
+                    CheckTexture(context, format, fragments, arrayed, false, arrayed ? 1u : 0u, false, arrayed, TextureTileMode::kZ64KBX);
+                    ++checked;
+                }
+            }
         }
         Require(checked != 0u, "device advertises no supported MS test cases");
         if (std::getenv("ANYPS5_REQUIRE_MSAA_ALL") != nullptr) Require(unavailable == 0u, "device did not exercise every required MS case");

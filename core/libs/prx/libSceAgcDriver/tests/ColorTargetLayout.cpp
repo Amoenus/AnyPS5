@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
 #include "BdaTests.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
@@ -26,6 +27,25 @@ void reject(TAction action) {
 }
 
 void RunColorTargetLayoutTests() {
+    Require(MultisampleHtileBytes_nid_no_patch(3840u, 2160u, 1u) == 655360u, "multisampled HTILE geometry differs");
+    Require(MultisampleHtileBytes_nid_no_patch(1025u, 513u, 3u) == 393216u, "multisampled HTILE boundary or layer stride differs");
+    for (const auto extent : {0u, 16385u}) {
+        reject([&] { MultisampleHtileBytes_nid_no_patch(extent, 1u, 1u); });
+        reject([&] { MultisampleHtileBytes_nid_no_patch(1u, extent, 1u); });
+    }
+    for (const auto layers : {0u, 8193u}) reject([&] { MultisampleHtileBytes_nid_no_patch(1u, 1u, layers); });
+    for (const auto fragments : {2u, 4u, 8u}) {
+        Require(MultisampleHtileOffset_nid_no_patch(fragments, 1025u, 513u, 3u, 0xcf00u, 1024u, 512u, 2u) < 393216u, "multisampled HTILE offset exceeds its extent");
+    }
+    for (const auto fragments : {0u, 1u, 3u, 16u}) reject([&] { MultisampleHtileOffset_nid_no_patch(fragments, 1u, 1u, 1u, 0u, 0u, 0u, 0u); });
+    reject([&] { MultisampleHtileOffset_nid_no_patch(8u, 1u, 1u, 1u, 0x100u, 1u, 0u, 0u); });
+    reject([&] { MultisampleHtileOffset_nid_no_patch(8u, 1u, 1u, 1u, 0x1000u, 0u, 0u, 0u); });
+    Require(MultisampleHtileOffset_nid_no_patch(8u, 1u, 1u, 1u, 0x100u, 0u, 0u, 0u) == 256u, "multisampled HTILE loses its pipe XOR");
+    Require(MultisampleHtileOffset_nid_no_patch(8u, 1u, 1u, 2u, 0u, 0u, 0u, 1u) != MultisampleHtileOffset_nid_no_patch(4u, 1u, 1u, 2u, 0u, 0u, 0u, 1u), "multisampled HTILE loses its 8x layer pattern");
+    for (const auto word : {0u, 0xf0u, 0x30u}) Require(MultisampleHtileState_nid_no_patch(word) == HtileDepthState::ClearZero, "HTILE zero clear differs");
+    for (const auto word : {0xfffffff0u, 0xfffc00f0u, 0xfffc0030u}) Require(MultisampleHtileState_nid_no_patch(word) == HtileDepthState::ClearOne, "HTILE one clear differs");
+    for (const auto word : {0x0000000fu, 0xfffc000fu, 0xfffff3ffu, 0x1234567fu}) Require(MultisampleHtileState_nid_no_patch(word) == HtileDepthState::Uncompressed, "HTILE expanded depth differs");
+    for (const auto word : {1u, 2u, 8u, 0x55555550u}) reject([&] { MultisampleHtileState_nid_no_patch(word); });
     Require(MultisampleDccBytes_nid_no_patch(8u, 8u, 3840u, 2160u, 1u) == 552960u, "multisampled DCC ignores its compressed-fragment limit");
     for (const auto fragments : {2u, 4u, 8u}) {
         Require(MultisampleDccBytes_nid_no_patch(8u, fragments, 257u, 257u, 3u) == 49152u, "multisampled DCC boundary or array geometry differs");
