@@ -522,6 +522,8 @@ extern "C" {
 int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name) {
     if (!thread || !entry) throw std::runtime_error("scePthreadCreate: null arg");
     if (attr && !*attr) throw std::runtime_error("scePthreadCreate: null attributes");
+    if (attr && (*attr)->_inheritsched != 4 && (*attr)->_scope != 2)
+        NotImplemented_nid_no_patch("process contention scope");
     auto p = std::make_unique<PthreadPrivate>(attr ? *attr : nullptr);
     bool detached = false;
     if (attr && *attr) detached = ((*attr)->_detachstate == DETACH_DETACHED);

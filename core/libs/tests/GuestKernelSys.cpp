@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <source_location>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -18,6 +20,8 @@
 #endif
 
 extern "C" {
+std::int64_t APS5_VABI pathconf_nid_postfix(const char*, int);
+int APS5_VABI fork_nid_postfix(void);
 int APS5_VABI fstatfs_nid_postfix(int, void*);
 int APS5_VABI _fstatfs_nid_postfix(int, void*);
 int APS5_VABI open_nid_postfix(const char*, int, int);
@@ -47,6 +51,31 @@ int Error() {
 }
 
 int main() {
+    char pathconfPath[] = "unchanged-path";
+    const auto rejectsPathconf = [](const char* path, int name) {
+        *__error_nid_postfix() = 71;
+        bool rejected = false;
+        try {
+            static_cast<void>(pathconf_nid_postfix(path, name));
+        } catch (const std::runtime_error& error) {
+            rejected = std::strcmp(error.what(), "pathconf_nid_postfix not implemented") == 0;
+        }
+        return rejected && *__error_nid_postfix() == 71;
+    };
+    Require(rejectsPathconf(pathconfPath, 4));
+    Require(std::strcmp(pathconfPath, "unchanged-path") == 0);
+    Require(rejectsPathconf(nullptr, 4));
+    Require(rejectsPathconf(reinterpret_cast<const char*>(std::uintptr_t{1}), 4));
+    Require(rejectsPathconf(pathconfPath, -1));
+    *__error_nid_postfix() = 73;
+    bool forkUnsupported = false;
+    try {
+        fork_nid_postfix();
+    } catch (const std::runtime_error& error) {
+        forkUnsupported = std::string_view(error.what()) == "fork: child processes not implemented";
+    }
+    Require(forkUnsupported);
+    Require(Error() == 73);
     Require(setsid_nid_postfix() == -1 && Error() == 1);
     Require(umask_nid_postfix(0) == 022);
     Require(umask_nid_postfix(07777) == 0);

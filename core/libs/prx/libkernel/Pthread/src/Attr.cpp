@@ -82,6 +82,7 @@ int APS5_VABI scePthreadAttrGet(Pthread thread, PthreadAttr* attr) {
     (*attr)->_schedpriority = thread->priority.load(std::memory_order_relaxed);
     (*attr)->_schedpolicy = SCHED_FIFO_PS5;
     (*attr)->_inheritsched = 4;
+    (*attr)->_scope = 2;
     (*attr)->_affinity = thread->affinity.load(std::memory_order_relaxed);
     (*attr)->_affinityExplicit = true;
     return SCE_OK;
