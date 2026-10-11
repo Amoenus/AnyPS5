@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "ThreadOwned.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
@@ -566,6 +567,7 @@ std::shared_ptr<Texture> multisampleDepthSnapshot(const Context& context, const 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false) {
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
+    RequireNoMultisampleTarget(resource.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a texture read");
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     if (resource.fragments != 1u) {
         Require(!depthCompare, "multisampled depth comparison sampling is not implemented");
@@ -911,6 +913,7 @@ GuestTextureResource StorageSurface(const Context& context, const GuestTextureRe
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, std::uint32_t mip, std::uint64_t guestBytes) {
+    RequireNoMultisampleTarget(viewed.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a storage image access");
     if (DepthSurfaceAt(viewed.baseAddress)) {
         char text[112];
         std::snprintf(text, sizeof(text), "AGC graphics: storage image access to depth/stencil surface 0x%llx is not implemented", static_cast<unsigned long long>(viewed.baseAddress));
