@@ -894,17 +894,18 @@ bool DepthSupported(const Context& context, VkFormat format, std::uint32_t fragm
     return result == VK_SUCCESS && (properties.sampleCounts & fragments) != 0u && (context.limits.framebufferDepthSampleCounts & fragments) != 0u;
 }
 
-void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one) {
+void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing = false, bool depthOnly = false) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(DepthPlaneBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
     TargetMemory memory(bytes), metadata(65536u);
     const auto metadataBytes = MultisampleHtileBytes_nid_no_patch(extent.width, extent.height, 1u);
-    const std::uint32_t pattern = one ? 0xfffc00f0u : 0u;
+    const std::uint32_t pattern = one ? (depthOnly ? 0xfffffff0u : 0xfffc00f0u) : 0u;
     for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
     DepthTarget target{memory.Address(), 0u, extent, format, one ? 1.0f : 0.0f, 0u, metadata.Address(), false, fragments};
     target.depthSwizzle = 24u;
     target.pipeBankXor = one ? 0x8c00u : 0u;
     target.iterate256 = target.htilePipeAligned = true;
+    target.htileDepthOnly = depthOnly;
     Recorder recorder(context);
     recorder.Activate();
     struct Cleanup {
@@ -958,6 +959,28 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
             batch.SubmitAndWait();
             check(true, offset);
         }
+        if (clearing) {
+            for (std::uint32_t iteration = 0u; iteration < 3u; ++iteration) {
+                {
+                    CommandBatch batch(context);
+                    raster.Run(batch.Handle(), static_cast<float>(iteration) / 16.0f);
+                    batch.SubmitAndWait();
+                }
+                NoteHtileDepthClear(target.htileAddress, metadataBytes);
+                AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, metadataBytes, [&] {
+                    for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
+                });
+                Require(DepthSurfaceHolds(context, DecodeTextureResource(words), texture.get()), "completed native depth clear lost its retained sampled view");
+                recorder.Sync();
+                Require(DepthSurfaceView(context, target) == view && CachedSampledTexture(context, words) == texture, "completed native depth clear replaced an attachment or cached view");
+                std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+                CommandBatch batch(context);
+                fetch.Run(batch.Handle(), count);
+                RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+                batch.SubmitAndWait();
+                check(false, 0.0f);
+            }
+        }
     }
     Require(std::all_of(memory.Data(), memory.Data() + bytes, [](auto value) { return value == std::byte{0xa5}; }), "native depth sampling silently published guest memory");
     std::array<std::byte, 1> probe{};
@@ -1001,7 +1024,7 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
     TargetRefuses([&] { CachedSampledTexture(context, words); }, "guest writes");
     TargetRefuses([&] { DepthSurfaceHolds(context, resource, texture.get()); }, "guest writes");
     texture.reset();
-    std::printf("Native depth format=%u samples=%u clear=%u: imported, rasterized twice, sampled and refused conflicts\n", static_cast<std::uint32_t>(format), fragments, one);
+    std::printf("Native depth format=%u samples=%u clear=%u depthOnly=%u clearCycles=%u: imported, rasterized, sampled and refused conflicts\n", static_cast<std::uint32_t>(format), fragments, one, depthOnly, clearing ? 3u : 0u);
 }
 
 void CheckDepthRefusals(Context context, std::uint32_t fragments) {
@@ -1048,9 +1071,9 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
         TargetRefuses([&] { DepthSurfaceView(context, unsupported); }, "watched guest memory");
         ++checked;
     }
-    for (const std::uint32_t word : {0x40u, 0xfffc00f0u, 0xfu}) {
+    for (const std::uint32_t word : {0x1000u, 0xfffc00f0u, 0xfu}) {
         std::memcpy(metadata.Data() + metadataBytes - 4u, &word, 4u);
-        TargetRefuses([&] { DepthSurfaceView(context, target); }, word == 0x40u ? "compression" : "clear value");
+        TargetRefuses([&] { DepthSurfaceView(context, target); }, word == 0x1000u ? "compression" : "clear value");
         std::memset(metadata.Data(), 0, metadataBytes);
         ++checked;
     }
@@ -1088,6 +1111,46 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
     TargetRefuses([&] { CachedSampledTexture(context, words); }, "metadata fill transition");
     ++checked;
     reset();
+    for (std::uint32_t field = 0u; field < 10u; ++field) {
+        DepthSurfaceView(context, target);
+        auto texture = CachedSampledTexture(context, words);
+        recorder.Sync();
+        const auto store = [&](std::uint32_t word) {
+            AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, metadataBytes, [&] {
+                for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &word, 4u);
+            });
+        };
+        if (field == 1u) store(0u);
+        NoteHtileDepthClear(target.htileAddress, field == 2u ? metadataBytes - 1u : metadataBytes);
+        if (field != 0u && field != 1u) store(field == 4u ? 0x1000u : 0u);
+        std::string_view expected = "completed HTILE store";
+        switch (field) {
+            case 2u: expected = "incomplete"; break;
+            case 3u: {
+                const std::uint32_t one = 0xfffc00f0u;
+                AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress + metadataBytes - 4u, std::as_bytes(std::span(&one, 1u)));
+                expected = "clear value";
+                break;
+            }
+            case 4u: expected = "compression"; break;
+            case 5u: metadata.Data()[metadataBytes - 1u] = std::byte{0}; expected = "CPU writes"; break;
+            case 6u: memory.Data()[bytes - 1u] = std::byte{0}; expected = "guest writes"; break;
+            case 7u: QueueTargetByteWrite(context, recorder, target.htileAddress + metadataBytes - 1u, std::byte{0}); expected = "external GPU writes"; break;
+            case 8u: QueueTargetByteWrite(context, recorder, target.address + bytes - 1u, std::byte{0}); expected = "external GPU writes"; break;
+            case 9u: {
+                auto unsupported = target;
+                unsupported.clearDepth = 0.5f;
+                expected = "clear value";
+                TargetRefuses([&] { DepthSurfaceView(context, unsupported); }, expected);
+                break;
+            }
+        }
+        TargetRefuses([&] { CachedSampledTexture(context, words); }, expected);
+        TargetRefuses([&] { DepthSurfaceHolds(context, DecodeTextureResource(words), texture.get()); }, expected);
+        texture.reset();
+        ++checked;
+        reset();
+    }
     DepthSurfaceView(context, target);
     recorder.Sync();
     AgcDriver::GuestMemory::Unwatch(target.address, bytes);
@@ -1492,6 +1555,19 @@ int main(int argc, char** argv) {
                 if (DepthSupported(context, VK_FORMAT_D32_SFLOAT, fragments)) { CheckDepthRefusals(context, fragments); return 0; }
             }
             Require(false, "no supported native depth refusal configuration");
+        }
+        if (argc > 1 && std::string(argv[1]) == "--depth-clears") {
+            for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    if (!DepthSupported(context, format, fragments)) { unavailable += 4u; continue; }
+                    for (const bool depthOnly : {false, true}) {
+                        for (const bool one : {false, true}) { CheckDepthTarget(context, format, fragments, one, true, depthOnly); ++checked; }
+                    }
+                }
+            }
+            Require(checked != 0u && (unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr), "required native depth clear configurations are unsupported");
+            std::printf("Native depth clear checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--depth-targets") {
             for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {

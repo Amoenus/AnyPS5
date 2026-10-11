@@ -21,7 +21,8 @@ extern "C" bool DepthSurfaceGuestOverlap_nid_no_patch(const Context& context, st
 extern "C" bool DepthTargetGuestOverlap_nid_no_patch(const DepthTarget& target, std::uint64_t address, std::uint64_t bytes);
 void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t bytes);
 std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);
-void NoteHtileDepthClear(std::uint64_t htileAddress);
+extern "C" std::uint64_t HtileDepthClearBytes_nid_no_patch(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, std::span<const std::uint32_t> packet, std::uint64_t indirectArguments);
+void NoteHtileDepthClear(std::uint64_t htileAddress, std::uint64_t bytes = 0u);
 bool DepthSurfaceHolds(const Context& context, const GuestTextureResource& resource, const Texture* texture);
 void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
 VkImageAspectFlags HtileFillClears(std::uint32_t pattern, bool stencilInHtile);

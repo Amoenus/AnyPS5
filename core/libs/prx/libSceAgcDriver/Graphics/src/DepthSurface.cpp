@@ -78,7 +78,7 @@ std::array<GuestMemory::UnchangedQuery, 2> prepareMultisampleDepth(const Context
     std::vector<std::uint32_t> metadata(ranges[1].bytes / sizeof(std::uint32_t));
     GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(metadata)), 256u);
     const auto expected = target.clearDepth == 0.0f ? HtileDepthState::ClearZero : HtileDepthState::ClearOne;
-    for (const auto word : metadata) Require(MultisampleHtileState_nid_no_patch(word) == expected, "native multisample depth initial HTILE does not prove its clear value");
+    for (const auto word : metadata) Require(MultisampleHtileClearState_nid_no_patch(word, target.htileDepthOnly) == expected, "native multisample depth initial HTILE does not prove its clear value");
     for (const auto& range : ranges) GuestMemory::CollectWritesUncached(range.address, range.bytes);
     Require(GuestMemory::UnchangedSinceAll(ranges), "guest writes raced native multisample depth import");
     return ranges;
@@ -86,7 +86,7 @@ std::array<GuestMemory::UnchangedQuery, 2> prepareMultisampleDepth(const Context
 
 class DepthSurface {
 public:
-    DepthSurface(const Context& context, const DepthTarget& target, std::array<GuestMemory::UnchangedQuery, 2> initial = {}) : context(context), target(target), initial(initial) {
+    DepthSurface(const Context& context, const DepthTarget& target, std::array<GuestMemory::UnchangedQuery, 2> initial = {}) : clearDepth(target.clearDepth), clearStencil(target.clearStencil), context(context), target(target), initial(initial) {
         this->context.bufferPool.reset();
         VkFormatProperties properties{};
         context.formatProperties(context.physical, target.format, &properties);
@@ -156,13 +156,32 @@ public:
     DepthSurface(const DepthSurface&) = delete;
     DepthSurface& operator=(const DepthSurface&) = delete;
 
-    void CheckCurrent() const {
+    void CheckCurrent() {
         if (target.samples == 1u) return;
         Require(refusal.empty(), refusal);
         for (const auto& range : initial) {
             Require(GuestMemory::Accessible(reinterpret_cast<const void*>(range.address), range.bytes) && GuestMemory::Watched(range.address, range.bytes), "native multisample depth requires watched accessible guest memory");
             if (const auto* recorder = RecorderFor(context)) Require(!recorder->PendingWriteOverlaps(range.address, range.bytes), "external GPU writes over native multisample depth are not implemented");
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
+        }
+        if (clearGeneration != 0u) {
+            Require(GuestMemory::UnchangedSince(initial[0].address, initial[0].bytes, initial[0].generation), "guest writes over native multisample depth are not implemented");
+            const auto& metadata = initial[1];
+            Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
+            Require(GuestMemory::StoredOver(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no completed HTILE store");
+            Require(clearDepth == 0.0f || clearDepth == 1.0f, "native multisample depth clear value is not implemented");
+            auto current = initial;
+            current[1].generation = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
+            std::vector<std::uint32_t> words(metadata.bytes / sizeof(std::uint32_t));
+            std::memcpy(words.data(), reinterpret_cast<const void*>(metadata.address), metadata.bytes);
+            const auto expected = clearDepth == 0.0f ? HtileDepthState::ClearZero : HtileDepthState::ClearOne;
+            for (const auto word : words) Require(MultisampleHtileClearState_nid_no_patch(word, target.htileDepthOnly) == expected, "native multisample depth completed HTILE does not prove its clear value");
+            for (const auto& range : current) GuestMemory::CollectWritesUncached(range.address, range.bytes);
+            Require(GuestMemory::UnchangedSinceAll(current), "guest writes raced native multisample depth clear");
+            Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
+            RecordClear(VK_IMAGE_ASPECT_DEPTH_BIT);
+            initial = current;
+            clearGeneration = 0u;
         }
         Require(GuestMemory::UnchangedSinceAll(initial), "guest writes over native multisample depth are not implemented");
     }
@@ -180,6 +199,10 @@ public:
         const auto aspects = pendingClear & (VK_IMAGE_ASPECT_DEPTH_BIT | (target.stencilAddress != 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u));
         pendingClear = 0;
         if (aspects == 0) return;
+        RecordClear(aspects);
+    }
+
+    void RecordClear(VkImageAspectFlags aspects) {
         auto* recorder = RecorderFor(context);
         std::unique_ptr<CommandBatch> batch;
         if (recorder == nullptr) batch = std::make_unique<CommandBatch>(context);
@@ -234,7 +257,8 @@ public:
     VkImageView view = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     std::string refusal;
-    const std::array<GuestMemory::UnchangedQuery, 2> initial;
+    std::array<GuestMemory::UnchangedQuery, 2> initial;
+    std::uint64_t clearGeneration = 0u;
 
 private:
     std::map<std::array<std::uint32_t, 12>, std::shared_ptr<Texture>> textures;
@@ -251,7 +275,7 @@ private:
 };
 
 bool sameSurface(const DepthTarget& a, const DepthTarget& b) {
-    return a.address == b.address && a.stencilAddress == b.stencilAddress && a.extent.width == b.extent.width && a.extent.height == b.extent.height && a.format == b.format && a.samples == b.samples && (a.samples == 1u || (a.htileAddress == b.htileAddress && a.htileStencil == b.htileStencil && a.depthSwizzle == b.depthSwizzle && a.pipeBankXor == b.pipeBankXor && a.firstSlice == b.firstSlice && a.lastSlice == b.lastSlice && a.iterate256 == b.iterate256 && a.htilePipeAligned == b.htilePipeAligned && a.htileVrsEncoding == b.htileVrsEncoding));
+    return a.address == b.address && a.stencilAddress == b.stencilAddress && a.extent.width == b.extent.width && a.extent.height == b.extent.height && a.format == b.format && a.samples == b.samples && (a.samples == 1u || (a.htileAddress == b.htileAddress && a.htileStencil == b.htileStencil && a.depthSwizzle == b.depthSwizzle && a.pipeBankXor == b.pipeBankXor && a.firstSlice == b.firstSlice && a.lastSlice == b.lastSlice && a.iterate256 == b.iterate256 && a.htilePipeAligned == b.htilePipeAligned && a.htileVrsEncoding == b.htileVrsEncoding && a.htileDepthOnly == b.htileDepthOnly));
 }
 
 std::mutex& surfacesMutex() {
@@ -328,12 +352,25 @@ std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::s
     return userData[2] | (static_cast<std::uint64_t>(userData[3]) << 32u);
 }
 
-void NoteHtileDepthClear(std::uint64_t htileAddress) {
+extern "C" std::uint64_t HtileDepthClearBytes_nid_no_patch(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, std::span<const std::uint32_t> packet, std::uint64_t indirectArguments) {
+    if (userData.size() != 6u || packet.size() < 5u || indirectArguments != 0u || compute.PartialGroups() || !compute.groupIdEnable[0] || compute.threadIdComponentCount == 0u || compute.threadIdComponentCount > 3u) return 0u;
+    if (packet[1] == 0u || packet[2] != 1u || packet[3] != 1u || (packet[4] & 0x23u) != 1u) return 0u;
+    const auto address = HtileDepthClearAddress(code, userData, compute.numThreads);
+    if (address == 0u || (address & 15u) != 0u) return 0u;
+    const auto bytes = static_cast<std::uint64_t>(packet[1]) * 1024u;
+    return address <= std::numeric_limits<std::uint64_t>::max() - bytes ? bytes : 0u;
+}
+
+void NoteHtileDepthClear(std::uint64_t htileAddress, std::uint64_t bytes) {
     std::lock_guard lock(surfacesMutex());
     bool existing = false;
     for (const auto& surface : surfaces()) {
         if (surface->target.htileAddress != htileAddress) continue;
-        if (surface->target.samples != 1u) surface->refusal = "native multisample depth fast-clear transition is not implemented";
+        if (surface->target.samples != 1u) {
+            const auto& metadata = surface->initial[1];
+            if (bytes < metadata.bytes || !GuestMemory::Accessible(reinterpret_cast<const void*>(metadata.address), metadata.bytes) || !GuestMemory::Watched(metadata.address, metadata.bytes)) surface->refusal = "native multisample depth incomplete or untracked fast-clear transition is not implemented";
+            else surface->clearGeneration = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
+        }
         else surface->pendingClear |= VK_IMAGE_ASPECT_DEPTH_BIT;
         existing = true;
     }

@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ParallelCompare.hpp"
@@ -1041,6 +1042,15 @@ void DepthStencilTests() {
     const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
     Require(rejection.empty(), "precheck rejected a stencil draw with a surface: " + rejection);
     Require(state.depth && state.depth->address == 0x10000 && state.depth->stencilAddress == 0x20000 && state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT && state.depth->clearStencil == 7 && state.depth->htileAddress == 0x10000030000ull && !state.depth->htileStencil, "depth surface decode changed");
+    Require(state.depth->htileDepthOnly, "TILE_STENCIL_DISABLE did not retain the depth-only HTILE layout");
+    {
+        auto depthOnly = queue;
+        depthOnly.context[0x011] &= ~1u;
+        Require(AgcDriver::Graphics::DecodeState(depthOnly).depth->htileDepthOnly, "absence of a stencil plane lost TILE_STENCIL_DISABLE");
+        depthOnly.context[0x011] &= ~(1u << 29u);
+        const auto sharedLayout = AgcDriver::Graphics::DecodeState(depthOnly);
+        Require(!sharedLayout.depth->htileDepthOnly && !sharedLayout.depth->htileStencil, "HTILE encoding was inferred from absence of a stencil plane");
+    }
     {
         queue.context[0x011] &= ~(1u << 29u);
         const auto stencilTiled = AgcDriver::Graphics::DecodeState(queue);
@@ -1206,6 +1216,19 @@ void OneDimensionalColorTests() {
 }
 
 void htileDepthClearTests() {
+    using AgcDriver::Graphics::HtileDepthState;
+    using AgcDriver::Graphics::MultisampleHtileClearState_nid_no_patch;
+    for (const auto stencil : {0u, 0x30u, 0x40u, 0xf0u, 0x3f0u, 0xff0u}) {
+        Require(MultisampleHtileClearState_nid_no_patch(stencil, false) == HtileDepthState::ClearZero, "stencil metadata changed a depth/stencil-layout zero clear");
+        Require(MultisampleHtileClearState_nid_no_patch(0xfffc0000u | stencil, false) == HtileDepthState::ClearOne, "stencil metadata changed a depth/stencil-layout one clear");
+    }
+    Require(MultisampleHtileClearState_nid_no_patch(0u, true) == HtileDepthState::ClearZero && MultisampleHtileClearState_nid_no_patch(0xfffffff0u, true) == HtileDepthState::ClearOne, "depth-only HTILE clear ranges differ");
+    for (const bool depthOnly : {false, true}) {
+        Require(MultisampleHtileClearState_nid_no_patch(0xffffffffu, depthOnly) == HtileDepthState::Uncompressed, "expanded metadata was taken for a fast clear");
+        for (const auto word : {1u, 0x1000u, depthOnly ? 0xfffc00f0u : 0xfffffff0u}) {
+            expectFailure([&] { static_cast<void>(MultisampleHtileClearState_nid_no_patch(word, depthOnly)); }, "compression or clear layout");
+        }
+    }
     static constexpr std::array<std::uint32_t, 17> kernel{0xd7460000u, 0x04010c06u, 0x34000084u, 0xdc388000u, 0x04020000u, 0xbf8c3f70u, 0xd7710008u, 0x00120805u, 0xd7710009u, 0x00120a05u, 0xd771000au, 0x00120c05u, 0xd771000bu, 0x00120e05u, 0xdc788000u, 0x00020800u, 0xbf810000u};
     const std::array<std::uint32_t, 3> wave{64, 1, 1};
     const auto address = [&](std::span<const std::uint32_t> code, std::array<std::uint32_t, 6> userData, std::array<std::uint32_t, 3> threads) {
@@ -1219,6 +1242,51 @@ void htileDepthClearTests() {
     other[6] ^= 1u;
     Require(address(other, {0, 0, 0x0dc50000u, 0x40u, 0u, 0x00000ff0u}, wave) == 0, "a different kernel was taken for RADV's HTILE update");
     Require(address(std::span(kernel).first(16), {0, 0, 0x0dc50000u, 0x40u, 0u, 0x00000ff0u}, wave) == 0, "a truncated kernel was taken for RADV's HTILE update");
+    const std::array<std::uint32_t, 6> users{0u, 0u, 0x91b00000u, 0x40u, 0u, 0xff0u};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u, {}};
+    const std::array<std::uint32_t, 5> dispatch{0xc0031500u, 640u, 1u, 1u, 0x2045u};
+    using AgcDriver::Graphics::HtileDepthClearBytes_nid_no_patch;
+    Require(HtileDepthClearBytes_nid_no_patch(kernel, users, compute, dispatch, 0u) == 655360u, "the captured full HTILE dispatch coverage differs");
+    for (const auto groups : {1u, 32u, 63u, 64u, 639u, 641u}) {
+        auto changed = dispatch;
+        changed[1] = groups;
+        Require(HtileDepthClearBytes_nid_no_patch(kernel, users, compute, changed, 0u) == static_cast<std::uint64_t>(groups) * 1024u, "HTILE coverage did not follow the dispatch extent");
+    }
+    for (std::uint32_t field = 0u; field < 14u; ++field) {
+        auto changed = compute;
+        auto packet = dispatch;
+        auto data = users;
+        std::uint64_t indirect = 0u;
+        switch (field) {
+            case 0u: changed.numThreads[0] = 32u; break;
+            case 1u: changed.numThreads[1] = 2u; break;
+            case 2u: changed.groupIdEnable[0] = false; break;
+            case 3u: changed.threadIdComponentCount = 0u; break;
+            case 4u: changed.threadIdComponentCount = 4u; break;
+            case 5u: changed.partialThreads = {63u, 1u, 1u}; break;
+            case 6u: packet[1] = 0u; break;
+            case 7u: packet[2] = 2u; break;
+            case 8u: packet[3] = 2u; break;
+            case 9u: packet[4] &= ~1u; break;
+            case 10u: packet[4] |= 0x2u; break;
+            case 11u: packet[4] |= 0x20u; break;
+            case 12u: indirect = 0x10000u; break;
+            case 13u: data[2] = 0xffffff00u; data[3] = 0xffffffffu; break;
+        }
+        Require(HtileDepthClearBytes_nid_no_patch(kernel, data, changed, packet, indirect) == 0u, "malformed HTILE input or dispatch coverage was accepted");
+    }
+    Require(HtileDepthClearBytes_nid_no_patch(kernel, std::span(users).first(5u), compute, dispatch, 0u) == 0u, "a missing user SGPR was accepted");
+    const std::array<std::uint32_t, 7> shiftedUsers{0u, 0u, 0x91b00000u, 0x40u, 0u, 0xff0u, 0u};
+    Require(HtileDepthClearBytes_nid_no_patch(kernel, shiftedUsers, compute, dispatch, 0u) == 0u, "a shifted group SGPR was accepted");
+    Require(HtileDepthClearBytes_nid_no_patch(other, users, compute, dispatch, 0u) == 0u, "another kernel acquired HTILE coverage");
+    auto additional = compute;
+    additional.groupIdEnable[1] = additional.groupIdEnable[2] = additional.tgSizeEnable = true;
+    additional.threadIdComponentCount = 3u;
+    additional.ldsSizeDwords = 128u;
+    additional.scratchDwords = 1u;
+    auto wave32 = dispatch;
+    wave32[4] |= 0x8000u;
+    Require(HtileDepthClearBytes_nid_no_patch(kernel, users, additional, wave32, 0u) == 655360u, "unused shader inputs or wave size changed the kernel's linear coverage");
 }
 
 void depthMaintenanceTests() {

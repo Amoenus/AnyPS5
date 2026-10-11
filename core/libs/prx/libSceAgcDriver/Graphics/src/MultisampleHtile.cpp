@@ -41,4 +41,12 @@ extern "C" HtileDepthState MultisampleHtileState_nid_no_patch(std::uint32_t word
     }
 }
 
+extern "C" HtileDepthState MultisampleHtileClearState_nid_no_patch(std::uint32_t word, bool depthOnly) {
+    if ((word & 15u) == 15u) return HtileDepthState::Uncompressed;
+    const auto depth = depthOnly ? word : word & 0xfffff00fu;
+    if (depth == 0u) return HtileDepthState::ClearZero;
+    if (depth == (depthOnly ? 0xfffffff0u : 0xfffc0000u)) return HtileDepthState::ClearOne;
+    throw std::runtime_error("multisampled HTILE depth compression or clear layout is not implemented");
+}
+
 }
