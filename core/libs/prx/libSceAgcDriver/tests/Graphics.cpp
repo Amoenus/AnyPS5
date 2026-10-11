@@ -1694,27 +1694,76 @@ void multisampleTests() {
 
     expectFailure([&] { AgcDriver::Graphics::MultisampleTargetView({}, {}); }, "initial guest contents of a multisampled color target are not imported");
 
-    using AgcDriver::Graphics::DccKeys;
+    using AgcDriver::Graphics::MultisampleCmaskState;
     using AgcDriver::Graphics::MultisampledCmask;
-    MultisampledCmask cmask(0x10000, 0x1000);
+    MultisampledCmask cmask(0x10000, 0x1000, 8u, true, false);
     cmask.NoteFill(0x10000, 0x1000, 0x11111111u);
-    expectFailure([&] { cmask.TakeClear(); }, "leaves its tiles mixed");
+    expectFailure([&] { cmask.TakeClear(); }, "not modeled");
     cmask.NoteFill(0x10800, 0x1000, 0);
     expectFailure([&] { cmask.TakeClear(); }, "partly covers");
     cmask.NoteFill(0x10000, 0x1000, 0);
-    Require(cmask.TakeClear() && !cmask.TakeClear(), "a zero fill of the whole CMASK did not clear once");
+    Require(cmask.ClearPending() && cmask.State() == MultisampleCmaskState::ColorClear, "whole CMASK clear was not pending");
+    Require(cmask.TakeClear() && !cmask.TakeClear() && !cmask.ClearPending(), "a zero fill of the whole CMASK did not clear once");
+    Require(cmask.State() == MultisampleCmaskState::ColorClear, "consuming a clear changed the guest metadata state");
+    cmask.NoteFill(0x10000, 0x1000, 0xccccccccu);
+    Require(!cmask.TakeClear() && cmask.State() == MultisampleCmaskState::FmaskClear, "FMASK clear zero was treated as a color clear");
     cmask.NoteFill(0x10000, 0x1000, 0xffffffffu);
-    Require(!cmask.TakeClear(), "an expanded CMASK cleared");
+    Require(!cmask.TakeClear() && cmask.State() == MultisampleCmaskState::Expanded, "an expanded CMASK cleared");
     cmask.NoteFill(0x20000, 0x1000, 0x11111111u);
-    Require(!cmask.TakeClear() && cmask.Keys() == DccKeys::Uncompressed, "a fill of another range changed the CMASK");
+    cmask.NoteFill(0x10000, 0u, 0u);
+    cmask.NoteFill(0xf000, 0x1000, 0u);
+    cmask.NoteFill(0x11000, 0x1000, 0u);
+    Require(!cmask.TakeClear() && cmask.State() == MultisampleCmaskState::Expanded, "an empty or nonoverlapping fill changed the CMASK");
     cmask.CheckAddress(0x10000);
+    cmask.CheckMode(8u, true, false);
+    expectFailure([&] { cmask.CheckMode(4u, true, false); }, "mode changed");
+    expectFailure([&] { cmask.CheckMode(8u, false, false); }, "mode changed");
+    expectFailure([&] { cmask.CheckMode(8u, true, true); }, "mode changed");
     expectFailure([&] { cmask.CheckAddress(0x20000); }, "used CMASK 0x20000");
-    MultisampledCmask seeded(0x30000, 0x1000);
-    seeded.SeedKeys(DccKeys::Clear0000);
-    Require(seeded.TakeClear(), "a fast-cleared seed did not clear its first use");
-    MultisampledCmask mixedSeed(0x30000, 0x1000);
-    mixedSeed.SeedKeys(DccKeys::Mixed);
-    expectFailure([&] { mixedSeed.TakeClear(); }, "not modeled");
+    expectFailure([&] { cmask.NoteFill(~0ull, 2u, 0u); }, "range overflows");
+    expectFailure([&] { MultisampledCmask invalid(~0ull, 2u, 8u, true, false); }, "invalid multisampled CMASK range");
+    expectFailure([&] { MultisampledCmask invalid(0x10000, 0u, 8u, true, false); }, "invalid multisampled CMASK range");
+    expectFailure([&] { MultisampledCmask invalid(0u, 0x1000, 8u, true, false); }, "invalid multisampled CMASK range");
+    expectFailure([&] { MultisampledCmask invalid(0x10000, 0x1000, 16u, true, false); }, "sample count");
+    std::vector<std::byte> metadata(0x1000);
+    expectFailure([&] { cmask.Seed(std::span<const std::byte>(metadata).first(0xfff)); }, "snapshot size mismatch");
+    for (const auto samples : {2u, 4u, 8u}) {
+        const auto expanded = samples == 2u ? 13u : samples == 4u ? 14u : 15u;
+        for (const bool fastClear : {false, true}) {
+            for (const bool dcc : {false, true}) {
+                for (std::uint32_t nibble = 0u; nibble < 16u; ++nibble) {
+                    const auto expected = nibble == 0u && fastClear && !dcc ? MultisampleCmaskState::ColorClear : nibble == 12u ? MultisampleCmaskState::FmaskClear : nibble == expanded ? MultisampleCmaskState::Expanded : MultisampleCmaskState::Unsupported;
+                    MultisampledCmask state(0x30000, metadata.size(), samples, fastClear, dcc);
+                    const auto check = [&] {
+                        Require(state.State() == expected, "CMASK code, sample count or clear mode was decoded incorrectly");
+                        if (expected == MultisampleCmaskState::Unsupported) {
+                            expectFailure([&] { state.TakeClear(); }, "not modeled");
+                        } else {
+                            Require(state.Refusal().empty(), "supported CMASK state retained a refusal");
+                            Require(state.TakeClear() == (expected == MultisampleCmaskState::ColorClear) && !state.TakeClear(), "CMASK color clear was lost or repeated");
+                        }
+                    };
+                    state.NoteFill(0x2fff0, metadata.size() + 32u, nibble * 0x11111111u);
+                    check();
+                    std::ranges::fill(metadata, static_cast<std::byte>(nibble * 17u));
+                    state.Seed(metadata);
+                    check();
+                }
+            }
+        }
+        MultisampledCmask mixed(0x30000, metadata.size(), samples, true, false);
+        std::ranges::fill(metadata, std::byte{0xcc});
+        for (const auto index : {0u, 0x7ffu, 0xfffu}) {
+            metadata[index] = static_cast<std::byte>(expanded * 17u);
+            mixed.Seed(metadata);
+            expectFailure([&] { mixed.TakeClear(); }, "mixed multisampled CMASK snapshot");
+            metadata[index] = std::byte{0xcc};
+        }
+        mixed.NoteFill(0x30000, metadata.size(), 0xcdcdcdcdu);
+        expectFailure([&] { mixed.TakeClear(); }, "not modeled");
+        mixed.Seed(metadata);
+        Require(mixed.State() == MultisampleCmaskState::FmaskClear && !mixed.TakeClear(), "a complete supported seed did not recover from mixed CMASK");
+    }
     MultisampledCmask unaddressed;
     unaddressed.NoteFill(0, 0x1000, 0);
     Require(!unaddressed.TakeClear(), "a target without a CMASK cleared");
