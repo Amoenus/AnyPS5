@@ -1,4 +1,5 @@
 #include "Recompiler.hpp"
+#include "BdaAbi.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <array>
 #include <cstdint>
@@ -47,7 +48,7 @@ std::vector<std::uint32_t> RecompileProgram(std::span<const std::uint32_t> code)
     request.target.vulkanVersion = 0x00403000u;
     request.target.spirvVersion = 0x00010600u;
     request.target.subgroupSize = 32;
-    request.target.bdaAbiVersion = 1;
+    request.target.bdaAbiVersion = BdaAbi::Version;
     request.target.supportedCapabilities = capabilities;
     request.target.supportedExtensions = extensions;
     request.target.maxWorkgroupSize = {1024u, 1024u, 64u};
