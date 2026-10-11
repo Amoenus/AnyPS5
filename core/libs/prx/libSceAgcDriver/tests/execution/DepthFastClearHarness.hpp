@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace DepthFastClearHarness {
@@ -17,10 +19,20 @@ namespace DepthFastClearHarness {
 using AgcDriver::Graphics::Require;
 using ShaderRecompiler::ShaderStage;
 
+template<typename TAction>
+void ExpectFailure(TAction action, std::string_view reason) {
+    try { action(); }
+    catch (const std::runtime_error& error) {
+        Require(std::string_view(error.what()).find(reason) != std::string_view::npos, "unexpected HTILE refusal");
+        return;
+    }
+    throw std::runtime_error("an unsupported HTILE fill was accepted");
+}
+
 inline constexpr std::uint32_t Width = 64;
 inline constexpr std::uint32_t Height = 32;
 inline constexpr std::uint32_t Covered = Width * Height;
-inline constexpr std::size_t HtileBytes = ((Width + 7u) / 8u) * ((Height + 7u) / 8u) * 4u;
+inline constexpr std::size_t HtileBytes = 32768u;
 
 alignas(256) inline std::array<std::byte, Width * Height * 4> Pixels{};
 

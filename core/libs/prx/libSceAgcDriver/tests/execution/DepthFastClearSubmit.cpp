@@ -45,7 +45,7 @@ public:
 #endif
         Require(block != nullptr, "depth fast clear submit: cannot allocate a guest block");
         std::memset(block, 0, bytes);
-        GuestAllocations::Mutation().Add(block, bytes, true, true);
+        GuestAllocations::Mutation().Add(block, bytes, true, true, true);
     }
 
     GuestBlock(const GuestBlock&) = delete;
@@ -97,7 +97,7 @@ void DispatchFill(const GuestBlock& code, const GuestBlock& htile, std::uint32_t
         Pm4Packet(0x76, {0x207, 64}),
         Pm4Packet(0x76, {0x208, 1}),
         Pm4Packet(0x76, {0x209, 1}),
-        Pm4Packet(0x76, {0x213, 8u << 1u}),
+        Pm4Packet(0x76, {0x213, (8u << 1u) | (1u << 7u)}),
         Pm4Packet(0x76, {0x240, Low(base)}),
         Pm4Packet(0x76, {0x241, (High(base) & 0xffffu) | (16u << 16u)}),
         Pm4Packet(0x76, {0x242, records}),
@@ -106,7 +106,7 @@ void DispatchFill(const GuestBlock& code, const GuestBlock& htile, std::uint32_t
         Pm4Packet(0x76, {0x245, 0}),
         Pm4Packet(0x76, {0x246, 0}),
         Pm4Packet(0x76, {0x247, 0}),
-        Pm4Packet(0x15, {1, 1, 1, 0x41}),
+        Pm4Packet(0x15, {(records + 63u) / 64u, 1, 1, 0x41}),
     });
 }
 
@@ -124,7 +124,7 @@ void DmaFillClearsDepth(AgcDriver::VulkanDevice& device, const Shaders& shaders)
     Require(Draw(device, shaders, surface, {.depthWrite = true}) == Covered, "a new depth surface was not cleared to DB_DEPTH_CLEAR (1.0)");
     Require(Draw(device, shaders, surface, {}) == 0u, "a draw at depth 0.5 passed LESS against the 0.5 written before it");
     DmaFill(htile, HtileFillBytes - 4u, 0u);
-    Require(Draw(device, shaders, surface, {}) == 0u, "a DMA_DATA fill shorter than the HTILE cleared the depth");
+    DepthFastClearHarness::ExpectFailure([&] { Draw(device, shaders, surface, {}); }, "partial fill of resident HTILE");
     DmaFill(htile, HtileFillBytes, 0xffffffffu);
     Require(Draw(device, shaders, surface, {}) == 0u, "a DMA_DATA fill expanded to ZMask 0xf cleared the depth");
     DmaFill(htile, HtileFillBytes, 0u);
@@ -133,13 +133,18 @@ void DmaFillClearsDepth(AgcDriver::VulkanDevice& device, const Shaders& shaders)
 }
 
 void DispatchFillClearsDepth(AgcDriver::VulkanDevice& device, const Shaders& shaders) {
-    const auto& htile = NewBlock();
+    auto& htile = NewBlock();
+    std::memset(htile.Data(), 0xff, HtileFillBytes);
     auto& code = NewBlock();
     std::memcpy(code.Data(), FillKernel.data(), sizeof(FillKernel));
     const Surface surface{NewBlock().Address(), 0, htile.Address(), false, VK_FORMAT_D32_SFLOAT};
     Require(Draw(device, shaders, surface, {.depthWrite = true}) == Covered, "a new depth surface was not cleared to DB_DEPTH_CLEAR (1.0)");
     Require(Draw(device, shaders, surface, {}) == 0u, "a draw at depth 0.5 passed LESS against the 0.5 written before it");
+    DispatchFill(code, htile, 64u);
+    DepthFastClearHarness::ExpectFailure([&] { Draw(device, shaders, surface, {}); }, "partial fill of resident HTILE");
     DispatchFill(code, htile, HtileFillBytes / 16u);
+    AgcDriver::GuestMemory::FlushGpuWrites(htile.Address(), HtileFillBytes);
+    Require(std::all_of(htile.Data(), htile.Data() + HtileFillBytes, [](std::uint8_t value) { return value == 0u; }), "the compute fill left HTILE bytes unwritten");
     Require(Draw(device, shaders, surface, {.depthWrite = true}) == Covered, "a compute fill of 0 over the HTILE did not clear the depth to DB_DEPTH_CLEAR (1.0)");
     Require(Draw(device, shaders, surface, {}) == 0u, "the depth written after the compute fill clear was lost");
 }

@@ -932,9 +932,9 @@ void DepthStencilTests() {
         Require(HtileFillClears(0x000003f0u, true) == VK_IMAGE_ASPECT_DEPTH_BIT, "SMem 3 leaves the stencil uncleared");
         Require(HtileFillClears(0xfffff0ffu, true) == VK_IMAGE_ASPECT_STENCIL_BIT, "ZMask 0xf with SMem 0 clears only the stencil");
         Require(HtileFillClears(0xffffffffu, true) == 0 && HtileFillClears(0xffffffffu, false) == 0, "an expanded fill clears nothing");
-        const VkExtent2D extent{16, 8};
-        Require(HtileFillCovers(0x1000, extent, 0x1000, 8) && HtileFillCovers(0x1000, extent, 0xff0, 0x20), "a fill over every HTILE word covers the surface");
-        Require(!HtileFillCovers(0x1000, extent, 0x1000, 4) && !HtileFillCovers(0x1000, extent, 0x1004, 8) && !HtileFillCovers(0, extent, 0, 64), "a partial fill, one starting past the HTILE base, or no HTILE covers nothing");
+        const VkExtent2D extent{16, 16};
+        Require(HtileFillCovers(0x1000, extent, 0x1000, 32768) && HtileFillCovers(0x1000, extent, 0xff0, 32784), "a fill over every HTILE word covers the surface");
+        Require(!HtileFillCovers(0x1000, extent, 0x1000, 16) && !HtileFillCovers(0x1000, extent, 0x1000, 32764) && !HtileFillCovers(0x1000, extent, 0x1004, 32768) && !HtileFillCovers(0, extent, 0, 64), "a partial fill, one starting past the HTILE base, or no HTILE covers nothing");
     }
     Require(state.renderExtent.width == 4 && state.renderExtent.height == 2, "render extent ignores the depth surface");
     Require(!state.depthTest && !state.depthWrite && state.stencilTest, "depth/stencil enables changed");

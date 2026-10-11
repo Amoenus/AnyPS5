@@ -17,7 +17,7 @@ using DepthFastClearHarness::Surface;
 using DepthFastClearHarness::Width;
 
 alignas(4096) std::array<float, Width * Height * 2> Depth{};
-alignas(256) std::array<std::uint32_t, 1024> Htile{};
+alignas(256) std::array<std::uint32_t, HtileBytes / 4u> Htile{};
 
 }
 
@@ -32,7 +32,7 @@ int main() {
         Require(Draw(*device, shaders, surface, {.depthWrite = true}) == Covered, "a new depth surface was not cleared to DB_DEPTH_CLEAR (1.0)");
         Require(Draw(*device, shaders, surface, {}) == 0u, "a draw at depth 0.5 passed LESS against the 0.5 written before it");
         AgcDriver::Graphics::NoteDepthMetadataFill(htile, HtileBytes - 4u, 0u);
-        Require(Draw(*device, shaders, surface, {}) == 0u, "a fill shorter than the HTILE cleared the depth");
+        DepthFastClearHarness::ExpectFailure([&] { Draw(*device, shaders, surface, {}); }, "partial fill of resident HTILE");
         AgcDriver::Graphics::NoteDepthMetadataFill(htile, HtileBytes, 0xffffffffu);
         Require(Draw(*device, shaders, surface, {}) == 0u, "an expanded HTILE fill (ZMask 0xf) cleared the depth");
         AgcDriver::Graphics::NoteDepthMetadataFill(htile, HtileBytes, 0u);
