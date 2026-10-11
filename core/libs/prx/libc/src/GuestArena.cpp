@@ -79,6 +79,21 @@ public:
         return reinterpret_cast<void*>(candidate);
     }
 
+    std::uintptr_t HighestFree(std::size_t bytes, std::size_t alignment) {
+        if (_base == 0) throw std::runtime_error("guest address space arena is unavailable");
+        if (bytes == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0) throw std::invalid_argument("invalid guest arena window");
+        std::lock_guard lock(_lock);
+        auto limit = _end;
+        while (limit >= _base && bytes <= limit - _base) {
+            const auto candidate = (limit - bytes) & ~(alignment - 1);
+            if (candidate < _base) break;
+            const auto next = _used.lower_bound(candidate + bytes);
+            if (next == _used.begin() || std::prev(next)->second <= candidate) return candidate;
+            limit = std::prev(next)->first;
+        }
+        return 0;
+    }
+
     bool MarkUsedForCommit(const void* pointer, std::size_t bytes) {
         std::lock_guard lock(_lock);
         const auto start = reinterpret_cast<std::uintptr_t>(pointer);
@@ -262,6 +277,10 @@ void* GuestArenaAllocate_nid_postfix(std::size_t bytes, std::size_t alignment) {
 
 void* GuestArenaAllocateAtOrAbove_nid_postfix(std::uintptr_t hint, std::size_t bytes, std::size_t alignment) {
     return Arena::Get().AllocateAtOrAbove(hint, bytes, alignment);
+}
+
+std::uintptr_t GuestArenaHighestFree_nid_no_patch(std::size_t bytes, std::size_t alignment) {
+    return Arena::Get().HighestFree(bytes, alignment);
 }
 
 void GuestArenaMarkUsed_nid_postfix(const void* pointer, std::size_t bytes) {
