@@ -5,6 +5,19 @@
 
 extern "C" {
 
+int APS5_VABI sceKernelGetCpuTemperature(int* temperature) {
+    (void)temperature;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceKernelGetSocSensorTemperature(int sensor, int* temperature) {
+    (void)sensor;
+    (void)temperature;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI sceCoredumpWriteUserData() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
