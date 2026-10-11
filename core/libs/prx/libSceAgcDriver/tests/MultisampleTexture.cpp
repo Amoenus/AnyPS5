@@ -470,6 +470,119 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
     TargetRefuses([&] { AgcDriver::GuestMemory::Read(target.address + layout.Offset(64u, 0u, 0u, fragments - 1u), probe); }, AgcDriver::GuestMemory::Watched(target.address, target.bytes) ? "unimplemented residency transition" : "watched guest memory");
 }
 
+void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragments) {
+    const std::uint32_t bytes = format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8u : 4u;
+    constexpr VkExtent2D extent{65u, 5u};
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, bytes, fragments, extent.width, extent.height, 1u, 0x8c00u);
+    TargetMemory memory(static_cast<std::size_t>(layout.Bytes()) + 3u * 65536u);
+    auto detiler = std::make_unique<TextureDetiler>(context);
+    context.detiler = detiler.get();
+    ColorTarget target{};
+    target.address = target.surfaceAddress = memory.Address();
+    target.extent = target.surfaceExtent = extent;
+    target.bytes = layout.Bytes();
+    target.format = format;
+    target.tileMode = ColorTileMode::RenderTarget;
+    target.elementBytes = bytes;
+    target.samples = fragments;
+    target.pipeBankXor = 0x8c00u;
+    target.dccAddress = target.address + target.bytes;
+    target.cmaskAddress = target.dccAddress + 65536u;
+    target.fmaskAddress = target.cmaskAddress + 65536u;
+    target.fmaskSwizzle = 0x18u;
+    target.dccPipeAligned = target.dccAlphaOnMsb = true;
+    target.dccControl = 0x100038u;
+    target.cmaskBytes = CmaskBytes(extent.width, extent.height);
+    const auto dccBytes = MultisampleDccBytes_nid_no_patch(bytes, fragments, extent.width, extent.height, 1u);
+    const auto fmaskBytes = MultisampleFmaskBytes(target);
+    const auto expanded = fragments == 2u ? std::byte{0xdd} : fragments == 4u ? std::byte{0xee} : std::byte{0xff};
+    std::vector<std::byte> original(layout.LinearBytes());
+    for (std::size_t index = 0u; index < original.size() / bytes; ++index) {
+        for (std::uint32_t channel = 0u; channel < 4u; ++channel) {
+            if (bytes == 8u) {
+                const auto value = static_cast<std::uint16_t>(0x3400u + (index % fragments) * 0x80u + channel * 0x10u);
+                std::memcpy(original.data() + index * bytes + channel * 2u, &value, 2u);
+            } else original[index * bytes + channel] = static_cast<std::byte>((index * 13u + channel * 37u) & 255u);
+        }
+    }
+    Recorder recorder(context);
+    recorder.Activate();
+    struct Cleanup {
+        Recorder& recorder;
+        VkDevice device;
+        ~Cleanup() { recorder.Sync(); ClearCachedTextures(device); ClearMultisampleTargets(device); }
+    } cleanup{recorder, context.device};
+    const auto store = [](std::uint64_t address, std::size_t count, std::byte value) {
+        const std::vector<std::byte> data(count, value);
+        AgcDriver::GuestMemory::StoreOwnBytes(address, data);
+    };
+    const auto publish = [&] {
+        std::array<std::byte, 1> probe{};
+        AgcDriver::GuestMemory::Read(target.address + layout.Offset(64u, 0u, 0u, fragments - 1u), probe);
+    };
+    const auto fresh = [&] {
+        recorder.Sync();
+        ClearCachedTextures(context.device);
+        ClearMultisampleTargets(context.device);
+        layout.Tile(original, std::span(memory.Data(), static_cast<std::size_t>(target.bytes)));
+        store(target.dccAddress, dccBytes, std::byte{0xff});
+        store(target.cmaskAddress, target.cmaskBytes, expanded);
+        const auto mapping = MultisampleExpandedFmask(fragments);
+        for (std::size_t at = 0u; at < fmaskBytes; ++at) memory.Data()[target.fmaskAddress - target.address + at] = static_cast<std::byte>((mapping >> (at % 4u * 8u)) & 255u);
+        const auto view = MultisampleTargetView(context, target);
+        Require(ReadMultisampleTargetSamples(context, target) == original, "metadata reset initial raw samples differ");
+        publish();
+        return view;
+    };
+    auto view = fresh();
+    for (const std::uint32_t code : {0u, 0x40u, 0x80u, 0xc0u}) {
+        auto physical = std::vector<std::byte>(memory.Data(), memory.Data() + target.bytes);
+        store(target.dccAddress, dccBytes, static_cast<std::byte>(code));
+        store(target.cmaskAddress, target.cmaskBytes, std::byte{0xcc});
+        QueueTargetByteWrite(context, recorder, target.dccAddress + dccBytes - 1u, static_cast<std::byte>(code));
+        TargetRefuses([&] { MultisampleTargetView(context, target); }, "external GPU writes");
+        recorder.Sync();
+        Require(MultisampleTargetView(context, target) == view, "metadata reset replaced the retained attachment view");
+        std::vector<std::byte> expected(original.size());
+        for (std::size_t index = 0u; index < expected.size() / bytes; ++index) {
+            for (std::uint32_t channel = 0u; channel < 4u; ++channel) {
+                const bool one = channel == 3u ? code == 0x40u || code == 0xc0u : code == 0x80u || code == 0xc0u;
+                if (bytes == 8u) {
+                    const std::uint16_t value = one ? 0x3c00u : 0u;
+                    std::memcpy(expected.data() + index * bytes + channel * 2u, &value, 2u);
+                } else expected[index * bytes + channel] = one ? std::byte{0xff} : std::byte{0};
+            }
+        }
+        Require(ReadMultisampleTargetSamples(context, target) == expected, "metadata reset native GPU samples lost clear channels or fragments");
+        if (bytes == 8u) CheckPublishedSampledRead(context, recorder, target, expected);
+        publish();
+        layout.Tile(expected, physical);
+        Require(std::equal(physical.begin(), physical.end(), memory.Data()), "metadata reset publication kept stale sample bytes");
+        Require(std::all_of(reinterpret_cast<const std::byte*>(target.dccAddress), reinterpret_cast<const std::byte*>(target.dccAddress) + dccBytes, [](auto byte) { return byte == std::byte{0xff}; }), "metadata reset publication left DCC compressed");
+        Require(std::all_of(reinterpret_cast<const std::byte*>(target.cmaskAddress), reinterpret_cast<const std::byte*>(target.cmaskAddress) + target.cmaskBytes, [&](auto byte) { return byte == expanded; }), "metadata reset publication left CMASK collapsed");
+    }
+    for (std::uint32_t field = 0u; field < 10u; ++field) {
+        view = fresh();
+        store(target.dccAddress, dccBytes, std::byte{0});
+        store(target.cmaskAddress, target.cmaskBytes, std::byte{0xcc});
+        std::string_view reason = "guest writes";
+        switch (field) {
+            case 0u: store(target.dccAddress + dccBytes - 1u, 1u, std::byte{0x40}); break;
+            case 1u: store(target.dccAddress, dccBytes, std::byte{0x20}); break;
+            case 2u: store(target.dccAddress, dccBytes, std::byte{0xff}); break;
+            case 3u: store(target.cmaskAddress + target.cmaskBytes - 1u, 1u, std::byte{0xdd}); break;
+            case 4u: store(target.cmaskAddress, target.cmaskBytes, std::byte{0xaa}); break;
+            case 5u: store(target.address + target.bytes - 1u, 1u, std::byte{0}); break;
+            case 6u: store(target.fmaskAddress + fmaskBytes - 1u, 1u, std::byte{0}); break;
+            case 7u: ClearTargetAttachment(context, view, target); break;
+            case 8u: NoteColorMetadataFill(target.dccAddress + dccBytes - 1u, 1u, 0u); reason = "unimplemented residency transition"; break;
+            case 9u: AgcDriver::GuestMemory::Unwatch(target.dccAddress, dccBytes); reason = "watched guest memory"; break;
+        }
+        TargetRefuses([&] { MultisampleTargetView(context, target); }, reason);
+    }
+    std::printf("Metadata reset format=%u samples=%u: four clear cycles and conflict refusals\n", static_cast<std::uint32_t>(format), fragments);
+}
+
 std::vector<std::uint32_t> FetchShader(std::uint32_t width, std::uint32_t height, std::uint32_t fragments, bool arrayed, bool floating) {
     ShaderRecompiler::SpirvModule module;
     module.EmitCapability(spv::CapabilityShader);
@@ -1362,6 +1475,18 @@ int main(int argc, char** argv) {
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         std::uint32_t checked = 0u, unavailable = 0u;
+        if (argc > 1 && std::string(argv[1]) == "--metadata-reset") {
+            for (const auto format : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT}) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    if (!TargetSupported(context, format, fragments)) { unavailable += 4u; continue; }
+                    CheckMetadataReset(context, format, fragments);
+                    checked += 4u;
+                }
+            }
+            Require(checked != 0u && (unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr), "required metadata reset configurations are unsupported");
+            std::printf("Metadata reset checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--depth-refusals") {
             for (const auto fragments : {2u, 4u, 8u}) {
                 if (DepthSupported(context, VK_FORMAT_D32_SFLOAT, fragments)) { CheckDepthRefusals(context, fragments); return 0; }

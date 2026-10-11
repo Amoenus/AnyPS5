@@ -144,12 +144,60 @@ public:
     void CheckCurrent(const ColorTarget& use) {
         Require(sameTarget(target, use), "multisample target layout or metadata changed; residency transition is not implemented");
         Require(refusal.empty(), refusal);
+        bool changed = false;
         for (const auto& range : initialRanges) {
             Require(range.generation != 0u && GuestMemory::Watched(range.address, range.bytes), "multisample target reuse requires watched guest memory; untracked writes are not implemented");
             if (auto* recorder = recorderFor(context); recorder != nullptr) Require(!recorder->PendingWriteOverlaps(range.address, range.bytes), "external GPU writes to a resident multisample target or its metadata are not implemented");
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
-            Require(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation), "guest writes to a resident multisample target or its metadata are not implemented");
+            changed |= !GuestMemory::UnchangedSince(range.address, range.bytes, range.generation);
         }
+        if (changed) Require(ImportPublishedClear(), "guest writes to a resident multisample target or its metadata are not implemented");
+    }
+
+    bool ImportPublishedClear() {
+        if (dirty || target.dccAddress == 0u) return false;
+        for (const auto& range : initialRanges) {
+            if (range.address == target.address || (target.fmaskAddress != 0u && range.address == (target.fmaskAddress & ~std::uint64_t{65535u}))) {
+                if (!GuestMemory::UnchangedSince(range.address, range.bytes, range.generation)) return false;
+            }
+        }
+        auto current = initialRanges;
+        std::vector<std::byte> dcc, cmask;
+        for (auto& range : current) {
+            GuestMemory::CheckRange(reinterpret_cast<const void*>(range.address), range.bytes, 1u);
+            range.generation = GuestMemory::CollectWritesUncached(range.address, range.bytes);
+            if (range.address == target.dccAddress || range.address == target.cmaskAddress) {
+                auto& data = range.address == target.dccAddress ? dcc : cmask;
+                data.resize(range.bytes);
+                std::memcpy(data.data(), reinterpret_cast<const void*>(range.address), range.bytes);
+            }
+        }
+        if (dcc.empty()) return false;
+        const auto code = std::to_integer<std::uint32_t>(dcc.front());
+        if (code != 0u && code != 0x40u && code != 0x80u && code != 0xc0u) return false;
+        if (!std::ranges::all_of(dcc, [&](std::byte byte) { return byte == dcc.front(); })) return false;
+        if (!cmask.empty()) {
+            const auto expanded = target.samples == 2u ? std::byte{0xdd} : target.samples == 4u ? std::byte{0xee} : std::byte{0xff};
+            if ((cmask.front() != std::byte{0xcc} && cmask.front() != expanded) || !std::ranges::all_of(cmask, [&](std::byte byte) { return byte == cmask.front(); })) return false;
+        }
+        const auto contents = DecodeMultisampleInitialContents(target, {}, dcc, cmask, {});
+        Require(contents.clear.has_value(), "multisample metadata reset has no exact native clear");
+        for (const auto& range : current) GuestMemory::CollectWritesUncached(range.address, range.bytes);
+        Require(GuestMemory::UnchangedSinceAll(current), "guest writes raced multisample metadata reset");
+        for (const auto& range : initialRanges) {
+            if (range.address == target.address || (target.fmaskAddress != 0u && range.address == (target.fmaskAddress & ~std::uint64_t{65535u}))) Require(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation), "sample writes raced multisample metadata reset");
+        }
+        recordCommands(context, [&](VkCommandBuffer commands, Recorder* recorder) {
+            constexpr VkAccessFlags access = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, access, VK_ACCESS_TRANSFER_WRITE_BIT);
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+            context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &*contents.clear, 1u, &range);
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, access);
+            if (recorder != nullptr) Recorder::CountBarriers(Recorder::CommandClass::Draw, 2u);
+        });
+        initialRanges = std::move(current);
+        dirty = true;
+        return true;
     }
 
     void NoteFill(std::uint64_t address, std::size_t bytes) {
