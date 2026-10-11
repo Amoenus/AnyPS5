@@ -99,7 +99,7 @@ void CheckRegistryPolicy() {
     ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(VertexCode.data()), 0, 2, {VertexCode.begin(), VertexCode.end()}, {}};
     snapshot.header.resize(sizeof(Shader));
     const auto entry = std::make_shared<const ShaderSnapshot>(std::move(snapshot));
-    const ShaderRegistry registry{{entry->codeAddress, entry}};
+    const ShaderRegistry registry{{entry->codeAddress, {entry}}};
     for (const bool staticAbi : {false, true}) {
         decoded = {};
         DecodeGraphicsPrograms(decoded, queue, registry, staticAbi, false);

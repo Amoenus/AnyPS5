@@ -580,9 +580,14 @@ void testProgramSnapshots() {
     snapshot.code.assign(registered.begin(), registered.end());
     snapshot.header.resize(sizeof(Shader));
     const auto entry = std::make_shared<const AgcDriver::DriverDetail::ShaderSnapshot>(std::move(snapshot));
-    shaders.emplace(registeredAddress, entry);
+    shaders[registeredAddress].push_back(entry);
     check(AgcDriver::DriverDetail::ProgramSnapshot(shaders, registeredAddress) == entry, "a registered program was not resolved to its registration");
     check(AgcDriver::DriverDetail::ProgramSnapshot(shaders, registeredAddress + 4 * 8) == entry, "an entry inside registered code was not resolved to its registration");
+    auto conflicting = std::make_shared<AgcDriver::DriverDetail::ShaderSnapshot>(*entry);
+    conflicting->type = 0;
+    shaders[registeredAddress].push_back(conflicting);
+    check(!expectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::ProgramSnapshot(shaders, registeredAddress)); }).empty(), "ambiguous shader types were accepted by an untyped lookup");
+    shaders[registeredAddress].pop_back();
     const auto unregistered = AgcDriver::DriverDetail::ProgramSnapshot(shaders, rawAddress);
     check(unregistered != entry && unregistered->codeAddress == rawAddress && unregistered->header.empty() && unregistered->code.size() == 2, "an unregistered program was not read as raw code");
     check(AgcDriver::DriverDetail::ProgramSnapshot({}, rawAddress) == unregistered, "an empty registry did not fall back to raw code");

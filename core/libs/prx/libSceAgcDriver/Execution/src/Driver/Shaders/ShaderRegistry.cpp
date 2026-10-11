@@ -105,8 +105,18 @@ std::shared_ptr<const ShaderSnapshot> ReadRawShader(std::uint64_t address) {
 }
 
 std::shared_ptr<const ShaderSnapshot> ProgramSnapshot(const ShaderRegistry& shaders, std::uint64_t address) {
-    const auto registered = RegisteredProgram(shaders, address, {0});
-    return registered ? registered : ReadRawShader(address);
+    auto found = shaders.upper_bound(address);
+    if (found != shaders.begin()) {
+        --found;
+        std::shared_ptr<const ShaderSnapshot> result;
+        for (const auto& snapshot : found->second) {
+            if (address - snapshot->codeAddress >= snapshot->code.size() * sizeof(std::uint32_t)) continue;
+            require(result == nullptr || result->type == snapshot->type, "registered program has ambiguous shader binary types");
+            result = snapshot;
+        }
+        if (result) return result;
+    }
+    return ReadRawShader(address);
 }
 
 namespace {
