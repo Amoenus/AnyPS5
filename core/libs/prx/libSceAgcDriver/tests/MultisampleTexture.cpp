@@ -1,6 +1,12 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -18,6 +24,11 @@
 #include <span>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 
 namespace {
 
@@ -62,8 +73,9 @@ public:
             std::vector<VkQueueFamilyProperties> families(count);
             queues(context.physical, &count, families.data());
             std::uint32_t family = 0u;
-            while (family < count && (families[family].queueFlags & VK_QUEUE_COMPUTE_BIT) == 0u) ++family;
-            Require(family < count, "no compute queue");
+            constexpr auto queueFlags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT;
+            while (family < count && (families[family].queueFlags & queueFlags) != queueFlags) ++family;
+            Require(family < count, "no graphics and compute queue");
             VkPhysicalDeviceFeatures available{};
             function<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(context.physical, &available);
             Require(available.shaderStorageImageMultisample && available.shaderStorageImageWriteWithoutFormat, "device lacks multisampled image upload features");
@@ -105,6 +117,7 @@ private:
     void release() noexcept {
         if (context.device != VK_NULL_HANDLE) {
             context.Function<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(context.device);
+            ClearMultisampleTargets(context.device);
             ClearCachedTextures(context.device);
             context.bufferPool.reset();
             if (context.pool) context.Function<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(context.device, context.pool, nullptr);
@@ -118,6 +131,274 @@ private:
     VkInstance instance = VK_NULL_HANDLE;
     Context context{};
 };
+
+class TargetMemory {
+public:
+    explicit TargetMemory(std::size_t bytes) : bytes(bytes) {
+#ifdef _WIN32
+        pointer = GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536u);
+        GuestArena::GuestArenaCommit_nid_postfix(pointer, bytes, PAGE_READWRITE, bytes);
+#else
+        void* raw = mmap(nullptr, bytes + 65536u, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        Require(raw != MAP_FAILED, "cannot allocate multisample target fixture");
+        const auto begin = reinterpret_cast<std::uintptr_t>(raw);
+        const auto aligned = (begin + 65535u) & ~std::uintptr_t{65535u};
+        if (aligned != begin) munmap(raw, aligned - begin);
+        if (aligned + bytes != begin + bytes + 65536u) munmap(reinterpret_cast<void*>(aligned + bytes), begin + 65536u - aligned);
+        pointer = reinterpret_cast<void*>(aligned);
+        GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(pointer, bytes);
+#endif
+        Require(pointer != nullptr, "multisample target fixture allocation failed");
+        std::memset(pointer, 0xa5, bytes);
+    }
+    ~TargetMemory() {
+#ifdef _WIN32
+        GuestArena::GuestArenaReset_nid_postfix(pointer, bytes);
+        GuestArena::GuestArenaRelease_nid_postfix(pointer, bytes);
+#else
+        GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(pointer, bytes);
+        munmap(pointer, bytes);
+#endif
+    }
+    std::byte* Data() const { return static_cast<std::byte*>(pointer); }
+    std::uint64_t Address() const { return reinterpret_cast<std::uint64_t>(pointer); }
+private:
+    void* pointer = nullptr;
+    std::size_t bytes;
+};
+
+template<typename Action>
+void TargetRefuses(Action action, std::string_view expected) {
+    std::string message;
+    try { action(); }
+    catch (const std::exception& error) { message = error.what(); }
+    Require(message.find(expected) != std::string::npos, "multisample target refusal did not match " + std::string(expected) + ": " + message);
+}
+
+bool TargetSupported(const Context& context, VkFormat format, std::uint32_t fragments) {
+    VkImageFormatProperties properties{};
+    const auto status = context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT, &properties);
+    return status == VK_SUCCESS && (properties.sampleCounts & fragments) != 0u && (context.limits.framebufferColorSampleCounts & fragments) != 0u;
+}
+
+void QueueTargetByteWrite(const Context& context, Recorder& recorder, std::uint64_t address, std::byte value) {
+    auto buffer = std::make_shared<Buffer>(context, 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    const auto commands = recorder.Commands();
+    const auto byte = std::to_integer<std::uint32_t>(value);
+    context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(commands, buffer->Handle(), 0u, 4u, byte * 0x01010101u);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    recorder.OnComplete([buffer, address] {
+        buffer->Invalidate();
+        AgcDriver::GuestMemory::StoreOwnBytes(address, buffer->Bytes().first(1u));
+    });
+    recorder.Keep(buffer);
+    recorder.NotePendingWrite(address, 1u);
+}
+
+void ClearTargetAttachment(const Context& context, VkImageView view, const ColorTarget& target) {
+    VkAttachmentDescription attachment{};
+    attachment.format = target.format;
+    attachment.samples = static_cast<VkSampleCountFlagBits>(target.samples);
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+    const VkAttachmentReference reference{0u, VK_IMAGE_LAYOUT_GENERAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1u;
+    subpass.pColorAttachments = &reference;
+    VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    info.attachmentCount = 1u;
+    info.pAttachments = &attachment;
+    info.subpassCount = 1u;
+    info.pSubpasses = &subpass;
+    VkRenderPass pass = VK_NULL_HANDLE;
+    Check(context.Function<PFN_vkCreateRenderPass>("vkCreateRenderPass")(context.device, &info, nullptr, &pass), "vkCreateRenderPass target fixture");
+    try {
+        const std::array views{view};
+        Framebuffer framebuffer(context, pass, views, target.extent);
+        CommandBatch batch(context);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+        VkClearValue clear{};
+        clear.color.uint32[0] = 0x11u;
+        clear.color.uint32[1] = 0x22u;
+        clear.color.uint32[2] = 0x33u;
+        clear.color.uint32[3] = 0x44u;
+        if (target.format == VK_FORMAT_R8G8B8A8_UNORM || target.format == VK_FORMAT_R8G8B8A8_SRGB) {
+            clear.color.float32[0] = clear.color.float32[2] = 0.0f;
+            clear.color.float32[1] = clear.color.float32[3] = 1.0f;
+        }
+        VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        begin.renderPass = pass;
+        begin.framebuffer = framebuffer.Handle();
+        begin.renderArea = {{0, 0}, target.extent};
+        begin.clearValueCount = 1u;
+        begin.pClearValues = &clear;
+        context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(batch.Handle(), &begin, VK_SUBPASS_CONTENTS_INLINE);
+        context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(batch.Handle());
+        batch.SubmitAndWait();
+    } catch (...) {
+        context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, pass, nullptr);
+        throw;
+    }
+    context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, pass, nullptr);
+}
+
+void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragments, VkFormat format, bool metadata) {
+    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, bytes, fragments, 65u, 5u, 1u, 0x8c00u);
+    TargetMemory memory(static_cast<std::size_t>(layout.Bytes()) + 3u * 65536u);
+    auto detiler = std::make_unique<TextureDetiler>(context);
+    context.detiler = detiler.get();
+    ColorTarget target{};
+    target.address = target.surfaceAddress = memory.Address();
+    target.extent = target.surfaceExtent = {65u, 5u};
+    target.format = format;
+    target.bytes = layout.Bytes();
+    target.tileMode = ColorTileMode::RenderTarget;
+    target.elementBytes = bytes;
+    target.samples = fragments;
+    target.pipeBankXor = 0x8c00u;
+    std::vector<std::byte> expected(layout.LinearBytes());
+    for (std::uint32_t y = 0; y < 5u; ++y) {
+        for (std::uint32_t x = 0; x < 65u; ++x) {
+            for (std::uint32_t fragment = 0; fragment < fragments; ++fragment) {
+                for (std::uint32_t byte = 0; byte < bytes; ++byte) {
+                    const auto value = static_cast<std::byte>((x * 13u + y * 31u + fragment * 53u + byte * 7u) & 0xffu);
+                    memory.Data()[layout.Offset(x, y, 0u, fragment) + byte] = value;
+                    expected[((y * 65u + x) * fragments + fragment) * bytes + byte] = value;
+                }
+            }
+        }
+    }
+    Recorder recorder(context);
+    recorder.Activate();
+    struct Cleanup {
+        Recorder& recorder;
+        VkDevice device;
+        ~Cleanup() { recorder.Sync(); ClearMultisampleTargets(device); }
+    } cleanup{recorder, context.device};
+    if (metadata) {
+        target.dccAddress = target.address + target.bytes;
+        target.cmaskAddress = target.dccAddress + 65536u;
+        target.fmaskAddress = target.cmaskAddress + 65536u;
+        target.fmaskSwizzle = 0x18u;
+        target.dccPipeAligned = true;
+        target.dccAlphaOnMsb = true;
+        target.dccControl = 0x100038u;
+        target.cmaskBytes = CmaskBytes(65u, 5u);
+        target.cmaskFastClear = true;
+        target.clearWords = {0xffffffffu, 0xffffffffu};
+        const auto dccBytes = MultisampleDccBytes_nid_no_patch(bytes, fragments, 65u, 5u, 1u);
+        std::memset(reinterpret_cast<void*>(target.dccAddress), 0u, dccBytes);
+        std::memset(reinterpret_cast<void*>(target.cmaskAddress), 0xccu, target.cmaskBytes);
+        const std::array<std::uint32_t, 4> codes{0u, 0x40u, 0x80u, 0xc0u};
+        for (const auto code : codes) {
+            ClearMultisampleTargets(context.device);
+            std::memset(reinterpret_cast<void*>(target.dccAddress), code, dccBytes);
+            const auto view = MultisampleTargetView(context, target);
+            Require(view != VK_NULL_HANDLE, "DCC target view is absent");
+            const auto actual = ReadMultisampleTargetSamples(context, target);
+            Require(actual.size() == expected.size(), "DCC target sample size changed");
+            for (std::size_t offset = 0; offset < actual.size(); offset += 8u) {
+                for (std::uint32_t channel = 0; channel < 4u; ++channel) {
+                    std::uint16_t value = 0;
+                    std::memcpy(&value, actual.data() + offset + channel * 2u, 2u);
+                    const bool set = channel == 3u ? code == 0x40u || code == 0xc0u : code == 0x80u || code == 0xc0u;
+                    Require(value == (set ? 0x3c00u : 0u), "DCC target GPU import used clear registers, raw color or an incorrect channel");
+                }
+            }
+        }
+        const bool watched = AgcDriver::GuestMemory::Watched(target.address, target.bytes);
+        Require(watched || std::getenv("ANYPS5_REQUIRE_TARGET_WATCHED") == nullptr, "watched metadata reuse was required but unavailable");
+        if (watched) {
+            TargetRefuses([&] { *reinterpret_cast<std::byte*>(target.dccAddress) = std::byte{0}; MultisampleTargetView(context, target); }, "guest writes");
+            for (const auto address : {target.dccAddress, target.cmaskAddress, target.fmaskAddress + 65535u}) {
+                ClearMultisampleTargets(context.device);
+                std::memset(reinterpret_cast<void*>(target.dccAddress), 0xc0u, dccBytes);
+                MultisampleTargetView(context, target);
+                ReadMultisampleTargetSamples(context, target);
+                const auto original = *reinterpret_cast<std::byte*>(address);
+                *reinterpret_cast<volatile std::byte*>(address) = original;
+                TargetRefuses([&] { MultisampleTargetView(context, target); }, "guest writes");
+                ClearMultisampleTargets(context.device);
+                MultisampleTargetView(context, target);
+                ReadMultisampleTargetSamples(context, target);
+                NoteColorMetadataFill(address, 1u, 0xc0c0c0c0u);
+                TargetRefuses([&] { MultisampleTargetView(context, target); }, "unimplemented residency transition");
+            }
+        }
+        ClearMultisampleTargets(context.device);
+        target.dccAddress = 0u;
+        std::memset(reinterpret_cast<void*>(target.cmaskAddress), 0xccu, target.cmaskBytes);
+        MultisampleTargetView(context, target);
+        auto actual = ReadMultisampleTargetSamples(context, target);
+        for (std::size_t offset = 0; offset < expected.size(); offset += bytes * fragments) {
+            for (std::uint32_t fragment = 0; fragment < fragments; ++fragment) {
+                Require(std::equal(expected.begin() + offset, expected.begin() + offset + bytes, actual.begin() + offset + fragment * bytes), "CMASK CC GPU import did not replicate physical fragment zero");
+            }
+        }
+        ClearMultisampleTargets(context.device);
+        std::memset(reinterpret_cast<void*>(target.cmaskAddress), 0u, target.cmaskBytes);
+        target.clearWords = {0x3c000000u, 0x38003400u};
+        MultisampleTargetView(context, target);
+        actual = ReadMultisampleTargetSamples(context, target);
+        const std::array<std::uint16_t, 4> channels{0u, 0x3c00u, 0x3400u, 0x3800u};
+        for (std::size_t offset = 0; offset < actual.size(); offset += bytes) {
+            Require(std::memcmp(actual.data() + offset, channels.data(), bytes) == 0, "CMASK register clear GPU import lost exact channels");
+        }
+        ClearMultisampleTargets(context.device);
+        target.fmaskSwizzle = 0u;
+        TargetRefuses([&] { MultisampleTargetView(context, target); }, "FMASK footprint requires");
+        return;
+    }
+    const auto producedPhysical = layout.Offset(64u, 0u, 0u, fragments - 1u);
+    const auto producedLinear = static_cast<std::size_t>(64u * fragments + fragments - 1u) * bytes;
+    QueueTargetByteWrite(context, recorder, target.address + producedPhysical, std::byte{0x5a});
+    expected[producedLinear] = std::byte{0x5a};
+    Require(recorder.PendingWriteOverlaps(target.address + producedPhysical, 1u), "initial target fixture did not queue a producer");
+    const auto view = MultisampleTargetView(context, target);
+    Require(!recorder.PendingWriteOverlaps(target.address + producedPhysical, 1u), "initial target import did not wait for its producer");
+    Require(ReadMultisampleTargetSamples(context, target) == expected, "raw target import lost physical fragments, components or tile addressing");
+    ClearTargetAttachment(context, view, target);
+    const auto rendered = ReadMultisampleTargetSamples(context, target);
+    const std::array<std::uint32_t, 4> clear{0x11u, 0x22u, 0x33u, 0x44u};
+    for (std::size_t offset = 0; offset < rendered.size(); offset += bytes) {
+        for (std::uint32_t byte = 0; byte < bytes; ++byte) {
+            if (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB) {
+                Require(rendered[offset + byte] == static_cast<std::byte>(byte % 2u == 0u ? 0u : 255u), "normalized attachment clear and sample readback disagree");
+                continue;
+            }
+            const auto channel = bytes < 4u ? 0u : byte / 4u;
+            const auto shift = bytes < 4u ? byte * 8u : byte % 4u * 8u;
+            Require(rendered[offset + byte] == static_cast<std::byte>((clear[channel] >> shift) & 0xffu), "the target's attachment view and sample-preserving readback disagree");
+        }
+    }
+    if (AgcDriver::GuestMemory::Watched(target.address, target.bytes)) {
+        Require(MultisampleTargetView(context, target) == view && ReadMultisampleTargetSamples(context, target) == rendered, "resident reuse changed the image or reapplied its initial guest contents");
+        auto alias = target;
+        alias.pipeBankXor ^= 0x400u;
+        TargetRefuses([&] { MultisampleTargetView(context, alias); }, "layout or metadata changed");
+        memory.Data()[layout.Offset(64u, 0u, 0u, fragments - 1u)] ^= std::byte{1};
+        TargetRefuses([&] { MultisampleTargetView(context, target); }, "guest writes");
+        ClearMultisampleTargets(context.device);
+        MultisampleTargetView(context, target);
+        ReadMultisampleTargetSamples(context, target);
+        recorder.Commands();
+        recorder.NotePendingWrite(target.address, 4u);
+        TargetRefuses([&] { MultisampleTargetView(context, target); }, "external GPU writes");
+        recorder.Sync();
+        NoteColorMetadataFill(target.address, target.bytes, 0xa5a5a5a5u);
+        TargetRefuses([&] { MultisampleTargetView(context, target); }, "unimplemented residency transition");
+    } else {
+        Require(std::getenv("ANYPS5_REQUIRE_TARGET_WATCHED") == nullptr, "watched target reuse was required but unavailable");
+        TargetRefuses([&] { MultisampleTargetView(context, target); }, "watched guest memory");
+    }
+    std::array<std::byte, 1> probe{};
+    TargetRefuses([&] { AgcDriver::GuestMemory::Read(target.address + layout.Offset(64u, 0u, 0u, fragments - 1u), probe); }, "samples are only on the host");
+}
 
 std::vector<std::uint32_t> FetchShader(std::uint32_t width, std::uint32_t height, std::uint32_t fragments, bool arrayed, bool floating) {
     ShaderRecompiler::SpirvModule module;
@@ -580,6 +861,32 @@ int main(int argc, char** argv) {
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         std::uint32_t checked = 0u, unavailable = 0u;
+        if (argc > 1 && std::string(argv[1]) == "--targets") {
+            const std::array formats{VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT};
+            for (std::uint32_t index = 0; index < formats.size(); ++index) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    if (!TargetSupported(context, formats[index], fragments)) { ++unavailable; continue; }
+                    CheckTargetImport(context, 1u << index, fragments, formats[index], false);
+                    ++checked;
+                }
+            }
+            for (const auto fragments : {2u, 4u, 8u}) {
+                if (!TargetSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments)) { ++unavailable; continue; }
+                CheckTargetImport(context, 8u, fragments, VK_FORMAT_R16G16B16A16_SFLOAT, true);
+                ++checked;
+            }
+            for (const auto format : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB}) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    if (!TargetSupported(context, format, fragments)) { ++unavailable; continue; }
+                    CheckTargetImport(context, 4u, fragments, format, false);
+                    ++checked;
+                }
+            }
+            Require(checked != 0u, "device advertises no supported multisample target imports");
+            Require(unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr, "all multisample target cases were required but some are unsupported");
+            std::printf("MS target import checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--readback") {
             if (!context.storageImageReadWithoutFormat) {
                 Require(std::getenv("ANYPS5_REQUIRE_VULKAN") == nullptr, "device lacks required formatless MS storage image reads");

@@ -4328,9 +4328,9 @@ void multisampleInitialContentRefusalTests() {
         } catch (const std::exception& error) {
             message = error.what();
         }
-        Require(message.find("initial guest contents of a multisampled color target are not imported") != std::string::npos, "multisampled target acquisition did not refuse before fabricating guest contents: " + message);
+        Require(message.find("multisample target requires a device, format queries and a detiler") != std::string::npos, "multisampled target acquisition did not refuse an incomplete context: " + message);
     }
-    std::cout << "Multisampled target initial-content refusal tests passed\n";
+    std::cout << "Multisampled target invalid-context refusal tests passed\n";
 }
 
 void depthSurfaceProofTests(const Device& device, Recorder& recorder) {

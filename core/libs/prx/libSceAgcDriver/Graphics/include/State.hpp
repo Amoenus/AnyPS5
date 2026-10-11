@@ -45,6 +45,7 @@ struct ColorTarget {
     bool dccPipeAligned = false;
     std::uint32_t dccControl = 0;
     std::uint64_t fmaskAddress = 0;
+    std::uint32_t fmaskSwizzle = 0;
     std::uint32_t arrayLayers = 1;
     std::uint32_t arraySlice = 0;
     std::uint64_t cmaskAddress = 0;

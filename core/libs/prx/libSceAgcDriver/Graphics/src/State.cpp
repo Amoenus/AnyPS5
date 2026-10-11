@@ -967,6 +967,7 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     if (color.samples > 1) {
         const auto fmaskHigh = find(cx, 0x3a0 + slot);
         color.fmaskAddress = ((fmaskHigh == cx.end() ? 0ull : static_cast<std::uint64_t>(fmaskHigh->second & 0xffu)) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x321 + stride)) << 8u);
+        color.fmaskSwizzle = (attrib3 >> 19u) & 0x1fu;
     }
     color.format = decoded.format;
     color.componentMapping = decoded.componentMapping;

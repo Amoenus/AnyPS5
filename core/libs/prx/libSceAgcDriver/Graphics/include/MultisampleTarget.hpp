@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -31,6 +32,7 @@ private:
 };
 
 VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target);
+std::vector<std::byte> ReadMultisampleTargetSamples(const Context& context, const ColorTarget& target);
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
 void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
 void ClearMultisampleTargets(VkDevice device);

@@ -304,11 +304,12 @@ if(BUILD_TESTING)
     configure_windows_unwind(agc_driver_msaa_runtime_tests)
     add_test(NAME agc_driver_msaa_runtime COMMAND agc_driver_msaa_runtime_tests)
     add_test(NAME agc_driver_msaa_readback COMMAND agc_driver_msaa_runtime_tests --readback)
+    add_test(NAME agc_driver_msaa_target_import COMMAND agc_driver_msaa_runtime_tests --targets)
     add_test(NAME agc_shader_msaa_shapes COMMAND agc_driver_msaa_runtime_tests --shapes)
-    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_shader_msaa_shapes PROPERTIES TIMEOUT 20)
-    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_target_import agc_shader_msaa_shapes PROPERTIES TIMEOUT 20)
+    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_target_import PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
     if(WIN32)
-        set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+        set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_target_import agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
     endif()
     add_test_executable(agc_driver_msaa_layout_tests
             tests/MultisampleTextureLayout.cpp
@@ -919,6 +920,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/Draw.cpp
         Graphics/src/DepthSurface.cpp
         Graphics/src/MultisampleTarget.cpp
+        Graphics/src/MultisampleInitialContents.cpp
         Graphics/src/Pipeline.cpp
         Graphics/src/PipelineLibrary.cpp
         Graphics/src/State.cpp

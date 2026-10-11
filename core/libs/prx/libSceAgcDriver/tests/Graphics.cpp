@@ -1843,7 +1843,7 @@ void multisampleTests() {
         expectFailure([&] { DecodeState(queue); }, "coverage conversion or nonstandard multisampling");
     }
 
-    expectFailure([&] { AgcDriver::Graphics::MultisampleTargetView({}, {}); }, "initial guest contents of a multisampled color target are not imported");
+    expectFailure([&] { AgcDriver::Graphics::MultisampleTargetView({}, {}); }, "multisample target requires a device, format queries and a detiler");
 
     using AgcDriver::Graphics::DccKeys;
     using AgcDriver::Graphics::MultisampledCmask;
