@@ -16,6 +16,7 @@
 #include <unistd.h>
 #endif
 extern "C" {
+int APS5_VABI truncate_nid_postfix(const char*, std::int64_t);
 int APS5_VABI remove_nid_postfix(const char*);
 int APS5_VABI rename_nid_postfix(const char*, const char*);
 int APS5_VABI sceKernelChmod_nid_postfix(const char*, unsigned short);
@@ -74,6 +75,23 @@ static void Check(bool value, int line) {
 }
 #define Require(value) Check((value), __LINE__)
 int main() {
+    const auto rejectsTruncate = [](const char* path, std::int64_t length) {
+        *__error_nid_postfix() = 71;
+        bool rejected = false;
+        try {
+            static_cast<void>(truncate_nid_postfix(path, length));
+        } catch (const std::runtime_error& error) {
+            rejected = std::strcmp(error.what(), "truncate_nid_postfix not implemented") == 0;
+        }
+        return rejected && *__error_nid_postfix() == 71;
+    };
+    char truncatePath[] = "unchanged-path";
+    Require(rejectsTruncate(truncatePath, 0));
+    Require(std::strcmp(truncatePath, "unchanged-path") == 0);
+    Require(rejectsTruncate(nullptr, 0));
+    Require(rejectsTruncate(reinterpret_cast<const char*>(std::uintptr_t{1}), 0));
+    Require(rejectsTruncate(truncatePath, -1));
+    Require(rejectsTruncate(truncatePath, INT64_MAX));
     Require(chmod_nid_postfix(nullptr, 0600) == -1 && *__error_nid_postfix() == 14);
     Require(sceKernelChmod_nid_postfix(nullptr, 0600) == static_cast<int>(0x8002000eu));
     Require(chmod_nid_postfix("anyps5_missing_chmod_path", 0600) == -1 && *__error_nid_postfix() == 2);
@@ -204,6 +222,10 @@ int main() {
     const auto sized = root / "sized.txt";
     { std::ofstream stream(sized); stream << "0123456789abcdef"; }
     Require(sceKernelChmod_nid_postfix(sized.string().c_str(), 0600) == 0);
+    Require(rejectsTruncate(sized.string().c_str(), 0));
+    Require(std::filesystem::file_size(sized) == 16);
+    { std::ifstream stream(sized); std::string contents; std::getline(stream, contents);
+      Require(contents == "0123456789abcdef"); }
     Require(sceKernelTruncate_nid_postfix(sized.string().c_str(), 6) == 0);
     Require(std::filesystem::file_size(sized) == 6);
     { std::ifstream stream(sized); std::string contents; std::getline(stream, contents);

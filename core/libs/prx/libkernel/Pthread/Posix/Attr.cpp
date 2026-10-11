@@ -32,6 +32,7 @@ int APS5_VABI pthread_attr_get_np_nid_postfix(Pthread thread, PthreadAttr* attr)
     p->_detachstate = thread->_detached ? 1 : 0;
     p->_schedpriority = thread->priority.load(std::memory_order_relaxed);
     p->_affinity = thread->affinity.load(std::memory_order_relaxed);
+    p->_scope = 2;
     return 0;
 }
 
@@ -56,6 +57,24 @@ int APS5_VABI pthread_attr_getschedparam_nid_postfix(const PthreadAttr* attr, Ke
 int APS5_VABI pthread_attr_getschedpolicy_nid_postfix(const PthreadAttr* attr, int* policy) {
     if (!Valid(attr) || !policy) return PosixThread::GUEST_EINVAL;
     *policy = (*attr)->_schedpolicy;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_getinheritsched_nid_postfix(const PthreadAttr* attr, int* inherit_sched) {
+    if (!Valid(attr) || !inherit_sched) return PosixThread::GUEST_EINVAL;
+    *inherit_sched = (*attr)->_inheritsched;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_getscope_nid_postfix(const PthreadAttr* attr, int* scope) {
+    if (!Valid(attr) || !scope) return PosixThread::GUEST_EINVAL;
+    *scope = (*attr)->_scope;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_getstackaddr_nid_postfix(const PthreadAttr* attr, void** stack_addr) {
+    if (!Valid(attr) || !stack_addr) return PosixThread::GUEST_EINVAL;
+    *stack_addr = (*attr)->stackAddress;
     return 0;
 }
 
@@ -104,6 +123,12 @@ int APS5_VABI pthread_attr_setschedparam_nid_postfix(PthreadAttr* attr, const Ke
 int APS5_VABI pthread_attr_setschedpolicy_nid_postfix(PthreadAttr* attr, int policy) {
     if (!Valid(attr)) return PosixThread::GUEST_EINVAL;
     (*attr)->_schedpolicy = policy;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_setscope_nid_postfix(PthreadAttr* attr, int scope) {
+    if (!Valid(attr) || (scope != 0 && scope != 2)) return PosixThread::GUEST_EINVAL;
+    (*attr)->_scope = scope;
     return 0;
 }
 
