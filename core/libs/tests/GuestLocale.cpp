@@ -3,6 +3,8 @@
 #include <cstring>
 #include <cwchar>
 #include <climits>
+#include <clocale>
+#include <string>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -23,6 +25,9 @@ int APS5_VABI _Mbtowcx_nid_postfix(std::uint16_t* dst, const char* src, std::siz
 int APS5_VABI _Wctombx_nid_postfix(char* dst, std::uint16_t src, std::mbstate_t* st);
 void APS5_VABI _Locksyslock_nid_postfix();
 void APS5_VABI _Unlocksyslock_nid_postfix();
+GuestLocale::GuestLconv* APS5_VABI localeconv_nid_postfix();
+int* APS5_VABI __error_nid_postfix();
+const char* APS5_VABI setlocale_nid_postfix(int, const char*);
 
 }
 
@@ -144,12 +149,80 @@ static void CheckStreamDestruction() {
     Require(object.stream.locale == &_ZSt21_sceLibcClassicLocale_nid_postfix);
 }
 
+static void CheckLocaleconv() {
+    *__error_nid_postfix() = 0x12345;
+    auto* lconv = localeconv_nid_postfix();
+    Require(lconv != nullptr);
+    Require(std::strcmp(lconv->decimal_point, ".") == 0);
+    Require(std::strcmp(lconv->thousands_sep, "") == 0);
+    Require(static_cast<unsigned char>(lconv->grouping[0]) == 127 && lconv->grouping[1] == 0);
+    Require(std::strcmp(lconv->int_curr_symbol, "") == 0);
+    Require(std::strcmp(lconv->currency_symbol, "") == 0);
+    Require(std::strcmp(lconv->mon_decimal_point, "") == 0);
+    Require(std::strcmp(lconv->mon_thousands_sep, "") == 0);
+    Require(static_cast<unsigned char>(lconv->mon_grouping[0]) == 127 && lconv->mon_grouping[1] == 0);
+    Require(std::strcmp(lconv->positive_sign, "") == 0);
+    Require(std::strcmp(lconv->negative_sign, "") == 0);
+    Require(lconv->int_frac_digits == 127);
+    Require(lconv->frac_digits == 127);
+    Require(lconv->p_cs_precedes == 127);
+    Require(lconv->p_sep_by_space == 127);
+    Require(lconv->n_cs_precedes == 127);
+    Require(lconv->n_sep_by_space == 127);
+    Require(lconv->p_sign_posn == 127);
+    Require(lconv->n_sign_posn == 127);
+    Require(lconv->int_p_cs_precedes == 127);
+    Require(lconv->int_n_cs_precedes == 127);
+    Require(lconv->int_p_sep_by_space == 127);
+    Require(lconv->int_n_sep_by_space == 127);
+    Require(lconv->int_p_sign_posn == 127);
+    Require(lconv->int_n_sign_posn == 127);
+    Require(localeconv_nid_postfix() == lconv);
+    Require(*__error_nid_postfix() == 0x12345);
+    for (int category = 0; category <= 6; ++category) {
+        for (const char* name : {static_cast<const char*>(nullptr), "", "C", "POSIX"}) {
+            const auto* selected = setlocale_nid_postfix(category, name);
+            Require(selected != nullptr && std::strcmp(selected, "C") == 0);
+            Require(localeconv_nid_postfix() == lconv && std::strcmp(lconv->decimal_point, ".") == 0);
+        }
+        Require(setlocale_nid_postfix(category, "unavailable-locale") == nullptr);
+        Require(localeconv_nid_postfix() == lconv && lconv->int_frac_digits == 127);
+    }
+    std::vector<std::thread> callers;
+    for (int index = 0; index < 4; ++index) {
+        callers.emplace_back([=] {
+            *__error_nid_postfix() = 2000 + index;
+            for (int repeat = 0; repeat < 1000; ++repeat) {
+                const auto* current = localeconv_nid_postfix();
+                Require(current == lconv && std::strcmp(current->decimal_point, ".") == 0);
+                Require(static_cast<unsigned char>(current->grouping[0]) == 127 && current->int_n_sign_posn == 127);
+            }
+            Require(*__error_nid_postfix() == 2000 + index);
+        });
+    }
+    for (auto& caller : callers) caller.join();
+    Require(*__error_nid_postfix() == 0x12345);
+    const char* original = std::setlocale(LC_ALL, nullptr);
+    Require(original != nullptr);
+    const std::string originalLocale(original);
+    for (const char* hostLocale : {"C", "German_Germany.1252", "de_DE.UTF-8", "C.UTF-8"}) {
+        if (std::setlocale(LC_ALL, hostLocale) == nullptr) continue;
+        *__error_nid_postfix() = 0x12345;
+        Require(localeconv_nid_postfix() == lconv && std::strcmp(lconv->decimal_point, ".") == 0);
+        Require(static_cast<unsigned char>(lconv->grouping[0]) == 127 && lconv->int_frac_digits == 127);
+        Require(*__error_nid_postfix() == 0x12345);
+    }
+    Require(std::setlocale(LC_ALL, originalLocale.c_str()) != nullptr);
+
+}
+
 int main() {
     CheckGuestCalls();
     CheckLocinfoAlignment();
     CheckCharacterTables();
     CheckCharacterConversions();
     CheckStreamDestruction();
+    CheckLocaleconv();
     _Locksyslock_nid_postfix();
     _Locksyslock_nid_postfix();
     _Unlocksyslock_nid_postfix();
