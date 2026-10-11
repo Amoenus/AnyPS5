@@ -59,6 +59,9 @@ private:
     IrU32 packHalf2x16(IrF32 low, IrF32 high);
     void write16Bits(const RdnaOperand& operand, IrU32 value);
     void writeF16(const RdnaOperand& operand, IrF32 value, std::initializer_list<IrValue*> sources);
+    bool directedF16Rounding() const;
+    IrU32 convertF32ToF16Bits(IrF32 value, std::initializer_list<IrValue*> sources);
+    void writeF16Conversion(const RdnaOperand& operand, IrF32 value, std::initializer_list<IrValue*> sources);
     IrU32 readU32(const RdnaOperand& operand);
     IrU32 flushF32Denormal(IrU32 bits);
     IrF32 flushTinyProduct(IrValue* lhs, IrValue* rhs, IrValue* product, IrValue* addend = nullptr, bool afterRounding = true);
@@ -145,6 +148,10 @@ private:
     IrU32 convertF32ToU32Saturated(IrF32 value, float upperBound, float safeUpper, std::uint32_t highResult);
     IrU32 convertF32ToI32Saturated(IrF32 value, float lowerBound, float upperBound, float safeUpper, std::uint32_t lowerResult, std::uint32_t upperResult);
     IrU32 convertFlooredF32ToI32(IrF32 source, IrF32 floored);
+    bool directedF32Rounding() const;
+    IrF32 convertMagnitudeToF32Directed(IrU32 magnitude, IrU32 signBits, std::uint32_t rounding, IrF32 native);
+    IrF32 convertU32ToF32(IrU32 source);
+    IrF32 convertS32ToF32(IrU32 source);
     IrU32 packU16Lanes(IrU32 low, IrU32 high);
     void emitCompareResult(const RdnaInstruction& inst, IrU1 value, bool scalar, bool cmpx);
     void emitCompareConstant(const RdnaInstruction& inst, bool value, bool scalar, bool cmpx);
