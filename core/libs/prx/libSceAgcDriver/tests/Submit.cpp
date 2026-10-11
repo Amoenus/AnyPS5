@@ -451,8 +451,8 @@ std::array<std::uint32_t, 7> memoryCopy(const void* destination, const void* sou
 void testCopyIntoHostMemory() {
     constexpr std::size_t words = 32768;
     constexpr auto bytes = static_cast<std::uint32_t>(words * 4);
-    auto* produced = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlign_nid_postfix(65536, bytes));
-    auto* source = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlign_nid_postfix(65536, bytes));
+    auto* produced = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, bytes));
+    auto* source = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, bytes));
     std::vector<std::uint32_t> destination(words);
     for (const bool label : {false, true}) {
         for (std::size_t i = 0; i < words; ++i) {

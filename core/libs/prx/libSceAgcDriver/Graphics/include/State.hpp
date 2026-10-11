@@ -104,6 +104,7 @@ struct State {
     VkViewport viewport;
     bool negativeOneToOne;
     bool depthClamp = false;
+    bool alphaToCoverage = false;
     VkConservativeRasterizationModeEXT conservativeRasterization = VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
     VkRect2D scissor;
     VkCullModeFlags cullMode;
@@ -183,6 +184,7 @@ inline constexpr std::array<DrawKeyRange, 48> DrawKeyRegisters{{
     // GE_PRIM_TYPE, GE_MULTI_PRIM_IB_RESET_EN, the geometry subgroup sizes.
     {RegisterBank::UserConfig, 0x242, 1}, {RegisterBank::UserConfig, 0x24b, 1}, {RegisterBank::UserConfig, 0x25b, 1},
 }};
+bool SplitsAlternateAlpha(const State& state);
 // Whether DrawKeyRegisters holds the read.
 bool DrawKeyCovers(RegisterRead read);
 

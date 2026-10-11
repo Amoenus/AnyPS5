@@ -9,6 +9,7 @@
 #include <unistd.h>
 #endif
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libkernel/Socket/include/SocketSelectDeadline.hpp"
 #include "SceTypes.hpp"
 #include <algorithm>
 #include <array>
@@ -298,6 +299,13 @@ static void CheckUnspecifiedIpv6() {
 }
 
 int main() {
+    const auto epoch = std::chrono::steady_clock::time_point{};
+    Require(KernelSocketSelect::DeadlineAfter(epoch, 2, 250000) == epoch + std::chrono::milliseconds(2250));
+    Require(KernelSocketSelect::DeadlineAfter(epoch, INT64_MAX, 0) == std::chrono::steady_clock::time_point::max());
+    Require(KernelSocketSelect::DeadlineAfter(epoch, 10000000000LL, 0) == std::chrono::steady_clock::time_point::max());
+    const auto almostMax = std::chrono::steady_clock::time_point::max() - std::chrono::microseconds(1);
+    Require(KernelSocketSelect::DeadlineAfter(almostMax, 0, 1) == std::chrono::steady_clock::time_point::max());
+    Require(KernelSocketSelect::DeadlineAfter(almostMax, 0, 2) == std::chrono::steady_clock::time_point::max());
     for (int i = 0; i < 16; ++i) {
         Require(in6addr_any_nid_postfix[i] == 0);
         Require(in6addr_loopback_nid_postfix[i] == (i == 15 ? 1 : 0));

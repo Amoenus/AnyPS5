@@ -91,7 +91,7 @@ RdnaImageDimension descriptorDimension(const DescriptorValue& descriptor, RdnaIm
         case ImageType::Cube:
             return RdnaImageDimension::Dim2DArray;
         case ImageType::Color2DArray:
-            return wantArray ? RdnaImageDimension::Dim2DArray : RdnaImageDimension::Dim2D;
+            return wantArray || requested == RdnaImageDimension::Dim3D ? RdnaImageDimension::Dim2DArray : RdnaImageDimension::Dim2D;
         case ImageType::Color2DMsaaArray:
             return wantArray ? RdnaImageDimension::Dim2DMsaaArray : RdnaImageDimension::Dim2DMsaa;
         case ImageType::Color2D:
@@ -633,9 +633,11 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             modes.push_back(volume);
         }
         if (image.dimension == RdnaImageDimension::Dim3D && image.flatVolumeCompatible && !storage && !depth && conversion == IrBufferFormat::Invalid && packed == IrBufferFormat::Invalid) {
-            auto plane = mode;
-            plane.dimension = RdnaImageDimension::Dim2D;
-            modes.push_back(plane);
+            for (const auto dimension : {RdnaImageDimension::Dim2D, RdnaImageDimension::Dim2DArray}) {
+                auto plane = mode;
+                plane.dimension = dimension;
+                modes.push_back(plane);
+            }
         }
         if (image.dimension == RdnaImageDimension::Dim2D && storage && image.written && !image.read && !image.atomic && image.mipMode != ImageMipMode::DynamicStorage && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
             auto line = mode;

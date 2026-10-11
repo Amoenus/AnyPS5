@@ -272,6 +272,26 @@ std::uint32_t SelectExportPacking(SpirvEmitterState& state, std::uint32_t target
     return result;
 }
 
+bool AlphaToCoverage(const SpirvEmitterState& state) {
+    return state.program.Resources().stage == IrShaderStage::Pixel && state.inputInfo.pixel != nullptr && state.inputInfo.pixel->psAlphaToCoverage;
+}
+
+void StoreCoverage(SpirvEmitterState& state, std::uint32_t mask) {
+    const auto pointer = state.module.AllocateId();
+    state.module.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassOutput, TypeI32(state)), pointer, state.sampleMaskVariable, ConstantU32(state, 0u));
+    state.module.AddFunction(spv::OpStore, pointer, mask);
+}
+
+void StoreAlphaCoverage(SpirvEmitterState& state, std::uint32_t color) {
+    const auto alpha = state.module.AllocateId();
+    state.module.AddFunction(spv::OpCompositeExtract, TypeF32(state), alpha, color, 3u);
+    const auto below = state.module.AllocateId();
+    state.module.AddFunction(spv::OpFUnordLessThan, TypeBool(state), below, alpha, ConstantF32(state, 0x3f000000u));
+    const auto mask = state.module.AllocateId();
+    state.module.AddFunction(spv::OpSelect, TypeI32(state), mask, below, ConstantI32(state, 0), ConstantI32(state, -1));
+    StoreCoverage(state, mask);
+}
+
 std::uint32_t ExportRawComponent(SpirvValueEmitContext& ctx, std::uint32_t vector, std::uint32_t component) {
     const auto value = ctx.state.module.AllocateId();
     ctx.state.module.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state), value, vector, component);
@@ -992,6 +1012,7 @@ void EmitProgram(SpirvEmitterState& state) {
     if (state.pixelValidMaskVariable != 0u) {
         state.module.AddFunction(spv::OpStore, state.pixelValidMaskVariable, ConstantU32(state, 1u));
     }
+    if (AlphaToCoverage(state)) StoreCoverage(state, ConstantI32(state, -1));
     if (OrderedPixelShader(state)) {
         state.module.AddFunction(spv::OpBeginInvocationInterlockEXT);
     }
@@ -1244,6 +1265,7 @@ void EmitSetAttribute(SpirvValueEmitContext& ctx, const IrValue& inst) {
             const auto mapped = state.module.AllocateId();
             state.module.AddFunction(spv::OpCompositeConstruct, vectorType, mapped, components[0], components[1], components[2], components[3]);
             value = mapped;
+            if (exp.index == 0u && !uintOutput && AlphaToCoverage(state)) StoreAlphaCoverage(state, value);
             const auto mode = MrtOutputMode(state, exp);
             if (!uintOutput && mode != 5u && mode != 6u) value = SelectExportPacking(state, exp.index, value);
         }

@@ -254,14 +254,14 @@ static void RunBdaDwordWriteTests(const Context& context) {
             }
             return false;
         };
-        const auto write = [&](std::uint64_t address, std::uint32_t dwords, std::uint32_t storedBytes, Abi::FaultReason reason) {
+        const auto write = [&](std::uint64_t address, std::uint32_t dwords, std::uint32_t storedBytes, Abi::FaultReason reason, std::uint32_t groups = 1) {
             const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(Abi::Range), writtenWords};
             std::memcpy(table.Bytes().data(), &header, sizeof(header));
             std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), sizeof(ranges));
             std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
             for (auto* buffer : {&first, &second, &readOnly}) std::memset(buffer->Bytes().data(), 0xa5, buffer->Bytes().size());
             Pipeline pipeline(context, MakeBdaDwordWriteTestShader(address, dwords, values.data()), {&table, &fault, &output});
-            pipeline.Run(1);
+            pipeline.Run(groups);
             Abi::Fault report{};
             std::memcpy(&report, fault.Bytes().data(), sizeof(report));
             for (std::uint32_t byte = 0; byte < dwords * 4u; ++byte) {
@@ -288,6 +288,7 @@ static void RunBdaDwordWriteTests(const Context& context) {
         write(guest + 41, 4, 16, static_cast<Abi::FaultReason>(0));
         write(guest + firstBytes - 8, 4, 16, static_cast<Abi::FaultReason>(0));
         write(guest + firstBytes + 12, 4, 4, Abi::FaultReason::Permission);
+        write(guest + 0x7c, 2, 8, static_cast<Abi::FaultReason>(0), 64);
     }
 }
 

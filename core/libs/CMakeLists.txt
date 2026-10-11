@@ -189,6 +189,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
     endif()
 
+    add_test_executable(guest_memory_pool_stats_tests tests/GuestMemoryPoolStats.cpp)
+    target_include_directories(guest_memory_pool_stats_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_memory_pool_stats_tests PRIVATE libSceSsl libSceHttp2 libSceNet libkernel libc)
+    configure_windows_unwind(guest_memory_pool_stats_tests)
+    add_test(NAME guest_memory_pool_stats COMMAND guest_memory_pool_stats_tests)
+    if(WIN32)
+        set_tests_properties(guest_memory_pool_stats PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSsl>")
+    endif()
+
     add_test_executable(guest_system_gesture_tests tests/GuestSystemGesture.cpp)
     target_include_directories(guest_system_gesture_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_system_gesture_tests PRIVATE libSceSystemGesture libc)

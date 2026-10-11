@@ -307,6 +307,14 @@ void testControls() {
     check(owner->GetTriggeredEvents(&event, 1) == 1, "initial output mode event missing");
     int64_t mode = 0;
     check(sceVideoOutGetEventData(&event, &mode) == 0 && mode == VIDEO_OUT_OUTPUT_MODE_DEFAULT && sceVideoOutGetEventCount(&event) == 1, "initial output mode event encoding is wrong");
+    check(sceVideoOutDeleteOutputModeEvent(queue, handle) == 0, "output mode unsubscription failed");
+    {
+        std::lock_guard lock(cfg->mutex);
+        check(cfg->outputModeEvents.empty(), "output mode unsubscription did not clear registration");
+    }
+    check(sceVideoOutDeleteOutputModeEvent(queue, handle) == 0, "duplicate output mode unsubscription failed");
+    expectFailure([&] { sceVideoOutDeleteOutputModeEvent(0, handle); });
+    expectFailure([&] { sceVideoOutDeleteOutputModeEvent(queue, -1); });
     check(sceVideoOutAddVblankEvent(queue, handle, nullptr) == 0 && sceVideoOutAddVblankEvent(queue, handle, &settings) == 0, "vblank subscription failed");
     {
         std::lock_guard lock(cfg->mutex);

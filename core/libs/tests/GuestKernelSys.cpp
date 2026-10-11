@@ -17,6 +17,8 @@ int APS5_VABI link_nid_postfix(const char*, const char*);
 int APS5_VABI fork_nid_postfix(void);
 int APS5_VABI symlink_nid_postfix(const char*, const char*);
 std::int64_t APS5_VABI readlink_nid_postfix(const char*, char*, std::size_t);
+int APS5_VABI setsid_nid_postfix(void);
+std::uint16_t APS5_VABI umask_nid_postfix(std::uint16_t);
 int* APS5_VABI __error_nid_postfix();
 }
 
@@ -79,7 +81,7 @@ int main() {
     try {
         fork_nid_postfix();
     } catch (const std::runtime_error& error) {
-        forkUnsupported = std::string_view(error.what()) == "fork_nid_postfix not implemented";
+        forkUnsupported = std::string_view(error.what()) == "fork: child processes not implemented";
     }
     Require(forkUnsupported);
     Require(Error() == 73);
@@ -87,6 +89,10 @@ int main() {
     RejectsSymlink(nullptr, "link");
     RejectsSymlink("target", nullptr);
     RejectsSymlink(nullptr, nullptr);
+    Require(setsid_nid_postfix() == -1 && Error() == 1);
+    Require(umask_nid_postfix(0) == 022);
+    Require(umask_nid_postfix(07777) == 0);
+    Require(umask_nid_postfix(022) == 07777);
     const auto root = std::filesystem::path("anyps5-kernel-sys-test-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Require(std::filesystem::create_directory(root));

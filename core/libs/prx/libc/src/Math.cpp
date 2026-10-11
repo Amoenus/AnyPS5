@@ -1,5 +1,6 @@
 #include <mutex>
 #include <cstdint>
+#include <cfenv>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -7,6 +8,20 @@
 #include <stdexcept>
 
 #include "prx/libc/include/General.hpp"
+
+namespace {
+
+template<typename TFloat>
+std::int64_t RoundToInt64(TFloat value) {
+    const TFloat rounded = std::round(value);
+    if (!(rounded >= static_cast<TFloat>(INT64_MIN) && rounded < static_cast<TFloat>(INT64_MAX))) {
+        std::feraiseexcept(FE_INVALID);
+        return INT64_MIN;
+    }
+    return static_cast<std::int64_t>(rounded);
+}
+
+}
 
 extern "C" {
 
@@ -34,10 +49,10 @@ float APS5_VABI scalbnf_nid_postfix(float x, int exponent) { return std::scalbn(
 double APS5_VABI frexp_nid_postfix(double x, int* exponent) { return std::frexp(x, exponent); }
 float APS5_VABI frexpf_nid_postfix(float x, int* exponent) { return std::frexp(x, exponent); }
 // Guest long is 64-bit, including on Windows where native long is 32-bit.
-std::int64_t APS5_VABI lround_nid_postfix(double x) { return std::llround(x); }
-std::int64_t APS5_VABI lroundf_nid_postfix(float x) { return std::llround(x); }
-std::int64_t APS5_VABI llround_nid_postfix(double x) { return std::llround(x); }
-std::int64_t APS5_VABI llroundf_nid_postfix(float x) { return std::llround(x); }
+std::int64_t APS5_VABI lround_nid_postfix(double x) { return RoundToInt64(x); }
+std::int64_t APS5_VABI lroundf_nid_postfix(float x) { return RoundToInt64(x); }
+std::int64_t APS5_VABI llround_nid_postfix(double x) { return RoundToInt64(x); }
+std::int64_t APS5_VABI llroundf_nid_postfix(float x) { return RoundToInt64(x); }
 int APS5_VABI __isfinitef_nid_postfix(float x) { return std::isfinite(x) ? 1 : 0; }
 int APS5_VABI __isnormal_nid_postfix(double x) { return std::isnormal(x) ? 1 : 0; }
 int APS5_VABI __isnormalf_nid_postfix(float x) { return std::isnormal(x) ? 1 : 0; }
@@ -48,6 +63,9 @@ double APS5_VABI asin_nid_postfix(double x) { return std::asin(x); }
 double APS5_VABI acos_nid_postfix(double x) { return std::acos(x); }
 double APS5_VABI sqrt_nid_postfix(double x) { return std::sqrt(x); }
 float APS5_VABI sqrtf_nid_postfix(float x) { return std::sqrt(x); }
+double APS5_VABI fabs_nid_postfix(double x) { return std::fabs(x); }
+double APS5_VABI trunc_nid_postfix(double x) { return std::trunc(x); }
+double APS5_VABI fma_nid_postfix(double x, double y, double z) { return std::fma(x, y, z); }
 long double APS5_VABI acosl_nid_postfix(long double x) { return std::acos(x); }
 
 long double APS5_VABI frexpl_nid_postfix(long double x, int* exponent) {
@@ -59,6 +77,9 @@ double APS5_VABI atan_nid_postfix(double x) { return std::atan(x); }
 double APS5_VABI tan_nid_postfix(double x) { return std::tan(x); }
 double APS5_VABI log2_nid_postfix(double x) { return std::log2(x); }
 double APS5_VABI log_nid_postfix(double x) { return std::log(x); }
+double APS5_VABI log1p_nid_postfix(double x) { return std::log1p(x); }
+float APS5_VABI log1pf_nid_postfix(float x) { return std::log1p(x); }
+double APS5_VABI expm1_nid_postfix(double x) { return std::expm1(x); }
 
 float APS5_VABI sinf_nid_postfix(float x) { return std::sin(x); }
 float APS5_VABI cosf_nid_postfix(float x) { return std::cos(x); }

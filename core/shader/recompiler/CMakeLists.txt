@@ -242,6 +242,9 @@ function(add_shader_recompiler target runtimeTarget)
             SrgbUnormFormat
             ThreadOwned
             UnresolvableSwappcTarget
+            FindUserDataCalls
+            UserDataCalleeLength
+            LinkUserDataCalls
             WriteFileAtomically
     )
     set(shaderCacheManifest)

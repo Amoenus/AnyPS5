@@ -434,6 +434,9 @@ std::uint32_t QueryDimensions(SpirvValueEmitContext& ctx, const ImageEmitAccess&
             state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), result[index], size, index);
         }
     }
+    if (access.mem.imageDimension == RdnaImageDimension::Dim3D && dimension == RdnaImageDimension::Dim2D) {
+        result[2] = ConstantU32(state, 1);
+    }
     if (info.multisampled == 0u) {
         result[3] = state.module.AllocateId();
         state.module.AddFunction(spv::OpImageQueryLevels, TypeU32(state), result[3], image);

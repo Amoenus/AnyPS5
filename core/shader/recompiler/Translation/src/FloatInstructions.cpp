@@ -698,10 +698,53 @@ bool TranslationContext::vLdexpF32(const RdnaInstruction& inst) {
     const IrU32 sign(ir.BitwiseAnd(bits.Value(), ir.Constant(0x80000000u)));
     const IrU32 exponent(ir.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {&bits.Value(), &ir.Constant(23u), &ir.Constant(8u)}));
     const IrU32 clamped(ir.Emit(IrOpcode::SMax32, IrType::U32, {&ir.Emit(IrOpcode::SMin32, IrType::U32, {&offset.Value(), &ir.Constant(512u)}), &ir.Constant(static_cast<std::uint32_t>(-512))}));
+    const IrU32 overflow(ir.BitwiseOr(sign.Value(), ir.Constant(0x7f800000u)));
+    const std::uint32_t denorm32 = floatMode.has_value() ? (floatMode->floatMode >> 4u) & 3u : 0u;
+    const std::uint32_t roundMode = floatMode.has_value() ? floatMode->floatMode & 3u : 0u;
+    IrValue* positive = roundMode == 1u || roundMode == 2u ? &ir.IEqual(sign.Value(), ir.Constant(0u)) : nullptr;
+    IrValue* overflowBits = &overflow.Value();
+    if (roundMode == 1u) overflowBits = &ir.Select(*positive, ir.Constant(0x7f800000u), ir.Constant(0xff7fffffu));
+    else if (roundMode == 2u) overflowBits = &ir.Select(*positive, ir.Constant(0x7f7fffffu), ir.Constant(0xff800000u));
+    else if (roundMode == 3u) overflowBits = &ir.BitwiseOr(sign.Value(), ir.Constant(0x7f7fffffu));
+    if (denorm32 == 1u || denorm32 == 2u) {
+        throw std::runtime_error("f32 denormal mode " + std::to_string(denorm32) + " at pc " + std::to_string(inst.programCounter) + " is not implemented");
+    }
+    if (denorm32 == 3u) {
+        const IrU32 mantissa(ir.BitwiseAnd(bits.Value(), ir.Constant(0x007fffffu)));
+        const IrU1 isSubnormal(ir.IEqual(exponent.Value(), ir.Constant(0u)));
+        const IrU32 sig(ir.Select(isSubnormal.Value(), mantissa.Value(), ir.BitwiseOr(mantissa.Value(), ir.Constant(0x00800000u))));
+        const IrU32 msb(ir.Emit(IrOpcode::FindUMsb32, IrType::U32, {&sig.Value()}));
+        const IrU32 normShift(ir.ISub(ir.Constant(23u), msb.Value()));
+        const IrU32 sigNorm(ir.ShiftLeftLogical(sig.Value(), normShift.Value()));
+        const IrU32 effExp(ir.Select(isSubnormal.Value(), ir.Constant(1u), exponent.Value()));
+        const IrU32 expNorm(ir.ISub(ir.IAdd(effExp.Value(), clamped.Value()), normShift.Value()));
+        const IrU32 normResult(ir.BitwiseOr(sign.Value(), ir.BitwiseOr(ir.ShiftLeftLogical(expNorm.Value(), ir.Constant(23u)), ir.BitwiseAnd(sigNorm.Value(), ir.Constant(0x007fffffu)))));
+        const IrU32 underShiftRaw(ir.ISub(ir.Constant(1u), expNorm.Value()));
+        const IrU32 underShift(ir.Emit(IrOpcode::SMin32, IrType::U32, {&ir.Emit(IrOpcode::SMax32, IrType::U32, {&underShiftRaw.Value(), &ir.Constant(1u)}), &ir.Constant(25u)}));
+        const IrU32 unrounded(ir.ShiftRightLogical(sigNorm.Value(), underShift.Value()));
+        const IrU32 half(ir.ShiftLeftLogical(ir.Constant(1u), ir.ISub(underShift.Value(), ir.Constant(1u))));
+        const IrU32 remMask(ir.BitwiseOr(ir.ISub(half.Value(), ir.Constant(1u)), half.Value()));
+        const IrU32 rem(ir.BitwiseAnd(sigNorm.Value(), remMask.Value()));
+        const IrU1 remGreater(ir.UGreaterThan(rem.Value(), half.Value()));
+        const IrU1 remEqual(ir.IEqual(rem.Value(), half.Value()));
+        const IrU1 lsbOdd(ir.INotEqual(ir.BitwiseAnd(unrounded.Value(), ir.Constant(1u)), ir.Constant(0u)));
+        IrValue* roundUp = &ir.LogicalOr(remGreater.Value(), ir.LogicalAnd(remEqual.Value(), lsbOdd.Value()));
+        if (roundMode == 1u) roundUp = &ir.LogicalAnd(ir.INotEqual(rem.Value(), ir.Constant(0u)), *positive);
+        else if (roundMode == 2u) roundUp = &ir.LogicalAnd(ir.INotEqual(rem.Value(), ir.Constant(0u)), ir.LogicalNot(*positive));
+        const IrU32 magnitude(roundMode == 3u ? unrounded : IrU32(ir.Select(*roundUp, ir.IAdd(unrounded.Value(), ir.Constant(1u)), unrounded.Value())));
+        const IrU32 subResult(ir.BitwiseOr(sign.Value(), magnitude.Value()));
+        IrU32 result(ir.Select(ir.Emit(IrOpcode::SGreaterThanEqual32, IrType::U1, {&expNorm.Value(), &ir.Constant(255u)}), *overflowBits, normResult.Value()));
+        result = IrU32(ir.Select(ir.Emit(IrOpcode::SLessThanEqual32, IrType::U1, {&expNorm.Value(), &ir.Constant(0u)}), subResult.Value(), result.Value()));
+        const IrU1 zero(ir.IEqual(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffffffu)), ir.Constant(0u)));
+        result = IrU32(ir.Select(zero.Value(), bits.Value(), result.Value()));
+        const IrU1 nan(ir.UGreaterThan(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffffffu)), ir.Constant(0x7f800000u)));
+        result = IrU32(ir.Select(ir.IEqual(exponent.Value(), ir.Constant(0xffu)), ir.Select(nan.Value(), quietNan32(bits).Value(), bits.Value()), result.Value()));
+        writeOperand(inst.destination, &ir.BitCastF32(result.Value()));
+        return true;
+    }
     const IrU32 scaled(ir.IAdd(exponent.Value(), clamped.Value()));
     const IrU32 normal(ir.BitwiseOr(ir.BitwiseAnd(bits.Value(), ir.Constant(0x807fffffu)), ir.ShiftLeftLogical(scaled.Value(), ir.Constant(23u))));
-    const IrU32 overflow(ir.BitwiseOr(sign.Value(), ir.Constant(0x7f800000u)));
-    IrU32 result(ir.Select(ir.Emit(IrOpcode::SGreaterThanEqual32, IrType::U1, {&scaled.Value(), &ir.Constant(255u)}), overflow.Value(), normal.Value()));
+    IrU32 result(ir.Select(ir.Emit(IrOpcode::SGreaterThanEqual32, IrType::U1, {&scaled.Value(), &ir.Constant(255u)}), *overflowBits, normal.Value()));
     result = IrU32(ir.Select(ir.Emit(IrOpcode::SLessThanEqual32, IrType::U1, {&scaled.Value(), &ir.Constant(0u)}), sign.Value(), result.Value()));
     const IrU1 nan(ir.UGreaterThan(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffffffu)), ir.Constant(0x7f800000u)));
     result = IrU32(ir.Select(ir.IEqual(exponent.Value(), ir.Constant(0xffu)), ir.Select(nan.Value(), quietNan32(bits).Value(), bits.Value()), result.Value()));

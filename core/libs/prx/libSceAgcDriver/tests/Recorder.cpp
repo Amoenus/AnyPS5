@@ -2454,11 +2454,12 @@ void staleGenerationTests(const Device& device, Recorder& recorder) {
     resource.dstSelW = 7;
     resource.dccAddress = address + surfaceBytes;
     {
+        Require(AgcDriver::GuestMemory::Watched(address, bytes), "(s) the block is not watched before the storage image takes its generation");
         auto image = std::make_shared<StorageTexture>(context, detiler, resource, 0);
-        Require(AgcDriver::GuestMemory::Watched(address, bytes), "(s) the storage image imported its memory before a generation was taken");
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         const auto commands = recorder.Commands();
         recorder.Keep(image);
+        Require(image->Generation() != 0, "(s) the storage image took no generation while its memory was watched");
         const VkClearColorValue red{{1.0f, 0.0f, 0.0f, 1.0f}};
         RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
         context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
@@ -2480,6 +2481,11 @@ void staleGenerationTests(const Device& device, Recorder& recorder) {
         copy.imageExtent = {side, side, 1};
         context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(copyCommands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
         RecordMemoryBarrier(context, copyCommands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        Require(StorageTexture::FindPending(address, surfaceBytes) == image, "(s) the image is not pending after the refresh");
+        Require(StorageTexture::FlushPending(address, surfaceBytes, nullptr, "stale generation test"), "(s) the pending image was not flushed");
         recorder.Submit();
         device.WaitQueue();
         recorder.Sync();
@@ -3221,8 +3227,10 @@ void importWindowTests(const Device& device, Recorder& recorder) {
     resource.dstSelW = 7;
     resource.dccAddress = address + surfaceBytes;
     {
+        Require(!HostImportCovers(base, address, bytes), "(w) the block is imported before the cache takes its generation");
+        const auto cached = CollectWritesUncached(address, surfaceBytes);
+        Require(cached != 0 && UnchangedSince(address, surfaceBytes, cached), "(w) the cache's generation is not current before the import");
         auto image = std::make_shared<StorageTexture>(context, detiler, resource, 0);
-        Require(!HostImportCovers(base, address, bytes), "(w) the storage image imported its memory before a generation was taken");
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         const auto commands = recorder.Commands();
         recorder.Keep(image);
@@ -3231,8 +3239,6 @@ void importWindowTests(const Device& device, Recorder& recorder) {
         context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
         RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
         image->MarkDirty();
-        const auto cached = CollectWritesUncached(address, surfaceBytes);
-        Require(cached != 0 && UnchangedSince(address, surfaceBytes, cached), "(w) the cache's generation is not current before the import");
         const auto* import = HostImportFor(base, address, bytes);
         if (import == nullptr) {
             std::cout << "host import of the import window block refused: the import window not tested\n";
@@ -3243,6 +3249,7 @@ void importWindowTests(const Device& device, Recorder& recorder) {
         CollectWritesUncached(address, surfaceBytes);
         if (importWrites) {
             Require(!UnchangedSince(address, surfaceBytes, cached), "(w) a cache over the pages the import reported sees no change");
+            Require(image->Generation() != 0 && !UnchangedSince(address, surfaceBytes, image->Generation()), "(w) the storage image took its generation after the import window");
             std::array<std::uint8_t, surfaceBytes / 65536> changed{};
             const std::array<std::uint64_t, surfaceBytes / 65536> generations{cached, cached, cached, cached};
             Require(ChangedBlocks(address, surfaceBytes, generations, changed) && std::all_of(changed.begin(), changed.end(), [](std::uint8_t value) { return value == BlockMaybeWritten; }), "(w) the pages the import reported read as written by the CPU");

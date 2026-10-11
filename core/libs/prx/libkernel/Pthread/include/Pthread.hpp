@@ -163,7 +163,9 @@ constexpr std::uint32_t GuestSignalBit(int signum) {
 inline bool GuestSignalBlocked(const PthreadPrivate& thread, int signum) {
     return (thread.signalMask[static_cast<std::size_t>(signum - 1) >> 5].load() & GuestSignalBit(signum)) != 0;
 }
+void NoteGuestStackProtection(std::uintptr_t start, std::size_t bytes, bool readWrite);
 int GuestThreadCpuClockId(const PthreadPrivate* thread);
 bool GuestThreadCpuNanos(int cpuClockThread, std::uint64_t* nanos);
+void SetLiveGuestThreadsAffinity(KernelCpumask mask);
 
 #endif

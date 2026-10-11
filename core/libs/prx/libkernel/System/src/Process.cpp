@@ -13,7 +13,9 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include <array>
 #include <atomic>
@@ -195,6 +197,21 @@ int APS5_VABI getpid_nid_postfix(void) {
     if (pid == 0 || static_cast<std::uint64_t>(pid) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
         throw std::runtime_error("Process identifier is outside the guest range");
     return static_cast<int>(pid);
+}
+
+int APS5_VABI sceKernelGetAppInfo(int pid, void* info) {
+    if (pid != getpid_nid_postfix()) return SCE_KERNEL_ERROR_EPERM;
+    if (info == nullptr) return 0;
+    constexpr std::size_t TitleIdOffset = 0x10;
+    constexpr std::size_t TitleIdBytes = 10;
+    const auto titleId = GetAppTitleId_nid_postfix();
+    char field[TitleIdBytes] = {};
+    std::strncpy(field, titleId.value, sizeof(field) - 1);
+    auto* bytes = static_cast<std::uint8_t*>(info);
+    const std::uint32_t appId = 1;
+    std::memcpy(bytes, &appId, sizeof(appId));
+    std::memcpy(bytes + TitleIdOffset, field, TitleIdBytes);
+    return 0;
 }
 
 int APS5_VABI getuid_nid_postfix(void) {

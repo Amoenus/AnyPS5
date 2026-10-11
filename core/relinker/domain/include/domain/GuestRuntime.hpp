@@ -2,6 +2,7 @@
 #define DOMAIN_GUESTRUNTIME_HPP
 
 #include <cstdint>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,8 @@ struct GuestRuntime {
     std::uint32_t FiniRva = 0;
     bool UsePlatformTlsResolver = true;
     std::vector<std::string> Names;
+    std::vector<std::string> UnmatchedImportModules;
+    std::set<std::string> ZeroReturnExports;
 };
 
 }

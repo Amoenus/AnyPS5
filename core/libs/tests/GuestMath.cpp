@@ -1,5 +1,6 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <bit>
+#include <cerrno>
 #include <cfenv>
 #include <cmath>
 #include <cstdint>
@@ -25,6 +26,9 @@ long long APS5_VABI atoll_nid_postfix(const char*);
 int* APS5_VABI __error_nid_postfix();
 double APS5_VABI sqrt_nid_postfix(double);
 float APS5_VABI sqrtf_nid_postfix(float);
+double APS5_VABI fabs_nid_postfix(double);
+double APS5_VABI trunc_nid_postfix(double);
+double APS5_VABI fma_nid_postfix(double, double, double);
 long double APS5_VABI acosl_nid_postfix(long double);
 long double APS5_VABI frexpl_nid_postfix(long double, int*);
 struct LibcFloatConstant { std::uint32_t bits[4]; };
@@ -43,6 +47,9 @@ int APS5_VABI rand_nid_postfix();
 void APS5_VABI srand_nid_postfix(unsigned int);
 int APS5_VABI rand_r_nid_postfix(unsigned int*);
 float APS5_VABI log10f_nid_postfix(float);
+double APS5_VABI log1p_nid_postfix(double);
+float APS5_VABI log1pf_nid_postfix(float);
+double APS5_VABI expm1_nid_postfix(double);
 float APS5_VABI logbf_nid_postfix(float);
 double APS5_VABI exp2_nid_postfix(double);
 double APS5_VABI ldexp_nid_postfix(double, int);
@@ -83,6 +90,22 @@ static void CheckSquareRoot() {
     Require(std::bit_cast<std::uint32_t>(sqrtf_nid_postfix(-0.f)) == 0x80000000u);
     Require(sqrt_nid_postfix(INFINITY) == INFINITY && sqrtf_nid_postfix(INFINITY) == INFINITY);
     Require(std::isnan(sqrt_nid_postfix(-1.)) && std::isnan(sqrtf_nid_postfix(-1.f)));
+}
+
+static void CheckExactOperations() {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    Require(fabs_nid_postfix(-3.5) == 3.5 && fabs_nid_postfix(-INFINITY) == INFINITY);
+    Require(std::bit_cast<std::uint64_t>(fabs_nid_postfix(-0.)) == 0);
+    Require(std::isnan(fabs_nid_postfix(-nan)) && !std::signbit(fabs_nid_postfix(-nan)));
+    Require(trunc_nid_postfix(2.7) == 2. && trunc_nid_postfix(-2.7) == -2.);
+    Require(std::bit_cast<std::uint64_t>(trunc_nid_postfix(-0.5)) == 0x8000000000000000ull);
+    Require(trunc_nid_postfix(4503599627370497.) == 4503599627370497. && trunc_nid_postfix(-1e300) == -1e300);
+    Require(trunc_nid_postfix(-INFINITY) == -INFINITY && std::isnan(trunc_nid_postfix(nan)));
+    Require(fma_nid_postfix(2., 3., 4.) == 10.);
+    volatile double tenth = 0.1;
+    Require(fma_nid_postfix(tenth, 10., -1.) == 0x1p-54);
+    Require(fma_nid_postfix(0x1p1023, 2., -0x1p1023) == 0x1p1023);
+    Require(std::isnan(fma_nid_postfix(INFINITY, 0., 1.)));
 }
 
 static bool ExtendedBits(long double value, std::uint64_t mantissa, std::uint16_t signExponent) {
@@ -295,6 +318,28 @@ static void CheckFloatClassification() {
     Require(_FDtest_nid_postfix(reinterpret_cast<const float*>(&_FNan_nid_postfix)) == 2);
 }
 
+static void CheckDoubleRounding(double value, std::int64_t expected, bool invalid) {
+    for (const bool useLlround : {false, true}) {
+        std::feclearexcept(FE_ALL_EXCEPT);
+        errno = 12345;
+        const std::int64_t result = useLlround ? llround_nid_postfix(value) : lround_nid_postfix(value);
+        Require(result == expected);
+        Require((std::fetestexcept(FE_INVALID) != 0) == invalid);
+        Require(errno == 12345);
+    }
+}
+
+static void CheckFloatRounding(float value, std::int64_t expected, bool invalid) {
+    for (const bool useLlround : {false, true}) {
+        std::feclearexcept(FE_ALL_EXCEPT);
+        errno = 12345;
+        const std::int64_t result = useLlround ? llroundf_nid_postfix(value) : lroundf_nid_postfix(value);
+        Require(result == expected);
+        Require((std::fetestexcept(FE_INVALID) != 0) == invalid);
+        Require(errno == 12345);
+    }
+}
+
 int main() {
     CheckFloatClassification();
     CheckIntegerConversions();
@@ -342,6 +387,18 @@ int main() {
         Require(std::isinf(result) && result > 0.f && std::fetestexcept(FE_INVALID) != 0);
     }
     Require(log10f_nid_postfix(100.f) == 2.f);
+    Require(log1p_nid_postfix(0.) == 0. && std::signbit(log1p_nid_postfix(-0.)));
+    Require(log1p_nid_postfix(-1.) == -std::numeric_limits<double>::infinity() && std::isnan(log1p_nid_postfix(-2.)));
+    Require(log1p_nid_postfix(std::numeric_limits<double>::infinity()) == std::numeric_limits<double>::infinity());
+    Require(log1p_nid_postfix(1e-300) == 1e-300 && log1pf_nid_postfix(1e-30f) == 1e-30f);
+    Require(std::abs(log1p_nid_postfix(1.) - 0.6931471805599453) < 1e-16);
+    Require(std::abs(log1p_nid_postfix(1e-10) - 9.9999999995e-11) < 1e-25);
+    Require(std::abs(log1pf_nid_postfix(1.f) - 0.6931472f) < 1e-7f && std::isnan(log1pf_nid_postfix(-2.f)));
+    Require(expm1_nid_postfix(0.) == 0. && std::signbit(expm1_nid_postfix(-0.)));
+    Require(expm1_nid_postfix(1e-300) == 1e-300 && expm1_nid_postfix(-1000.) == -1.);
+    Require(expm1_nid_postfix(-std::numeric_limits<double>::infinity()) == -1.);
+    Require(std::abs(expm1_nid_postfix(1.) - 1.718281828459045) < 1e-15);
+    Require(std::abs(expm1_nid_postfix(1e-10) - 1.00000000005e-10) < 1e-25);
     Require(logbf_nid_postfix(8.f) == 3.f && logbf_nid_postfix(-0.75f) == -1.f);
     Require(logbf_nid_postfix(std::numeric_limits<float>::denorm_min()) == -149.f);
     Require(logbf_nid_postfix(0.f) == -std::numeric_limits<float>::infinity());
@@ -350,6 +407,7 @@ int main() {
     Require(exp2_nid_postfix(-3.) == 0.125);
     Require(ldexp_nid_postfix(0.75, 4) == 12.);
     CheckSquareRoot();
+    CheckExactOperations();
     CheckLongDouble();
     Require(scalbn_nid_postfix(0.75, -2) == 0.1875);
     Require(scalbnf_nid_postfix(0.75f, 4) == 12.f);
@@ -371,6 +429,24 @@ int main() {
     Require(llroundf_nid_postfix(2.5f) == 3 && llroundf_nid_postfix(-2.5f) == -3 && llroundf_nid_postfix(-0.4f) == 0);
     Require(llroundf_nid_postfix(8589934592.f) == INT64_C(8589934592) && llroundf_nid_postfix(-0x1p62f) == -(INT64_C(1) << 62));
     Require(llroundf_nid_postfix(0.49999997f) == 0 && llroundf_nid_postfix(16777215.f) == 16777215);
+    Require(lround_nid_postfix(0.49999999999999994) == 0 && lround_nid_postfix(-0.49999999999999994) == 0);
+    constexpr double kTwo63 = 9223372036854775808.0;
+    constexpr double kTwo63Below = 9223372036854774784.0;
+    constexpr float kTwo63f = 9223372036854775808.f;
+    constexpr float kTwo63fBelow = 9223371487098961920.f;
+    CheckDoubleRounding(-kTwo63, INT64_MIN, false);
+    CheckDoubleRounding(kTwo63Below, INT64_C(9223372036854774784), false);
+    CheckDoubleRounding(-kTwo63Below, -INT64_C(9223372036854774784), false);
+    CheckDoubleRounding(4503599627370497.0, INT64_C(4503599627370497), false);
+    CheckFloatRounding(-kTwo63f, INT64_MIN, false);
+    CheckFloatRounding(kTwo63fBelow, INT64_C(9223371487098961920), false);
+    CheckFloatRounding(-kTwo63fBelow, -INT64_C(9223371487098961920), false);
+    for (const double value : {kTwo63, -9223374235878031360.0, 1e30, -1e30, std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        CheckDoubleRounding(value, INT64_MIN, true);
+        CheckFloatRounding(static_cast<float>(value), INT64_MIN, true);
+    }
+    CheckFloatRounding(kTwo63f, INT64_MIN, true);
+    std::feclearexcept(FE_ALL_EXCEPT);
     const auto infinity = std::numeric_limits<float>::infinity();
     const auto nan = std::numeric_limits<float>::quiet_NaN();
     Require(__isinff_nid_postfix(infinity) == 1 && __isinff_nid_postfix(-infinity) == 1);
