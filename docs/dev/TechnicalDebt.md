@@ -334,6 +334,8 @@ Throughout the project, every function at every stage either **does exactly what
 
 ### Functional
 
+- [getc_unlocked, putc_unlocked](../../core/libs/prx/libc/src/StandardStreams.cpp) (libc) - byte I/O uses the host unlocked operations; guest EOF/error flags and macro counters follow FileStream. Linux status queries use feof_unlocked/ferror_unlocked because [glibc feof](https://github.com/bminor/glibc/blob/d2097651cc57834dbfcaa102ddfacae0d86cfb66/libio/feof.c) and ferror can acquire the stream lock. Windows uses [the CRT no-lock byte operations](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/fgetc-nolock-fgetwc-nolock) and feof/ferror, verified under a held stream lock on UCRT. Console behavior and other host CRTs remain unverified.
+
 - [truncate](../../core/libs/prx/libkernel/Unimplemented.cpp) (libkernel) - every call throws without resizing files. The signature follows FreeBSD 9.2 [unistd.h](https://github.com/freebsd/freebsd-src/blob/d43c54ae9f1bc8002297ec035de83fb14d0accb8/include/unistd.h) and its signed 64-bit [off_t](https://github.com/freebsd/freebsd-src/blob/d43c54ae9f1bc8002297ec035de83fb14d0accb8/sys/sys/_types.h).
 
 - [pathconf](../../core/libs/prx/libkernel_sys/Export.cpp) (libkernel_sys) - every call throws; no filesystem limits are reported. The signature follows FreeBSD 9.2 [unistd.h](https://github.com/freebsd/freebsd-src/blob/d43c54ae9f1bc8002297ec035de83fb14d0accb8/include/unistd.h), with a 64-bit AMD64 return type.
