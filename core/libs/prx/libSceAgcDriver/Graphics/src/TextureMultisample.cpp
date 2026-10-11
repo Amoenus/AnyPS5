@@ -13,7 +13,7 @@ namespace AgcDriver::Graphics {
 void Texture::initializeMultisample(TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot) {
     Require(context.storageImageMultisample && context.storageImageWriteWithoutFormat, "device does not enable multisampled storage image writes without format");
     Require(descriptor.dccAddress == 0u, "compressed multisampled texture snapshot is not implemented");
-    Require(descriptor.tileMode == TextureTileMode::kR64KBX, "multisampled depth texture sampling is not implemented");
+    Require(descriptor.tileMode == TextureTileMode::kR64KBX || (descriptor.tileMode == TextureTileMode::kZ64KBX && (descriptor.format == 7u || descriptor.format == 22u)), "multisampled texture snapshot requires R tiling or numeric Z depth");
     Require(!IsConvertedTextureFormat(descriptor.format) && !IsBlockCompressed(descriptor.format), "multisampled texture format requires an unsupported conversion");
     const auto geometry = DescribeSurface(descriptor);
     const auto elementBytes = BytesPerElement(descriptor.format);

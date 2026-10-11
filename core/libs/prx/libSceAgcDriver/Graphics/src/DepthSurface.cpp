@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -230,6 +231,20 @@ bool DepthSurfaceHolds(const Context& context, const GuestTextureResource& resou
         return surface->context.device == context.device && (surface->target.address == address || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == address));
     });
     return found != list.rend() && (*found)->Holds(texture);
+}
+
+extern "C" bool DepthSurfaceGuestOverlap_nid_no_patch(const Context& context, std::uint64_t address, std::uint64_t bytes) {
+    Require(bytes != 0u && address <= std::numeric_limits<std::uint64_t>::max() - bytes, "invalid depth overlap range");
+    const auto overlaps = [&](std::uint64_t base, std::uint64_t size) {
+        return base != 0u && size != 0u && (address <= base ? base - address < bytes : address - base < size);
+    };
+    std::lock_guard lock(surfacesMutex());
+    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) {
+        if (surface->context.device != context.device) return false;
+        const auto& target = surface->target;
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        return overlaps(target.address, DepthSliceBytes(target.extent, d16 ? 2u : 4u)) || overlaps(target.stencilAddress, DepthSliceBytes(target.extent, 1u));
+    });
 }
 
 bool DepthSurfaceAt(std::uint64_t address) {
