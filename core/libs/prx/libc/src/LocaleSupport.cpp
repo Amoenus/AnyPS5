@@ -380,4 +380,38 @@ void APS5_VABI init_env_nid_postfix(const InitEnvParams* params) {
     _init_env_nid_postfix();
 }
 
+GuestLocale::GuestLconv* APS5_VABI localeconv_nid_postfix() {
+    constexpr char unavailable = 127;
+    static char decimalPoint[] = ".";
+    static char noGrouping[] = {unavailable, 0};
+    static char empty[] = "";
+    static GuestLocale::GuestLconv classicLconv{
+        decimalPoint,
+        empty,
+        noGrouping,
+        empty,
+        empty,
+        empty,
+        empty,
+        noGrouping,
+        empty,
+        empty,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+        unavailable,
+    };
+    return &classicLconv;
+}
+
 }
