@@ -70,6 +70,7 @@ public:
             VkPhysicalDeviceFeatures enabled{};
             enabled.shaderStorageImageMultisample = VK_TRUE;
             enabled.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+            enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
             const float priority = 1.0f;
             VkDeviceQueueCreateInfo queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
             queue.queueFamilyIndex = family;
@@ -86,6 +87,7 @@ public:
             function<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties")(context.physical, &context.memory);
             context.storageImageMultisample = true;
             context.storageImageWriteWithoutFormat = true;
+            context.storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
             context.Function<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(context.device, family, 0u, &context.queue);
             VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             pool.queueFamilyIndex = family;
@@ -318,6 +320,119 @@ void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments
 }
 
 
+bool CheckReadback(Context context, std::uint32_t bytes, std::uint32_t fragments, bool chunks) {
+    constexpr auto width = 13u, height = 7u, layers = 3u;
+    const auto count = width * height * layers * fragments;
+    const auto format = TextureDetiler::ImageElementFormat(bytes);
+    VkImageFormatProperties supported{};
+    constexpr auto usage = VK_IMAGE_USAGE_STORAGE_BIT;
+    const auto samples = static_cast<VkSampleCountFlagBits>(fragments);
+    if (context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0u, &supported) != VK_SUCCESS || (supported.sampleCounts & samples) == 0u) return false;
+    context.limits.maxComputeWorkGroupCount[0] = 1u;
+    TextureDetiler detiler(context);
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent = {width, height, 1u};
+    info.mipLevels = 1u;
+    info.arrayLayers = layers;
+    info.samples = samples;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkImage image = VK_NULL_HANDLE;
+    Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &info, nullptr, &image), "vkCreateImage readback test");
+    OwnedImage owned(context, image, VK_NULL_HANDLE);
+    VkMemoryRequirements requirements{};
+    context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &owned.memory), "vkAllocateMemory readback test");
+    Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned.memory, 0u), "vkBindImageMemory readback test");
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    viewInfo.format = format;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, layers};
+    VkImageView view = VK_NULL_HANDLE;
+    owned.transferViews.reserve(1u);
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView readback test");
+    owned.transferViews.push_back(view);
+    const auto align = std::max<std::uint64_t>(16u, context.limits.minStorageBufferOffsetAlignment);
+    const auto first = chunks ? 3u : 0u;
+    const auto selected = chunks ? count - 7u : count;
+    const auto chunkElements = chunks ? 73u : selected;
+    const auto chunkCount = (selected + chunkElements - 1u) / chunkElements;
+    const auto stride = (static_cast<std::uint64_t>(chunkElements) * bytes + 16u + align - 1u) / align * align;
+    Buffer input(context, align + count * bytes + 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer output(context, align + chunkCount * stride, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    if (bytes == 4u && fragments == 2u && !chunks) {
+        CommandBatch validation(context);
+        const auto reject = [&](auto&& call, const char* reason) {
+            try { call(); }
+            catch (const std::runtime_error& error) {
+                Require(std::string(error.what()).find(reason) != std::string::npos, std::string("MS readback refusal differs: ") + error.what());
+                return;
+            }
+            throw std::runtime_error("invalid MS readback was accepted");
+        };
+        auto disabled = context;
+        disabled.storageImageReadWithoutFormat = false;
+        TextureDetiler noReads(disabled);
+        reject([&] { noReads.DispatchMultisampleReadback(validation.Handle(), bytes, output.Handle(), align, count * bytes, view, width, height, layers, fragments, 0u, count); }, "does not enable");
+        disabled = context;
+        disabled.storageImageMultisample = false;
+        TextureDetiler noMultisample(disabled);
+        reject([&] { noMultisample.DispatchMultisampleReadback(validation.Handle(), bytes, output.Handle(), align, count * bytes, view, width, height, layers, fragments, 0u, count); }, "does not enable");
+        reject([&] { detiler.DispatchMultisampleReadback(VK_NULL_HANDLE, bytes, output.Handle(), align, count * bytes, view, width, height, layers, fragments, 0u, count); }, "requires commands");
+        reject([&] { detiler.DispatchMultisampleReadback(validation.Handle(), 3u, output.Handle(), align, count * bytes, view, width, height, layers, fragments, 0u, count); }, "element size");
+        reject([&] { detiler.DispatchMultisampleReadback(validation.Handle(), bytes, output.Handle(), align, count * bytes, view, 0u, height, layers, fragments, 0u, count); }, "extent");
+        reject([&] { detiler.DispatchMultisampleReadback(validation.Handle(), bytes, output.Handle(), align, count * bytes, view, width, height, layers, 3u, 0u, count); }, "fragment count");
+        reject([&] { detiler.DispatchMultisampleReadback(validation.Handle(), bytes, output.Handle(), align, count * bytes, view, width, height, layers, fragments, 1u, count); }, "element range");
+        reject([&] { detiler.DispatchMultisampleReadback(validation.Handle(), bytes, output.Handle(), align + 1u, count * bytes, view, width, height, layers, fragments, 0u, count); }, "buffer range");
+        reject([&] { detiler.DispatchMultisampleReadback(validation.Handle(), bytes, output.Handle(), align, count * bytes - 4u, view, width, height, layers, fragments, 0u, count); }, "buffer range");
+        std::puts("MS readback missing features, commands, invalid elements/extent/fragments/ranges refused");
+    }
+    for (std::uint32_t round = 0u; round < 2u; ++round) {
+        std::memset(input.Bytes().data(), 0xa5, input.Bytes().size());
+        for (std::uint32_t index = 0u; index < count * bytes; ++index) input.Bytes()[align + index] = static_cast<std::byte>((index * 137u + (index >> 8u) * 29u + round * 71u) & 255u);
+        const auto saved = std::vector(input.Bytes().begin(), input.Bytes().end());
+        std::vector<std::byte> expected(output.Bytes().size(), std::byte{0xa5});
+        std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+        detiler.BeginBatch();
+        CommandBatch batch(context);
+        VkImageMemoryBarrier transition{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        transition.srcAccessMask = round == 0u ? 0u : VK_ACCESS_SHADER_READ_BIT;
+        transition.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        transition.oldLayout = round == 0u ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+        transition.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        transition.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transition.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transition.image = image;
+        transition.subresourceRange = viewInfo.subresourceRange;
+        context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(batch.Handle(), round == 0u ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &transition);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        detiler.DispatchMultisampleImage(batch.Handle(), bytes, input.Handle(), align, (static_cast<std::uint64_t>(count) * bytes + 3u) & ~3ull, view, width, height, layers, fragments, 0u, count);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        for (std::uint32_t chunk = 0u; chunk < chunkCount; ++chunk) {
+            const auto begin = chunk * chunkElements;
+            const auto elements = std::min(chunkElements, selected - begin);
+            const auto offset = align + chunk * stride;
+            const auto range = (static_cast<std::uint64_t>(elements) * bytes + 3u) & ~3ull;
+            detiler.DispatchMultisampleReadback(batch.Handle(), bytes, output.Handle(), offset, range, view, width, height, layers, fragments, first + begin, elements);
+            std::memcpy(expected.data() + offset, input.Bytes().data() + align + (first + begin) * bytes, elements * bytes);
+        }
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        output.Invalidate();
+        Require(std::ranges::equal(output.Bytes(), expected), "MS readback lost element, sample, layer, chunk or guard bytes");
+        Require(std::ranges::equal(input.Bytes(), saved), "MS readback altered its upload source");
+    }
+    std::printf("MS readback bytes=%u fragments=%u chunks=%u two uploads exact samples/layers/tails/guards\n", bytes, fragments, chunks);
+    return true;
+}
+
 void CheckCache(Context context, std::uint32_t fragments) {
     TextureDetiler detiler(context);
     context.detiler = &detiler;
@@ -465,6 +580,24 @@ int main(int argc, char** argv) {
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         std::uint32_t checked = 0u, unavailable = 0u;
+        if (argc > 1 && std::string(argv[1]) == "--readback") {
+            if (!context.storageImageReadWithoutFormat) {
+                Require(std::getenv("ANYPS5_REQUIRE_VULKAN") == nullptr, "device lacks required formatless MS storage image reads");
+                return 77;
+            }
+            for (const auto bytes : {1u, 2u, 4u, 8u, 16u}) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    for (const bool chunks : {false, true}) {
+                        if (CheckReadback(context, bytes, fragments, chunks)) ++checked;
+                        else ++unavailable;
+                    }
+                }
+            }
+            Require(checked != 0u, "device advertises no supported MS readback cases");
+            if (std::getenv("ANYPS5_REQUIRE_MSAA_ALL") != nullptr) Require(unavailable == 0u, "device did not exercise every required MS readback case");
+            std::printf("MS readback checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
         for (const auto format : {5u, 11u, 20u, 62u, 75u, 71u}) {
             for (const auto fragments : {2u, 4u, 8u}) {
                 if (!Supports(context, format, fragments)) {

@@ -160,6 +160,7 @@ struct Context {
     bool sampleRateShading = false;
     bool storageImageMultisample = false;
     bool storageImageWriteWithoutFormat = false;
+    bool storageImageReadWithoutFormat = false;
     bool nullDescriptors = false;
     bool bufferInt64Atomics = false;
     const PlaceholderImages* placeholderImages = nullptr;

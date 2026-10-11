@@ -70,6 +70,19 @@ add_custom_command(
         VERBATIM
 )
 
+set(agcMultisampleReadbackShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MultisampleReadback.comp)
+set(agcMultisampleReadbackShaderSpv ${agcTextureDetileGeneratedDir}/MultisampleReadback.spv)
+set(agcMultisampleReadbackShaderHeader ${agcTextureDetileGeneratedDir}/MultisampleReadback_spv.h)
+add_custom_command(
+        OUTPUT "${agcMultisampleReadbackShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcMultisampleReadbackShaderSpv}" "${agcMultisampleReadbackShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcMultisampleReadbackShaderSpv} -DOUTPUT=${agcMultisampleReadbackShaderHeader}
+        -DSYMBOL=MULTISAMPLE_READBACK_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcMultisampleReadbackShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 set(agcMeshArgumentsShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MeshArguments.comp)
 set(agcMeshArgumentsShaderSpv ${agcTextureDetileGeneratedDir}/MeshArguments.spv)
 set(agcMeshArgumentsShaderHeader ${agcTextureDetileGeneratedDir}/MeshArguments_spv.h)
@@ -217,6 +230,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureMultisample.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleUpload.cpp
         ${agcMultisampleUploadShaderHeader}
+        ${agcMultisampleReadbackShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PassHazards.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/UnitShadow.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
@@ -278,11 +292,12 @@ if(BUILD_TESTING)
     set_target_properties(agc_driver_msaa_runtime_tests PROPERTIES CXX_EXTENSIONS OFF)
     configure_windows_unwind(agc_driver_msaa_runtime_tests)
     add_test(NAME agc_driver_msaa_runtime COMMAND agc_driver_msaa_runtime_tests)
+    add_test(NAME agc_driver_msaa_readback COMMAND agc_driver_msaa_runtime_tests --readback)
     add_test(NAME agc_shader_msaa_shapes COMMAND agc_driver_msaa_runtime_tests --shapes)
-    set_tests_properties(agc_driver_msaa_runtime agc_shader_msaa_shapes PROPERTIES TIMEOUT 20)
-    set_tests_properties(agc_driver_msaa_runtime PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_shader_msaa_shapes PROPERTIES TIMEOUT 20)
+    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
     if(WIN32)
-        set_tests_properties(agc_driver_msaa_runtime agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+        set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
     endif()
     add_test_executable(agc_driver_msaa_layout_tests
             tests/MultisampleTextureLayout.cpp
@@ -919,6 +934,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/MultisampleTextureLayout.cpp
         Graphics/src/MultisampleUpload.cpp
         ${agcMultisampleUploadShaderHeader}
+        ${agcMultisampleReadbackShaderHeader}
         Graphics/src/PassHazards.cpp
         Graphics/src/UnitShadow.cpp
         Graphics/src/Sampler.cpp
