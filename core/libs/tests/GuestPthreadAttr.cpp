@@ -32,7 +32,9 @@ int APS5_VABI pthread_attr_get_np_nid_postfix(Pthread thread, PthreadAttr* attr)
 int APS5_VABI pthread_create_nid_postfix(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg);
 int APS5_VABI pthread_join_nid_postfix(Pthread thread, void** result);
 int* APS5_VABI __error_nid_postfix();
+int APS5_VABI scePthreadAttrGetsolosched(const PthreadAttr* attr, int* solosched);
 int APS5_VABI pthread_attr_setstacksize_nid_postfix(PthreadAttr* attr, std::size_t stackSize);
+int APS5_VABI pthread_attr_setsolosched_np_nid_postfix(PthreadAttr* attr, int solosched);
 }
 
 static constexpr int SCE_OK = 0;
@@ -87,6 +89,21 @@ static void CheckStackSizeLimit() {
     Require(pthread_attr_setstacksize_nid_postfix(&attr, MIN_STACK_SIZE - 1) == GUEST_EINVAL);
     Require(scePthreadAttrGetstacksize(&attr, &stackSize) == SCE_OK && stackSize == MIN_STACK_SIZE);
     Require(scePthreadAttrDestroy(&attr) == SCE_OK);
+}
+
+static void CheckSoloSched() {
+    PthreadAttr attr = nullptr;
+    Require(pthread_attr_setsolosched_np_nid_postfix(nullptr, 1) == GUEST_EINVAL);
+    Require(pthread_attr_setsolosched_np_nid_postfix(&attr, 1) == GUEST_EINVAL);
+    Require(scePthreadAttrInit(&attr) == SCE_OK);
+    int soloSched = -1;
+    Require(scePthreadAttrGetsolosched(&attr, &soloSched) == SCE_OK && soloSched == 0);
+    Require(pthread_attr_setsolosched_np_nid_postfix(&attr, 1) == 0);
+    Require(scePthreadAttrGetsolosched(&attr, &soloSched) == SCE_OK && soloSched == 1);
+    Require(pthread_attr_setsolosched_np_nid_postfix(&attr, 0) == 0);
+    Require(scePthreadAttrGetsolosched(&attr, &soloSched) == SCE_OK && soloSched == 0);
+    Require(scePthreadAttrDestroy(&attr) == SCE_OK);
+    Require(pthread_attr_setsolosched_np_nid_postfix(&attr, 1) == GUEST_EINVAL);
 }
 
 static void* APS5_VABI Worker(void* arg) {
@@ -176,6 +193,7 @@ static void QueriedScope() {
 
 int main() {
     CheckStackSizeLimit();
+    CheckSoloSched();
     PthreadAttr attr = nullptr;
     Require(scePthreadAttrInit(&attr) == SCE_OK);
     Require(scePthreadAttrSetinheritsched(&attr, EXPLICIT_SCHED) == SCE_OK);
