@@ -98,6 +98,7 @@ struct PthreadAttrPrivate {
     int _schedpriority;
     int _schedpolicy;
     int _inheritsched;
+    int _scope = 2;
     KernelCpumask _affinity = DEFAULT_THREAD_AFFINITY;
     bool _affinityExplicit = false;
     std::size_t _guardsize = 0x1000;
