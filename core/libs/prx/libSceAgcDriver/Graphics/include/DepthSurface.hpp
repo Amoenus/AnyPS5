@@ -14,6 +14,7 @@ class Texture;
 
 VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target);
 std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel);
+extern "C" std::uint64_t DepthPlaneBytes_nid_no_patch(VkExtent2D extent, std::uint32_t bytesPerTexel, std::uint32_t samples);
 void ClearDepthSurfaces(VkDevice device);
 bool DepthSurfaceAt(std::uint64_t address);
 extern "C" bool DepthSurfaceGuestOverlap_nid_no_patch(const Context& context, std::uint64_t address, std::uint64_t bytes);

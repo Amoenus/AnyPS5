@@ -3,6 +3,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
 #include "RdnaDecoder/include/RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
 #include <array>
@@ -188,6 +190,13 @@ std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel) {
     return width * height * bytesPerTexel;
 }
 
+extern "C" std::uint64_t DepthPlaneBytes_nid_no_patch(VkExtent2D extent, std::uint32_t bytesPerTexel, std::uint32_t samples) {
+    Require(extent.width != 0u && extent.height != 0u && extent.width <= 16384u && extent.height <= 16384u, "invalid depth plane extent");
+    Require(bytesPerTexel == 1u || bytesPerTexel == 2u || bytesPerTexel == 4u, "unsupported depth plane element size");
+    if (samples == 1u) return DepthSliceBytes(extent, bytesPerTexel);
+    return MultisampleTextureLayout(TextureTileMode::kZ64KBX, bytesPerTexel, samples, extent.width, extent.height, 1u, 0u).Bytes();
+}
+
 VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target) {
     std::lock_guard lock(surfacesMutex());
     const bool cleared = target.htileAddress != 0 && clearedHtiles().erase(target.htileAddress) != 0;
@@ -295,7 +304,8 @@ extern "C" bool DepthSurfaceGuestOverlap_nid_no_patch(const Context& context, st
         if (surface->context.device != context.device) return false;
         const auto& target = surface->target;
         const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
-        return overlaps(target.address, DepthSliceBytes(target.extent, d16 ? 2u : 4u)) || overlaps(target.stencilAddress, DepthSliceBytes(target.extent, 1u)) || overlaps(target.htileAddress, HtileMetadataBytes(target.extent));
+        const auto metadataBytes = target.samples == 1u ? HtileMetadataBytes(target.extent) : MultisampleHtileBytes_nid_no_patch(target.extent.width, target.extent.height, 1u);
+        return overlaps(target.address, DepthPlaneBytes_nid_no_patch(target.extent, d16 ? 2u : 4u, target.samples)) || overlaps(target.stencilAddress, DepthPlaneBytes_nid_no_patch(target.extent, 1u, target.samples)) || overlaps(target.htileAddress, metadataBytes);
     });
 }
 

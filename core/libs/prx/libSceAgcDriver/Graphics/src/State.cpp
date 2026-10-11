@@ -219,6 +219,7 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     Require(!depthClear || (zFormat != 0 && !depthReadOnly), "depth clear requires a writable depth plane");
     DepthTarget depth{};
     depth.samples = 1u << ((read(cx, 0x010) >> 2u) & 3u);
+    Require(depth.samples == 1u || ((zFormat == 0u || ((read(cx, 0x010) >> 4u) & 31u) == 24u) && (!stencil || ((read(cx, 0x011) >> 4u) & 31u) == 24u)), "multisampled depth/stencil footprint requires 64KB_Z_X");
     depth.address = zFormat != 0 ? base(0x012, 0x01a) : 0;
     depth.stencilAddress = stencil ? base(0x013, 0x01b) : 0;
     Require(zFormat == 0 || depthReadOnly || base(0x014, 0x01c) == depth.address, "depth read and written at different addresses is unsupported");
@@ -226,8 +227,8 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     const auto size = read(cx, 0x007);
     depth.extent = {(size & 0x3fffu) + 1u, ((size >> 16u) & 0x3fffu) + 1u};
     if (const auto slice = view & 0x1fffu; slice != 0) {
-        if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, zFormat == 1 ? 2u : 4u);
-        if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, 1u);
+        if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * DepthPlaneBytes_nid_no_patch(depth.extent, zFormat == 1 ? 2u : 4u, depth.samples);
+        if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * DepthPlaneBytes_nid_no_patch(depth.extent, 1u, depth.samples);
     }
     depth.format = zFormat == 1 ? (stencil ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D16_UNORM) : (stencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT);
     depth.clearDepth = readFloat(cx, 0x00b);

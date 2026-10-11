@@ -1728,6 +1728,32 @@ void multisampleTests() {
     }
     state = DecodeState(queue);
     Require(state.samples == 8 && state.colors.size() == 1 && state.colors[0].samples == 8, "the standard 8x pattern (sample 7 at (7, -7), PPSA99902's registers) did not decode as standard");
+    for (const auto extent : {VkExtent2D{5u, 3u}, VkExtent2D{129u, 67u}, VkExtent2D{3840u, 2160u}}) {
+        for (const auto format : {1u, 3u}) {
+            for (const auto layer : {0u, 1u, 3u}) {
+                auto depthQueue = queue;
+                depthQueue.context[0x000] = 0x20u;
+                depthQueue.context[0x002] = layer | (layer << 13u);
+                depthQueue.context[0x007] = (extent.width - 1u) | ((extent.height - 1u) << 16u);
+                depthQueue.context[0x00a] = depthQueue.context[0x00b] = 0u;
+                depthQueue.context[0x010] = 0x2290098cu | format;
+                depthQueue.context[0x011] = 0x20000181u;
+                depthQueue.context[0x012] = depthQueue.context[0x014] = 0x400000u;
+                depthQueue.context[0x013] = depthQueue.context[0x015] = 0x800000u;
+                depthQueue.context[0x200] = 2u;
+                const auto depthState = DecodeState(depthQueue);
+                Require(depthState.depth && depthState.depth->samples == 8u, "multisample depth slice lost its sample count");
+                Require(depthState.depth->address == 0x40000000ull + layer * AgcDriver::Graphics::DepthPlaneBytes_nid_no_patch(extent, format == 1u ? 2u : 4u, 8u), "multisample depth array slice uses a single-sample stride");
+                Require(depthState.depth->stencilAddress == 0x80000000ull + layer * AgcDriver::Graphics::DepthPlaneBytes_nid_no_patch(extent, 1u, 8u), "multisample stencil array slice uses a single-sample stride");
+                auto unsupported = depthQueue;
+                unsupported.context[0x010] &= ~(31u << 4u);
+                expectFailure([&] { DecodeState(unsupported); }, "64KB_Z_X");
+                unsupported = depthQueue;
+                unsupported.context[0x011] &= ~(31u << 4u);
+                expectFailure([&] { DecodeState(unsupported); }, "64KB_Z_X");
+            }
+        }
+    }
     queue = multisampled();
     queue.context[0x31d] = 0x1000;
     expectFailure([&] { DecodeState(queue); }, "fewer fragments than samples");
