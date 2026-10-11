@@ -230,10 +230,8 @@ void RunColorTargetLayoutTests() {
             Require(layout.Alignment() == block[0] && layout.BlocksPerRow() == 3u && layout.Bytes() == ComputeSurfaceSize(ComputeElementMipLayout(ColorTextureTileMode(mode), bpe, width, height, 1), 1), "a 64 KiB color layout differs from its texture geometry");
             for (const auto x : {0u, 1u, block[1] - 1u, block[1], block[1] + 1u, width - 1u}) {
                 for (const auto y : {0u, 1u, block[2] - 1u, block[2], block[2] + 1u, height - 1u}) {
-                    const auto localX = x % block[1];
-                    const auto localY = y % block[2];
                     std::size_t expected = 0;
-                    for (std::uint32_t bit = 0; bit < 16u; ++bit) expected |= static_cast<std::size_t>(std::popcount((localX & equation->bits[bit] & 0xfffu) ^ ((localY << 12u) & equation->bits[bit] & 0xfff000u)) & 1) << bit;
+                    for (std::uint32_t bit = 0; bit < 16u; ++bit) expected |= static_cast<std::size_t>(std::popcount((x & equation->bits[bit] & 0xfffu) ^ ((y << 12u) & equation->bits[bit] & 0xfff000u)) & 1) << bit;
                     const auto blockIndex = (y / block[2]) * 3u + x / block[1];
                     Require(layout.Offset(x, y) == blockIndex * 65536u + (expected ^ 0x4600u), "a 64 KiB color offset differs from its mode's equation across block boundaries");
                 }
