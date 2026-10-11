@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -281,6 +282,20 @@ void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
         const VkImageAspectFlags written = VK_IMAGE_ASPECT_DEPTH_BIT | (target.htileStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
         surface->pendingClear = (surface->pendingClear & ~written) | HtileFillClears(pattern, target.htileStencil);
     }
+}
+
+extern "C" bool DepthSurfaceGuestOverlap_nid_no_patch(const Context& context, std::uint64_t address, std::uint64_t bytes) {
+    Require(bytes != 0u && address <= std::numeric_limits<std::uint64_t>::max() - bytes, "invalid depth overlap range");
+    const auto overlaps = [&](std::uint64_t base, std::uint64_t size) {
+        return base != 0u && size != 0u && (address <= base ? base - address < bytes : address - base < size);
+    };
+    std::lock_guard lock(surfacesMutex());
+    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) {
+        if (surface->context.device != context.device) return false;
+        const auto& target = surface->target;
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        return overlaps(target.address, DepthSliceBytes(target.extent, d16 ? 2u : 4u)) || overlaps(target.stencilAddress, DepthSliceBytes(target.extent, 1u)) || overlaps(target.htileAddress, HtileMetadataBytes(target.extent));
+    });
 }
 
 bool DepthSurfaceAt(std::uint64_t address) {

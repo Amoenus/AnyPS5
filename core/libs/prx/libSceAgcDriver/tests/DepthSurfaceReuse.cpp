@@ -185,6 +185,29 @@ void RunDepthSurfaceReuseTests() {
     Require(lookup(context, {stencil, FormatR8Uint, 320, 180}) != nullptr, "an 8-bit view of a stencil plane's own extent must sample the stencil plane");
     Require(lookup(context, {stencil, FormatR8G8B8A8Unorm, 320, 180, TileRenderTarget64KB}) == nullptr, "an RGBA8 view of a stencil plane's own extent must be read as reused memory");
     Require(lookup(context, {stencil, FormatR32Float, 320, 180}) == nullptr, "an R32F view of a stencil plane's own extent must be read as reused memory");
+    const auto depth32Bytes = DepthSliceBytes({384u, 384u}, 4u);
+    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, depth32, 1u), "resident depth base was not detected");
+    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, depth32 + depth32Bytes - 1u, 1u), "resident depth final byte was not detected");
+    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, depth32 - 1u, 2u), "resident depth overlap from before its base was not detected");
+    Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, depth32 - 1u, 1u), "adjacent bytes before depth overlap");
+    Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, depth32 + depth32Bytes, 1u), "adjacent bytes after depth overlap");
+    auto another = context;
+    another.device = reinterpret_cast<VkDevice>(static_cast<std::uintptr_t>(1u));
+    Require(!DepthSurfaceGuestOverlap_nid_no_patch(another, depth32, depth32Bytes), "resident depth from another device overlaps");
+    constexpr std::uint64_t overlapStencil = 0x70000000u;
+    DepthSurfaceView(context, {0x60000000u, overlapStencil, {256u, 256u}, VK_FORMAT_D16_UNORM_S8_UINT, 1.0f, 0});
+    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, overlapStencil + DepthSliceBytes({256u, 256u}, 1u) - 1u, 1u), "resident stencil final byte was not detected");
+    Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, overlapStencil + DepthSliceBytes({256u, 256u}, 1u), 1u), "adjacent bytes after stencil overlap");
+    constexpr std::uint64_t htile = 0x78000000u;
+    DepthSurfaceView(context, {0x79000000u, 0u, {16u, 16u}, VK_FORMAT_D32_SFLOAT, 1.0f, 0, htile});
+    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, htile, 1u), "resident HTILE base was not detected");
+    Require(DepthSurfaceGuestOverlap_nid_no_patch(context, htile + 32767u, 1u), "resident HTILE padding was not detected");
+    Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, htile + 32768u, 1u), "adjacent bytes after HTILE overlap");
+    for (const auto range : {std::array<std::uint64_t, 2>{0u, 0u}, std::array<std::uint64_t, 2>{~0ull, 1u}}) {
+        bool rejected = false;
+        try { DepthSurfaceGuestOverlap_nid_no_patch(context, range[0], range[1]); } catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected, "invalid resident depth overlap range did not throw");
+    }
 
     ClearDepthSurfaces(context.device);
 }

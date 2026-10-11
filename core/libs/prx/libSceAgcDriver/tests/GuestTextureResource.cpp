@@ -296,7 +296,32 @@ void RunGuestTextureResourceTests() {
 
     Fields badMsaa = base;
     badMsaa.msaaDepth = true;
-    rejectFields(badMsaa, "MSAA");
+    rejectFields(badMsaa, "ITERATE_256");
+    for (const auto format : {7u, 22u}) {
+        for (const auto type : {14u, 15u}) {
+            for (const auto count : {1u, 2u, 3u}) {
+                Fields depth = base;
+                depth.msaaDepth = true;
+                depth.format = format;
+                depth.typeRaw = type;
+                depth.tileModeRaw = 24u;
+                depth.lastLevel = count;
+                depth.maxMip = count;
+                depth.depth = type == 15u ? 2u : 0u;
+                const auto decoded = DecodeTextureResource(pack(depth));
+                Require(decoded.iterate256 && decoded.fragments == (1u << count) && decoded.depthOrLastArray == depth.depth, "multisampled depth descriptor lost ITERATE_256 or its samples/layers");
+                depth.metaCompress = true;
+                rejectFields(depth, "null metadata");
+                depth.metaCompress = false;
+                depth.tileModeRaw = 27u;
+                rejectFields(depth, "ITERATE_256");
+                depth.tileModeRaw = 24u;
+                depth.format = 20u;
+                rejectFields(depth, "ITERATE_256");
+            }
+        }
+    }
+
 
     Fields blockSize = base;
     blockSize.maxUncompBlkSize = 1;

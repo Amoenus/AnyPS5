@@ -6,6 +6,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include <algorithm>
 #include <atomic>
@@ -511,12 +513,64 @@ std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
     return budget;
 }
 
+std::shared_ptr<Texture> multisampleDepthSnapshot(const Context& context, const GuestTextureResource& resource, VkComponentMapping components) {
+    Require(resource.format == 7u || resource.format == 22u, "multisampled Z depth format is not implemented");
+    Require(resource.dccAddress == 0u || (resource.iterate256 && resource.dccPipeAligned && !resource.dccAlphaOnMsb), "multisampled HTILE snapshot requires pipe-aligned ITERATE_256 depth");
+    const auto geometry = DescribeSurface(resource);
+    const auto metadataBytes = resource.dccAddress != 0u ? MultisampleHtileBytes_nid_no_patch(resource.width, resource.height, geometry.layers) : 0u;
+    if (auto* recorder = Recorder::Active()) {
+        recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+        if (metadataBytes != 0u) recorder->SyncThrough(resource.dccAddress, metadataBytes);
+    }
+    StorageTexture::FlushPending(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+    if (metadataBytes != 0u) StorageTexture::FlushPending(resource.dccAddress, metadataBytes);
+    Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, resource.baseAddress, geometry.guestBytes), "sample-preserving readback of a resident depth surface is not implemented");
+    if (metadataBytes != 0u) Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, resource.dccAddress, metadataBytes), "HTILE overlaps a resident depth surface");
+    std::vector<std::byte> snapshot(geometry.guestBytes);
+    GuestMemory::Read(resource.baseAddress, snapshot);
+    if (metadataBytes != 0u) {
+        std::vector<std::uint32_t> metadata(metadataBytes / sizeof(std::uint32_t));
+        GuestMemory::Read(resource.dccAddress, std::as_writable_bytes(std::span(metadata)));
+        const bool uniform = std::all_of(metadata.begin(), metadata.end(), [&](auto word) { return word == metadata.front(); });
+        if (uniform) {
+            const auto state = MultisampleHtileState_nid_no_patch(metadata.front());
+            if (state != HtileDepthState::Uncompressed) Require(FillDccClear(ResolveTextureFormat(resource.format), state == HtileDepthState::ClearZero ? DccKeys::Clear0000 : DccKeys::Clear1111, false, snapshot), "HTILE clear has no supported depth encoding");
+        } else {
+            const auto elementBytes = BytesPerElement(resource.format);
+            const MultisampleTextureLayout address(resource.tileMode, elementBytes, resource.fragments, resource.width, resource.height, geometry.layers, resource.pipeBankXor);
+            for (std::uint32_t layer = 0u; layer < geometry.layers; ++layer) {
+                for (std::uint32_t y = 0u; y < resource.height; y += 8u) {
+                    for (std::uint32_t x = 0u; x < resource.width; x += 8u) {
+                        const auto offset = MultisampleHtileOffset_nid_no_patch(resource.fragments, resource.width, resource.height, geometry.layers, resource.pipeBankXor, x, y, layer);
+                        const auto state = MultisampleHtileState_nid_no_patch(metadata.at(offset / sizeof(std::uint32_t)));
+                        if (state == HtileDepthState::Uncompressed) continue;
+                        const std::uint32_t value = state == HtileDepthState::ClearZero ? 0u : elementBytes == 2u ? 0xffffu : 0x3f800000u;
+                        for (auto yy = y; yy < std::min(y + 8u, resource.height); ++yy) {
+                            for (auto xx = x; xx < std::min(x + 8u, resource.width); ++xx) {
+                                for (std::uint32_t sample = 0u; sample < resource.fragments; ++sample) std::memcpy(snapshot.data() + address.Offset(xx, yy, layer, sample), &value, elementBytes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    auto decoded = resource;
+    decoded.dccAddress = 0u;
+    decoded.dccPipeAligned = false;
+    decoded.dccAlphaOnMsb = false;
+    decoded.iterate256 = false;
+    return std::make_shared<Texture>(context, *context.detiler, decoded, components, snapshot);
+}
+
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false) {
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     if (resource.fragments != 1u) {
-        Require(resource.tileMode == TextureTileMode::kR64KBX && !depthCompare, "multisampled depth texture sampling is not implemented");
+        Require(!depthCompare, "multisampled depth comparison sampling is not implemented");
+        if (resource.tileMode == TextureTileMode::kZ64KBX) return multisampleDepthSnapshot(context, resource, components);
+        Require(resource.tileMode == TextureTileMode::kR64KBX, "unsupported multisampled texture tile mode");
         const auto geometry = DescribeSurface(resource);
         if (resource.dccAddress != 0u) {
             const auto metadataBytes = MultisampleDccBytes_nid_no_patch(BytesPerElement(resource.format), resource.fragments, resource.width, resource.height, geometry.layers);
@@ -3095,7 +3149,7 @@ bool ShaderResources::precollectImages() {
                 record.guestBytes = memo != nullptr ? memo->guestBytes : DescribeSurface(record.resource).guestBytes;
                 record.generation = GuestMemory::CollectWrites(record.resource.baseAddress, static_cast<std::size_t>(record.guestBytes));
                 record.decoded = true;
-                if (record.sampled && !noRecords && words.size() == 8 && (binding.imageDepthCompare.empty() || !binding.imageDepthCompare.at(element))) {
+                if (record.sampled && record.resource.fragments == 1u && !noRecords && words.size() == 8 && (binding.imageDepthCompare.empty() || !binding.imageDepthCompare.at(element))) {
                     std::copy(words.begin(), words.end(), record.words.begin());
                     record.components = memo->components;
                     record.keys = TextureClearKeys(record.resource, record.guestBytes);
