@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include <algorithm>
 #include <atomic>
@@ -515,9 +516,27 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     if (resource.fragments != 1u) {
-        Require(resource.dccAddress == 0u, "compressed multisampled texture snapshot is not implemented");
         Require(resource.tileMode == TextureTileMode::kR64KBX && !depthCompare, "multisampled depth texture sampling is not implemented");
-        if (auto* recorder = Recorder::Active()) recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(DescribeSurface(resource).guestBytes));
+        const auto geometry = DescribeSurface(resource);
+        if (resource.dccAddress != 0u) {
+            const auto metadataBytes = MultisampleDccBytes_nid_no_patch(BytesPerElement(resource.format), resource.fragments, resource.width, resource.height, geometry.layers);
+            if (auto* recorder = Recorder::Active()) {
+                recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+                recorder->SyncThrough(resource.dccAddress, metadataBytes);
+            }
+            std::vector<std::byte> metadata(metadataBytes);
+            GuestMemory::Read(resource.dccAddress, metadata);
+            const auto keys = MultisampleDccKeys_nid_no_patch(resource, metadata);
+            std::vector<std::byte> snapshot(geometry.guestBytes);
+            if (keys == DccKeys::Uncompressed) GuestMemory::Read(resource.baseAddress, snapshot);
+            else Require(FillDccClear(ResolveTextureFormat(resource.format), keys, resource.dccAlphaOnMsb, snapshot), "multisampled DCC clear has no supported texel encoding");
+            auto decoded = resource;
+            decoded.dccAddress = 0u;
+            decoded.dccPipeAligned = false;
+            decoded.dccAlphaOnMsb = false;
+            return std::make_shared<Texture>(context, *context.detiler, decoded, components, snapshot);
+        }
+        if (auto* recorder = Recorder::Active()) recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
     }
     if (resource.fragments == 1u) {
         if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
