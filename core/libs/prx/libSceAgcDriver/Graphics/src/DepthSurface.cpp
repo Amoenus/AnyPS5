@@ -8,6 +8,8 @@
 #include <array>
 #include <cstdio>
 #include <limits>
+#include <string>
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
 #include <map>
 #include <memory>
 #include <mutex>
@@ -97,6 +99,7 @@ public:
     DepthSurface& operator=(const DepthSurface&) = delete;
 
     void ApplyFastClear() {
+        Require(metadataRefusal.empty(), metadataRefusal);
         const auto aspects = pendingClear & (VK_IMAGE_ASPECT_DEPTH_BIT | (target.stencilAddress != 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u));
         pendingClear = 0;
         if (aspects == 0) return;
@@ -144,6 +147,7 @@ public:
         return std::any_of(textures.begin(), textures.end(), [&](const auto& entry) { return entry.second.get() == texture; });
     }
 
+    std::string metadataRefusal;
     VkImageAspectFlags pendingClear = 0;
     float clearDepth = 0.0f;
     std::uint8_t clearStencil = 0;
@@ -269,7 +273,7 @@ extern "C" bool DepthSurfaceGuestOverlap_nid_no_patch(const Context& context, st
         if (surface->context.device != context.device) return false;
         const auto& target = surface->target;
         const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
-        return overlaps(target.address, DepthSliceBytes(target.extent, d16 ? 2u : 4u)) || overlaps(target.stencilAddress, DepthSliceBytes(target.extent, 1u));
+        return overlaps(target.address, DepthSliceBytes(target.extent, d16 ? 2u : 4u) * target.samples) || overlaps(target.stencilAddress, DepthSliceBytes(target.extent, 1u) * target.samples);
     });
 }
 
@@ -280,16 +284,27 @@ VkImageAspectFlags HtileFillClears(std::uint32_t pattern, bool stencilInHtile) {
 }
 
 bool HtileFillCovers(std::uint64_t htile, VkExtent2D extent, std::uint64_t address, std::size_t bytes) {
-    if (htile == 0 || htile < address || htile >= address + bytes) return false;
-    const auto tiles = static_cast<std::uint64_t>((extent.width + 7u) / 8u) * ((extent.height + 7u) / 8u);
-    return address + bytes - htile >= tiles * 4u;
+    if (htile == 0 || htile < address || htile - address >= bytes) return false;
+    Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "invalid HTILE fill range");
+    return bytes - (htile - address) >= MultisampleHtileBytes_nid_no_patch(extent.width, extent.height, 1u);
 }
 
 void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
+    if (bytes == 0u) return;
+    Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "invalid HTILE fill range");
     std::lock_guard lock(surfacesMutex());
     for (const auto& surface : surfaces()) {
         const auto& target = surface->target;
-        if (!HtileFillCovers(target.htileAddress, target.extent, address, bytes)) continue;
+        if (target.htileAddress == 0u) continue;
+        const auto metadataBytes = MultisampleHtileBytes_nid_no_patch(target.extent.width, target.extent.height, 1u);
+        const bool overlaps = address <= target.htileAddress ? target.htileAddress - address < bytes : address - target.htileAddress < metadataBytes;
+        if (!overlaps) continue;
+        clearedHtiles().erase(target.htileAddress);
+        if (!HtileFillCovers(target.htileAddress, target.extent, address, bytes)) {
+            surface->metadataRefusal = "a partial fill of resident HTILE is not implemented";
+            continue;
+        }
+        surface->metadataRefusal.clear();
         const VkImageAspectFlags written = VK_IMAGE_ASPECT_DEPTH_BIT | (target.htileStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
         surface->pendingClear = (surface->pendingClear & ~written) | HtileFillClears(pattern, target.htileStencil);
     }

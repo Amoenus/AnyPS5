@@ -196,5 +196,18 @@ void RunDepthSurfaceReuseTests() {
         Require(rejected, "invalid resident depth overlap range did not throw");
     }
 
+    for (const auto samples : {2u, 4u, 8u}) {
+        const auto base = 0x80000000ull + static_cast<std::uint64_t>(samples) * 0x01000000u;
+        DepthTarget target{base, base + 0x00800000u, {129u, 67u}, VK_FORMAT_D16_UNORM_S8_UINT, 1.0f, 0};
+        target.samples = samples;
+        DepthSurfaceView(context, target);
+        const auto depthBytes = DepthSliceBytes(target.extent, 2u) * samples;
+        const auto stencilBytes = DepthSliceBytes(target.extent, 1u) * samples;
+        Require(DepthSurfaceGuestOverlap_nid_no_patch(context, base + depthBytes - 1u, 1u), "resident MSAA depth final byte was not detected");
+        Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, base + depthBytes, 1u), "adjacent bytes after MSAA depth overlap");
+        Require(DepthSurfaceGuestOverlap_nid_no_patch(context, target.stencilAddress + stencilBytes - 1u, 1u), "resident MSAA stencil final byte was not detected");
+        Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, target.stencilAddress + stencilBytes, 1u), "adjacent bytes after MSAA stencil overlap");
+    }
+
     ClearDepthSurfaces(context.device);
 }

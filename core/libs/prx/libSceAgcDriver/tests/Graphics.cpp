@@ -932,12 +932,15 @@ void DepthStencilTests() {
         Require(HtileFillClears(0x000003f0u, true) == VK_IMAGE_ASPECT_DEPTH_BIT, "SMem 3 leaves the stencil uncleared");
         Require(HtileFillClears(0xfffff0ffu, true) == VK_IMAGE_ASPECT_STENCIL_BIT, "ZMask 0xf with SMem 0 clears only the stencil");
         Require(HtileFillClears(0xffffffffu, true) == 0 && HtileFillClears(0xffffffffu, false) == 0, "an expanded fill clears nothing");
-        const VkExtent2D extent{16, 8};
-        Require(HtileFillCovers(0x1000, extent, 0x1000, 8) && HtileFillCovers(0x1000, extent, 0xff0, 0x20), "a fill over every HTILE word covers the surface");
-        Require(!HtileFillCovers(0x1000, extent, 0x1000, 4) && !HtileFillCovers(0x1000, extent, 0x1004, 8) && !HtileFillCovers(0, extent, 0, 64), "a partial fill, one starting past the HTILE base, or no HTILE covers nothing");
+        const VkExtent2D extent{16, 16};
+        Require(HtileFillCovers(0x1000, extent, 0x1000, 32768) && HtileFillCovers(0x1000, extent, 0xff0, 32784), "a fill over every HTILE word covers the surface");
+        Require(!HtileFillCovers(0x1000, extent, 0x1000, 16) && !HtileFillCovers(0x1000, extent, 0x1000, 32764) && !HtileFillCovers(0x1000, extent, 0x1004, 32768) && !HtileFillCovers(0, extent, 0, 64), "a partial fill, one starting past the HTILE base, or no HTILE covers nothing");
     }
     Require(state.renderExtent.width == 4 && state.renderExtent.height == 2, "render extent ignores the depth surface");
     Require(!state.depthTest && !state.depthWrite && state.stencilTest, "depth/stencil enables changed");
+    queue.context.erase(0x005);
+    queue.context.erase(0x01e);
+    state = AgcDriver::Graphics::DecodeState(queue);
     Require(state.depth->htileAddress == 0, "an HTILE surface without DB_HTILE_DATA_BASE decoded an HTILE address");
     queue.context[0x005] = 0x300;
     queue.context[0x01e] = 0x01;
@@ -947,6 +950,10 @@ void DepthStencilTests() {
     AgcDriver::Graphics::RegisterReadLog() = nullptr;
     for (const auto read : log) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks an HTILE register the decoder reads: " + std::to_string(read.offset));
     Require(state.depth->htileAddress == (0x30000ull | (1ull << 40u)), "the HTILE address was not decoded from DB_HTILE_DATA_BASE and its high byte");
+    queue.context[0x005] = 0;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.depth->htileAddress == (1ull << 40u), "an HTILE base with only its high byte was lost");
+    queue.context[0x005] = 0x300;
     queue.context[0x010] &= ~0x20000000u;
     state = AgcDriver::Graphics::DecodeState(queue);
     Require(state.depth->htileAddress == 0, "a surface without TILE_SURFACE_ENABLE decoded an HTILE address");
@@ -1557,6 +1564,12 @@ void multisampleTests() {
         queue.context[0x1b4] = 2;
         return queue;
     };
+    const auto cmaskAddress = reinterpret_cast<std::uintptr_t>(cmaskMemory.data());
+    const auto setCmaskAddress = [&](AgcDriver::QueueState& queue, std::uint32_t slot = 0u) {
+        queue.context[0x31f + 0xfu * slot] = static_cast<std::uint32_t>(cmaskAddress >> 8u);
+        queue.context[0x398 + slot] = static_cast<std::uint32_t>(cmaskAddress >> 40u);
+        queue.context[0x3b8 + slot] |= 0x0dc00000u;
+    };
     auto queue = multisampled();
     auto state = DecodeState(queue);
     Require(state.samples == 2 && state.colors.size() == 1 && state.colors[0].samples == 2 && state.colors[0].cmaskAddress == 0, "2x multisampling did not decode");
@@ -1577,28 +1590,28 @@ void multisampleTests() {
     expectFailure([&] { DecodeState(queue); }, "coverage conversion");
     queue = multisampled();
     queue.context[0x31c] |= 0x6000;
-    queue.context[0x31f] = 0x1234;
-    Require(DecodeState(queue).colors[0].cmaskAddress == 0x123400, "the CMASK address of a multisampled target did not decode");
+    setCmaskAddress(queue);
+    Require(DecodeState(queue).colors[0].cmaskAddress == cmaskAddress, "the CMASK address of a multisampled target did not decode");
     queue = makeState();
     queue.context[0x31c] |= 0x4000;
     expectFailure([&] { DecodeState(queue); }, "color compression");
     queue = multisampled();
     queue.context[0x31c] |= 0x2000;
-    queue.context[0x31f] = 0x1234;
+    setCmaskAddress(queue);
     const auto fastCleared = DecodeState(queue).colors[0];
-    Require(fastCleared.cmaskAddress == 0x123400 && fastCleared.cmaskFastClear && fastCleared.cmaskBytes == 0x1000, "a multisampled FAST_CLEAR target did not decode its CMASK at the metablock size");
+    Require(fastCleared.cmaskAddress == cmaskAddress && fastCleared.cmaskFastClear && fastCleared.cmaskBytes == 0x1000, "a multisampled FAST_CLEAR target did not decode its CMASK at the metablock size");
     queue = multisampled();
     queue.context[0x31c] |= 0x4000;
-    queue.context[0x31f] = 0x1234;
+    setCmaskAddress(queue);
     const auto compressed = DecodeState(queue).colors[0];
-    Require(compressed.cmaskAddress == 0x123400 && !compressed.cmaskFastClear && compressed.cmaskBytes == 0x1000, "a multisampled COMPRESSION target did not decode its CMASK at the metablock size");
+    Require(compressed.cmaskAddress == cmaskAddress && !compressed.cmaskFastClear && compressed.cmaskBytes == 0x1000, "a multisampled COMPRESSION target did not decode its CMASK at the metablock size");
     queue = multisampled();
     queue.context[0x31c] |= 0x2000;
     queue.context[0x31f] = 0;
     expectFailure([&] { DecodeState(queue); }, "without a CMASK address");
     queue = multisampled();
     queue.context[0x31c] |= 0x2000;
-    queue.context[0x31f] = 0x1234;
+    setCmaskAddress(queue);
     std::vector<AgcDriver::Graphics::RegisterRead> reads;
     AgcDriver::Graphics::RegisterReadLog() = &reads;
     static_cast<void>(DecodeState(queue));
@@ -1624,13 +1637,39 @@ void multisampleTests() {
     queue.context[0x3b1] = queue.context[0x3b0];
     queue.context[0x3b9] = queue.context[0x3b8];
     queue.context[0x32b] = queue.context[0x31c] | 0x2000u;
-    queue.context[0x32e] = 0x1234;
+    setCmaskAddress(queue, 1u);
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "fast-clear color target");
     queue = multisampled();
     queue.context[0x2f8] = 0;
     queue.context[0x0] = 0;
     queue.context[0x202] = 0xcc0020;
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "multisampled color target");
+
+    for (const auto log2 : {1u, 2u, 3u}) {
+        queue = multisampled();
+        queue.context[0x2f8] = (log2 << 20u) | 0xe000u | log2;
+        queue.context[0x31d] = (log2 << 12u) | (log2 << 15u);
+        const auto word0 = log2 == 1u ? 0x0000cc44u : log2 == 2u ? 0x622ae6aeu : 0xbd153fd1u;
+        for (std::uint32_t pixel = 0u; pixel < 4u; ++pixel) {
+            queue.context[0x2fe + pixel * 4u] = word0;
+            queue.context[0x2ff + pixel * 4u] = log2 == 3u ? 0x9773f95bu : 0u;
+        }
+        std::vector<AgcDriver::Graphics::RegisterRead> sampleReads;
+        AgcDriver::Graphics::RegisterReadLog() = &sampleReads;
+        const auto standard = DecodeState(queue);
+        AgcDriver::Graphics::RegisterReadLog() = nullptr;
+        Require(standard.samples == (1u << log2) && standard.colors[0].samples == standard.samples, "independent standard sample register pattern did not decode");
+        for (const auto read : sampleReads) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a standard sample location register");
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "standard MSAA pattern was refused by the precheck");
+        if (log2 == 3u) {
+            queue.context[0x2ff] = 0x8773f95bu;
+            expectFailure([&] { DecodeState(queue); }, "nonstandard sample locations");
+            queue.context[0x2ff] = 0x9773f95bu;
+        }
+        queue.context[0x2f8] |= 0x20000000u;
+        expectFailure([&] { DecodeState(queue); }, "coverage conversion or nonstandard multisampling");
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).find("coverage conversion or nonstandard multisampling") != std::string::npos, "the precheck accepted unimplemented covered-centroid mode");
+    }
 
     using AgcDriver::Graphics::DccKeys;
     using AgcDriver::Graphics::MultisampledCmask;
