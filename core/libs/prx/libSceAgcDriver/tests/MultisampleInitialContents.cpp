@@ -50,9 +50,11 @@ void RawSamples() {
             }
             auto decoded = DecodeMultisampleInitialContents(target, tiled, {}, {});
             Require(!decoded.clear && decoded.samples == expected, "initial raw sample bytes, components or order differ");
+            const auto raw = expected;
             target.cmaskAddress = 0x20000u;
             target.cmaskBytes = CmaskBytes(target.extent.width, target.extent.height);
             target.fmaskAddress = 0x30000u;
+            target.fmaskSwizzle = 0x18u;
             std::vector<std::byte> cmask(target.cmaskBytes, std::byte{0xcc});
             decoded = DecodeMultisampleInitialContents(target, tiled, {}, cmask);
             for (std::size_t offset = 0; offset < expected.size(); offset += bytes * fragments) {
@@ -63,6 +65,21 @@ void RawSamples() {
             Refuses([&] { DecodeMultisampleInitialContents(target, tiled, {}, cmask); }, "mixed initial");
             std::fill(cmask.begin(), cmask.end(), fragments == 2u ? std::byte{0xdd} : fragments == 4u ? std::byte{0xee} : std::byte{0xff});
             Refuses([&] { DecodeMultisampleInitialContents(target, tiled, {}, cmask); }, "FMASK mapping");
+            std::vector<std::byte> fmask(MultisampleFmaskBytes(target));
+            const auto pattern = fragments == 2u ? 0x02020202u : fragments == 4u ? 0xe4e4e4e4u : 0x76543210u;
+            for (std::size_t byte = 0; byte < fmask.size(); ++byte) fmask[byte] = static_cast<std::byte>((pattern >> (byte % 4u * 8u)) & 0xffu);
+            decoded = DecodeMultisampleInitialContents(target, tiled, {}, cmask, fmask);
+            Require(!decoded.clear && decoded.samples == raw, "expanded identity FMASK changed physical fragment order");
+            Refuses([&] { DecodeMultisampleInitialContents(target, tiled, {}, cmask, std::span(fmask).first(fmask.size() - 1u)); }, "snapshot size mismatch");
+            fmask.back() ^= std::byte{1};
+            Refuses([&] { DecodeMultisampleInitialContents(target, tiled, {}, cmask, fmask); }, "not expanded identity");
+            fmask.back() ^= std::byte{1};
+            fmask.front() ^= std::byte{1};
+            Refuses([&] { DecodeMultisampleInitialContents(target, tiled, {}, cmask, fmask); }, "not expanded identity");
+            fmask.front() ^= std::byte{1};
+            target.fmaskSwizzle = 0u;
+            Refuses([&] { DecodeMultisampleInitialContents(target, tiled, {}, cmask, fmask); }, "FMASK footprint requires");
+            target.fmaskSwizzle = 0x18u;
             target.fmaskAddress = 0;
             Refuses([&] { DecodeMultisampleInitialContents(target, tiled, {}, cmask); }, "FMASK mapping");
             target.cmaskAddress = 0;

@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleInitialContents.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libc/include/GuestArena.hpp"
@@ -239,11 +240,60 @@ void ClearTargetAttachment(const Context& context, VkImageView view, const Color
         context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(batch.Handle(), &begin, VK_SUBPASS_CONTENTS_INLINE);
         context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(batch.Handle());
         batch.SubmitAndWait();
+        MarkMultisampleTargetDirty(context, target);
     } catch (...) {
         context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, pass, nullptr);
         throw;
     }
     context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, pass, nullptr);
+}
+
+void CheckPublishedSampledRead(const Context& context, Recorder& recorder, const ColorTarget& target, std::span<const std::byte> samples);
+
+VkImageView CheckTargetPublication(const Context& context, Recorder& recorder, const ColorTarget& target, std::span<const std::byte> samples) {
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u, target.pipeBankXor);
+    const auto* color = reinterpret_cast<const std::byte*>(target.address);
+    std::vector<std::byte> physical(color, color + target.bytes);
+    for (std::uint32_t y = 0; y < target.extent.height; ++y) {
+        for (std::uint32_t x = 0; x < target.extent.width; ++x) {
+            for (std::uint32_t sample = 0; sample < target.samples; ++sample) {
+                const auto linear = ((static_cast<std::size_t>(y) * target.extent.width + x) * target.samples + sample) * target.elementBytes;
+                std::memcpy(physical.data() + layout.Offset(x, y, 0u, sample), samples.data() + linear, target.elementBytes);
+            }
+        }
+    }
+    std::array<std::byte, 1> unrelated{std::byte{0x5a}}, observed{};
+    MarkMultisampleTargetDirty(context, target);
+    recorder.Commands();
+    recorder.OnComplete([&] { AgcDriver::GuestMemory::Read(reinterpret_cast<std::uint64_t>(unrelated.data()), observed); });
+    std::array<std::byte, 1> probe{};
+    const auto offset = layout.Offset(target.extent.width - 1u, 0u, 0u, target.samples - 1u);
+    AgcDriver::GuestMemory::Read(target.address + offset, probe);
+    Require(observed == unrelated, "multisample publication blocked an unrelated completion read");
+    Require(probe.front() == physical[offset], "partial CPU read did not publish the newest physical fragment");
+    Require(std::equal(physical.begin(), physical.end(), color), "multisample guest publication lost a sample, XOR addressing or tile padding");
+    if (target.dccAddress != 0u) {
+        const auto* dcc = reinterpret_cast<const std::byte*>(target.dccAddress);
+        const auto bytes = MultisampleDccBytes_nid_no_patch(target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u);
+        Require(std::all_of(dcc, dcc + bytes, [](auto byte) { return byte == std::byte{0xff}; }), "multisample publication left compressed DCC");
+    }
+    if (target.cmaskAddress != 0u) {
+        const auto* cmask = reinterpret_cast<const std::byte*>(target.cmaskAddress);
+        const auto code = target.samples == 2u ? std::byte{0xdd} : target.samples == 4u ? std::byte{0xee} : std::byte{0xff};
+        Require(std::all_of(cmask, cmask + target.cmaskBytes, [&](auto byte) { return byte == code; }), "multisample publication left CMASK compressed or mapped to fragment zero");
+    }
+    if (target.fmaskAddress != 0u) {
+        const auto* fmask = reinterpret_cast<const std::byte*>(target.fmaskAddress & ~std::uint64_t{65535u});
+        const auto bytes = MultisampleFmaskBytes(target);
+        const auto pattern = target.samples == 2u ? 0x02020202u : target.samples == 4u ? 0xe4e4e4e4u : 0x76543210u;
+        for (std::size_t byte = 0; byte < bytes; ++byte) Require(fmask[byte] == static_cast<std::byte>((pattern >> (byte % 4u * 8u)) & 0xffu), "multisample publication did not expand the full FMASK identity mapping");
+    }
+    Require(ReadMultisampleTargetSamples(context, target) == std::vector<std::byte>(samples.begin(), samples.end()), "publication changed resident GPU samples");
+    ClearMultisampleTargets(context.device);
+    const auto view = MultisampleTargetView(context, target);
+    Require(ReadMultisampleTargetSamples(context, target) == std::vector<std::byte>(samples.begin(), samples.end()), "reimport of published multisample contents lost samples or metadata");
+    AgcDriver::GuestMemory::FlushGpuWrites(target.address, target.bytes);
+    return view;
 }
 
 void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragments, VkFormat format, bool metadata) {
@@ -310,6 +360,10 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
                     Require(value == (set ? 0x3c00u : 0u), "DCC target GPU import used clear registers, raw color or an incorrect channel");
                 }
             }
+            if (AgcDriver::GuestMemory::Watched(target.address, target.bytes)) {
+                CheckPublishedSampledRead(context, recorder, target, actual);
+                CheckTargetPublication(context, recorder, target, actual);
+            }
         }
         const bool watched = AgcDriver::GuestMemory::Watched(target.address, target.bytes);
         Require(watched || std::getenv("ANYPS5_REQUIRE_TARGET_WATCHED") == nullptr, "watched metadata reuse was required but unavailable");
@@ -332,6 +386,7 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
         }
         ClearMultisampleTargets(context.device);
         target.dccAddress = 0u;
+        layout.Tile(expected, std::span(memory.Data(), static_cast<std::size_t>(target.bytes)));
         std::memset(reinterpret_cast<void*>(target.cmaskAddress), 0xccu, target.cmaskBytes);
         MultisampleTargetView(context, target);
         auto actual = ReadMultisampleTargetSamples(context, target);
@@ -340,6 +395,7 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
                 Require(std::equal(expected.begin() + offset, expected.begin() + offset + bytes, actual.begin() + offset + fragment * bytes), "CMASK CC GPU import did not replicate physical fragment zero");
             }
         }
+        if (watched) CheckTargetPublication(context, recorder, target, actual);
         ClearMultisampleTargets(context.device);
         std::memset(reinterpret_cast<void*>(target.cmaskAddress), 0u, target.cmaskBytes);
         target.clearWords = {0x3c000000u, 0x38003400u};
@@ -348,6 +404,10 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
         const std::array<std::uint16_t, 4> channels{0u, 0x3c00u, 0x3400u, 0x3800u};
         for (std::size_t offset = 0; offset < actual.size(); offset += bytes) {
             Require(std::memcmp(actual.data() + offset, channels.data(), bytes) == 0, "CMASK register clear GPU import lost exact channels");
+        }
+        if (watched) {
+            CheckPublishedSampledRead(context, recorder, target, actual);
+            CheckTargetPublication(context, recorder, target, actual);
         }
         ClearMultisampleTargets(context.device);
         target.fmaskSwizzle = 0u;
@@ -359,9 +419,10 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
     QueueTargetByteWrite(context, recorder, target.address + producedPhysical, std::byte{0x5a});
     expected[producedLinear] = std::byte{0x5a};
     Require(recorder.PendingWriteOverlaps(target.address + producedPhysical, 1u), "initial target fixture did not queue a producer");
-    const auto view = MultisampleTargetView(context, target);
+    auto view = MultisampleTargetView(context, target);
     Require(!recorder.PendingWriteOverlaps(target.address + producedPhysical, 1u), "initial target import did not wait for its producer");
     Require(ReadMultisampleTargetSamples(context, target) == expected, "raw target import lost physical fragments, components or tile addressing");
+    if (AgcDriver::GuestMemory::Watched(target.address, target.bytes)) view = CheckTargetPublication(context, recorder, target, expected);
     ClearTargetAttachment(context, view, target);
     const auto rendered = ReadMultisampleTargetSamples(context, target);
     const std::array<std::uint32_t, 4> clear{0x11u, 0x22u, 0x33u, 0x44u};
@@ -378,17 +439,22 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
     }
     if (AgcDriver::GuestMemory::Watched(target.address, target.bytes)) {
         Require(MultisampleTargetView(context, target) == view && ReadMultisampleTargetSamples(context, target) == rendered, "resident reuse changed the image or reapplied its initial guest contents");
+        if (format == VK_FORMAT_R32_UINT) CheckPublishedSampledRead(context, recorder, target, rendered);
+        view = CheckTargetPublication(context, recorder, target, rendered);
         auto alias = target;
         alias.pipeBankXor ^= 0x400u;
         TargetRefuses([&] { MultisampleTargetView(context, alias); }, "layout or metadata changed");
         memory.Data()[layout.Offset(64u, 0u, 0u, fragments - 1u)] ^= std::byte{1};
         TargetRefuses([&] { MultisampleTargetView(context, target); }, "guest writes");
+        std::array<std::byte, 1> conflict{};
+        TargetRefuses([&] { AgcDriver::GuestMemory::Read(target.address, conflict); }, "guest writes");
         ClearMultisampleTargets(context.device);
         MultisampleTargetView(context, target);
         ReadMultisampleTargetSamples(context, target);
         recorder.Commands();
         recorder.NotePendingWrite(target.address, 4u);
         TargetRefuses([&] { MultisampleTargetView(context, target); }, "external GPU writes");
+        TargetRefuses([&] { AgcDriver::GuestMemory::Read(target.address, conflict); }, "external GPU writes");
         recorder.Sync();
         NoteColorMetadataFill(target.address, target.bytes, 0xa5a5a5a5u);
         TargetRefuses([&] { MultisampleTargetView(context, target); }, "unimplemented residency transition");
@@ -397,7 +463,7 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
         TargetRefuses([&] { MultisampleTargetView(context, target); }, "watched guest memory");
     }
     std::array<std::byte, 1> probe{};
-    TargetRefuses([&] { AgcDriver::GuestMemory::Read(target.address + layout.Offset(64u, 0u, 0u, fragments - 1u), probe); }, "samples are only on the host");
+    TargetRefuses([&] { AgcDriver::GuestMemory::Read(target.address + layout.Offset(64u, 0u, 0u, fragments - 1u), probe); }, AgcDriver::GuestMemory::Watched(target.address, target.bytes) ? "unimplemented residency transition" : "watched guest memory");
 }
 
 std::vector<std::uint32_t> FetchShader(std::uint32_t width, std::uint32_t height, std::uint32_t fragments, bool arrayed, bool floating) {
@@ -522,6 +588,47 @@ private:
     VkShaderModule module = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
 };
+
+void CheckPublishedSampledRead(const Context& context, Recorder& recorder, const ColorTarget& target, std::span<const std::byte> samples) {
+    const bool floating = target.format == VK_FORMAT_R16G16B16A16_SFLOAT;
+    Require(floating || target.format == VK_FORMAT_R32_UINT, "published sampled fixture format is unsupported");
+    const auto format = floating ? 71u : 20u;
+    const auto base = (target.address | target.pipeBankXor) >> 8u;
+    const auto metadata = target.dccAddress >> 8u;
+    const auto logFragments = static_cast<std::uint32_t>(std::countr_zero(target.samples));
+    const auto width = target.extent.width, height = target.extent.height;
+    const auto flags = target.dccAddress == 0u ? 0u : (1u << 21u) | (static_cast<std::uint32_t>(target.dccAlphaOnMsb) << 22u) | (static_cast<std::uint32_t>(target.dccPipeAligned) << 19u);
+    const std::array<std::uint32_t, 8> words{static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 255u) | (format << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), (14u << 28u) | (27u << 20u) | (logFragments << 16u) | 0xfacu, 0u, logFragments << 4u, flags | (static_cast<std::uint32_t>(metadata & 255u) << 24u), static_cast<std::uint32_t>(metadata >> 8u)};
+    const auto texture = CachedSampledTexture(context, words);
+    recorder.Sync();
+    const auto count = width * height * target.samples;
+    std::vector<std::array<std::uint32_t, 4>> expected(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        auto& value = expected[index];
+        if (floating) {
+            for (std::uint32_t component = 0; component < 4u; ++component) {
+                std::uint16_t half = 0u;
+                std::memcpy(&half, samples.data() + index * 8u + component * 2u, 2u);
+                Require(half == 0u || (half >= 0x0400u && half < 0x7c00u), "published sampled fixture needs nonnegative normal half values");
+                value[component] = half == 0u ? 0u : ((static_cast<std::uint32_t>(half & 0x7c00u) + 0x1c000u) << 13u) | (static_cast<std::uint32_t>(half & 0x3ffu) << 13u);
+            }
+        } else {
+            std::memcpy(&value[0], samples.data() + index * 4u, 4u);
+            value[3] = 1u;
+        }
+    }
+    Buffer output(context, (count + 2u) * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+    const Fetch fetch(context, *texture, output, FetchShader(width, height, target.samples, false, floating));
+    CommandBatch batch(context);
+    fetch.Run(batch.Handle(), count);
+    RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    batch.SubmitAndWait();
+    output.Invalidate();
+    Require(std::memcmp(output.Bytes().data() + 16u, expected.data(), expected.size() * 16u) == 0, "sampled reader returned stale resident samples or compressed metadata");
+    Require(std::all_of(output.Bytes().begin(), output.Bytes().begin() + 16u, [](auto byte) { return byte == std::byte{0xa5}; }) && std::all_of(output.Bytes().end() - 16u, output.Bytes().end(), [](auto byte) { return byte == std::byte{0xa5}; }), "published sample fetch changed output guards");
+    ClearCachedTextures(context.device);
+}
 
 void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments, bool arrayed, bool chunks, std::uint32_t baseArray = 0u, bool firstLayer = false, bool recorded = false, TextureTileMode tileMode = TextureTileMode::kR64KBX) {
     const auto width = chunks ? 65u : 5u;

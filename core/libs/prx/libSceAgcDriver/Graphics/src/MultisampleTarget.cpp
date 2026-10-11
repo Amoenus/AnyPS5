@@ -63,12 +63,8 @@ public:
         auto color = readInitialRange(target.address, target.bytes, MultisampleTextureLayout::Alignment);
         auto dcc = target.dccAddress != 0u ? readInitialRange(target.dccAddress, MultisampleDccBytes_nid_no_patch(target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u), 256u) : std::vector<std::byte>{};
         auto cmask = target.cmaskAddress != 0u ? readInitialRange(target.cmaskAddress, target.cmaskBytes, CmaskLayout::Alignment) : std::vector<std::byte>{};
-        const auto initial = DecodeMultisampleInitialContents(target, color, dcc, cmask);
-        if (target.fmaskAddress != 0u) {
-            Require(target.fmaskSwizzle == 0x18u, "initial multisample FMASK footprint requires SW_64KB_Z_X");
-            const auto fmask = ComputeElementMipLayout(TextureTileMode::kZ64KBX, target.samples == 8u ? 4u : 1u, target.extent.width, target.extent.height, 1u);
-            readInitialRange(target.fmaskAddress & ~std::uint64_t{65535u}, ComputeSurfaceSize(fmask, 1u), 65536u);
-        }
+        auto fmask = target.fmaskAddress != 0u ? readInitialRange(target.fmaskAddress & ~std::uint64_t{65535u}, MultisampleFmaskBytes(target), 65536u) : std::vector<std::byte>{};
+        const auto initial = DecodeMultisampleInitialContents(target, color, dcc, cmask, fmask);
         try {
             VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
             info.flags = flags;
@@ -163,6 +159,48 @@ public:
         }
     }
 
+    std::span<const GuestMemory::UnchangedQuery> Ranges() const { return initialRanges; }
+    void MarkDirty() { dirty = true; }
+
+    bool Overlaps(std::uint64_t address, std::size_t bytes) const {
+        return std::ranges::any_of(initialRanges, [&](const auto& range) { return address < range.address + range.bytes && range.address < address + bytes; });
+    }
+
+    void PublishGuest() {
+        CheckCurrent(target);
+        if (!dirty) return;
+        for (const auto& range : initialRanges) GuestMemory::CheckRange(reinterpret_cast<const void*>(range.address), range.bytes, 1u, true);
+        for (std::size_t first = 0; first < initialRanges.size(); ++first) {
+            for (std::size_t second = first + 1u; second < initialRanges.size(); ++second) {
+                const auto& a = initialRanges[first];
+                const auto& b = initialRanges[second];
+                Require(a.address >= b.address + b.bytes || b.address >= a.address + a.bytes, "multisample guest publication with overlapping color and metadata ranges is not implemented");
+            }
+        }
+        const auto samples = ReadSamples();
+        CheckCurrent(target);
+        const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u, target.pipeBankXor);
+        std::vector<std::vector<std::byte>> payloads;
+        payloads.reserve(initialRanges.size());
+        for (const auto& range : initialRanges) {
+            auto& payload = payloads.emplace_back(range.bytes);
+            if (range.address == target.address) {
+                std::memcpy(payload.data(), reinterpret_cast<const void*>(target.address), payload.size());
+                layout.Tile(samples, payload);
+            } else if (range.address == target.dccAddress) std::fill(payload.begin(), payload.end(), std::byte{0xff});
+            else if (range.address == target.cmaskAddress) std::fill(payload.begin(), payload.end(), target.samples == 2u ? std::byte{0xdd} : target.samples == 4u ? std::byte{0xee} : std::byte{0xff});
+            else {
+                Require(target.fmaskAddress != 0u && range.address == (target.fmaskAddress & ~std::uint64_t{65535u}), "unknown multisample publication range");
+                const auto pattern = MultisampleExpandedFmask(target.samples);
+                for (std::size_t byte = 0; byte < payload.size(); ++byte) payload[byte] = static_cast<std::byte>((pattern >> (byte % 4u * 8u)) & 0xffu);
+            }
+        }
+        CheckCurrent(target);
+        for (std::size_t index = 0; index < initialRanges.size(); ++index) GuestMemory::StoreOwnBytes(initialRanges[index].address, payloads[index]);
+        for (auto& range : initialRanges) range.generation = GuestMemory::CollectWritesUncached(range.address, range.bytes);
+        dirty = false;
+    }
+
     std::vector<std::byte> ReadSamples() {
         Require(context.storageImageReadWithoutFormat, "device does not enable multisampled image reads without format");
         if (auto* recorder = recorderFor(context); recorder != nullptr) recorder->Sync();
@@ -222,6 +260,7 @@ public:
 private:
     std::vector<GuestMemory::UnchangedQuery> initialRanges;
     std::string refusal;
+    bool dirty = true;
 
     std::vector<std::byte> readInitialRange(std::uint64_t address, std::size_t bytes, std::size_t alignment) {
         Require(bytes != 0u, "initial multisample snapshot range is empty");
@@ -294,13 +333,12 @@ std::atomic<bool>& anyGuarded() {
 }
 
 void guardReads(std::uint64_t address, std::size_t bytes) {
-    RequireNoMultisampleTarget(address, bytes, "a CPU read");
+    SynchronizeMultisampleTargetRead(address, bytes);
 }
 
-void guard(const Context& context, const ColorTarget& target) {
-    const auto bytes = std::max<std::uint64_t>(target.bytes, static_cast<std::uint64_t>(target.extent.width) * target.extent.height * target.elementBytes * target.samples);
+void guard(const Context& context, const MultisampleTarget& target) {
     std::unique_lock lock(guardedMutex());
-    guarded().push_back({context.device, target.address, bytes, target.samples});
+    for (const auto& range : target.Ranges()) guarded().push_back({context.device, range.address, range.bytes, target.target.samples});
     anyGuarded().store(true, std::memory_order_release);
     static std::once_flag installed;
     std::call_once(installed, [] { GuestMemory::SetReadGuard(&guardReads); });
@@ -324,7 +362,7 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
         return *target;
     }
     targets().push_back(std::make_unique<MultisampleTarget>(context, use));
-    guard(context, use);
+    guard(context, *targets().back());
     auto& created = *targets().back();
     return created;
 }
@@ -389,6 +427,37 @@ std::vector<std::byte> ReadMultisampleTargetSamples(const Context& context, cons
     }
     Require(false, "multisample target sample read requires an existing resident");
     return {};
+}
+
+void MarkMultisampleTargetDirty(const Context& context, const ColorTarget& target) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::lock_guard lock(targetsMutex());
+    for (const auto& resident : targets()) {
+        if (resident->context.device == context.device && sameTarget(resident->target, target)) {
+            resident->MarkDirty();
+            return;
+        }
+    }
+    Require(false, "marking multisample writes requires an existing resident");
+}
+
+void SynchronizeMultisampleTargetRead(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0u || !anyGuarded().load(std::memory_order_acquire)) return;
+    Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "multisample read range overflows");
+    {
+        std::shared_lock lock(guardedMutex());
+        if (std::ranges::none_of(guarded(), [&](const auto& range) { return address < range.address + range.bytes && range.address < address + bytes; })) return;
+    }
+    static thread_local bool publishing = false;
+    Require(!publishing, "recursive multisample guest publication is not implemented");
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::lock_guard lock(targetsMutex());
+    struct Publishing {
+        bool& flag;
+        explicit Publishing(bool& flag) : flag(flag) { flag = true; }
+        ~Publishing() { flag = false; }
+    } publication(publishing);
+    for (const auto& resident : targets()) if (resident->Overlaps(address, bytes)) resident->PublishGuest();
 }
 
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView) {

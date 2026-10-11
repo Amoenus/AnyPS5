@@ -13,7 +13,9 @@ struct MultisampleInitialContents {
     std::vector<std::byte> samples;
 };
 
-MultisampleInitialContents DecodeMultisampleInitialContents(const ColorTarget& target, std::span<const std::byte> color, std::span<const std::byte> dcc, std::span<const std::byte> cmask);
+std::size_t MultisampleFmaskBytes(const ColorTarget& target);
+std::uint32_t MultisampleExpandedFmask(std::uint32_t samples);
+MultisampleInitialContents DecodeMultisampleInitialContents(const ColorTarget& target, std::span<const std::byte> color, std::span<const std::byte> dcc, std::span<const std::byte> cmask, std::span<const std::byte> fmask = {});
 
 }
 
