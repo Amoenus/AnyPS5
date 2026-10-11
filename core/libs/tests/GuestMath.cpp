@@ -52,6 +52,10 @@ float APS5_VABI log1pf_nid_postfix(float);
 double APS5_VABI expm1_nid_postfix(double);
 float APS5_VABI logbf_nid_postfix(float);
 double APS5_VABI exp2_nid_postfix(double);
+double APS5_VABI fmin_nid_postfix(double, double);
+double APS5_VABI fmax_nid_postfix(double, double);
+float APS5_VABI fminf_nid_postfix(float, float);
+float APS5_VABI fmaxf_nid_postfix(float, float);
 double APS5_VABI ldexp_nid_postfix(double, int);
 double APS5_VABI scalbn_nid_postfix(double, int);
 float APS5_VABI scalbnf_nid_postfix(float, int);
@@ -82,6 +86,36 @@ float APS5_VABI nanf_nid_postfix(const char*);
 double APS5_VABI nan_nid_postfix(const char*);
 }
 static void Require(bool value) { if (!value) std::abort(); }
+
+template<typename TValue>
+static void CheckMinMax(TValue (APS5_VABI *maximum)(TValue, TValue), TValue (APS5_VABI *minimum)(TValue, TValue)) {
+    std::fenv_t saved;
+    Require(std::fegetenv(&saved) == 0);
+    const int savedErrno = *__error_nid_postfix();
+    *__error_nid_postfix() = 0x12345;
+    const auto nan = std::numeric_limits<TValue>::quiet_NaN();
+    const auto signalingNan = std::numeric_limits<TValue>::signaling_NaN();
+    const auto infinity = std::numeric_limits<TValue>::infinity();
+    Require(maximum(3, -2) == 3 && minimum(3, -2) == -2);
+    Require(maximum(infinity, -infinity) == infinity && minimum(infinity, -infinity) == -infinity);
+    for (const auto function : {maximum, minimum}) {
+        std::feclearexcept(FE_ALL_EXCEPT);
+        Require(function(nan, 3) == 3 && function(3, nan) == 3);
+        Require(std::fetestexcept(FE_ALL_EXCEPT) == 0);
+        Require(function(signalingNan, 3) == 3 && function(3, signalingNan) == 3);
+        Require(std::fetestexcept(FE_ALL_EXCEPT) == 0);
+        Require(std::isnan(function(nan, nan)));
+        std::feraiseexcept(FE_DIVBYZERO);
+        (void)function(1, 2);
+        Require(std::fetestexcept(FE_DIVBYZERO) != 0);
+    }
+    Require(!std::signbit(maximum(TValue(0), TValue(-0.L))) && !std::signbit(maximum(TValue(-0.L), TValue(0))));
+    Require(std::signbit(minimum(TValue(0), TValue(-0.L))) && std::signbit(minimum(TValue(-0.L), TValue(0))));
+    Require(std::signbit(maximum(TValue(-0.L), TValue(-0.L))) && !std::signbit(minimum(TValue(0), TValue(0))));
+    Require(*__error_nid_postfix() == 0x12345);
+    *__error_nid_postfix() = savedErrno;
+    Require(std::fesetenv(&saved) == 0);
+}
 
 static void CheckSquareRoot() {
     Require(sqrt_nid_postfix(4.) == 2. && sqrtf_nid_postfix(6.25f) == 2.5f);
@@ -415,6 +449,17 @@ int main() {
     Require(logbf_nid_postfix(-std::numeric_limits<float>::infinity()) == std::numeric_limits<float>::infinity());
     Require(std::isnan(logbf_nid_postfix(std::numeric_limits<float>::quiet_NaN())));
     Require(exp2_nid_postfix(-3.) == 0.125);
+    const double doubleNan = std::numeric_limits<double>::quiet_NaN();
+    const float floatNan = std::numeric_limits<float>::quiet_NaN();
+    CheckMinMax(fmax_nid_postfix, fmin_nid_postfix);
+    CheckMinMax(fmaxf_nid_postfix, fminf_nid_postfix);
+    Require(fmin_nid_postfix(3.0, -2.0) == -2.0 && fmax_nid_postfix(3.0, -2.0) == 3.0);
+    Require(fminf_nid_postfix(3.0f, -2.0f) == -2.0f && fmaxf_nid_postfix(3.0f, -2.0f) == 3.0f);
+    Require(fmin_nid_postfix(doubleNan, 4.0) == 4.0 && fmax_nid_postfix(4.0, doubleNan) == 4.0);
+    Require(fminf_nid_postfix(floatNan, 4.0f) == 4.0f && fmaxf_nid_postfix(4.0f, floatNan) == 4.0f);
+    Require(std::isnan(fmin_nid_postfix(doubleNan, doubleNan)) && std::isnan(fmaxf_nid_postfix(floatNan, floatNan)));
+    Require(std::isinf(fmin_nid_postfix(-std::numeric_limits<double>::infinity(), 1.0)));
+    Require(std::isinf(fmaxf_nid_postfix(std::numeric_limits<float>::infinity(), 1.0f)));
     Require(ldexp_nid_postfix(0.75, 4) == 12.);
     CheckSquareRoot();
     CheckExactOperations();
