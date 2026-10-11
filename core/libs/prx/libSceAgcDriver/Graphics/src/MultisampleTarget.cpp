@@ -126,7 +126,7 @@ public:
                 if (initial.clear) context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &*initial.clear, 1, &toGeneral.subresourceRange);
                 else {
                     RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-                    transfer(commands, *upload, false);
+                    transfer(commands, upload->Handle(), false);
                     if (recorder != nullptr) recorder->Keep(upload, upload->Bytes().size());
                 }
                 RecordMemoryBarrier(context, commands, initial.clear ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, initial.clear ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT);
@@ -254,12 +254,16 @@ public:
         Require(context.storageImageReadWithoutFormat, "device does not enable multisampled image reads without format");
         if (auto* recorder = recorderFor(context); recorder != nullptr) recorder->Sync();
         const auto count = static_cast<std::size_t>(target.extent.width) * target.extent.height * target.samples * target.elementBytes;
-        Buffer readback(context, (count + 3u) & ~std::size_t{3u}, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        const auto bytes = (count + 3u) & ~std::size_t{3u};
+        DeviceBuffer samples(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         context.detiler->BeginBatch();
         CommandBatch batch(context);
         RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        transfer(batch.Handle(), readback, true);
-        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        transfer(batch.Handle(), samples.Handle(), true);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        CopyBuffer(context, batch.Handle(), samples.Handle(), 0, readback.Handle(), 0, bytes);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
         batch.SubmitAndWait();
         readback.Invalidate();
         return {readback.Bytes().begin(), readback.Bytes().begin() + count};
@@ -334,7 +338,7 @@ private:
         return data;
     }
 
-    void transfer(VkCommandBuffer commands, Buffer& buffer, bool readback) {
+    void transfer(VkCommandBuffer commands, VkBuffer buffer, bool readback) {
         const auto total = static_cast<std::uint64_t>(target.extent.width) * target.extent.height * target.samples;
         Require(total <= std::numeric_limits<std::uint32_t>::max(), "multisample target transfer element count overflows");
         const auto alignment = std::max<std::uint64_t>({4u, target.elementBytes, context.limits.minStorageBufferOffsetAlignment});
@@ -345,8 +349,8 @@ private:
             const auto bytes = std::min(stride, count - offset);
             const auto first = static_cast<std::uint32_t>(offset / target.elementBytes);
             const auto elements = static_cast<std::uint32_t>(bytes / target.elementBytes);
-            if (readback) context.detiler->DispatchMultisampleReadback(commands, target.elementBytes, buffer.Handle(), offset, (bytes + 3u) & ~3ull, transferView, target.extent.width, target.extent.height, 1u, target.samples, first, elements);
-            else context.detiler->DispatchMultisampleImage(commands, target.elementBytes, buffer.Handle(), offset, (bytes + 3u) & ~3ull, transferView, target.extent.width, target.extent.height, 1u, target.samples, first, elements);
+            if (readback) context.detiler->DispatchMultisampleReadback(commands, target.elementBytes, buffer, offset, (bytes + 3u) & ~3ull, transferView, target.extent.width, target.extent.height, 1u, target.samples, first, elements);
+            else context.detiler->DispatchMultisampleImage(commands, target.elementBytes, buffer, offset, (bytes + 3u) & ~3ull, transferView, target.extent.width, target.extent.height, 1u, target.samples, first, elements);
         }
     }
 

@@ -300,8 +300,9 @@ VkImageView CheckTargetPublication(const Context& context, Recorder& recorder, c
     return view;
 }
 
-void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragments, VkFormat format, bool metadata) {
+void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragments, VkFormat format, bool metadata, bool chunks = false) {
     std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    if (chunks) context.limits.maxStorageBufferRange = std::min(context.limits.maxStorageBufferRange, 256u);
     const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, bytes, fragments, 65u, 5u, 1u, 0x8c00u);
     TargetMemory memory(static_cast<std::size_t>(layout.Bytes()) + 3u * 65536u);
     auto detiler = std::make_unique<TextureDetiler>(context);
@@ -1584,21 +1585,18 @@ int main(int argc, char** argv) {
             const std::array formats{VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT};
             for (std::uint32_t index = 0; index < formats.size(); ++index) {
                 for (const auto fragments : {2u, 4u, 8u}) {
-                    if (!TargetSupported(context, formats[index], fragments)) { ++unavailable; continue; }
-                    CheckTargetImport(context, 1u << index, fragments, formats[index], false);
-                    ++checked;
+                    if (!TargetSupported(context, formats[index], fragments)) { unavailable += 2u; continue; }
+                    for (const bool chunks : {false, true}) { CheckTargetImport(context, 1u << index, fragments, formats[index], false, chunks); ++checked; }
                 }
             }
             for (const auto fragments : {2u, 4u, 8u}) {
-                if (!TargetSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments)) { ++unavailable; continue; }
-                CheckTargetImport(context, 8u, fragments, VK_FORMAT_R16G16B16A16_SFLOAT, true);
-                ++checked;
+                if (!TargetSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments)) { unavailable += 2u; continue; }
+                for (const bool chunks : {false, true}) { CheckTargetImport(context, 8u, fragments, VK_FORMAT_R16G16B16A16_SFLOAT, true, chunks); ++checked; }
             }
             for (const auto format : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB}) {
                 for (const auto fragments : {2u, 4u, 8u}) {
-                    if (!TargetSupported(context, format, fragments)) { ++unavailable; continue; }
-                    CheckTargetImport(context, 4u, fragments, format, false);
-                    ++checked;
+                    if (!TargetSupported(context, format, fragments)) { unavailable += 2u; continue; }
+                    for (const bool chunks : {false, true}) { CheckTargetImport(context, 4u, fragments, format, false, chunks); ++checked; }
                 }
             }
             Require(checked != 0u, "device advertises no supported multisample target imports");
