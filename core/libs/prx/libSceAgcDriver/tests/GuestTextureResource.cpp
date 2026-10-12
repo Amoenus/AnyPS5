@@ -272,6 +272,36 @@ void RunGuestTextureResourceTests() {
             rejectFields(mismatchedSamples, "same sample count");
         }
     }
+    Fields multisampled = base;
+    multisampled.typeRaw = 14;
+    multisampled.width = 297;
+    multisampled.height = 297;
+    multisampled.tileModeRaw = 0x1b;
+    multisampled.lastLevel = 2;
+    multisampled.maxMip = 2;
+    result = DecodeTextureResource(pack(multisampled));
+    Require(result.dimension == TextureDimension::k2DMsaa && result.samples == 4 && result.width == 297 && result.height == 297, "4x multisampled descriptor decoded incorrectly");
+    Require(result.mipCount == 1 && result.allocatedMipCount == 1 && result.baseLevel == 0 && result.lastLevel == 0, "a multisampled descriptor's sample count was decoded as mip levels");
+    Require(DecodeTextureResource(pack(base)).samples == 1, "a single-sample descriptor decoded with several samples");
+    const std::array<std::uint32_t, 8> canvas{0x021f2000u, 0x03800000u, 0x804a004au, 0xe1b20facu, 0x00000000u, 0x00400020u, 0x00000000u, 0x00000000u};
+    result = DecodeTextureResource(canvas);
+    Require(result.dimension == TextureDimension::k2DMsaa && result.samples == 4 && result.baseAddress == 0x21f200000ull && result.width == 297 && result.height == 297 && result.format == 56 && result.tileMode == TextureTileMode::kR64KBX, "the 4x canvas descriptor of PPSA99006 decoded incorrectly");
+    Fields fewerFragments = multisampled;
+    fewerFragments.maxMip = 1;
+    rejectFields(fewerFragments, "same sample count");
+    Fields singleSampleType = multisampled;
+    singleSampleType.lastLevel = 0;
+    singleSampleType.maxMip = 0;
+    rejectFields(singleSampleType, "same sample count");
+    Fields offsetLevel = multisampled;
+    offsetLevel.baseLevel = 1;
+    rejectFields(offsetLevel, "same sample count");
+    Fields multisampledSlice = multisampled;
+    multisampledSlice.depth = 1;
+    rejectFields(multisampledSlice, "nonzero depth or base array");
+    Fields multisampledArray = multisampled;
+    multisampledArray.typeRaw = 15;
+    rejectFields(multisampledArray, "unsupported image type");
     Fields badType = base;
     badType.typeRaw = 0;
     rejectFields(badType, "unsupported image type");
@@ -466,6 +496,9 @@ void RunGuestTextureResourceTests() {
     Require(MatchesGuestDimension(Shape::Image2D, TextureDimension::k2D), "2D shape must match 2D dimension");
     Require(!MatchesGuestDimension(Shape::Image2D, TextureDimension::k2DArray), "2D shape must not match 2D array dimension");
     Require(MatchesGuestDimension(Shape::Image2DArray, TextureDimension::k2DArray), "2D array shape must match 2D array dimension");
+    Require(MatchesGuestDimension(Shape::Image2DMultisample, TextureDimension::k2DMsaa), "multisampled shape must match the multisampled dimension");
+    Require(!MatchesGuestDimension(Shape::Image2DMultisample, TextureDimension::k2D), "multisampled shape must not match 2D dimension");
+    Require(!MatchesGuestDimension(Shape::Image2D, TextureDimension::k2DMsaa), "2D shape must not match the multisampled dimension");
     Require(MatchesGuestDimension(Shape::Image2DArray, TextureDimension::kCube), "a cube must be readable as a 2D array of its faces");
     Require(MatchesGuestDimension(Shape::ImageCube, TextureDimension::kCube), "cube shape must match cube dimension");
     Require(!MatchesGuestDimension(Shape::ImageCube, TextureDimension::k1D), "cube shape must not match 1D dimension");
