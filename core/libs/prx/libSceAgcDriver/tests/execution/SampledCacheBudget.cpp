@@ -164,9 +164,9 @@ class Block {
 public:
     explicit Block(const Context& context) : context(context) {
 #ifdef _WIN32
-        memory = VirtualAlloc(nullptr, BlockBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        memory = VirtualAlloc(nullptr, BlockBytes + 65536u, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
-        memory = std::aligned_alloc(65536, BlockBytes);
+        memory = std::aligned_alloc(65536, BlockBytes + 65536u);
 #endif
         Require(memory != nullptr, "cannot allocate the texture block");
         std::memset(memory, 0x5a, BlockBytes);
@@ -449,7 +449,9 @@ void viewEvictionTests(const Context& context) {
     const std::weak_ptr<Texture> view = Sampled(context, imported.Surface(0));
     Require(!view.expired() && TextureCacheUsage().sampledBytes == 0, "the view of a cached storage image did not enter the sampled texture cache at 0 bytes");
     Sampled(context, snapshots.Surface(0));
-    const auto capacity = static_cast<std::size_t>(Budget / TextureCacheUsage().sampledBytes);
+    const auto bytes = TextureCacheUsage().sampledBytes;
+    Require(bytes != 0u, "sampled cache snapshot fixture has no charged bytes");
+    const auto capacity = static_cast<std::size_t>(Budget / bytes);
     for (std::size_t surface = 1; surface <= capacity; ++surface) Sampled(context, snapshots.Surface(surface));
     Require(!view.expired(), "the sampled texture cache evicted a view of a cached storage image, which frees no memory");
 }
