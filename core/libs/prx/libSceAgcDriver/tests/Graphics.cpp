@@ -1,6 +1,7 @@
 #include "BdaTests.hpp"
 #include "GraphicsTests.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferFill.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
@@ -1287,6 +1288,55 @@ void htileDepthClearTests() {
     auto wave32 = dispatch;
     wave32[4] |= 0x8000u;
     Require(HtileDepthClearBytes_nid_no_patch(kernel, users, additional, wave32, 0u) == 655360u, "unused shader inputs or wave size changed the kernel's linear coverage");
+}
+
+void constantFillTests() {
+    using AgcDriver::DriverDetail::ConstantFillKernel;
+    using AgcDriver::DriverDetail::MatchConstantFill;
+    const std::array<std::uint32_t, 6> users{0u, 0u, 0x819f4000u, 0x40u, 0x86ff0u, 0u};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u, {}};
+    const std::array<std::uint32_t, 5> packet{0xc0031502u, 540u, 1u, 1u, 0x2047u};
+    const auto fill = MatchConstantFill(ConstantFillKernel, users, compute, packet);
+    Require(fill.has_value() && fill->address == 0x40819f4000ull && fill->bytes == 552960u && fill->value == 0u, "constant metadata fill coverage differs from its inputs");
+    for (const auto groups : {1u, 2u, 63u, 64u, 80u, 539u, 540u, 541u, 641u}) {
+        auto changed = packet;
+        changed[1] = groups;
+        const auto range = MatchConstantFill(ConstantFillKernel, users, compute, changed);
+        Require(range.has_value() && range->bytes == std::min<std::uint64_t>(static_cast<std::uint64_t>(groups) * 1024u, 552960u), "constant fill ignored dispatch count or maximum offset");
+    }
+    auto cmask = users;
+    cmask[2] = 0x819e0000u;
+    cmask[4] = 0x13ff0u;
+    cmask[5] = 0xccccccccu;
+    const auto collapsed = MatchConstantFill(ConstantFillKernel, cmask, compute, packet);
+    Require(collapsed.has_value() && collapsed->bytes == 81920u && collapsed->value == 0xccccccccu, "constant CMASK fill clipped or replicated the wrong value");
+    for (std::uint32_t field = 0u; field < 15u; ++field) {
+        auto stage = compute;
+        auto words = users;
+        auto dispatch = packet;
+        switch (field) {
+            case 0u: stage.numThreads[0] = 32u; break;
+            case 1u: stage.numThreads[1] = 2u; break;
+            case 2u: stage.groupIdEnable[0] = false; break;
+            case 3u: stage.threadIdComponentCount = 0u; break;
+            case 4u: stage.threadIdComponentCount = 4u; break;
+            case 5u: stage.partialThreads = {34559u, 1u, 1u}; break;
+            case 6u: dispatch[1] = 0u; break;
+            case 7u: dispatch[2] = 2u; break;
+            case 8u: dispatch[3] = 2u; break;
+            case 9u: dispatch[4] |= 0x20u; break;
+            case 10u: dispatch[4] &= ~1u; break;
+            case 11u: ++words[4]; break;
+            case 12u: ++words[2]; break;
+            case 13u: words[2] = words[3] = 0u; break;
+            case 14u: words[2] = 0xfffffff0u; words[3] = 0xffffffffu; break;
+        }
+        Require(!MatchConstantFill(ConstantFillKernel, words, stage, dispatch), "unsupported constant fill inputs were accepted");
+    }
+    auto other = ConstantFillKernel;
+    other[7] ^= 1u;
+    Require(!MatchConstantFill(other, users, compute, packet) && !MatchConstantFill(std::span(ConstantFillKernel).first(10u), users, compute, packet), "a changed or truncated constant fill kernel was accepted");
+    Require(!MatchConstantFill(ConstantFillKernel, std::span(users).first(5u), compute, packet) && !MatchConstantFill(ConstantFillKernel, users, compute, std::span(packet).first(4u)), "short constant fill inputs were accepted");
 }
 
 void depthMaintenanceTests() {
@@ -4659,6 +4709,7 @@ int main(int argc, char** argv) {
         DepthStencilTests();
         OneDimensionalColorTests();
         htileDepthClearTests();
+        constantFillTests();
         ZExportTests();
         unorm10_11_11TargetTests();
         DepthBoundsBiasTests();

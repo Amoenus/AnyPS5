@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferFill.hpp"
 #include "Optimization/DescriptorBindingBuilder.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include "SpirvBackend/SpirvModule.hpp"
@@ -567,7 +568,12 @@ void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragment
     const auto generation = AgcDriver::GuestMemory::CollectWritesUncached(target.address, target.bytes);
     std::vector<std::byte> finalClear(original.size());
     for (const std::uint32_t code : {0u, 0x40u, 0x80u, 0xc0u}) {
-        NoteNativeColorClear_nid_no_patch(target.dccAddress, dccBytes, code * 0x01010101u, 0u);
+        const std::array<std::uint32_t, 6> users{0u, 0u, static_cast<std::uint32_t>(target.dccAddress), static_cast<std::uint32_t>(target.dccAddress >> 32u), static_cast<std::uint32_t>(dccBytes - 16u), code * 0x01010101u};
+        const ShaderRecompiler::ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u};
+        const std::array<std::uint32_t, 5> packet{0xc0031502u, static_cast<std::uint32_t>((dccBytes + 1023u) / 1024u), 1u, 1u, 0x2047u};
+        const auto fill = AgcDriver::DriverDetail::MatchConstantFill(AgcDriver::DriverDetail::ConstantFillKernel, users, compute, packet);
+        Require(fill.has_value() && fill->bytes == dccBytes, "registered constant fill does not cover the full metadata range");
+        NoteNativeColorClear_nid_no_patch(fill->address, fill->bytes, fill->value, 0u);
         store(target.dccAddress, dccBytes, static_cast<std::byte>(code));
         store(target.cmaskAddress, target.cmaskBytes, std::byte{0xcc});
         Require(MultisampleTargetView(context, target) == view, "registered clear replaced the retained attachment view");
@@ -1252,7 +1258,7 @@ void CheckPublishedSampledRead(const Context& context, Recorder& recorder, const
     ClearCachedTextures(context.device);
 }
 
-void CheckNativeSnapshot(Context context, VkFormat format, std::uint32_t fragments, bool arrayed) {
+void CheckNativeSnapshot(Context context, VkFormat format, std::uint32_t fragments, bool arrayed, bool recorded) {
     const auto guest = FindGuestTextureFormat(format, format == VK_FORMAT_R8_UINT ? 1u : format == VK_FORMAT_R16_UINT ? 2u : format == VK_FORMAT_R32G32_UINT || format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8u : format == VK_FORMAT_R32G32B32A32_UINT ? 16u : 4u);
     Require(guest.has_value(), "native snapshot fixture format is unavailable");
     const auto bytes = BytesPerElement(*guest);
@@ -1289,7 +1295,7 @@ void CheckNativeSnapshot(Context context, VkFormat format, std::uint32_t fragmen
     std::memset(memory.Data(), 0xa5, target.bytes);
     layout.Tile(original, std::span(memory.Data(), static_cast<std::size_t>(target.bytes)));
     Recorder recorder(context);
-    recorder.Activate();
+    if (recorded) recorder.Activate();
     struct Cleanup { Recorder& recorder; VkDevice device; ~Cleanup() { recorder.Sync(); ClearCachedTextures(device); ClearMultisampleTargets(device); } } cleanup{recorder, context.device};
     const auto view = MultisampleTargetView(context, target);
     Require(AgcDriver::GuestMemory::Watched(target.address, target.bytes), "native snapshot requires watched fixture memory");
@@ -1297,10 +1303,13 @@ void CheckNativeSnapshot(Context context, VkFormat format, std::uint32_t fragmen
     const auto base = (target.address | target.pipeBankXor) >> 8u;
     const auto log = static_cast<std::uint32_t>(std::countr_zero(fragments));
     const std::array<std::uint32_t, 8> words{static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 255u) | (*guest << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), ((arrayed ? 15u : 14u) << 28u) | (27u << 20u) | (log << 16u) | 0xfacu, 0u, log << 4u, 0u, 0u};
+    const auto keptBefore = recorder.OpenKeptBytes();
     const auto first = CachedSampledTexture(context, words);
+    if (recorded) Require(recorder.OpenKeptBytes() >= keptBefore + first->AllocationBytes(), "native snapshot image allocation is missing from the retained memory budget");
     ClearTargetAttachment(context, view, target);
     const auto changed = ReadMultisampleTargetSamples(context, target);
     const auto second = CachedSampledTexture(context, words);
+    if (recorded) Require(recorder.OpenKeptBytes() >= second->AllocationBytes(), "later native snapshot image is missing from the retained memory budget");
     ClearMultisampleTargets(context.device);
     recorder.Sync();
     AgcDriver::GuestMemory::CollectWritesUncached(target.address, target.bytes);
@@ -1676,8 +1685,10 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string(argv[1]) == "--native-snapshots") {
             for (const auto format : {VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB}) {
                 for (const auto fragments : {2u, 4u, 8u}) {
-                    if (!TargetSupported(context, format, fragments)) { unavailable += 2u; continue; }
-                    for (const bool arrayed : {false, true}) { CheckNativeSnapshot(context, format, fragments, arrayed); ++checked; }
+                    if (!TargetSupported(context, format, fragments)) { unavailable += 4u; continue; }
+                    for (const bool arrayed : {false, true}) {
+                        for (const bool recorded : {false, true}) { CheckNativeSnapshot(context, format, fragments, arrayed, recorded); ++checked; }
+                    }
                 }
             }
             Require(checked != 0u && (unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr), "required native GPU snapshot configurations are unsupported");

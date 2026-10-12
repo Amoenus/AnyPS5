@@ -67,7 +67,7 @@ void Texture::initializeNativeMultisample(VkImage sourceImage, std::shared_ptr<v
     const auto commands = recorder != nullptr ? recorder->Commands() : batch->Handle();
     if (recorder != nullptr) {
         recorder->Keep(std::move(sourceOwner));
-        recorder->Keep(owned);
+        recorder->Keep(owned, static_cast<std::size_t>(allocationBytes));
     }
     RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
     VkImageMemoryBarrier ready{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
