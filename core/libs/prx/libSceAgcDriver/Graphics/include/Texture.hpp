@@ -66,6 +66,8 @@ public:
     // CanCopyFrom says whether the two descriptors address the same surface compatibly.
     Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components);
     Texture(const Context& context, VkImage depthImage, VkFormat depthFormat, VkImageAspectFlags aspect, VkComponentMapping components);
+    struct NativeSnapshotTag {};
+    Texture(const Context& context, VkImage sourceImage, std::shared_ptr<void> sourceOwner, const GuestTextureResource& descriptor, VkComponentMapping components, NativeSnapshotTag);
     struct DepthCopyTag {};
     Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components, DepthCopyTag);
     static VkFormat DepthCopyFormat(VkFormat colorFormat);
@@ -106,6 +108,7 @@ public:
 
 private:
     void initializeMultisample(TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot);
+    void initializeNativeMultisample(VkImage sourceImage, std::shared_ptr<void> sourceOwner, const GuestTextureResource& descriptor, VkComponentMapping components);
     void release() noexcept;
     void createFirstLayerView(const GuestTextureResource& descriptor, VkImageViewCreateInfo viewInfo);
     void prepareBaseLevelView(const GuestTextureResource& descriptor, VkImageViewCreateInfo viewInfo);

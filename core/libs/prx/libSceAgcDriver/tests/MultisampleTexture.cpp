@@ -521,7 +521,7 @@ void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragment
         std::array<std::byte, 1> probe{};
         AgcDriver::GuestMemory::Read(target.address + layout.Offset(64u, 0u, 0u, fragments - 1u), probe);
     };
-    const auto fresh = [&] {
+    const auto fresh = [&](bool published = true) {
         recorder.Sync();
         ClearCachedTextures(context.device);
         ClearMultisampleTargets(context.device);
@@ -532,7 +532,7 @@ void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragment
         for (std::size_t at = 0u; at < fmaskBytes; ++at) memory.Data()[target.fmaskAddress - target.address + at] = static_cast<std::byte>((mapping >> (at % 4u * 8u)) & 255u);
         const auto view = MultisampleTargetView(context, target);
         Require(ReadMultisampleTargetSamples(context, target) == original, "metadata reset initial raw samples differ");
-        publish();
+        if (published) publish();
         return view;
     };
     auto view = fresh();
@@ -562,6 +562,57 @@ void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragment
         Require(std::all_of(reinterpret_cast<const std::byte*>(target.dccAddress), reinterpret_cast<const std::byte*>(target.dccAddress) + dccBytes, [](auto byte) { return byte == std::byte{0xff}; }), "metadata reset publication left DCC compressed");
         Require(std::all_of(reinterpret_cast<const std::byte*>(target.cmaskAddress), reinterpret_cast<const std::byte*>(target.cmaskAddress) + target.cmaskBytes, [&](auto byte) { return byte == expanded; }), "metadata reset publication left CMASK collapsed");
     }
+    view = fresh(false);
+    const auto savedPhysical = std::vector<std::byte>(memory.Data(), memory.Data() + target.bytes);
+    const auto generation = AgcDriver::GuestMemory::CollectWritesUncached(target.address, target.bytes);
+    std::vector<std::byte> finalClear(original.size());
+    for (const std::uint32_t code : {0u, 0x40u, 0x80u, 0xc0u}) {
+        NoteNativeColorClear_nid_no_patch(target.dccAddress, dccBytes, code * 0x01010101u, 0u);
+        store(target.dccAddress, dccBytes, static_cast<std::byte>(code));
+        store(target.cmaskAddress, target.cmaskBytes, std::byte{0xcc});
+        Require(MultisampleTargetView(context, target) == view, "registered clear replaced the retained attachment view");
+        for (std::size_t index = 0u; index < finalClear.size() / bytes; ++index) {
+            for (std::uint32_t channel = 0u; channel < 4u; ++channel) {
+                const bool one = channel == 3u ? code == 0x40u || code == 0xc0u : code == 0x80u || code == 0xc0u;
+                if (bytes == 8u) {
+                    const std::uint16_t value = one ? 0x3c00u : 0u;
+                    std::memcpy(finalClear.data() + index * bytes + channel * 2u, &value, 2u);
+                } else finalClear[index * bytes + channel] = one ? std::byte{0xff} : std::byte{0};
+            }
+        }
+        Require(ReadMultisampleTargetSamples(context, target) == finalClear, "unpublished native clear lost channel or sample values");
+        if (bytes == 8u) CheckPublishedSampledRead(context, recorder, target, finalClear);
+        AgcDriver::GuestMemory::CollectWritesUncached(target.address, target.bytes);
+        Require(AgcDriver::GuestMemory::UnchangedSince(target.address, target.bytes, generation) && std::equal(savedPhysical.begin(), savedPhysical.end(), memory.Data()), "native clear or snapshot published guest sample bytes");
+    }
+    publish();
+    auto finalPhysical = savedPhysical;
+    layout.Tile(finalClear, finalPhysical);
+    Require(std::equal(finalPhysical.begin(), finalPhysical.end(), memory.Data()), "final native clear CPU publication lost samples or padding");
+    for (std::uint32_t field = 0u; field < 20u; ++field) {
+        view = fresh(field == 15u);
+        if (field == 5u) store(target.dccAddress, dccBytes, std::byte{0});
+        const auto count = field == 0u ? dccBytes - 1u : dccBytes;
+        const auto value = field == 2u ? 0x20u : field == 3u ? 0x20202020u : field == 19u ? 0x01010100u : 0u;
+        NoteNativeColorClear_nid_no_patch(target.dccAddress, count, value, field == 1u ? 0xfffffff0u : 0u);
+        if (field != 4u && field != 5u && field != 15u && field != 18u) store(target.dccAddress, dccBytes, std::byte{0});
+        if (field != 15u && field != 18u) store(target.cmaskAddress, target.cmaskBytes, std::byte{0xcc});
+        std::string_view reason = field <= 3u || field == 19u ? "unsupported numeric clear" : "guest writes";
+        switch (field) {
+            case 6u: memory.Data()[target.dccAddress - target.address] = std::byte{0}; break;
+            case 7u: store(target.dccAddress, dccBytes, std::byte{0x40}); break;
+            case 8u: MarkMultisampleTargetDirty(context, target); break;
+            case 9u: QueueTargetByteWrite(context, recorder, target.dccAddress + dccBytes - 1u, std::byte{0}); reason = "external GPU writes"; break;
+            case 10u: QueueTargetByteWrite(context, recorder, target.address, std::byte{0}); reason = "external GPU writes"; break;
+            case 11u: store(target.address + target.bytes - 1u, 1u, std::byte{0}); break;
+            case 12u: store(target.fmaskAddress + fmaskBytes - 1u, 1u, std::byte{0}); break;
+            case 13u: store(target.dccAddress + dccBytes - 1u, 1u, std::byte{0x40}); break;
+            case 14u: store(target.cmaskAddress + target.cmaskBytes - 1u, 1u, std::byte{0xdd}); break;
+            case 16u: memory.Data()[target.cmaskAddress - target.address] = std::byte{0xcc}; break;
+            case 17u: store(target.cmaskAddress, target.cmaskBytes, std::byte{0xaa}); break;
+        }
+        TargetRefuses([&] { MultisampleTargetView(context, target); }, reason);
+    }
     for (std::uint32_t field = 0u; field < 10u; ++field) {
         view = fresh();
         store(target.dccAddress, dccBytes, std::byte{0});
@@ -581,7 +632,7 @@ void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragment
         }
         TargetRefuses([&] { MultisampleTargetView(context, target); }, reason);
     }
-    std::printf("Metadata reset format=%u samples=%u: four clear cycles and conflict refusals\n", static_cast<std::uint32_t>(format), fragments);
+    std::printf("Metadata reset format=%u samples=%u: four published and four unpublished clear cycles, 30 conflict refusals\n", static_cast<std::uint32_t>(format), fragments);
 }
 
 std::vector<std::uint32_t> FetchShader(std::uint32_t width, std::uint32_t height, std::uint32_t fragments, bool arrayed, bool floating) {
@@ -1201,6 +1252,89 @@ void CheckPublishedSampledRead(const Context& context, Recorder& recorder, const
     ClearCachedTextures(context.device);
 }
 
+void CheckNativeSnapshot(Context context, VkFormat format, std::uint32_t fragments, bool arrayed) {
+    const auto guest = FindGuestTextureFormat(format, format == VK_FORMAT_R8_UINT ? 1u : format == VK_FORMAT_R16_UINT ? 2u : format == VK_FORMAT_R32G32_UINT || format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8u : format == VK_FORMAT_R32G32B32A32_UINT ? 16u : 4u);
+    Require(guest.has_value(), "native snapshot fixture format is unavailable");
+    const auto bytes = BytesPerElement(*guest);
+    const bool half = format == VK_FORMAT_R16G16B16A16_SFLOAT;
+    const bool normalized = format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
+    constexpr std::uint32_t width = 65u, height = 5u;
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, bytes, fragments, width, height, 1u, 0x8c00u);
+    TargetMemory memory(static_cast<std::size_t>(layout.Bytes()));
+    auto detiler = std::make_unique<TextureDetiler>(context);
+    context.detiler = detiler.get();
+    ColorTarget target{};
+    target.address = target.surfaceAddress = memory.Address();
+    target.bytes = layout.Bytes();
+    target.extent = target.surfaceExtent = {width, height};
+    target.format = format;
+    target.tileMode = ColorTileMode::RenderTarget;
+    target.elementBytes = bytes;
+    target.samples = fragments;
+    target.pipeBankXor = 0x8c00u;
+    const auto count = width * height * fragments;
+    std::vector<std::byte> original(count * bytes);
+    for (std::uint32_t element = 0u; element < count; ++element) {
+        for (std::uint32_t component = 0u; component < (bytes < 4u ? 1u : 4u); ++component) {
+            if (half) {
+                const auto value = static_cast<std::uint16_t>(0x3c00u + ((element * 7u + component * 19u) & 0x3ffu));
+                std::memcpy(original.data() + element * bytes + component * 2u, &value, 2u);
+            } else if (normalized) original[element * bytes + component] = (element + component) % 2u != 0u ? std::byte{255} : std::byte{0};
+            else if (component < bytes / 4u || bytes < 4u) {
+                const auto value = element * 37u + component * 71u + 19u;
+                std::memcpy(original.data() + element * bytes + component * (bytes < 4u ? bytes : 4u), &value, std::min(bytes, 4u));
+            }
+        }
+    }
+    std::memset(memory.Data(), 0xa5, target.bytes);
+    layout.Tile(original, std::span(memory.Data(), static_cast<std::size_t>(target.bytes)));
+    Recorder recorder(context);
+    recorder.Activate();
+    struct Cleanup { Recorder& recorder; VkDevice device; ~Cleanup() { recorder.Sync(); ClearCachedTextures(device); ClearMultisampleTargets(device); } } cleanup{recorder, context.device};
+    const auto view = MultisampleTargetView(context, target);
+    Require(AgcDriver::GuestMemory::Watched(target.address, target.bytes), "native snapshot requires watched fixture memory");
+    const auto generation = AgcDriver::GuestMemory::CollectWritesUncached(target.address, target.bytes);
+    const auto base = (target.address | target.pipeBankXor) >> 8u;
+    const auto log = static_cast<std::uint32_t>(std::countr_zero(fragments));
+    const std::array<std::uint32_t, 8> words{static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 255u) | (*guest << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), ((arrayed ? 15u : 14u) << 28u) | (27u << 20u) | (log << 16u) | 0xfacu, 0u, log << 4u, 0u, 0u};
+    const auto first = CachedSampledTexture(context, words);
+    ClearTargetAttachment(context, view, target);
+    const auto changed = ReadMultisampleTargetSamples(context, target);
+    const auto second = CachedSampledTexture(context, words);
+    ClearMultisampleTargets(context.device);
+    recorder.Sync();
+    AgcDriver::GuestMemory::CollectWritesUncached(target.address, target.bytes);
+    Require(AgcDriver::GuestMemory::UnchangedSince(target.address, target.bytes, generation), "native GPU snapshot published guest sample bytes");
+    Require(first.get() != second.get() && first->View() != second->View(), "native snapshots reused a live view");
+    const auto check = [&](const Texture& texture, std::span<const std::byte> samples) {
+        std::vector<std::array<std::uint32_t, 4>> expected(count);
+        for (std::uint32_t element = 0u; element < count; ++element) {
+            expected[element][3] = half || normalized ? 0x3f800000u : 1u;
+            for (std::uint32_t component = 0u; component < (half || normalized ? 4u : std::max(bytes / 4u, 1u)); ++component) {
+                if (half) {
+                    std::uint16_t value = 0u;
+                    std::memcpy(&value, samples.data() + element * bytes + component * 2u, 2u);
+                    Require(value == 0u || (value >= 0x400u && value < 0x7c00u), "native half fixture requires nonnegative normal values");
+                    expected[element][component] = value == 0u ? 0u : ((static_cast<std::uint32_t>(value & 0x7c00u) + 0x1c000u) << 13u) | ((value & 0x3ffu) << 13u);
+                } else if (normalized) expected[element][component] = samples[element * bytes + component] == std::byte{0} ? 0u : 0x3f800000u;
+                else std::memcpy(&expected[element][component], samples.data() + element * bytes + component * (bytes < 4u ? bytes : 4u), std::min(bytes, 4u));
+            }
+        }
+        Buffer output(context, (count + 2u) * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+        Fetch fetch(context, texture, output, FetchShader(width, height, fragments, arrayed, half || normalized));
+        CommandBatch batch(context);
+        fetch.Run(batch.Handle(), count);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        output.Invalidate();
+        Require(std::memcmp(output.Bytes().data() + 16u, expected.data(), expected.size() * 16u) == 0, "native GPU snapshot lost samples, components or immutable source values");
+        Require(std::all_of(output.Bytes().begin(), output.Bytes().begin() + 16u, [](auto byte) { return byte == std::byte{0xa5}; }) && std::all_of(output.Bytes().end() - 16u, output.Bytes().end(), [](auto byte) { return byte == std::byte{0xa5}; }), "native snapshot fetch changed output guards");
+    };
+    check(*first, original);
+    check(*second, changed);
+}
+
 void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments, bool arrayed, bool chunks, std::uint32_t baseArray = 0u, bool firstLayer = false, bool recorded = false, TextureTileMode tileMode = TextureTileMode::kR64KBX) {
     const auto width = chunks ? 65u : 5u;
     const auto height = chunks ? 63u : 3u;
@@ -1539,6 +1673,17 @@ int main(int argc, char** argv) {
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         std::uint32_t checked = 0u, unavailable = 0u;
+        if (argc > 1 && std::string(argv[1]) == "--native-snapshots") {
+            for (const auto format : {VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB}) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    if (!TargetSupported(context, format, fragments)) { unavailable += 2u; continue; }
+                    for (const bool arrayed : {false, true}) { CheckNativeSnapshot(context, format, fragments, arrayed); ++checked; }
+                }
+            }
+            Require(checked != 0u && (unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr), "required native GPU snapshot configurations are unsupported");
+            std::printf("Native GPU snapshots checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--metadata-reset") {
             for (const auto format : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT}) {
                 for (const auto fragments : {2u, 4u, 8u}) {

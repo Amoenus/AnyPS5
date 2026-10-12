@@ -669,6 +669,17 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
     }
 }
 
+Texture::Texture(const Context& context, VkImage sourceImage, std::shared_ptr<void> sourceOwner, const GuestTextureResource& descriptor, VkComponentMapping components, NativeSnapshotTag) : context(context) {
+    try {
+        initializeNativeMultisample(sourceImage, std::move(sourceOwner), descriptor, components);
+        countedBytes = allocationBytes;
+        SampledMemoryCounter().fetch_add(countedBytes, std::memory_order_relaxed);
+    } catch (...) {
+        release();
+        throw;
+    }
+}
+
 Texture::Texture(const Context& context, VkImage depthImage, VkFormat depthFormat, VkImageAspectFlags aspect, VkComponentMapping components) : context(context) {
     layout = VK_IMAGE_LAYOUT_GENERAL;
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};

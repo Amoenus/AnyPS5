@@ -10,6 +10,88 @@
 
 namespace AgcDriver::Graphics {
 
+void Texture::initializeNativeMultisample(VkImage sourceImage, std::shared_ptr<void> sourceOwner, const GuestTextureResource& descriptor, VkComponentMapping components) {
+    Require(sourceImage != VK_NULL_HANDLE && sourceOwner != nullptr, "native multisample snapshot requires an owned source image");
+    Require(context.imageFormatProperties != nullptr && context.formatProperties != nullptr, "native multisample snapshot requires format queries");
+    Require((descriptor.dimension == TextureDimension::k2DMsaa || descriptor.dimension == TextureDimension::k2DMsaaArray) && descriptor.baseArray == 0u && descriptor.depthOrLastArray == 0u && descriptor.mipCount == 1u && descriptor.baseLevel == 0u && descriptor.lastLevel == 0u && descriptor.minLod == 0u, "native multisample snapshot array, mip or LOD range is not implemented");
+    Require(descriptor.fragments == 2u || descriptor.fragments == 4u || descriptor.fragments == 8u, "native multisample snapshot fragment count is not implemented");
+    Require(!IsConvertedTextureFormat(descriptor.format) && !IsBlockCompressed(descriptor.format), "native multisample snapshot format requires an unsupported conversion");
+    const auto sampledFormat = SampledTextureFormat(context, descriptor.format);
+    const auto elementFormat = TextureDetiler::ImageElementFormat(BytesPerElement(descriptor.format));
+    Require(elementFormat != VK_FORMAT_UNDEFINED, "native multisample snapshot element format is not implemented");
+    VkFormatProperties properties{};
+    context.formatProperties(context.physical, sampledFormat, &properties);
+    Require((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0u, "native multisample snapshot format cannot be sampled");
+    constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImageFormatProperties supported{};
+    Check(context.imageFormatProperties(context.physical, elementFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, &supported), "vkGetPhysicalDeviceImageFormatProperties native multisample snapshot");
+    const auto samples = static_cast<VkSampleCountFlagBits>(descriptor.fragments);
+    Require((supported.sampleCounts & samples) != 0u && descriptor.width != 0u && descriptor.height != 0u && descriptor.width <= supported.maxExtent.width && descriptor.height <= supported.maxExtent.height, "native multisample snapshot extent or sample count exceeds device limits");
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = elementFormat;
+    info.extent = {descriptor.width, descriptor.height, 1u};
+    info.mipLevels = info.arrayLayers = 1u;
+    info.samples = samples;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    owned = std::make_shared<OwnedImage>(context, VK_NULL_HANDLE, VK_NULL_HANDLE);
+    Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &info, nullptr, &owned->image), "vkCreateImage native multisample snapshot");
+    image = owned->image;
+    VkMemoryRequirements requirements{};
+    context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    allocationBytes = requirements.size;
+    Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &owned->memory), "vkAllocateMemory native multisample snapshot");
+    Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned->memory, 0u), "vkBindImageMemory native multisample snapshot");
+    VkImageViewUsageCreateInfo viewUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+    viewUsage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, &viewUsage};
+    viewInfo.image = image;
+    viewInfo.viewType = descriptor.dimension == TextureDimension::k2DMsaaArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = sampledFormat;
+    viewInfo.components = components;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView native multisample snapshot");
+    viewFormat = sampledFormat;
+    viewRange = {viewInfo.viewType, 1u, 1u};
+    createFirstLayerView(descriptor, viewInfo);
+    auto* recorder = Recorder::Active();
+    if (recorder != nullptr && recorder->Device() != context.device) recorder = nullptr;
+    std::unique_ptr<CommandBatch> batch;
+    if (recorder == nullptr) batch = std::make_unique<CommandBatch>(context);
+    const auto commands = recorder != nullptr ? recorder->Commands() : batch->Handle();
+    if (recorder != nullptr) {
+        recorder->Keep(std::move(sourceOwner));
+        recorder->Keep(owned);
+    }
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    VkImageMemoryBarrier ready{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    ready.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    ready.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ready.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    ready.srcQueueFamilyIndex = ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    ready.image = image;
+    ready.subresourceRange = viewInfo.subresourceRange;
+    const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    barrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &ready);
+    VkImageCopy copy{};
+    copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+    copy.extent = info.extent;
+    context.Function<PFN_vkCmdCopyImage>("vkCmdCopyImage")(commands, sourceImage, VK_IMAGE_LAYOUT_GENERAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+    ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    ready.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &ready);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+    if (batch != nullptr) batch->SubmitAndWait();
+}
+
 void Texture::initializeMultisample(TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot) {
     Require(context.storageImageMultisample && context.storageImageWriteWithoutFormat, "device does not enable multisampled storage image writes without format");
     Require(descriptor.dccAddress == 0u, "compressed multisampled texture snapshot is not implemented");

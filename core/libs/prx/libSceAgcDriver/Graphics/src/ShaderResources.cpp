@@ -576,6 +576,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
             logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
             return depth;
         }
+        if (auto color = NativeMultisampleSnapshot_nid_no_patch(context, resource, components)) return color;
     }
     SynchronizeMultisampleTargetRead(resource.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u);
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();

@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleInitialContents.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
@@ -56,7 +57,7 @@ public:
         VkFormatProperties properties{};
         context.formatProperties(context.physical, target.format, &properties);
         Require((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0, "multisampled render-target format cannot be a color attachment");
-        constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+        constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
         constexpr VkImageCreateFlags flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
         VkImageFormatProperties supported{};
         Check(context.imageFormatProperties(context.physical, target.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, flags, &supported), "vkGetPhysicalDeviceImageFormatProperties multisampled target");
@@ -151,11 +152,13 @@ public:
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
             changed |= !GuestMemory::UnchangedSince(range.address, range.bytes, range.generation);
         }
-        if (changed) Require(ImportPublishedClear(), "guest writes to a resident multisample target or its metadata are not implemented");
+        if (changed || clearGeneration != 0u) Require(ImportPublishedClear(), "guest writes to a resident multisample target or its metadata are not implemented");
     }
 
     bool ImportPublishedClear() {
-        if (dirty || target.dccAddress == 0u) return false;
+        if (target.dccAddress == 0u) return false;
+        if (dirty && clearGeneration == 0u) return false;
+        if (clearGeneration != 0u && (clearWriteSerial != writeSerial || !GuestMemory::UnchangedSinceCollected(target.dccAddress, clearBytes, clearGeneration) || !GuestMemory::StoredOver(target.dccAddress, clearBytes, clearGeneration) || (target.cmaskAddress != 0u && !GuestMemory::UnchangedSinceCollected(target.cmaskAddress, target.cmaskBytes, clearCmaskGeneration)))) return false;
         for (const auto& range : initialRanges) {
             if (range.address == target.address || (target.fmaskAddress != 0u && range.address == (target.fmaskAddress & ~std::uint64_t{65535u}))) {
                 if (!GuestMemory::UnchangedSince(range.address, range.bytes, range.generation)) return false;
@@ -175,6 +178,7 @@ public:
         if (dcc.empty()) return false;
         const auto code = std::to_integer<std::uint32_t>(dcc.front());
         if (code != 0u && code != 0x40u && code != 0x80u && code != 0xc0u) return false;
+        if (clearGeneration != 0u && code != clearCode) return false;
         if (!std::ranges::all_of(dcc, [&](std::byte byte) { return byte == dcc.front(); })) return false;
         if (!cmask.empty()) {
             const auto expanded = target.samples == 2u ? std::byte{0xdd} : target.samples == 4u ? std::byte{0xee} : std::byte{0xff};
@@ -184,6 +188,7 @@ public:
         Require(contents.clear.has_value(), "multisample metadata reset has no exact native clear");
         for (const auto& range : current) GuestMemory::CollectWritesUncached(range.address, range.bytes);
         Require(GuestMemory::UnchangedSinceAll(current), "guest writes raced multisample metadata reset");
+        if (clearGeneration != 0u && (!GuestMemory::UnchangedSinceCollected(target.dccAddress, clearBytes, clearGeneration) || (target.cmaskAddress != 0u && !GuestMemory::UnchangedSinceCollected(target.cmaskAddress, target.cmaskBytes, clearCmaskGeneration)))) return false;
         for (const auto& range : initialRanges) {
             if (range.address == target.address || (target.fmaskAddress != 0u && range.address == (target.fmaskAddress & ~std::uint64_t{65535u}))) Require(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation), "sample writes raced multisample metadata reset");
         }
@@ -197,7 +202,23 @@ public:
         });
         initialRanges = std::move(current);
         dirty = true;
+        ++writeSerial;
+        clearGeneration = 0u;
         return true;
+    }
+
+    void NoteClear(std::uint64_t bytes, std::uint32_t value, std::uint32_t mask) {
+        const auto metadata = std::ranges::find_if(initialRanges, [&](const auto& range) { return range.address == target.dccAddress; });
+        const auto code = value & 255u;
+        if (metadata == initialRanges.end() || bytes < metadata->bytes || mask != 0u || value != code * 0x01010101u || (code != 0u && code != 0x40u && code != 0x80u && code != 0xc0u) || !GuestMemory::Accessible(reinterpret_cast<const void*>(metadata->address), metadata->bytes) || !GuestMemory::Watched(metadata->address, metadata->bytes)) {
+            refusal = "native multisample color incomplete, untracked or unsupported numeric clear is not implemented";
+            return;
+        }
+        clearBytes = metadata->bytes;
+        clearCode = code;
+        clearWriteSerial = writeSerial;
+        clearGeneration = GuestMemory::CollectWritesUncached(metadata->address, metadata->bytes);
+        clearCmaskGeneration = target.cmaskAddress != 0u ? GuestMemory::CollectWritesUncached(target.cmaskAddress, target.cmaskBytes) : 0u;
     }
 
     void NoteFill(std::uint64_t address, std::size_t bytes) {
@@ -209,7 +230,7 @@ public:
     }
 
     std::span<const GuestMemory::UnchangedQuery> Ranges() const { return initialRanges; }
-    void MarkDirty() { dirty = true; }
+    void MarkDirty() { dirty = true; ++writeSerial; }
 
     bool Overlaps(std::uint64_t address, std::size_t bytes) const {
         return std::ranges::any_of(initialRanges, [&](const auto& range) { return address < range.address + range.bytes && range.address < address + bytes; });
@@ -314,6 +335,12 @@ private:
     std::vector<GuestMemory::UnchangedQuery> initialRanges;
     std::string refusal;
     bool dirty = true;
+    std::uint64_t writeSerial = 0u;
+    std::uint64_t clearWriteSerial = 0u;
+    std::uint64_t clearGeneration = 0u;
+    std::uint64_t clearCmaskGeneration = 0u;
+    std::size_t clearBytes = 0u;
+    std::uint32_t clearCode = 0u;
 
     std::vector<std::byte> readInitialRange(std::uint64_t address, std::size_t bytes, std::size_t alignment) {
         Require(bytes != 0u, "initial multisample snapshot range is empty");
@@ -401,8 +428,8 @@ std::mutex& targetsMutex() {
     return mutex;
 }
 
-std::vector<std::unique_ptr<MultisampleTarget>>& targets() {
-    static std::vector<std::unique_ptr<MultisampleTarget>> list;
+std::vector<std::shared_ptr<MultisampleTarget>>& targets() {
+    static std::vector<std::shared_ptr<MultisampleTarget>> list;
     return list;
 }
 
@@ -413,7 +440,7 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
         target->CheckCurrent(use);
         return *target;
     }
-    targets().push_back(std::make_unique<MultisampleTarget>(context, use));
+    targets().push_back(std::make_shared<MultisampleTarget>(context, use));
     guard(context, *targets().back());
     auto& created = *targets().back();
     return created;
@@ -484,6 +511,27 @@ std::vector<std::byte> ReadMultisampleTargetSamples(const Context& context, cons
     }
     Require(false, "multisample target sample read requires an existing resident");
     return {};
+}
+
+std::shared_ptr<Texture> NativeMultisampleSnapshot_nid_no_patch(const Context& context, const GuestTextureResource& resource, VkComponentMapping components) {
+    if (resource.dimension != TextureDimension::k2DMsaa && resource.dimension != TextureDimension::k2DMsaaArray) return nullptr;
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::lock_guard lock(targetsMutex());
+    for (const auto& resident : targets()) {
+        const auto& target = resident->target;
+        if (resident->context.device != context.device || target.address != resource.baseAddress) continue;
+        if (resource.width != target.extent.width || resource.height != target.extent.height || resource.fragments != target.samples || resource.pipeBankXor != target.pipeBankXor || resource.tileMode != TextureTileMode::kR64KBX || resource.baseArray != 0u || resource.depthOrLastArray != 0u || resource.mipCount != 1u || resource.baseLevel != 0u || resource.lastLevel != 0u || resource.minLod != 0u || IsConvertedTextureFormat(resource.format) || IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != target.elementBytes) return nullptr;
+        if (resource.dccAddress != 0u && (resource.dccAddress != target.dccAddress || resource.dccAlphaOnMsb != target.dccAlphaOnMsb || resource.dccPipeAligned != target.dccPipeAligned)) return nullptr;
+        resident->CheckCurrent(target);
+        return std::make_shared<Texture>(context, resident->image, resident, resource, components, Texture::NativeSnapshotTag{});
+    }
+    return nullptr;
+}
+
+void NoteNativeColorClear_nid_no_patch(std::uint64_t address, std::uint64_t bytes, std::uint32_t value, std::uint32_t mask) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::lock_guard lock(targetsMutex());
+    for (const auto& resident : targets()) if (resident->target.dccAddress != 0u && resident->target.dccAddress == address) resident->NoteClear(bytes, value, mask);
 }
 
 void MarkMultisampleTargetDirty(const Context& context, const ColorTarget& target) {
