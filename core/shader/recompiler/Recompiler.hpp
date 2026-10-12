@@ -141,6 +141,7 @@ struct ShaderPixelStageInfo {
     std::array<ColorExportPacking, 8> targetExportPacking;
     bool dualSourceBlend;
     bool alphaToCoverage;
+    bool ditheredAlphaToCoverage = false;
 };
 
 struct ShaderVertexBufferResource {

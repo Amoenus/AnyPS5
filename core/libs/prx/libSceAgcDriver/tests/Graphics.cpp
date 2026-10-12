@@ -2087,7 +2087,52 @@ void DepthClipTests() {
 }
 
 void AlphaToCoverageTests() {
+    auto dithered = makeState();
+    dithered.context[0x203] = 0x8010;
+    dithered.context[0x201] = 0x00133303;
+    dithered.context[0x2dc] = 0x18701;
+    dithered.context[0x2f8] = 0x0030e003;
+    dithered.context[0x292] = 3;
+    dithered.context[0x31d] = 0x1b000;
+    dithered.context[0x1b3] = 2;
+    dithered.context[0x1b4] = 2;
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+        dithered.context[0x2fe + pixel * 4u] = 0xbd153fd1u;
+        dithered.context[0x2ff + pixel * 4u] = 0x9773f95bu;
+    }
+    const auto rejection = AgcDriver::Graphics::DrawRejection(dithered, false);
+    Require(rejection.empty(), "eight-sample default dither refused: " + rejection);
+    const auto ditheredState = AgcDriver::Graphics::DecodeState(dithered);
+    Require(ditheredState.alphaToCoverage && ditheredState.samples == 8, "default dither did not enable eight-sample coverage");
+    Require(ditheredState.ditheredAlphaToCoverage, "default dither did not reach the shader state");
+    dithered.context[0x2dc] = 0xaa01;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "undithered multisample");
+    Require(AgcDriver::Graphics::DrawRejection(dithered, false).find("undithered multisample") != std::string::npos, "the precheck accepted unmeasured undithered multisample coverage");
+    dithered.context[0x2dc] = 0x18701;
+    for (const auto eqaa : {0x00133333u, 0x00132303u, 0x00133203u, 0x00333303u}) {
+        dithered.context[0x201] = eqaa;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "DB_EQAA");
+        Require(AgcDriver::Graphics::DrawRejection(dithered, false).find("DB_EQAA") != std::string::npos, "the precheck accepted unmatched dithered coverage samples");
+    }
+    dithered.context[0x201] = 0x00133303;
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) dithered.context[0x2fe + pixel * 4u] ^= 1u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "nonstandard sample locations");
+    Require(AgcDriver::Graphics::DrawRejection(dithered, false).find("custom sample locations") != std::string::npos, "the precheck accepted unmeasured dithered sample locations");
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) dithered.context[0x2fe + pixel * 4u] ^= 1u;
+    for (const auto format : {5u, 6u}) {
+        dithered.context[0x1c5] = format;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "FP16_ABGR or 32_ABGR");
+        Require(AgcDriver::Graphics::DrawRejection(dithered, false).find("FP16_ABGR or 32_ABGR") != std::string::npos, "the precheck accepted an unmeasured dithered export format");
+    }
+    dithered.context[0x1c5] = 4;
+    Require(AgcDriver::Graphics::DecodeState(dithered).ditheredAlphaToCoverage, "FP16 default dither was refused");
+    dithered.context[0x203] |= 0x800u;
+    Require(!AgcDriver::Graphics::DecodeState(dithered).alphaToCoverage, "the shader disable override was ignored");
+    Require(AgcDriver::Graphics::DrawRejection(dithered, false).empty(), "the precheck ignored the shader disable override");
+    dithered.context[0x2dc] |= 2u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "alpha-to-coverage");
     auto queue = makeState();
+    queue.context[0x203] = 0;
     queue.context[0x1b3] = 2;
     queue.context[0x1b4] = 2;
     Require(!AgcDriver::Graphics::DecodeState(queue).alphaToCoverage, "alpha-to-coverage decoded while disabled");
@@ -2128,6 +2173,7 @@ void InitialContextTests() {
         expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_VTE_CNTL=0x");
     }
     queue.context[0x206] = 0x43f;
+    queue.context[0x203] &= ~0x800u;
     queue.context[0x2dc] |= 1;
     Require(AgcDriver::Graphics::DecodeState(queue).alphaToCoverage, "undithered alpha-to-coverage was not decoded");
     queue.context.erase(0x2dc);
@@ -4664,6 +4710,11 @@ int main(int argc, char** argv) {
     setenv("APS5_HEAP_MIRROR_MIB", "4", 1);
 #endif
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--alpha-to-coverage-state") {
+            AlphaToCoverageTests();
+            std::cout << "Alpha-to-coverage state and refusal tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-pool-reset-failure") {
             descriptorPoolResetFailureTest();
             std::cerr << "descriptor pool reset failure did not terminate\n";

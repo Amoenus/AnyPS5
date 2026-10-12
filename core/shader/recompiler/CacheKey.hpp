@@ -177,6 +177,7 @@ private:
         append(key, value.conservativeZExport);
         append(key, value.orderedPixelShader);
         append(key, value.alphaToCoverage);
+        append(key, value.ditheredAlphaToCoverage);
         append(key, value.targetOutputMode);
     }
 

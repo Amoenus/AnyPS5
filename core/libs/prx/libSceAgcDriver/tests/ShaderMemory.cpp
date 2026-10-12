@@ -1536,7 +1536,7 @@ void verifyPixelRequestSerialization() {
                         value.posZ, value.posW, value.frontFace, value.ancillary, value.sampleShading,
                         value.noPerspective, value.linearCentroid, value.pixelKillEnable, value.depthExportEnable,
                         value.sampleMaskExportEnable, value.earlyZ, value.executeOnNoop, value.conservativeZExport, value.orderedPixelShader,
-                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage);
+                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage, value.ditheredAlphaToCoverage);
     };
     const std::array<std::uint32_t, 1> code{0xbf810000u};
     const std::array<std::uint32_t, 3> userData{0x12345678u, 0xabcdef01u, 0x87654321u};
@@ -1580,6 +1580,7 @@ void verifyPixelRequestSerialization() {
     };
     for (std::uint32_t i = 0; i < pixel.interpolatorSettings.size(); ++i) pixel.interpolatorSettings[i] = 0x10101010u + i;
     pixel.alphaToCoverage = true;
+    pixel.ditheredAlphaToCoverage = true;
     const std::array<std::array<std::uint8_t, 8>, 3> mappings{{
         {0x00u, 0xe4u, 0xc6u, 0x1bu, 0xffu, 0x80u, 0x55u, 0xaau},
         {0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u},
@@ -1604,6 +1605,10 @@ void verifyPixelRequestSerialization() {
             RecompileCacheKey::Build(changed, replayKey);
             require(key == replayKey && RecompileCacheKey::ContextHash(request) == RecompileCacheKey::ContextHash(changed), "runtime pixel export mapping changed the static shader identity");
         }
+        auto undithered = request;
+        undithered.context.pixel->ditheredAlphaToCoverage = false;
+        RecompileCacheKey::Build(undithered, replayKey);
+        require(key != replayKey && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(undithered), "dithered coverage did not change shader identity");
         auto withoutCoverage = request;
         withoutCoverage.context.pixel->alphaToCoverage = false;
         RecompileCacheKey::Build(withoutCoverage, replayKey);
@@ -1619,12 +1624,23 @@ void verifyPixelRequestSerialization() {
     minimal.context.waveSize = 64;
     minimal.context.pixel = ShaderPixelStageInfo{};
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRAAAAA=", "new requests did not use serialization version 16");
+    require(requestPrefix(encoded, 8u) == "NVNQQREAAAA=", "new requests did not use serialization version 17");
+    const auto legacy16 = serializer.Deserialize(
+        "NVNQQRAAAAAFAAADAAAAAAABAAAAAAAAAAAAgb8AAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAJAAAAAAAAAOQAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAEEAAAAMBAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAsAAAAQAAAAgAAAAAAAAAAAAAAAAQ==");
+    require(legacy16.request.context.pixel->alphaToCoverage && !legacy16.request.context.pixel->ditheredAlphaToCoverage, "version16 coverage acquired a dither mode");
+    require(legacy16.request.context.pixel->targetOutputMode[0] == 9u && legacy16.request.context.pixel->targetExportMapping[0] == 0xe4u && legacy16.request.target.float64DenormPreserve, "version16 export or FP64 fields were lost");
+    require(legacy16.request.layout.firstBinding == 11u && legacy16.request.layout.pushConstantOffsetBytes == 16u && !legacy16.request.useCache, "version16 trailing fields were misaligned");
+    const auto upgraded16 = serializer.Deserialize(serializer.Serialize(legacy16.request));
+    require(RecompileCacheKey::ContextHash(legacy16.request) == RecompileCacheKey::ContextHash(upgraded16.request), "upgrading version16 changed shader identity");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
-    for (std::size_t bytes = 0; bytes < 18u; ++bytes) {
+    for (std::size_t bytes = 0; bytes < 19u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source or alpha-to-coverage flag was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQREAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRIAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
 }
@@ -1713,7 +1729,7 @@ void verifyLegacyPixelRequests() {
         require(pixel.targetExportMapping == std::array<std::uint8_t, 8>{}, "legacy pixel mapping no longer defaults to zero");
         require(pixel.targetExportPacking == std::array<ColorExportPacking, 8>{}, "a legacy request packed a color export");
         require(!pixel.dualSourceBlend, "a legacy request enabled dual-source blending");
-        require(!pixel.alphaToCoverage, "a legacy request enabled alpha-to-coverage");
+        require(!pixel.alphaToCoverage && !pixel.ditheredAlphaToCoverage, "a legacy request enabled alpha-to-coverage");
         require(pixel.inputAddr == 2u && pixel.hasPerspectiveCenterVgpr && pixel.targetOutputMode[0] == 9u, "legacy pixel layout was misread");
         require(pixel.conservativeZExport == (version >= 7u ? ConservativeZExport::GreaterThanZ : ConservativeZExport::AnyZ), "legacy conservative Z layout was misread");
         require(!pixel.orderedPixelShader, "a legacy request became a primitive-ordered pixel shader");

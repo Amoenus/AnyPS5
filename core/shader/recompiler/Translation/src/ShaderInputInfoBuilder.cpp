@@ -141,7 +141,9 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         pixelStorage.psExecuteOnNoop = pixel.executeOnNoop;
         pixelStorage.psConservativeZExport = pixel.conservativeZExport;
         pixelStorage.psOrderedPixelShader = pixel.orderedPixelShader;
+        if (pixel.ditheredAlphaToCoverage && !pixel.alphaToCoverage) throw std::runtime_error("dithered alpha-to-coverage requires enabled coverage");
         pixelStorage.psAlphaToCoverage = pixel.alphaToCoverage;
+        pixelStorage.psDitheredAlphaToCoverage = pixel.ditheredAlphaToCoverage;
         ShaderStageInputInfo result;
         result.pixel = &pixelStorage;
         return result;
