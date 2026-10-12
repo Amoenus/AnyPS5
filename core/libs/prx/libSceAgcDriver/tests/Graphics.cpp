@@ -94,7 +94,7 @@ void expectFailure(TAction action, std::string_view reason) {
     try {
         action();
     } catch (const std::runtime_error& error) {
-        Require(std::string_view(error.what()).find(reason) != std::string_view::npos, std::string("unexpected failure: ") + error.what());
+        Require(std::string_view(error.what()).find(reason) != std::string_view::npos, std::string("expected rejection containing ") + std::string(reason) + "; got: " + error.what());
         return;
     }
     throw std::runtime_error("expected graphics rejection: " + std::string(reason));
@@ -516,6 +516,7 @@ void MsaaEnableSingleSampleTests() {
     queue.context[0x292] = 7;
     refused(queue, "scan conversion mode");
     clear.context[0x2fe] = 0x44;
+    clear.context[0x203] &= ~0x800u;
     clear.context[0x2dc] = 0xaa01;
     Require(DecodeState(clear).alphaToCoverage && DrawRejection(clear, false).empty(), "a single-sample target without MSAA_ENABLE was refused over its sample locations or alpha-to-coverage");
 }
@@ -2390,6 +2391,7 @@ void AlphaToCoverageTests() {
     dithered.context[0x2f8] = 0x0030e003;
     dithered.context[0x292] = 3;
     dithered.context[0x31d] = 0x1b000;
+    dithered.context[0x321] = 0;
     dithered.context[0x1b3] = 2;
     dithered.context[0x1b4] = 2;
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {

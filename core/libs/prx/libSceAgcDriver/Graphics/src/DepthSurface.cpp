@@ -240,7 +240,7 @@ public:
                           static_cast<unsigned>(resource.tileMode), static_cast<int>(resource.dimension), resource.baseLevel, resource.lastLevel, resource.baseArray, key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7]);
             throw std::runtime_error(text);
         }
-        auto texture = std::make_shared<Texture>(context, image, hostFormat, stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, components, target.samples, target.extent);
+        auto texture = std::make_shared<Texture>(context, image, hostFormat, stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, components);
         textures.emplace(key, texture);
         return texture;
     }
