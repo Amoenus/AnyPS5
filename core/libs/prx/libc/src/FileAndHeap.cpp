@@ -245,7 +245,12 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
     std::filesystem::path fpath;
     if (const int error = ResolvePathError_nid_no_patch(filename, fpath)) { errno = error; return nullptr; }
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
-    if (!handle) return nullptr;
+    if (!handle) {
+        const int error = errno;
+        errno = error;
+        return nullptr;
+    }
+    // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());
     if (parsed->append) static_cast<void>(std::fseek(handle.get(), 0, SEEK_END));
     if (parsed->writes) RecordWrittenPath_nid_no_patch(fpath);
     auto stream = std::make_unique<FileStream>(handle.get(), true);
