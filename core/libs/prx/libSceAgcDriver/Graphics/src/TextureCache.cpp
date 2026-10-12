@@ -24,6 +24,7 @@ void TextureCache::trim() {
 
 std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
     Require(words.size() == 8, "texture cache descriptor must contain eight DWORDs");
+    Require(resource.fragments == 1u || resource.dccAddress == 0u, "compressed multisampled texture snapshot is not implemented");
     trim();
     std::array<std::uint32_t, 8> key;
     std::copy(words.begin(), words.end(), key.begin());
@@ -38,9 +39,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         entries.erase(it);
         break;
     }
-    const auto mips = ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount);
-    const auto layers = resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::k1DArray || resource.dimension == TextureDimension::kCube ? resource.depthOrLastArray + 1u : 1u;
-    const auto bytes = ComputeSurfaceSize(mips, layers);
+    const auto bytes = DescribeSurface(resource).guestBytes;
     Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "texture cache surface size overflow");
     std::vector<std::byte> snapshot(static_cast<std::size_t>(bytes));
     GuestMemory::ReadCommitted(resource.baseAddress, snapshot);

@@ -269,6 +269,9 @@ struct VulkanDevice::State {
     bool geometryShader = false;
     bool sampleRateShading = false;
     bool shaderClipDistance = false;
+    bool storageImageMultisample = false;
+    bool storageImageWriteWithoutFormat = false;
+    bool storageImageReadWithoutFormat = false;
     bool shaderClock = false;
     bool narrowSubgroupClock = false;
     bool float64DenormPreserve = false;
@@ -1383,10 +1386,13 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     state->occlusionQueryPrecise = enabled.occlusionQueryPrecise == VK_TRUE;
     // Recompiled storage-image access declares no format (the guest descriptor decides it).
     enabled.shaderStorageImageMultisample = available.shaderStorageImageMultisample;
+    state->storageImageMultisample = enabled.shaderStorageImageMultisample == VK_TRUE;
     if (enabled.shaderStorageImageMultisample) state->capabilities.push_back(spv::CapabilityStorageImageMultisample);
     state->capabilities.push_back(spv::CapabilityImageMSArray);
     enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
+    state->storageImageWriteWithoutFormat = enabled.shaderStorageImageWriteWithoutFormat == VK_TRUE;
     enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
+    state->storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
     // Gathers with non-constant offsets (ImageGatherExtended).
     enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
     if (enabled.shaderImageGatherExtended) state->capabilities.push_back(spv::CapabilityImageGatherExtended);
@@ -3130,6 +3136,9 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.geometryShader = state->geometryShader;
     context.sampleRateShading = state->sampleRateShading;
     context.shaderClipDistance = state->shaderClipDistance;
+    context.storageImageMultisample = state->storageImageMultisample;
+    context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
+    context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.nullDescriptors = state->shaderProfile != nullptr && state->shaderProfile->NullDescriptors();
     context.bufferInt64Atomics = state->bufferInt64Atomics;
     context.placeholderImages = state->placeholderImages.get();

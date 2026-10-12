@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cfenv>
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
@@ -14,6 +15,31 @@
 #include "prx/libc/include/SonyCrt.hpp"
 
 namespace {
+
+template<typename TValue>
+bool IsNan_nid_no_patch(TValue value) {
+    if constexpr (sizeof(TValue) == sizeof(std::uint32_t)) {
+        const auto bits = std::bit_cast<std::uint32_t>(value) & UINT32_C(0x7fffffff);
+        return bits > UINT32_C(0x7f800000);
+    } else {
+        const auto bits = std::bit_cast<std::uint64_t>(value) & UINT64_C(0x7fffffffffffffff);
+        return bits > UINT64_C(0x7ff0000000000000);
+    }
+}
+
+template<typename TValue>
+TValue Extremum_nid_no_patch(TValue left, TValue right, bool maximum) {
+    if (IsNan_nid_no_patch(left)) return right;
+    if (IsNan_nid_no_patch(right)) return left;
+    if (left == right) {
+        if (maximum) return std::signbit(left) ? right : left;
+        return std::signbit(left) ? left : right;
+    }
+    return (maximum ? left > right : left < right) ? left : right;
+}
+
+static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
+static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559);
 
 template<typename TFloat>
 std::int64_t RoundToInt64(TFloat value) {
@@ -308,6 +334,10 @@ float APS5_VABI __powisf2_nid_postfix(float base, int exponent) {
     }
     return reciprocal ? 1.0f / result : result;
 }
+double APS5_VABI fmin_nid_postfix(double x, double y) { return Extremum_nid_no_patch(x, y, false); }
+double APS5_VABI fmax_nid_postfix(double x, double y) { return Extremum_nid_no_patch(x, y, true); }
+float APS5_VABI fminf_nid_postfix(float x, float y) { return Extremum_nid_no_patch(x, y, false); }
+float APS5_VABI fmaxf_nid_postfix(float x, float y) { return Extremum_nid_no_patch(x, y, true); }
 float APS5_VABI expf_nid_postfix(float x) { return std::exp(x); }
 float APS5_VABI exp2f_nid_postfix(float x) { return std::exp2(x); }
 float APS5_VABI logf_nid_postfix(float x) { return std::log(x); }

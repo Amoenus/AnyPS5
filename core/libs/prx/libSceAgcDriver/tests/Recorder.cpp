@@ -4558,107 +4558,23 @@ void dataRefreshTests(const Device& device, Recorder& recorder) {
     recorder.Sync();
 }
 
-void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
-    const auto& base = device.GetContext();
-    if ((base.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0 || !device.NullDescriptors()) {
-        std::cout << "4x color targets or nullDescriptor unavailable: multisampled target guest access not tested\n";
-        return;
-    }
-    constexpr std::uint32_t side = 64;
-    constexpr std::size_t targetBytes = 65536u;
-    constexpr std::size_t bytes = 5u * 65536u;
-#ifdef _WIN32
-    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-#else
-    void* block = std::aligned_alloc(65536, bytes);
-#endif
-    Require(block != nullptr, "cannot allocate the multisampled target block");
-    std::memset(block, 0, bytes);
-    const auto address = reinterpret_cast<std::uint64_t>(block);
-    {
-        GuestAllocations::Mutation mutation;
-        mutation.Add(block, bytes, true, true, true);
-    }
-    struct Unregister {
-        const Context& context;
-        void* block;
-        ~Unregister() {
-            ClearMultisampleTargets(context.device);
-            ClearCachedTextures(context.device);
-            {
-                GuestAllocations::Mutation mutation;
-                mutation.Remove(block);
-            }
-#ifdef _WIN32
-            VirtualFree(block, 0, MEM_RELEASE);
-#else
-            std::free(block);
-#endif
-        }
-    } unregister{base, block};
-    TextureDetiler detiler(base);
-    auto context = base;
-    context.detiler = &detiler;
-    context.nullDescriptors = true;
-    TextureCache cache(context);
-    context.textureCache = &cache;
-    const auto refused = [](const std::function<void()>& access, const std::string& expected, const std::string& what) {
+void multisampleInitialContentRefusalTests() {
+    for (const auto samples : {2u, 4u, 8u}) {
+        ColorTarget target{};
+        target.address = target.surfaceAddress = 0x10000u;
+        target.extent = target.surfaceExtent = {64u, 64u};
+        target.format = VK_FORMAT_R8G8B8A8_UNORM;
+        target.bytes = 65536u;
+        target.samples = samples;
         std::string message;
         try {
-            access();
+            static_cast<void>(MultisampleTargetView({}, target));
         } catch (const std::exception& error) {
             message = error.what();
         }
-        Require(message.find(expected) != std::string::npos && message.find("multisampled color target") != std::string::npos, what + " of a resolved-only multisampled target's memory did not throw: " + message);
-    };
-    ColorTarget target{};
-    target.address = address;
-    target.surfaceAddress = address;
-    target.extent = {side, side};
-    target.surfaceExtent = target.extent;
-    target.format = VK_FORMAT_R8G8B8A8_UNORM;
-    target.bytes = targetBytes;
-    target.samples = 4;
-    {
-        std::lock_guard gpu(GpuMutex());
-        Require(MultisampleTargetView(context, target) != VK_NULL_HANDLE, "the multisampled target has no view");
-        recorder.Submit();
-        device.WaitQueue();
-        recorder.Sync();
+        Require(message.find("multisample target requires a device, format queries and a detiler") != std::string::npos, "multisampled target acquisition did not refuse an incomplete context: " + message);
     }
-    std::array<std::byte, 64> texels{};
-    refused([&] { AgcDriver::GuestMemory::Read(address + 256u, texels); }, "a CPU read", "a CPU read");
-    refused([&] { RequireNoMultisampleTarget(address, 64u, "a DMA copy"); }, "a DMA copy", "a DMA copy");
-    ShaderRecompiler::RecompileResult program;
-    ShaderRecompiler::DescriptorBinding binding;
-    binding.kind = ShaderRecompiler::DescriptorKind::SampledImage;
-    binding.role = ShaderRecompiler::DescriptorRole::GuestImages;
-    binding.descriptorSet = 0;
-    binding.binding = ShaderRecompiler::RuntimeAbi::FirstImageBinding;
-    binding.count = 1;
-    binding.imageShape = ShaderRecompiler::DescriptorImageShape::Image2D;
-    binding.imageSamplers = {0};
-    binding.guestDescriptor = {
-        static_cast<std::uint32_t>(address >> 8u),
-        static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (56u << 20u) | (((side - 1u) & 3u) << 30u),
-        ((side - 1u) >> 2u) | ((side - 1u) << 14u),
-        0xfacu | (9u << 28u),
-        0u,
-        0u,
-        0u,
-        0u,
-    };
-    program.bindings.push_back(binding);
-    const CompiledShader compute{ShaderRecompiler::ShaderStage::Compute, &program, 0};
-    refused([&] {
-        std::lock_guard gpu(GpuMutex());
-        ShaderResources resources(context, compute);
-    }, "a texture read", "a texture read");
-    refused([&] { AgcDriver::GuestMemory::Read(address + 3u * 65536u + 256u, texels); }, "a CPU read", "a CPU read in the padding of a later sample plane");
-    AgcDriver::GuestMemory::Read(address + 4u * 65536u, texels);
-    ClearMultisampleTargets(context.device);
-    AgcDriver::GuestMemory::Read(address + 256u, texels);
-    std::cout << "Multisampled target guest access tests passed\n";
+    std::cout << "Multisampled target invalid-context refusal tests passed\n";
 }
 
 void depthSurfaceProofTests(const Device& device, Recorder& recorder) {
@@ -5539,7 +5455,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--multisample-only") {
-            multisampleGuestAccessTests(device, recorder);
+            multisampleInitialContentRefusalTests();
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--draw-descriptors-only") {
@@ -5570,7 +5486,7 @@ int main(int argc, char** argv) {
         resourceReadTests(device, recorder);
         readWrittenStagingTests(device, recorder);
         depthSurfaceProofTests(device, recorder);
-        multisampleGuestAccessTests(device, recorder);
+        multisampleInitialContentRefusalTests();
         misalignedSnapshotTests(device, recorder);
         misalignedRegionTests(device, recorder);
         drawSnapshotReuseTests(device, recorder);

@@ -1826,6 +1826,8 @@ void SetReadGuard(void (*guard)(std::uint64_t address, std::size_t bytes)) {
 }
 
 void FlushGpuWrites(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0u) return;
+    if (const auto guard = readGuard.load(std::memory_order_acquire)) guard(address, bytes);
     if (const auto hook = flushHook.load(std::memory_order_acquire)) hook(address, bytes);
 }
 

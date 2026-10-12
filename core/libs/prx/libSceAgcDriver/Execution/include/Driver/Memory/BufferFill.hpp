@@ -6,10 +6,31 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 
 namespace AgcDriver::DriverDetail {
+
+inline constexpr std::array<std::uint32_t, 11> ConstantFillKernel{
+    0xd7460000u, 0x04010c06u, 0x7e080205u, 0x7e0a0205u, 0x7e0c0205u, 0x7e0e0205u,
+    0x34000084u, 0x26000004u, 0xdc788000u, 0x00020400u, 0xbf810000u
+};
+
+struct ConstantFillRange {
+    std::uint64_t address, bytes;
+    std::uint32_t value;
+};
+
+inline std::optional<ConstantFillRange> MatchConstantFill(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, std::span<const std::uint32_t> packet) {
+    if (code.size() < ConstantFillKernel.size() || !std::equal(ConstantFillKernel.begin(), ConstantFillKernel.end(), code.begin())) return std::nullopt;
+    if (userData.size() != 6u || packet.size() < 5u || compute.numThreads != std::array<std::uint32_t, 3>{64u, 1u, 1u} || !compute.groupIdEnable[0] || compute.threadIdComponentCount == 0u || compute.threadIdComponentCount > 3u || compute.PartialGroups()) return std::nullopt;
+    if (packet[1] == 0u || packet[2] != 1u || packet[3] != 1u || (packet[4] & 0x21u) != 1u || (userData[4] & 15u) != 0u) return std::nullopt;
+    const auto address = userData[2] | (static_cast<std::uint64_t>(userData[3]) << 32u);
+    const auto bytes = std::min(static_cast<std::uint64_t>(packet[1]) * 1024u, static_cast<std::uint64_t>(userData[4]) + 16u);
+    if (address == 0u || (address & 15u) != 0u || address > std::numeric_limits<std::uint64_t>::max() - bytes) return std::nullopt;
+    return ConstantFillRange{address, bytes, userData[5]};
+}
 
 inline constexpr std::array<std::uint32_t, 18> PatternFillKernel{
     0xbfa00001u, 0xd7460000u, 0x04010c0cu, 0xf4201a84u, 0xfa000000u, 0xbf8cc07fu,

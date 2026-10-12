@@ -1,4 +1,6 @@
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
 #include "BdaTests.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
@@ -25,6 +27,70 @@ void reject(TAction action) {
 }
 
 void RunColorTargetLayoutTests() {
+    Require(MultisampleHtileBytes_nid_no_patch(3840u, 2160u, 1u) == 655360u, "multisampled HTILE geometry differs");
+    Require(MultisampleHtileBytes_nid_no_patch(1025u, 513u, 3u) == 393216u, "multisampled HTILE boundary or layer stride differs");
+    for (const auto extent : {0u, 16385u}) {
+        reject([&] { MultisampleHtileBytes_nid_no_patch(extent, 1u, 1u); });
+        reject([&] { MultisampleHtileBytes_nid_no_patch(1u, extent, 1u); });
+    }
+    for (const auto layers : {0u, 8193u}) reject([&] { MultisampleHtileBytes_nid_no_patch(1u, 1u, layers); });
+    for (const auto fragments : {2u, 4u, 8u}) {
+        Require(MultisampleHtileOffset_nid_no_patch(fragments, 1025u, 513u, 3u, 0xcf00u, 1024u, 512u, 2u) < 393216u, "multisampled HTILE offset exceeds its extent");
+    }
+    for (const auto fragments : {0u, 1u, 3u, 16u}) reject([&] { MultisampleHtileOffset_nid_no_patch(fragments, 1u, 1u, 1u, 0u, 0u, 0u, 0u); });
+    reject([&] { MultisampleHtileOffset_nid_no_patch(8u, 1u, 1u, 1u, 0x100u, 1u, 0u, 0u); });
+    reject([&] { MultisampleHtileOffset_nid_no_patch(8u, 1u, 1u, 1u, 0x1000u, 0u, 0u, 0u); });
+    Require(MultisampleHtileOffset_nid_no_patch(8u, 1u, 1u, 1u, 0x100u, 0u, 0u, 0u) == 256u, "multisampled HTILE loses its pipe XOR");
+    Require(MultisampleHtileOffset_nid_no_patch(8u, 1u, 1u, 2u, 0u, 0u, 0u, 1u) != MultisampleHtileOffset_nid_no_patch(4u, 1u, 1u, 2u, 0u, 0u, 0u, 1u), "multisampled HTILE loses its 8x layer pattern");
+    for (const auto word : {0u, 0xf0u, 0x30u}) Require(MultisampleHtileState_nid_no_patch(word) == HtileDepthState::ClearZero, "HTILE zero clear differs");
+    for (const auto word : {0xfffffff0u, 0xfffc00f0u, 0xfffc0030u}) Require(MultisampleHtileState_nid_no_patch(word) == HtileDepthState::ClearOne, "HTILE one clear differs");
+    for (const auto word : {0x0000000fu, 0xfffc000fu, 0xfffff3ffu, 0x1234567fu}) Require(MultisampleHtileState_nid_no_patch(word) == HtileDepthState::Uncompressed, "HTILE expanded depth differs");
+    for (const auto word : {1u, 2u, 8u, 0x55555550u}) reject([&] { MultisampleHtileState_nid_no_patch(word); });
+    Require(MultisampleDccBytes_nid_no_patch(8u, 8u, 3840u, 2160u, 1u) == 552960u, "multisampled DCC ignores its compressed-fragment limit");
+    for (const auto fragments : {2u, 4u, 8u}) {
+        Require(MultisampleDccBytes_nid_no_patch(8u, fragments, 257u, 257u, 3u) == 49152u, "multisampled DCC boundary or array geometry differs");
+    }
+    for (const auto elementBytes : {0u, 3u, 32u}) reject([&] { MultisampleDccBytes_nid_no_patch(elementBytes, 8u, 1u, 1u, 1u); });
+    for (const auto fragments : {0u, 1u, 3u, 16u}) reject([&] { MultisampleDccBytes_nid_no_patch(8u, fragments, 1u, 1u, 1u); });
+    for (const auto extent : {0u, 16385u}) {
+        reject([&] { MultisampleDccBytes_nid_no_patch(8u, 8u, extent, 1u, 1u); });
+        reject([&] { MultisampleDccBytes_nid_no_patch(8u, 8u, 1u, extent, 1u); });
+    }
+    for (const auto layers : {0u, 8193u}) reject([&] { MultisampleDccBytes_nid_no_patch(8u, 8u, 1u, 1u, layers); });
+    GuestTextureResource dccResource{};
+    dccResource.format = 71u;
+    dccResource.width = 5u;
+    dccResource.height = 3u;
+    dccResource.dimension = TextureDimension::k2DMsaaArray;
+    dccResource.depthOrLastArray = 2u;
+    dccResource.baseArray = 1u;
+    dccResource.fragments = 8u;
+    dccResource.mipCount = 1u;
+    dccResource.allocatedMipCount = 1u;
+    dccResource.tileMode = TextureTileMode::kR64KBX;
+    dccResource.pipeBankXor = 0xcf00u;
+    dccResource.dccAddress = 0x10000u;
+    dccResource.dccPipeAligned = true;
+    std::vector<std::byte> dccMetadata(12288u);
+    for (const auto [code, keys] : {std::pair{0x00u, DccKeys::Clear0000}, std::pair{0x40u, DccKeys::Clear0001}, std::pair{0x80u, DccKeys::Clear1110}, std::pair{0xc0u, DccKeys::Clear1111}, std::pair{0xffu, DccKeys::Uncompressed}}) {
+        std::ranges::fill(dccMetadata, static_cast<std::byte>(code));
+        Require(MultisampleDccKeys_nid_no_patch(dccResource, dccMetadata) == keys, "multisampled DCC clear classification differs");
+    }
+    for (const auto code : {0x10u, 0x20u, 0x01u, 0x55u}) {
+        std::ranges::fill(dccMetadata, static_cast<std::byte>(code));
+        reject([&] { MultisampleDccKeys_nid_no_patch(dccResource, dccMetadata); });
+    }
+    std::ranges::fill(dccMetadata, std::byte{0});
+    dccMetadata.back() = std::byte{0xff};
+    reject([&] { MultisampleDccKeys_nid_no_patch(dccResource, dccMetadata); });
+    dccMetadata.back() = std::byte{0};
+    reject([&] { MultisampleDccKeys_nid_no_patch(dccResource, std::span(dccMetadata).first(dccMetadata.size() - 1u)); });
+    auto unsupportedDcc = dccResource;
+    unsupportedDcc.dccPipeAligned = false;
+    reject([&] { MultisampleDccKeys_nid_no_patch(unsupportedDcc, dccMetadata); });
+    unsupportedDcc = dccResource;
+    unsupportedDcc.mipCount = 2u;
+    reject([&] { MultisampleDccKeys_nid_no_patch(unsupportedDcc, dccMetadata); });
     Require(DecodeColorTileMode(0x4dc6c000) == ColorTileMode::RenderTarget, "logged color descriptor was rejected");
     Require(DecodeColorTileMode(0x09000000) == ColorTileMode::Linear, "linear descriptor changed");
     Require(DecodeColorTileMode(0x4dc6c001) == ColorTileMode::RenderTarget, "2D array color descriptor with MIP0_DEPTH 1 was rejected");
