@@ -1200,10 +1200,12 @@ void DepthStencilTests() {
     {
         auto depthOnly = queue;
         depthOnly.context[0x011] &= ~1u;
-        Require(AgcDriver::Graphics::DecodeState(depthOnly).depth->htileDepthOnly, "absence of a stencil plane lost TILE_STENCIL_DISABLE");
+        depthOnly.context[0x200] |= 6u;
+        const auto depthOnlyState = AgcDriver::Graphics::DecodeState(depthOnly);
+        Require(depthOnlyState.depth && depthOnlyState.depth->htileDepthOnly, "absence of a stencil plane lost TILE_STENCIL_DISABLE");
         depthOnly.context[0x011] &= ~(1u << 29u);
         const auto sharedLayout = AgcDriver::Graphics::DecodeState(depthOnly);
-        Require(!sharedLayout.depth->htileDepthOnly && !sharedLayout.depth->htileStencil, "HTILE encoding was inferred from absence of a stencil plane");
+        Require(sharedLayout.depth && !sharedLayout.depth->htileDepthOnly && !sharedLayout.depth->htileStencil, "HTILE encoding was inferred from absence of a stencil plane");
     }
     {
         queue.context[0x011] &= ~(1u << 29u);
@@ -2388,7 +2390,6 @@ void AlphaToCoverageTests() {
     dithered.context[0x2f8] = 0x0030e003;
     dithered.context[0x292] = 3;
     dithered.context[0x31d] = 0x1b000;
-    dithered.context[0x321] = 0;
     dithered.context[0x1b3] = 2;
     dithered.context[0x1b4] = 2;
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
@@ -2411,7 +2412,7 @@ void AlphaToCoverageTests() {
     }
     dithered.context[0x201] = 0x00133303;
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) dithered.context[0x2fe + pixel * 4u] ^= 1u;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "nonstandard sample locations");
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "custom sample locations");
     Require(AgcDriver::Graphics::DrawRejection(dithered, false).find("custom sample locations") != std::string::npos, "the precheck accepted unmeasured dithered sample locations");
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) dithered.context[0x2fe + pixel * 4u] ^= 1u;
     for (const auto format : {5u, 6u}) {

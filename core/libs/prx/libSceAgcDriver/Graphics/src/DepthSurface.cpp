@@ -228,7 +228,6 @@ public:
         key[10] = components.b;
         key[11] = components.a;
         if (const auto found = textures.find(key); found != textures.end()) return found->second;
-        Require(target.samples == 1, "sampling a multisampled depth surface is not implemented");
         const bool stencil = target.stencilAddress != 0 && resource.baseAddress == target.stencilAddress;
         const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
         const auto expected = stencil ? VK_FORMAT_R8_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
@@ -241,7 +240,7 @@ public:
                           static_cast<unsigned>(resource.tileMode), static_cast<int>(resource.dimension), resource.baseLevel, resource.lastLevel, resource.baseArray, key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7]);
             throw std::runtime_error(text);
         }
-        auto texture = std::make_shared<Texture>(context, image, hostFormat, stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, components);
+        auto texture = std::make_shared<Texture>(context, image, hostFormat, stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, components, target.samples, target.extent);
         textures.emplace(key, texture);
         return texture;
     }
