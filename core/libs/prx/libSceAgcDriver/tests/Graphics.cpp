@@ -2094,6 +2094,7 @@ void AlphaToCoverageTests() {
     dithered.context[0x2f8] = 0x0030e003;
     dithered.context[0x292] = 3;
     dithered.context[0x31d] = 0x1b000;
+    dithered.context[0x321] = 0;
     dithered.context[0x1b3] = 2;
     dithered.context[0x1b4] = 2;
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
