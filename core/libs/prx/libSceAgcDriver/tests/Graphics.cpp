@@ -5507,15 +5507,15 @@ int main(int argc, char** argv) {
             std::cout << "sparse buffer hole tests " << (passed ? "passed" : "failed") << '\n';
             return passed ? 0 : 1;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--descriptor-layout-flags") {
+            descriptorLayoutFlagTests();
+            std::cout << "Descriptor layout native and captured binding flags passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--alpha-to-coverage-state") {
             MsaaEnableSingleSampleTests();
             AlphaToCoverageTests();
             std::cout << "Alpha-to-coverage state and refusal tests passed\n";
-            return 0;
-        }
-        if (argc == 2 && std::string_view(argv[1]) == "--descriptor-layout-flags") {
-            descriptorLayoutFlagTests();
-            std::cout << "Descriptor layout native and captured binding flags passed\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-pool-reset-failure") {
