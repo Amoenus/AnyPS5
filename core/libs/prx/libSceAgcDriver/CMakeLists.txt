@@ -1113,6 +1113,21 @@ target_link_libraries(agc_driver_gpu_map_on_fiber_tests PRIVATE libSceFiber)
 
 target_include_directories(agc_driver_alpha_to_coverage_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 
+if(BUILD_TESTING)
+    add_test(NAME agc_driver_alpha_to_coverage_state COMMAND agc_driver_graphics_tests --alpha-to-coverage-state)
+    set_tests_properties(agc_driver_alpha_to_coverage_state PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME agc_driver_dithered_alpha_to_coverage COMMAND agc_driver_alpha_to_coverage_tests --dithered8)
+    set_tests_properties(agc_driver_dithered_alpha_to_coverage PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_tests_properties(agc_driver_alpha_to_coverage_state PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        set_tests_properties(agc_driver_dithered_alpha_to_coverage PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 target_include_directories(agc_driver_dual_source_blend_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 
 target_include_directories(agc_driver_swap_alt_blend_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -1196,18 +1211,6 @@ if(BUILD_TESTING)
     set_tests_properties(agc_driver_sparse_buffer_holes PROPERTIES TIMEOUT 30)
     if(WIN32)
         set_tests_properties(agc_sparse_buffer_holes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-    endif()
-    add_test(NAME agc_driver_alpha_to_coverage_state COMMAND agc_driver_graphics_tests --alpha-to-coverage-state)
-    set_tests_properties(agc_driver_alpha_to_coverage_state PROPERTIES
-            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    add_test(NAME agc_driver_dithered_alpha_to_coverage COMMAND agc_driver_alpha_to_coverage_tests --dithered8)
-    set_tests_properties(agc_driver_dithered_alpha_to_coverage PROPERTIES
-            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    if(WIN32)
-        set_tests_properties(agc_driver_alpha_to_coverage_state PROPERTIES ENVIRONMENT_MODIFICATION
-                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-        set_tests_properties(agc_driver_dithered_alpha_to_coverage PROPERTIES ENVIRONMENT_MODIFICATION
-                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_driver_emulated_color_compare_srgb_decode COMMAND agc_driver_emulated_color_compare_tests)
     set_tests_properties(agc_driver_emulated_color_compare_srgb_decode PROPERTIES
