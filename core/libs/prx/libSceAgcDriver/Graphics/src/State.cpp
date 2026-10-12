@@ -107,6 +107,27 @@ constexpr std::uint32_t ShaderControlMask = ~(0x0000f870u | 0x00020600u | 0x0001
 constexpr std::uint32_t PixelStageRunsMask = 0x00020747u;
 constexpr std::uint32_t AlphaToCoverageMask = ~0x0001ff00u;
 constexpr std::uint32_t AlphaToCoverageUndithered = 0x0000aa01u;
+constexpr std::uint32_t AlphaToCoverageDithered = 0x00018701u;
+
+bool alphaToCoverageDisabled(const Registers& cx) {
+    const auto control = find(cx, 0x203);
+    return control != cx.end() && (control->second & 0x800u) != 0;
+}
+
+bool ditheredAlphaSamplesSupported(const Registers& cx) {
+    const auto config = find(cx, 0x2f8);
+    const auto eqaa = find(cx, 0x201);
+    return config != cx.end() && (config->second & 0x700007u) == 0x300003u && eqaa != cx.end() && (eqaa->second & 0x207777u) == 0x3303u;
+}
+
+bool ditheredAlphaLocationsSupported(const Registers& cx) {
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+        const auto first = find(cx, 0x2fe + pixel * 4u);
+        const auto second = find(cx, 0x2ff + pixel * 4u);
+        if (first == cx.end() || second == cx.end() || first->second != 0xbd153fd1u || second->second != 0x9773f95bu) return false;
+    }
+    return true;
+}
 constexpr std::uint32_t ScanModeMask = ~0x22u;
 constexpr std::uint32_t ScanControlMask = ~0x76023fffu;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
@@ -725,8 +746,16 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         Require((depthControl & 0xc0000000u) == 0, "depth-conditional color writes are unsupported");
     }
     zero(cx, 0x203, shaderControlMask(read(cx, 0x1c4)), "depth export, shader coverage or ordered fragment execution");
-    result.alphaToCoverage = read(cx, 0x2dc) == AlphaToCoverageUndithered;
-    if (!result.alphaToCoverage) zero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage");
+    const auto alpha = read(cx, 0x2dc);
+    const bool alphaDisabled = alphaToCoverageDisabled(cx);
+    result.alphaToCoverage = !alphaDisabled && (alpha == AlphaToCoverageUndithered || alpha == AlphaToCoverageDithered);
+    result.ditheredAlphaToCoverage = result.alphaToCoverage && alpha == AlphaToCoverageDithered;
+    if (!result.alphaToCoverage) zero(cx, 0x2dc, alphaDisabled ? AlphaToCoverageMask & ~1u : AlphaToCoverageMask, "dithered or rounded alpha-to-coverage");
+    Require(!result.alphaToCoverage || result.ditheredAlphaToCoverage || result.samples == 1, "undithered multisample alpha-to-coverage is unsupported");
+    if (result.ditheredAlphaToCoverage) {
+        Require(ditheredAlphaSamplesSupported(cx), "dithered alpha-to-coverage requires eight matched raster/DB_EQAA samples and one pixel iteration");
+        Require(!result.customSampleLocations, "dithered alpha-to-coverage with custom sample locations is unsupported");
+    }
     Require(!result.depth || result.depth->samples == result.samples, "the depth target's sample count differs from the rasterizer's");
     zero(cx, 0x292, ScanModeMask & ~1u, "scan conversion mode");
     Require(result.samples == 1 || (read(cx, 0x292) & 1u) != 0, "multisampled targets rasterized without MSAA_ENABLE are unsupported");
@@ -948,6 +977,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         Require(mrt0 != result.colors.end(), "alpha-to-coverage without a written MRT0 color target is unsupported");
         const auto format = exportFormat & 0xfu;
         Require(format == 4u || format == 5u || format == 6u || format == 9u, "alpha-to-coverage needs an MRT0 export format with a floating-point alpha");
+        Require(!result.ditheredAlphaToCoverage || format == 4u || format == 9u, "dithered alpha-to-coverage needs an FP16_ABGR or 32_ABGR export");
         Require(mrt0->componentMapping == 0xe4u && mrt0->packing == ShaderRecompiler::ColorExportPacking::None, "alpha-to-coverage into a component-swapped or packed MRT0 target is unsupported");
     }
     APS5_LOG_OUT_DEBUG("DecodeState done colorTarget=%u render=%ux%u topology=%u", result.hasColorTarget ? 1u : 0u, result.renderExtent.width, result.renderExtent.height, static_cast<unsigned>(result.topology));
@@ -1258,8 +1288,23 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     std::uint32_t zFormat = 0;
     static_cast<void>(value(cx, 0x1c4, zFormat));
     if (auto reason = nonzero(cx, 0x203, shaderControlMask(zFormat), "depth export, shader coverage or ordered fragment execution"); !reason.empty()) return reason;
-    if (value(cx, 0x2dc, word) && word != AlphaToCoverageUndithered) {
-        if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage"); !reason.empty()) return reason;
+    const bool alphaDisabled = alphaToCoverageDisabled(cx);
+    if (value(cx, 0x2dc, word)) {
+        const auto config = find(cx, 0x2f8);
+        if (!alphaDisabled && word == AlphaToCoverageUndithered && config != cx.end() && (config->second & 7u) != 0) return "AGC graphics: undithered multisample alpha-to-coverage is unsupported";
+        if ((word != AlphaToCoverageUndithered && word != AlphaToCoverageDithered) || alphaDisabled) {
+            if (auto reason = nonzero(cx, 0x2dc, alphaDisabled ? AlphaToCoverageMask & ~1u : AlphaToCoverageMask, "dithered or rounded alpha-to-coverage"); !reason.empty()) return reason;
+        }
+        if (!alphaDisabled && word == AlphaToCoverageDithered && !ditheredAlphaSamplesSupported(cx)) return "AGC graphics: dithered alpha-to-coverage requires eight matched raster/DB_EQAA samples and one pixel iteration";
+        if (!alphaDisabled && word == AlphaToCoverageDithered) {
+            if (!ditheredAlphaLocationsSupported(cx)) return "AGC graphics: dithered alpha-to-coverage with custom sample locations is unsupported";
+            std::uint32_t format = 0;
+            if (value(cx, 0x1c5, format)) {
+                format &= 0xfu;
+                if (format != 4u && format != 5u && format != 6u && format != 9u) return "AGC graphics: alpha-to-coverage needs an MRT0 export format with a floating-point alpha";
+                if (format != 4u && format != 9u) return "AGC graphics: dithered alpha-to-coverage needs an FP16_ABGR or 32_ABGR export";
+            }
+        }
     }
     if (auto reason = nonzero(cx, 0x2f8, ~(0x7u | 0x1e000u | 0x700000u), "coverage conversion or nonstandard multisampling"); !reason.empty()) return reason;
     const bool multisampled = value(cx, 0x2f8, word) && (word & 7u) != 0;
