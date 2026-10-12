@@ -91,7 +91,10 @@ DescriptorRole RoleFor(DescriptorBindingKind kind) {
 DescriptorImageShape ImageShapeForResource(const ImageResource& image) {
     const RdnaImageDimensionInfo& info = RdnaImageDimensionInfoFor(image.dimension);
     if (info.multisampled != 0u) {
-        fail("DescriptorBindingBuilder::Populate multisampled image resources have no descriptor image shape");
+        if (info.arrayed != 0u) {
+            fail("DescriptorBindingBuilder::Populate multisampled array image resources have no descriptor image shape");
+        }
+        return DescriptorImageShape::Image2DMultisample;
     }
     if (info.spirvDimension == spv::Dim1D) {
         return info.arrayed != 0u ? DescriptorImageShape::Image1DArray : DescriptorImageShape::Image1D;
