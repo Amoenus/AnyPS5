@@ -83,6 +83,19 @@ add_custom_command(
         VERBATIM
 )
 
+set(agcMultisampleTileShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MultisampleTile.comp)
+set(agcMultisampleTileShaderSpv ${agcTextureDetileGeneratedDir}/MultisampleTile.spv)
+set(agcMultisampleTileShaderHeader ${agcTextureDetileGeneratedDir}/MultisampleTile_spv.h)
+add_custom_command(
+        OUTPUT "${agcMultisampleTileShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcMultisampleTileShaderSpv}" "${agcMultisampleTileShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcMultisampleTileShaderSpv} -DOUTPUT=${agcMultisampleTileShaderHeader}
+        -DSYMBOL=MULTISAMPLE_TILE_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcMultisampleTileShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 set(agcMeshArgumentsShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MeshArguments.comp)
 set(agcMeshArgumentsShaderSpv ${agcTextureDetileGeneratedDir}/MeshArguments.spv)
 set(agcMeshArgumentsShaderHeader ${agcTextureDetileGeneratedDir}/MeshArguments_spv.h)
@@ -232,6 +245,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleUpload.cpp
         ${agcMultisampleUploadShaderHeader}
         ${agcMultisampleReadbackShaderHeader}
+        ${agcMultisampleTileShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PassHazards.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/UnitShadow.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
@@ -304,6 +318,8 @@ if(BUILD_TESTING)
     configure_windows_unwind(agc_driver_msaa_runtime_tests)
     add_test(NAME agc_driver_msaa_runtime COMMAND agc_driver_msaa_runtime_tests)
     add_test(NAME agc_driver_msaa_readback COMMAND agc_driver_msaa_runtime_tests --readback)
+    add_test(NAME agc_driver_msaa_tile_transfer COMMAND agc_driver_msaa_runtime_tests --tile-transfer)
+    add_test(NAME agc_driver_msaa_xor_views COMMAND agc_driver_msaa_runtime_tests --xor-views)
     add_test(NAME agc_driver_msaa_target_import COMMAND agc_driver_msaa_runtime_tests --targets)
     add_test(NAME agc_driver_msaa_depth_target COMMAND agc_driver_msaa_runtime_tests --depth-targets)
     add_test(NAME agc_driver_msaa_depth_refusals COMMAND agc_driver_msaa_runtime_tests --depth-refusals)
@@ -311,10 +327,10 @@ if(BUILD_TESTING)
     add_test(NAME agc_driver_msaa_metadata_reset COMMAND agc_driver_msaa_runtime_tests --metadata-reset)
     add_test(NAME agc_driver_msaa_native_snapshot COMMAND agc_driver_msaa_runtime_tests --native-snapshots)
     add_test(NAME agc_shader_msaa_shapes COMMAND agc_driver_msaa_runtime_tests --shapes)
-    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot agc_shader_msaa_shapes PROPERTIES TIMEOUT 20)
-    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_tile_transfer agc_driver_msaa_xor_views agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot agc_shader_msaa_shapes PROPERTIES TIMEOUT 20)
+    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_tile_transfer agc_driver_msaa_xor_views agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
     if(WIN32)
-        set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+        set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_tile_transfer agc_driver_msaa_xor_views agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
     endif()
     add_test_executable(agc_driver_msaa_layout_tests
             tests/MultisampleTextureLayout.cpp
@@ -953,6 +969,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/MultisampleUpload.cpp
         ${agcMultisampleUploadShaderHeader}
         ${agcMultisampleReadbackShaderHeader}
+        ${agcMultisampleTileShaderHeader}
         Graphics/src/PassHazards.cpp
         Graphics/src/UnitShadow.cpp
         Graphics/src/Sampler.cpp

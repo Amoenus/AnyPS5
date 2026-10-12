@@ -20,7 +20,7 @@ std::uint32_t MultisampleExpandedFmask(std::uint32_t samples) {
     return samples == 2u ? 0x02020202u : samples == 4u ? 0xe4e4e4e4u : 0x76543210u;
 }
 
-MultisampleInitialContents DecodeMultisampleInitialContents(const ColorTarget& target, std::span<const std::byte> color, std::span<const std::byte> dcc, std::span<const std::byte> cmask, std::span<const std::byte> fmask) {
+MultisampleInitialContents DecodeMultisampleInitialContents(const ColorTarget& target, std::span<const std::byte> color, std::span<const std::byte> dcc, std::span<const std::byte> cmask, std::span<const std::byte> fmask, bool includePadding) {
     Require(target.samples == 2u || target.samples == 4u || target.samples == 8u, "unsupported initial multisample fragment count");
     Require(target.tileMode == ColorTileMode::RenderTarget, "initial multisample color layout is not implemented");
     Require(target.arrayLayers == 1u && target.arraySlice == 0u && target.depth == 1u && target.depthSlice == 0u && target.mipCount == 1u && target.mip == 0u && !target.mipTail, "initial multisample array, volume or mip contents are not implemented");
@@ -84,8 +84,9 @@ MultisampleInitialContents DecodeMultisampleInitialContents(const ColorTarget& t
         const auto pattern = MultisampleExpandedFmask(target.samples);
         for (std::size_t byte = 0; byte < fmask.size(); ++byte) Require(fmask[byte] == static_cast<std::byte>((pattern >> (byte % 4u * 8u)) & 0xffu), "initial multisample FMASK mapping is not expanded identity");
     } else Require((target.fmaskAddress == 0u && cmask.empty() && fmask.empty()) || (!cmask.empty() && cmaskCode == 0xccu), "initial multisample FMASK mapping is not implemented");
-    result.samples.resize(static_cast<std::size_t>(layout.LinearBytes()));
-    layout.Detile(color, result.samples);
+    const MultisampleTextureLayout contentsLayout(TextureTileMode::kR64KBX, target.elementBytes, target.samples, includePadding ? layout.Pitch() : target.extent.width, includePadding ? layout.PaddedHeight() : target.extent.height, 1u, target.pipeBankXor);
+    result.samples.resize(static_cast<std::size_t>(contentsLayout.LinearBytes()));
+    contentsLayout.Detile(color, result.samples);
     if (!cmask.empty() && cmaskCode == 0xccu) {
         const auto pixelBytes = static_cast<std::size_t>(target.elementBytes) * target.samples;
         for (std::size_t offset = 0; offset < result.samples.size(); offset += pixelBytes) {

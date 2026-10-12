@@ -4,9 +4,38 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace AgcDriver::Graphics {
 namespace {
+
+std::array<std::uint32_t, 16> inverseBlock(const MultisampleSwizzleEquation& equation, std::uint32_t byteBits, std::uint32_t fragmentBits, std::uint32_t widthBits) {
+    std::array<std::uint32_t, 16> rows{}, inverse{};
+    for (std::uint32_t input = 0; input < 16u; ++input) {
+        std::uint32_t address = 0u;
+        if (input < byteBits) address = 1u << input;
+        else {
+            const auto coordinateBit = input < byteBits + fragmentBits ? 48u + input - byteBits : input < byteBits + fragmentBits + widthBits ? input - byteBits - fragmentBits : 16u + input - byteBits - fragmentBits - widthBits;
+            const auto coordinate = std::uint64_t{1} << coordinateBit;
+            for (std::uint32_t output = 0; output < 16u; ++output) address |= static_cast<std::uint32_t>(std::popcount(coordinate & equation.bits[output]) & 1u) << output;
+        }
+        for (std::uint32_t output = 0; output < 16u; ++output) rows[output] |= ((address >> output) & 1u) << input;
+        inverse[input] = 1u << input;
+    }
+    for (std::uint32_t input = 0; input < 16u; ++input) {
+        auto pivot = input;
+        while (pivot < 16u && (rows[pivot] & (1u << input)) == 0u) ++pivot;
+        Require(pivot < 16u, "multisample block address equation is not invertible");
+        std::swap(rows[input], rows[pivot]);
+        std::swap(inverse[input], inverse[pivot]);
+        for (std::uint32_t row = 0; row < 16u; ++row) {
+            if (row == input || (rows[row] & (1u << input)) == 0u) continue;
+            rows[row] ^= rows[input];
+            inverse[row] ^= inverse[input];
+        }
+    }
+    return inverse;
+}
 
 std::vector<std::uint32_t> axisOffsets(const MultisampleSwizzleEquation& equation, std::uint32_t count, std::uint32_t shift) {
     std::vector<std::uint32_t> offsets(count);
@@ -35,6 +64,7 @@ MultisampleTextureLayout::MultisampleTextureLayout(TextureTileMode tileMode, std
     const auto widthBits = (elementBits + ((fragmentBits & 1u) == 0 ? 1u : 0u)) / 2u;
     blockWidth = 1u << widthBits;
     blockHeight = 1u << (elementBits - widthBits);
+    inverseBlockEquation = inverseBlock(*equation, static_cast<std::uint32_t>(std::countr_zero(elementBytes)), fragmentBits, widthBits);
     pitch = (width + blockWidth - 1u) / blockWidth * blockWidth;
     paddedHeight = (height + blockHeight - 1u) / blockHeight * blockHeight;
     sliceBytes = static_cast<std::uint64_t>(pitch) * paddedHeight * fragments * elementBytes;

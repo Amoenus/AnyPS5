@@ -113,6 +113,11 @@ public:
     }
     ~Device() { release(); }
     Context GetContext() const { return context; }
+    void PrintDevice() const {
+        VkPhysicalDeviceProperties properties{};
+        function<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties")(context.physical, &properties);
+        std::printf("tile GPU vendor=0x%04x device=0x%04x name=%s\n", properties.vendorID, properties.deviceID, properties.deviceName);
+    }
 private:
     template<typename TFunction> TFunction function(const char* name) const {
         const auto result = reinterpret_cast<TFunction>(proc(instance, name));
@@ -201,7 +206,7 @@ void QueueTargetByteWrite(const Context& context, Recorder& recorder, std::uint6
     recorder.NotePendingWrite(address, 1u);
 }
 
-void ClearTargetAttachment(const Context& context, VkImageView view, const ColorTarget& target) {
+void ClearTargetAttachment(const Context& context, VkImageView view, const ColorTarget& target, const ColorTarget* transition = nullptr) {
     VkAttachmentDescription attachment{};
     attachment.format = target.format;
     attachment.samples = static_cast<VkSampleCountFlagBits>(target.samples);
@@ -225,6 +230,10 @@ void ClearTargetAttachment(const Context& context, VkImageView view, const Color
     try {
         const std::array views{view};
         Framebuffer framebuffer(context, pass, views, target.extent);
+        if (transition != nullptr) {
+            Require(MultisampleTargetView(context, *transition) == view, "XOR transition invalidated a retained framebuffer attachment");
+            if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->Device() == context.device) recorder->Sync();
+        }
         CommandBatch batch(context);
         RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
         VkClearValue clear{};
@@ -245,7 +254,7 @@ void ClearTargetAttachment(const Context& context, VkImageView view, const Color
         context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(batch.Handle(), &begin, VK_SUBPASS_CONTENTS_INLINE);
         context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(batch.Handle());
         batch.SubmitAndWait();
-        MarkMultisampleTargetDirty(context, target);
+        MarkMultisampleTargetDirty(context, transition != nullptr ? *transition : target);
     } catch (...) {
         context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, pass, nullptr);
         throw;
@@ -259,6 +268,16 @@ VkImageView CheckTargetPublication(const Context& context, Recorder& recorder, c
     const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u, target.pipeBankXor);
     const auto* color = reinterpret_cast<const std::byte*>(target.address);
     std::vector<std::byte> physical(color, color + target.bytes);
+    if (target.dccAddress != 0u || target.cmaskAddress != 0u) {
+        const auto snapshot = [](std::uint64_t address, std::size_t bytes) { return std::span(reinterpret_cast<const std::byte*>(address), address == 0u ? 0u : bytes); };
+        const auto contents = DecodeMultisampleInitialContents(target, physical, snapshot(target.dccAddress, target.dccAddress == 0u ? 0u : MultisampleDccBytes_nid_no_patch(target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u)), snapshot(target.cmaskAddress, target.cmaskBytes), snapshot(target.fmaskAddress & ~std::uint64_t{65535u}, target.fmaskAddress == 0u ? 0u : MultisampleFmaskBytes(target)), true);
+        if (contents.clear) {
+            for (std::size_t offset = 0u; offset < physical.size(); offset += target.elementBytes) std::memcpy(physical.data() + offset, samples.data(), target.elementBytes);
+        } else {
+            const MultisampleTextureLayout padded(TextureTileMode::kR64KBX, target.elementBytes, target.samples, layout.Pitch(), layout.PaddedHeight(), 1u, target.pipeBankXor);
+            padded.Tile(contents.samples, physical);
+        }
+    }
     for (std::uint32_t y = 0; y < target.extent.height; ++y) {
         for (std::uint32_t x = 0; x < target.extent.width; ++x) {
             for (std::uint32_t sample = 0; sample < target.samples; ++sample) {
@@ -448,8 +467,8 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
         if (format == VK_FORMAT_R32_UINT) CheckPublishedSampledRead(context, recorder, target, rendered);
         view = CheckTargetPublication(context, recorder, target, rendered);
         auto alias = target;
-        alias.pipeBankXor ^= 0x400u;
-        TargetRefuses([&] { MultisampleTargetView(context, alias); }, "layout or metadata changed");
+        alias.pipeBankXor ^= 0x1000u;
+        TargetRefuses([&] { MultisampleTargetView(context, alias); }, "XOR tag");
         memory.Data()[layout.Offset(64u, 0u, 0u, fragments - 1u)] ^= std::byte{1};
         TargetRefuses([&] { MultisampleTargetView(context, target); }, "guest writes");
         std::array<std::byte, 1> conflict{};
@@ -558,7 +577,7 @@ void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragment
         Require(ReadMultisampleTargetSamples(context, target) == expected, "metadata reset native GPU samples lost clear channels or fragments");
         if (bytes == 8u) CheckPublishedSampledRead(context, recorder, target, expected);
         publish();
-        layout.Tile(expected, physical);
+        for (std::size_t offset = 0u; offset < physical.size(); offset += bytes) std::memcpy(physical.data() + offset, expected.data(), bytes);
         Require(std::equal(physical.begin(), physical.end(), memory.Data()), "metadata reset publication kept stale sample bytes");
         Require(std::all_of(reinterpret_cast<const std::byte*>(target.dccAddress), reinterpret_cast<const std::byte*>(target.dccAddress) + dccBytes, [](auto byte) { return byte == std::byte{0xff}; }), "metadata reset publication left DCC compressed");
         Require(std::all_of(reinterpret_cast<const std::byte*>(target.cmaskAddress), reinterpret_cast<const std::byte*>(target.cmaskAddress) + target.cmaskBytes, [&](auto byte) { return byte == expanded; }), "metadata reset publication left CMASK collapsed");
@@ -593,7 +612,7 @@ void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragment
     }
     publish();
     auto finalPhysical = savedPhysical;
-    layout.Tile(finalClear, finalPhysical);
+    for (std::size_t offset = 0u; offset < finalPhysical.size(); offset += bytes) std::memcpy(finalPhysical.data() + offset, finalClear.data(), bytes);
     Require(std::equal(finalPhysical.begin(), finalPhysical.end(), memory.Data()), "final native clear CPU publication lost samples or padding");
     for (std::uint32_t field = 0u; field < 20u; ++field) {
         view = fresh(field == 15u);
@@ -1344,6 +1363,154 @@ void CheckNativeSnapshot(Context context, VkFormat format, std::uint32_t fragmen
     check(*second, changed);
 }
 
+void CheckXorViews(Context context, VkFormat format, std::uint32_t fragments, std::uint32_t metadata, bool recorded) {
+    const auto bytes = format == VK_FORMAT_R8_UINT ? 1u : format == VK_FORMAT_R16_UINT ? 2u : format == VK_FORMAT_R32_UINT ? 4u : format == VK_FORMAT_R32G32B32A32_UINT ? 16u : 8u;
+    context.limits.maxStorageBufferRange = std::min(context.limits.maxStorageBufferRange, 131072u);
+    context.limits.maxComputeWorkGroupCount[0] = 1u;
+    const MultisampleTextureLayout block(TextureTileMode::kR64KBX, bytes, fragments, 1u, 1u, 1u);
+    const VkExtent2D extent{block.BlockWidth() + 3u, block.BlockHeight() + 5u};
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, bytes, fragments, extent.width, extent.height, 1u, 0x8000u);
+    const MultisampleTextureLayout padded(TextureTileMode::kR64KBX, bytes, fragments, layout.Pitch(), layout.PaddedHeight(), 1u, 0x8000u);
+    TargetMemory memory(static_cast<std::size_t>(layout.Bytes()) + 8u * 65536u);
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    ColorTarget target{};
+    target.address = target.surfaceAddress = memory.Address() + 65536u;
+    target.extent = target.surfaceExtent = extent;
+    target.bytes = layout.Bytes();
+    target.format = format;
+    target.samples = fragments;
+    target.elementBytes = bytes;
+    target.tileMode = ColorTileMode::RenderTarget;
+    target.pipeBankXor = 0x8000u;
+    auto* color = reinterpret_cast<std::byte*>(target.address);
+    for (std::size_t index = 0u; index < target.bytes; ++index) color[index] = static_cast<std::byte>(((index * 37u) ^ (index >> 8u) ^ ((index >> 16u) * 11u)) & 255u);
+    if (metadata != 0u) {
+        target.cmaskAddress = target.address + target.bytes + 65536u;
+        target.cmaskBytes = CmaskBytes(extent.width, extent.height);
+        target.fmaskAddress = target.cmaskAddress + 65536u + 0x8000u;
+        target.fmaskSwizzle = 0x18u;
+        std::memset(reinterpret_cast<void*>(target.cmaskAddress), 0xcc, target.cmaskBytes);
+        if (metadata == 1u) {
+            target.dccAddress = target.address + target.bytes;
+            target.dccPipeAligned = target.dccAlphaOnMsb = true;
+            target.dccControl = 0x100038u;
+            std::memset(reinterpret_cast<void*>(target.dccAddress), 0x40, MultisampleDccBytes_nid_no_patch(bytes, fragments, extent.width, extent.height, 1u));
+        }
+    }
+    std::vector<std::byte> physical(color, color + target.bytes);
+    if (metadata == 1u) {
+        const std::array<std::uint16_t, 4> clear{0u, 0u, 0u, 0x3c00u};
+        for (std::size_t offset = 0u; offset < physical.size(); offset += bytes) std::memcpy(physical.data() + offset, clear.data(), bytes);
+    } else if (metadata == 2u) {
+        std::vector<std::byte> expanded(padded.LinearBytes());
+        padded.Detile(physical, expanded);
+        for (std::size_t offset = 0u; offset < expanded.size(); offset += bytes * fragments) {
+            for (std::uint32_t fragment = 1u; fragment < fragments; ++fragment) std::memcpy(expanded.data() + offset + fragment * bytes, expanded.data() + offset, bytes);
+        }
+        padded.Tile(expanded, physical);
+    }
+    std::vector<std::byte> original(layout.LinearBytes());
+    layout.Detile(physical, original);
+    Recorder recorder(context);
+    if (recorded) recorder.Activate();
+    struct Cleanup { Recorder& recorder; VkDevice device; ~Cleanup() { recorder.Sync(); ClearCachedTextures(device); ClearMultisampleTargets(device); } } cleanup{recorder, context.device};
+    const auto view = MultisampleTargetView(context, target);
+    Require(AgcDriver::GuestMemory::Watched(target.address, target.bytes), "XOR views require watched fixture memory");
+    const auto generation = AgcDriver::GuestMemory::CollectWritesUncached(target.address, target.bytes);
+    const auto untouched = std::vector<std::byte>(color, color + target.bytes);
+    GuestTextureResource resource{};
+    resource.baseAddress = target.address;
+    resource.width = extent.width;
+    resource.height = extent.height;
+    resource.fragments = fragments;
+    resource.dimension = TextureDimension::k2DMsaa;
+    resource.tileMode = TextureTileMode::kR64KBX;
+    resource.pipeBankXor = target.pipeBankXor;
+    resource.format = 20u;
+    resource.mipCount = resource.allocatedMipCount = 1u;
+    std::shared_ptr<Texture> snapshot;
+    if (format == VK_FORMAT_R32_UINT) {
+        snapshot = NativeMultisampleSnapshot_nid_no_patch(context, resource, {});
+        Require(snapshot != nullptr, "XOR fixture did not acquire its prior native snapshot");
+    }
+    auto alias = target;
+    alias.pipeBankXor = 0x4000u;
+    if (metadata != 0u) alias.fmaskAddress = (target.fmaskAddress & ~std::uint64_t{65535u}) | 0x4000u;
+    const auto kept = recorder.OpenKeptBytes();
+    Require(MultisampleTargetView(context, alias) == view, "XOR transition replaced the retained attachment view");
+    if (recorded) Require(recorder.OpenKeptBytes() >= kept + target.bytes, "XOR scratch buffer is missing from the recorder memory budget");
+    Require(MultisampleTargetView(context, target) == view && MultisampleTargetView(context, alias) == view, "queued A-B-A-B transition replaced an attachment handle");
+    const MultisampleTextureLayout other(TextureTileMode::kR64KBX, bytes, fragments, extent.width, extent.height, 1u, alias.pipeBankXor);
+    std::vector<std::byte> expected(other.LinearBytes());
+    other.Detile(physical, expected);
+    Require(ReadMultisampleTargetSamples(context, alias) == expected, "XOR view lost current samples or exposed stale tile padding");
+    AgcDriver::GuestMemory::CollectWritesUncached(target.address, target.bytes);
+    Require(AgcDriver::GuestMemory::UnchangedSince(target.address, target.bytes, generation) && std::equal(untouched.begin(), untouched.end(), color), "XOR conversion published or overwrote guest sample bytes");
+    Require(MultisampleTargetView(context, target) == view && ReadMultisampleTargetSamples(context, target) == original, "unmodified B-A transition lost original samples");
+    ClearTargetAttachment(context, view, target, &alias);
+    const auto rendered = ReadMultisampleTargetSamples(context, alias);
+    other.Tile(rendered, physical);
+    Require(MultisampleTargetView(context, target) == view, "modified B-A transition replaced an attachment view");
+    layout.Detile(physical, expected);
+    Require(ReadMultisampleTargetSamples(context, target) == expected, "B-A transition discarded writes or modified hidden physical samples");
+    if (snapshot) {
+        const auto count = extent.width * extent.height * fragments;
+        Buffer output(context, (count + 2u) * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+        Fetch fetch(context, *snapshot, output, FetchShader(extent.width, extent.height, fragments, false, false));
+        CommandBatch batch(context);
+        fetch.Run(batch.Handle(), count);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        output.Invalidate();
+        for (std::uint32_t element = 0u; element < count; ++element) {
+            const std::array<std::uint32_t, 4> value{[&] { std::uint32_t word; std::memcpy(&word, original.data() + element * 4u, 4u); return word; }(), 0u, 0u, 1u};
+            Require(std::memcmp(output.Bytes().data() + (element + 1u) * 16u, value.data(), 16u) == 0, "XOR transition modified a prior native snapshot");
+        }
+        Require(std::all_of(output.Bytes().begin(), output.Bytes().begin() + 16u, [](auto byte) { return byte == std::byte{0xa5}; }) && std::all_of(output.Bytes().end() - 16u, output.Bytes().end(), [](auto byte) { return byte == std::byte{0xa5}; }), "XOR snapshot fetch changed buffer guards");
+    }
+    std::array<std::byte, 1> probe{};
+    AgcDriver::GuestMemory::Read(target.address + target.bytes - 1u, probe);
+    Require(std::equal(physical.begin(), physical.end(), color), "XOR publication lost modified physical bytes or tile padding");
+    Require(std::all_of(memory.Data(), memory.Data() + 65536u, [](auto byte) { return byte == std::byte{0xa5}; }) && std::all_of(color + target.bytes + 6u * 65536u, color + target.bytes + 7u * 65536u, [](auto byte) { return byte == std::byte{0xa5}; }), "XOR publication overwrote guest allocation guards");
+    ClearMultisampleTargets(context.device);
+    MultisampleTargetView(context, alias);
+    other.Detile(physical, expected);
+    Require(ReadMultisampleTargetSamples(context, alias) == expected, "reimport of XOR-converted allocation lost sample values");
+    for (std::uint32_t field = 0u; field < 8u; ++field) {
+        auto invalid = alias;
+        switch (field) {
+            case 0u: invalid.address += 256u; break;
+            case 1u: invalid.extent.width += 1u; break;
+            case 2u: invalid.samples = fragments == 8u ? 4u : 8u; break;
+            case 3u: invalid.fmaskAddress = invalid.fmaskAddress == 0u ? target.address + target.bytes : invalid.fmaskAddress + 65536u; break;
+            case 4u: invalid.dccControl ^= 256u; break;
+            case 5u: invalid.clearWords[0] ^= 1u; break;
+            case 6u: invalid.elementBytes *= 2u; break;
+            case 7u: invalid.bytes += 65536u; break;
+        }
+        TargetRefuses([&] { MultisampleTargetView(context, invalid); }, "layout or metadata changed");
+    }
+    auto invalid = alias;
+    invalid.pipeBankXor |= 0x1000u;
+    TargetRefuses([&] { MultisampleTargetView(context, invalid); }, "XOR tag");
+    if (metadata != 0u) {
+        invalid = alias;
+        invalid.fmaskAddress |= 0x1000u;
+        TargetRefuses([&] { MultisampleTargetView(context, invalid); }, "FMASK XOR tag");
+    }
+    Require(ReadMultisampleTargetSamples(context, alias) == expected, "refused transition modified resident contents");
+    recorder.Activate();
+    recorder.Commands();
+    recorder.NotePendingWrite(target.address, 4u);
+    TargetRefuses([&] { MultisampleTargetView(context, target); }, "external GPU writes");
+    recorder.Sync();
+    color[target.bytes - 1u] ^= std::byte{1};
+    TargetRefuses([&] { MultisampleTargetView(context, target); }, "guest writes");
+    std::printf("XOR views bytes=%u fragments=%u metadata=%u recorded=%u preserved image, queued conversions, physical padding, publication and refusals\n", bytes, fragments, metadata, recorded ? 1u : 0u);
+}
+
 void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments, bool arrayed, bool chunks, std::uint32_t baseArray = 0u, bool firstLayer = false, bool recorded = false, TextureTileMode tileMode = TextureTileMode::kR64KBX) {
     const auto width = chunks ? 65u : 5u;
     const auto height = chunks ? 63u : 3u;
@@ -1421,6 +1588,115 @@ void CheckTexture(Context context, std::uint32_t format, std::uint32_t fragments
     std::printf("format=%u fragments=%u arrayed=%u chunks=%u base=%u firstLayer=%u recorded=%u elements=%u exact values and guards\n", format, fragments, arrayed, chunks, baseArray, firstLayer, recorded, fetched);
 }
 
+
+bool CheckTileTransfer(Context context, std::uint32_t bytes, std::uint32_t fragments, bool chunks) {
+    const MultisampleTextureLayout block(TextureTileMode::kR64KBX, bytes, fragments, 1u, 1u, 1u);
+    const auto width = block.BlockWidth() * 3u, height = block.BlockHeight() * 2u;
+    constexpr std::uint64_t surfaceBytes = 6u * 65536u;
+    const auto count = static_cast<std::uint32_t>(surfaceBytes / bytes);
+    const auto format = TextureDetiler::ImageElementFormat(bytes);
+    VkImageFormatProperties supported{};
+    if (context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_STORAGE_BIT, 0u, &supported) != VK_SUCCESS || (supported.sampleCounts & fragments) == 0u) return false;
+    context.limits.maxComputeWorkGroupCount[0] = 1u;
+    context.limits.maxStorageBufferRange = 2u * 65536u;
+    TextureDetiler detiler(context);
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent = {width, height, 1u};
+    info.mipLevels = info.arrayLayers = 1u;
+    info.samples = static_cast<VkSampleCountFlagBits>(fragments);
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkImage image = VK_NULL_HANDLE;
+    Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &info, nullptr, &image), "vkCreateImage tile test");
+    OwnedImage owned(context, image, VK_NULL_HANDLE);
+    VkMemoryRequirements requirements{};
+    context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &owned.memory), "vkAllocateMemory tile test");
+    Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned.memory, 0u), "vkBindImageMemory tile test");
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    viewInfo.format = format;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+    VkImageView view = VK_NULL_HANDLE;
+    owned.transferViews.reserve(1u);
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView tile test");
+    owned.transferViews.push_back(view);
+    const auto align = std::max<std::uint64_t>(65536u, context.limits.minStorageBufferOffsetAlignment);
+    Buffer input(context, align + surfaceBytes + align, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer raw(context, input.Bytes().size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer output(context, input.Bytes().size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const auto tileChunk = chunks ? 65536u : 131072u;
+    if (bytes == 4u && fragments == 2u && !chunks) {
+        CommandBatch validation(context);
+        const auto transfer = [&](const Context& candidate, std::uint32_t element, std::uint32_t samples, VkCommandBuffer commands, std::uint64_t start, std::uint64_t length, std::uint32_t imageWidth, std::uint32_t imageHeight, std::uint32_t first, std::uint32_t xorBytes) {
+            TextureDetiler checked(candidate);
+            checked.DispatchMultisampleTile(commands, element, samples, raw.Handle(), start, length, view, imageWidth, imageHeight, first, xorBytes, false);
+        };
+        for (std::uint32_t disabledFlag = 0u; disabledFlag < 3u; ++disabledFlag) {
+            auto disabled = context;
+            if (disabledFlag == 0u) disabled.storageImageMultisample = false;
+            if (disabledFlag == 1u) disabled.storageImageReadWithoutFormat = false;
+            if (disabledFlag == 2u) disabled.storageImageWriteWithoutFormat = false;
+            TargetRefuses([&] { transfer(disabled, bytes, fragments, validation.Handle(), align, 65536u, width, height, 0u, 0u); }, "does not enable");
+        }
+        TargetRefuses([&] { transfer(context, bytes, fragments, VK_NULL_HANDLE, align, 65536u, width, height, 0u, 0u); }, "requires commands");
+        TargetRefuses([&] { transfer(context, 3u, fragments, validation.Handle(), align, 65536u, width, height, 0u, 0u); }, "element size");
+        TargetRefuses([&] { transfer(context, bytes, 3u, validation.Handle(), align, 65536u, width, height, 0u, 0u); }, "fragment count");
+        TargetRefuses([&] { transfer(context, bytes, fragments, validation.Handle(), align, 65536u, width - 1u, height, 0u, 0u); }, "padded image");
+        TargetRefuses([&] { transfer(context, bytes, fragments, validation.Handle(), align, 65532u, width, height, 0u, 0u); }, "buffer range");
+        TargetRefuses([&] { transfer(context, bytes, fragments, validation.Handle(), align + 1u, 65536u, width, height, 0u, 0u); }, "buffer range");
+        TargetRefuses([&] { transfer(context, bytes, fragments, validation.Handle(), align, 65536u, width, height, 6u, 0u); }, "buffer range");
+        TargetRefuses([&] { transfer(context, bytes, fragments, validation.Handle(), align, 65536u, width, height, 0u, 0x1000u); }, "outside its 16-pipe");
+    }
+    for (std::uint32_t round = 0u; round < 2u; ++round) {
+        std::memset(input.Bytes().data(), 0xa5, input.Bytes().size());
+        std::memset(raw.Bytes().data(), 0xa5, raw.Bytes().size());
+        std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+        for (std::uint32_t index = 0u; index < surfaceBytes; ++index) input.Bytes()[align + index] = static_cast<std::byte>((index * 137u + (index >> 8u) * 29u + round * 71u) & 255u);
+        const auto savedInput = std::vector(input.Bytes().begin(), input.Bytes().end());
+        std::vector<std::byte> expectedRaw(raw.Bytes().size(), std::byte{0xa5}), expectedOutput(output.Bytes().size(), std::byte{0xa5});
+        const auto oldXor = round == 0u ? 0x8000u : 0xcf00u;
+        const auto newXor = round == 0u ? 0x4000u : 0x8c00u;
+        const MultisampleTextureLayout oldLayout(TextureTileMode::kR64KBX, bytes, fragments, width, height, 1u, oldXor), newLayout(TextureTileMode::kR64KBX, bytes, fragments, width, height, 1u, newXor);
+        oldLayout.Tile(input.Bytes().subspan(align, surfaceBytes), std::span(expectedRaw).subspan(align, surfaceBytes));
+        newLayout.Detile(std::span(expectedRaw).subspan(align, surfaceBytes), std::span(expectedOutput).subspan(align, surfaceBytes));
+        detiler.BeginBatch();
+        CommandBatch batch(context);
+        VkImageMemoryBarrier transition{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        transition.srcAccessMask = round == 0u ? 0u : VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        transition.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        transition.oldLayout = round == 0u ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+        transition.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        transition.srcQueueFamilyIndex = transition.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transition.image = image;
+        transition.subresourceRange = viewInfo.subresourceRange;
+        context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(batch.Handle(), round == 0u ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &transition);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        for (std::uint32_t offset = 0u; offset < surfaceBytes; offset += 131072u) detiler.DispatchMultisampleImage(batch.Handle(), bytes, input.Handle(), align + offset, 131072u, view, width, height, 1u, fragments, offset / bytes, 131072u / bytes);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        for (std::uint32_t offset = 0u; offset < surfaceBytes; offset += tileChunk) detiler.DispatchMultisampleTile(batch.Handle(), bytes, fragments, raw.Handle(), align + offset, tileChunk, view, width, height, offset / 65536u, oldXor, true);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        for (std::uint32_t offset = 0u; offset < surfaceBytes; offset += tileChunk) detiler.DispatchMultisampleTile(batch.Handle(), bytes, fragments, raw.Handle(), align + offset, tileChunk, view, width, height, offset / 65536u, newXor, false);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        for (std::uint32_t offset = 0u; offset < surfaceBytes; offset += 131072u) detiler.DispatchMultisampleReadback(batch.Handle(), bytes, output.Handle(), align + offset, 131072u, view, width, height, 1u, fragments, offset / bytes, 131072u / bytes);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        raw.Invalidate();
+        output.Invalidate();
+        Require(std::ranges::equal(raw.Bytes(), expectedRaw), "MS tile retile changed physical bytes or guards");
+        Require(std::ranges::equal(output.Bytes(), expectedOutput), "MS tile reinterpretation changed pixels, fragments, components or guards");
+        Require(std::ranges::equal(input.Bytes(), savedInput), "MS tile transfer changed its source");
+    }
+    std::printf("MS tile bytes=%u fragments=%u chunks=%u two XOR conversions exact physical bytes/samples/guards\n", bytes, fragments, chunks);
+    return true;
+}
 
 bool CheckReadback(Context context, std::uint32_t bytes, std::uint32_t fragments, bool chunks) {
     constexpr auto width = 13u, height = 7u, layers = 3u;
@@ -1682,6 +1958,24 @@ int main(int argc, char** argv) {
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         std::uint32_t checked = 0u, unavailable = 0u;
+        if (argc > 1 && std::string(argv[1]) == "--xor-views") {
+            device->PrintDevice();
+            for (const auto format : {VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT}) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    if (!TargetSupported(context, format, fragments)) { unavailable += 2u; continue; }
+                    for (const bool recorded : {false, true}) { CheckXorViews(context, format, fragments, 0u, recorded); ++checked; }
+                }
+            }
+            for (const auto fragments : {2u, 4u, 8u}) {
+                if (!TargetSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments)) { unavailable += 4u; continue; }
+                for (const auto metadata : {1u, 2u}) {
+                    for (const bool recorded : {false, true}) { CheckXorViews(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments, metadata, recorded); ++checked; }
+                }
+            }
+            Require(checked != 0u && (unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr), "required XOR view configurations are unsupported");
+            std::printf("XOR views checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--native-snapshots") {
             for (const auto format : {VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB}) {
                 for (const auto fragments : {2u, 4u, 8u}) {
@@ -1758,6 +2052,21 @@ int main(int argc, char** argv) {
             Require(checked != 0u, "device advertises no supported multisample target imports");
             Require(unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr, "all multisample target cases were required but some are unsupported");
             std::printf("MS target import checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--tile-transfer") {
+            device->PrintDevice();
+            for (const auto bytes : {1u, 2u, 4u, 8u, 16u}) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    for (const bool chunks : {false, true}) {
+                        if (CheckTileTransfer(context, bytes, fragments, chunks)) ++checked;
+                        else ++unavailable;
+                    }
+                }
+            }
+            Require(checked != 0u, "device advertises no supported MS tile transfer cases");
+            Require(unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr, "all MS tile transfer cases were required but some are unsupported");
+            std::printf("MS tile transfer checked=%u unavailable=%u\n", checked, unavailable);
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--readback") {

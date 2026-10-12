@@ -50,6 +50,11 @@ void RawSamples() {
             }
             auto decoded = DecodeMultisampleInitialContents(target, tiled, {}, {});
             Require(!decoded.clear && decoded.samples == expected, "initial raw sample bytes, components or order differ");
+            const MultisampleTextureLayout padded(TextureTileMode::kR64KBX, bytes, fragments, layout.Pitch(), layout.PaddedHeight(), 1u, target.pipeBankXor);
+            std::vector<std::byte> paddedExpected(padded.LinearBytes());
+            padded.Detile(tiled, paddedExpected);
+            const auto paddedRaw = DecodeMultisampleInitialContents(target, tiled, {}, {}, {}, true);
+            Require(!paddedRaw.clear && paddedRaw.samples == paddedExpected && paddedRaw.samples.size() == target.bytes, "padded initial import lost physical allocation bytes");
             const auto raw = expected;
             target.cmaskAddress = 0x20000u;
             target.cmaskBytes = CmaskBytes(target.extent.width, target.extent.height);
@@ -61,6 +66,11 @@ void RawSamples() {
                 for (std::uint32_t sample = 1; sample < fragments; ++sample) std::memcpy(expected.data() + offset + sample * bytes, expected.data() + offset, bytes);
             }
             Require(!decoded.clear && decoded.samples == expected, "FMASK-clear0 did not preserve the first physical fragment for every logical sample");
+            for (std::size_t offset = 0; offset < paddedExpected.size(); offset += bytes * fragments) {
+                for (std::uint32_t sample = 1u; sample < fragments; ++sample) std::memcpy(paddedExpected.data() + offset + sample * bytes, paddedExpected.data() + offset, bytes);
+            }
+            const auto paddedCollapsed = DecodeMultisampleInitialContents(target, tiled, {}, cmask, {}, true);
+            Require(!paddedCollapsed.clear && paddedCollapsed.samples == paddedExpected, "padded FMASK-clear0 import lost collapsed fragment or tile padding");
             cmask.front() = std::byte{0xff};
             Refuses([&] { DecodeMultisampleInitialContents(target, tiled, {}, cmask); }, "mixed initial");
             std::fill(cmask.begin(), cmask.end(), fragments == 2u ? std::byte{0xdd} : fragments == 4u ? std::byte{0xee} : std::byte{0xff});

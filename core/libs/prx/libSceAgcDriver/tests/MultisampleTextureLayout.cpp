@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -115,6 +116,29 @@ void checkTransfer(const ReferenceCase& reference) {
     Require(restored == source && tiled == savedTiled, "multisampled detile changed element, source or guard bytes");
 }
 
+void checkInverse(const ReferenceCase& reference) {
+    const auto byteBits = static_cast<std::uint32_t>(std::countr_zero(reference.elementBytes));
+    const auto fragmentBits = static_cast<std::uint32_t>(std::countr_zero(reference.fragments));
+    const auto widthBits = static_cast<std::uint32_t>(std::countr_zero(reference.blockWidth));
+    for (const auto xorBytes : {0u, 0x4000u, 0x8000u, 0xcf00u}) {
+        const MultisampleTextureLayout layout(reference.tileMode, reference.elementBytes, reference.fragments, reference.blockWidth * 4u, reference.blockHeight * 4u, 8u, xorBytes);
+        for (const auto origin : {std::array{0u, 0u, 0u}, std::array{reference.blockWidth * 2u, reference.blockHeight * 3u, 7u}}) {
+            const auto base = static_cast<std::uint32_t>(layout.Offset(origin[0], origin[1], origin[2], 0u) & 65535u);
+            const auto step = xorBytes == 0u && origin[2] == 0u ? 1u : 257u;
+            for (std::uint32_t packed = 0u; packed < 65536u; packed += step) {
+                const auto byte = packed & (reference.elementBytes - 1u);
+                const auto fragment = (packed >> byteBits) & (reference.fragments - 1u);
+                const auto x = (packed >> (byteBits + fragmentBits)) & (reference.blockWidth - 1u);
+                const auto y = packed >> (byteBits + fragmentBits + widthBits);
+                const auto physical = static_cast<std::uint32_t>((layout.Offset(origin[0] + x, origin[1] + y, origin[2], fragment) + byte) & 65535u) ^ base;
+                std::uint32_t restored = 0u;
+                for (std::uint32_t bit = 0; bit < 16u; ++bit) restored |= static_cast<std::uint32_t>(std::popcount(physical & layout.InverseBlockEquation()[bit]) & 1u) << bit;
+                Require(restored == packed, "multisampled inverse equation changed a byte, fragment or pixel coordinate");
+            }
+        }
+    }
+}
+
 void checkRefusals() {
     for (const auto& extent : {std::array{0u, 3u, 1u}, std::array{5u, 0u, 1u}, std::array{16385u, 3u, 1u}, std::array{5u, 16385u, 1u}, std::array{5u, 3u, 0u}, std::array{5u, 3u, 8193u}}) {
         requireRefusal([&] { MultisampleTextureLayout invalid(TextureTileMode::kR64KBX, 8u, 8u, extent[0], extent[1], extent[2]); });
@@ -146,6 +170,7 @@ int main() {
         for (const auto& reference : kReferences) {
             checkReference(reference);
             checkTransfer(reference);
+            checkInverse(reference);
         }
         checkRefusals();
         std::cout << "Multisampled texture layout reference, fragment, layer, padding and refusal tests passed\n";

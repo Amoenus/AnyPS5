@@ -1,0 +1,89 @@
+#version 450
+#extension GL_EXT_shader_image_load_formatted : require
+
+layout(constant_id = 0) const uint ELEMENT_BYTES = 4u;
+layout(constant_id = 1) const uint FRAGMENTS = 8u;
+layout(constant_id = 2) const uint BLOCK_WIDTH = 32u;
+layout(constant_id = 3) const uint BLOCK_HEIGHT = 64u;
+layout(constant_id = 4) const uint RETILE = 0u;
+layout(constant_id = 5) const uint BASE0 = 0u;
+layout(constant_id = 6) const uint BASE1 = 0u;
+layout(constant_id = 7) const uint BASE2 = 0u;
+layout(constant_id = 8) const uint BASE3 = 0u;
+layout(constant_id = 9) const uint BASE4 = 0u;
+layout(constant_id = 10) const uint BASE5 = 0u;
+layout(constant_id = 11) const uint BASE6 = 0u;
+layout(constant_id = 12) const uint BASE7 = 0u;
+layout(constant_id = 13) const uint BASE8 = 0u;
+layout(constant_id = 14) const uint BASE9 = 0u;
+layout(constant_id = 15) const uint BASE10 = 0u;
+layout(constant_id = 16) const uint BASE11 = 0u;
+layout(constant_id = 17) const uint BASE12 = 0u;
+layout(constant_id = 18) const uint BASE13 = 0u;
+layout(constant_id = 19) const uint BASE14 = 0u;
+layout(constant_id = 20) const uint BASE15 = 0u;
+layout(constant_id = 21) const uint INVERSE0 = 0u;
+layout(constant_id = 22) const uint INVERSE1 = 0u;
+layout(constant_id = 23) const uint INVERSE2 = 0u;
+layout(constant_id = 24) const uint INVERSE3 = 0u;
+layout(constant_id = 25) const uint INVERSE4 = 0u;
+layout(constant_id = 26) const uint INVERSE5 = 0u;
+layout(constant_id = 27) const uint INVERSE6 = 0u;
+layout(constant_id = 28) const uint INVERSE7 = 0u;
+layout(constant_id = 29) const uint INVERSE8 = 0u;
+layout(constant_id = 30) const uint INVERSE9 = 0u;
+layout(constant_id = 31) const uint INVERSE10 = 0u;
+layout(constant_id = 32) const uint INVERSE11 = 0u;
+layout(constant_id = 33) const uint INVERSE12 = 0u;
+layout(constant_id = 34) const uint INVERSE13 = 0u;
+layout(constant_id = 35) const uint INVERSE14 = 0u;
+layout(constant_id = 36) const uint INVERSE15 = 0u;
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer Raw { uint data[]; } rawBuffer;
+layout(set = 0, binding = 1) uniform uimage2DMSArray image;
+layout(push_constant) uniform Push {
+    uint blocksPerRow;
+    uint firstBlock;
+    uint units;
+    uint rowThreads;
+    uint pipeBankXor;
+} params;
+
+uint equation(uint inputValue, bool inverse) {
+    uint baseEquation[16] = uint[16](BASE0, BASE1, BASE2, BASE3, BASE4, BASE5, BASE6, BASE7, BASE8, BASE9, BASE10, BASE11, BASE12, BASE13, BASE14, BASE15);
+    uint inverseEquation[16] = uint[16](INVERSE0, INVERSE1, INVERSE2, INVERSE3, INVERSE4, INVERSE5, INVERSE6, INVERSE7, INVERSE8, INVERSE9, INVERSE10, INVERSE11, INVERSE12, INVERSE13, INVERSE14, INVERSE15);
+    uint outputValue = 0u;
+    for (uint bit = 0u; bit < 16u; ++bit) outputValue |= (uint(bitCount(inputValue & (inverse ? inverseEquation[bit] : baseEquation[bit]))) & 1u) << bit;
+    return outputValue;
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.y * params.rowThreads + gl_GlobalInvocationID.x;
+    if (index >= params.units) return;
+    uint address = index * max(4u, ELEMENT_BYTES);
+    uint block = params.firstBlock + address / 65536u;
+    uvec2 origin = uvec2((block % params.blocksPerRow) * BLOCK_WIDTH, (block / params.blocksPerRow) * BLOCK_HEIGHT);
+    uint base = equation(origin.x | (origin.y << 16u), false) ^ params.pipeBankXor;
+    uint byteBits = uint(findLSB(ELEMENT_BYTES));
+    uint fragmentBits = uint(findLSB(FRAGMENTS));
+    uint widthBits = uint(findLSB(BLOCK_WIDTH));
+    uint packedValue = 0u;
+    for (uint packed = 0u; packed < max(1u, 4u / ELEMENT_BYTES); ++packed) {
+        uint within = (address & 65535u) + packed * ELEMENT_BYTES;
+        uint local = equation(within ^ base, true);
+        uint sampleIndex = (local >> byteBits) & (FRAGMENTS - 1u);
+        ivec3 coordinate = ivec3(origin.x + ((local >> (byteBits + fragmentBits)) & (BLOCK_WIDTH - 1u)), origin.y + (local >> (byteBits + fragmentBits + widthBits)), 0);
+        if (RETILE != 0u) {
+            uvec4 value = imageLoad(image, coordinate, int(sampleIndex));
+            if (ELEMENT_BYTES < 4u) packedValue |= (value.x & (ELEMENT_BYTES == 1u ? 255u : 65535u)) << (packed * ELEMENT_BYTES * 8u);
+            else for (uint component = 0u; component < ELEMENT_BYTES / 4u; ++component) rawBuffer.data[(address >> 2u) + component] = value[component];
+        } else {
+            uvec4 value = uvec4(0u);
+            if (ELEMENT_BYTES < 4u) value.x = (rawBuffer.data[address >> 2u] >> (packed * ELEMENT_BYTES * 8u)) & (ELEMENT_BYTES == 1u ? 255u : 65535u);
+            else for (uint component = 0u; component < ELEMENT_BYTES / 4u; ++component) value[component] = rawBuffer.data[(address >> 2u) + component];
+            imageStore(image, coordinate, int(sampleIndex), value);
+        }
+    }
+    if (RETILE != 0u && ELEMENT_BYTES < 4u) rawBuffer.data[address >> 2u] = packedValue;
+}
