@@ -39,8 +39,40 @@ static void ExpectException(TAction action) {
     throw std::runtime_error("Expected a stream exception");
 }
 
+static void CheckOpenFailures(const std::filesystem::path& path) {
+    const auto directory = path.string() + ".directory";
+    Require(std::filesystem::create_directory(directory));
+    struct RemoveDirectory {
+        std::filesystem::path path;
+        ~RemoveDirectory() {
+            std::error_code error;
+            std::filesystem::remove(path, error);
+        }
+    } remove{directory};
+    try {
+#ifdef _WIN32
+        errno = 0;
+        Require(fopen_nid_postfix(directory.c_str(), "rb") == nullptr && errno == EACCES);
+#endif
+        for (const auto mode : {"wb", "ab", "r+b"}) {
+            errno = 0;
+            Require(fopen_nid_postfix(directory.c_str(), mode) == nullptr);
+#ifdef _WIN32
+            Require(errno == EACCES);
+#else
+            Require(errno == EISDIR);
+#endif
+            Require(std::filesystem::is_directory(directory) && std::filesystem::is_empty(directory));
+        }
+    } catch (...) {
+        std::filesystem::remove(directory);
+        throw;
+    }
+}
+
 int main(int argc, char** argv) {
     Require(argc == 2);
+    CheckOpenFailures(argv[1]);
     Require(_Stdout_nid_postfix.GetHandle() == stdout);
     Require(_Stderr_nid_postfix.GetHandle() == stderr);
     Require(fputs_nid_postfix("stdout object works\n", &_Stdout_nid_postfix) >= 0);
