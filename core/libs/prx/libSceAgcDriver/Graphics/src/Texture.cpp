@@ -209,6 +209,7 @@ VkImageViewType ViewTypeFor(TextureDimension dimension, [[maybe_unused]] std::ui
         case TextureDimension::kCube: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         case TextureDimension::k3D: return VK_IMAGE_VIEW_TYPE_3D;
         case TextureDimension::k1DArray: return VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+        case TextureDimension::k2DMsaa: break;
     }
     throw std::runtime_error("AGC graphics: Texture encountered an unknown guest texture dimension");
 }
