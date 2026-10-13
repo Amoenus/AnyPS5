@@ -1232,7 +1232,7 @@ void CheckDepthRetirement(Context context, VkFormat format, std::uint32_t fragme
     std::printf("Native depth retirement format=%u samples=%u release=%u: retained live/partial/failed/protected, recreated exact clear-one samples\n", static_cast<std::uint32_t>(format), fragments, releaseMode);
 }
 
-void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing = false, bool depthOnly = false) {
+void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing = false, bool depthOnly = false, bool partialCompletion = false) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(DepthPlaneBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
     TargetMemory memory(bytes), metadata(65536u);
@@ -1305,8 +1305,9 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                     batch.SubmitAndWait();
                 }
                 NoteHtileDepthClear(target.htileAddress, metadataBytes);
-                AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, metadataBytes, [&] {
-                    for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
+                const auto storedBytes = partialCompletion ? 4u : metadataBytes;
+                AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, storedBytes, [&] {
+                    for (std::size_t i = 0u; i < storedBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
                 });
                 Require(DepthSurfaceHolds(context, DecodeTextureResource(words), texture.get()), "completed native depth clear lost its retained sampled view");
                 recorder.Sync();
@@ -1317,6 +1318,7 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
                 batch.SubmitAndWait();
                 check(false, 0.0f);
+                if (partialCompletion) std::printf("Partial HTILE driver store=%zu of%zu cleared every rasterized depth sample, cycle=%u\n", static_cast<std::size_t>(storedBytes), metadataBytes, iteration);
             }
         }
     }
@@ -2291,6 +2293,11 @@ int main(int argc, char** argv) {
                 if (DepthSupported(context, VK_FORMAT_D32_SFLOAT, fragments)) { CheckDepthRefusals(context, fragments); return 0; }
             }
             Require(false, "no supported native depth refusal configuration");
+        }
+        if (argc > 1 && std::string(argv[1]) == "--depth-clear-partial") {
+            Require(DepthSupported(context, VK_FORMAT_D32_SFLOAT, 4u), "partial clear fixture requires sampled four-fragment D32");
+            TargetRefuses([&] { CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, true); }, "completed HTILE store");
+            return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--depth-clears") {
             for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
