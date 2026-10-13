@@ -525,6 +525,11 @@ std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false) {
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
     if (resource.dimension == TextureDimension::k2DMsaa) {
+        Require(!depthCompare, "native multisampled depth comparison sampling is not implemented");
+        if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
+            logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
+            return depth;
+        }
         auto target = MultisampleTargetTexture(context, resource, components);
         logLookup({target.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
         return target;
