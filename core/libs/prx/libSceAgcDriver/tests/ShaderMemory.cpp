@@ -2051,11 +2051,11 @@ void verifyVertexInfoVersion19() {
     while (offset < plain.size() && plain[offset] == flagged[offset]) ++offset;
     require(offset + 4u <= plain.size() && flagged[offset] == 0xefu && flagged[offset + 1u] == 0xcdu && flagged[offset + 2u] == 0xabu && flagged[offset + 3u] == 0x89u, "PA_CL_VS_OUT_CNTL is not the four bytes the version 20 vertex info adds");
     require(std::equal(plain.begin() + offset + 4u, plain.end(), flagged.begin() + offset + 4u), "PA_CL_VS_OUT_CNTL moved the fields after it");
-    auto version20 = flagged;
-    version20[4] = 20u;
-    const auto replay20 = serializer.Deserialize(encodeBase64(version20));
-    require(replay20.request.context.vertex.has_value() && replay20.request.context.vertex->paClVsOutCntl == 0x89abcdefu, "a version 20 vertex info lost its position export layout");
-    require(serializer.Serialize(replay20.request) == marked, "a version 20 vertex info misread the fields after its position export layout");
+    auto version20Vertex = flagged;
+    version20Vertex[4] = 20u;
+    const auto replay20Vertex = serializer.Deserialize(encodeBase64(version20Vertex));
+    require(replay20Vertex.request.context.vertex.has_value() && replay20Vertex.request.context.vertex->paClVsOutCntl == 0x89abcdefu, "a main version20 request lost PA_CL_VS_OUT_CNTL");
+    require(serializer.Serialize(replay20Vertex.request) == marked, "a main version20 vertex request misread trailing fields");
     vertex.context.vertex->paClVsOutCntl = (1u << 18u) | (1u << 21u) | 0xfu;
     const auto layered = serializer.Deserialize(serializer.Serialize(vertex));
     require(layered.request.context.vertex.has_value() && layered.request.context.vertex->paClVsOutCntl == vertex.context.vertex->paClVsOutCntl, "a layered vertex info lost its clip distances or render target index");
