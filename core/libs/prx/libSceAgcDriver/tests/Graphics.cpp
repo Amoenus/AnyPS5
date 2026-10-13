@@ -2014,7 +2014,11 @@ void multisampleTests() {
             rejected.context[0x31d] = (log2 << 12u) | (log2 << 15u);
             rejected.context[0x31c] |= 0x10000000u;
             rejected.context[0x202] = 0xcc0000u | (mode << 4u);
-            const auto reason = "slot 0, samples " + std::to_string(1u << log2) + ", CB_COLOR_INFO 0x10028028, CB_COLOR_CONTROL 0x00cc00" + (mode == 1u ? "10" : "50");
+            rejected.context[0x3b0] = 0x003fc007u;
+            rejected.context[0x3b8] = 0x4ec0001bu;
+            rejected.context[0x31b] = 0x00002000u;
+            rejected.context[0x31e] = 0x00000050u;
+            const auto reason = "slot 0, samples " + std::to_string(1u << log2) + ", CB_COLOR_INFO 0x10028028, CB_COLOR_CONTROL 0x00cc00" + (mode == 1u ? "10" : "50") + ", CB_COLOR_ATTRIB2 0x003fc007, CB_COLOR_ATTRIB3 0x4ec0001b, CB_COLOR_VIEW 0x00002000, CB_DCC_CONTROL 0x00000050";
             expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(rejected.context, 0); }, reason);
         }
     }
@@ -2022,7 +2026,10 @@ void multisampleTests() {
     withoutControl.context[0x31d] = 0x1b000u;
     withoutControl.context[0x31c] |= 0x10000000u;
     withoutControl.context.erase(0x202);
-    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(withoutControl.context, 0); }, "slot 0, samples 8, CB_COLOR_INFO 0x10028028, CB_COLOR_CONTROL absent");
+    for (const auto key : {0x3b0u, 0x3b8u, 0x31bu, 0x31eu}) withoutControl.context.erase(key);
+    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(withoutControl.context, 0); }, "slot 0, samples 8, CB_COLOR_INFO 0x10028028, CB_COLOR_CONTROL absent, CB_COLOR_ATTRIB2 absent, CB_COLOR_ATTRIB3 absent, CB_COLOR_VIEW absent, CB_DCC_CONTROL absent");
+    withoutControl.context[0x31e] = 0;
+    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(withoutControl.context, 0); }, "CB_DCC_CONTROL 0x00000000");
     const auto cmaskAddress = reinterpret_cast<std::uintptr_t>(cmaskMemory.data());
     const auto setCmaskAddress = [&](auto& target, std::uint32_t slot = 0u) {
         const auto stride = slot * 0xfu;

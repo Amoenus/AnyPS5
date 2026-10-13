@@ -1092,10 +1092,15 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     Require((1u << ((attrib >> 15u) & 3u)) == color.samples, "color targets with fewer fragments than samples (EQAA) are unsupported");
     const auto multisampleInfo = color.samples > 1 ? 0x0c006000u : 0u;
     if (color.samples > 1 && (info & 0x10000000u) != 0) {
-        const auto control = find(cx, 0x202);
-        const auto controlText = control == cx.end() ? std::string("absent") : [&] { char text[16]; std::snprintf(text, sizeof(text), "0x%08x", control->second); return std::string(text); }();
-        char text[240];
-        std::snprintf(text, sizeof(text), "AGC graphics: DCC over a multisampled color target is unsupported (slot %u, samples %u, CB_COLOR_INFO 0x%08x, CB_COLOR_CONTROL %s)", slot, color.samples, info, controlText.c_str());
+        const auto registerText = [&](std::uint32_t key) {
+            const auto value = find(cx, key);
+            if (value == cx.end()) return std::string("absent");
+            char text[16];
+            std::snprintf(text, sizeof(text), "0x%08x", value->second);
+            return std::string(text);
+        };
+        char text[512];
+        std::snprintf(text, sizeof(text), "AGC graphics: DCC over a multisampled color target is unsupported (slot %u, samples %u, CB_COLOR_INFO 0x%08x, CB_COLOR_CONTROL %s, CB_COLOR_ATTRIB2 %s, CB_COLOR_ATTRIB3 %s, CB_COLOR_VIEW %s, CB_DCC_CONTROL %s)", slot, color.samples, info, registerText(0x202).c_str(), registerText(0x3b0 + slot).c_str(), registerText(0x3b8 + slot).c_str(), registerText(0x31b + stride).c_str(), registerText(0x31e + stride).c_str());
         throw std::runtime_error(text);
     }
     // ROUND_MODE (bit 18) only affects unorm rounding. With DCC_ENABLE (bit 28) the target is written
