@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -726,6 +727,7 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target) 
     }
     lock.unlock();
     auto sampling = target.samples == 1u ? DepthSamplingState{} : prepareDepthSampling(context, target);
+    const auto creationLease = target.samples == 1u || !sampling.refusal.empty() ? GuestAllocations::Lease{} : GuestAllocations::GuestAllocationsAcquireAll_nid_postfix();
     lock.lock();
     surfaces().push_back(std::make_unique<DepthSurface>(context, target, std::move(sampling)));
     auto& surface = *surfaces().back();
