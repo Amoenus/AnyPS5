@@ -244,6 +244,28 @@ void RunGuestTextureResourceTests() {
     cubeNotMultiple.depth = 4;
     rejectFields(cubeNotMultiple, "multiple of 6");
 
+    for (const auto format : {7u, 22u}) {
+        for (const auto log2 : {1u, 2u, 3u}) {
+            auto nativeDepth = base;
+            nativeDepth.typeRaw = 14;
+            nativeDepth.format = format;
+            nativeDepth.tileModeRaw = 24;
+            nativeDepth.lastLevel = log2;
+            nativeDepth.maxMip = log2;
+            nativeDepth.msaaDepth = true;
+            const auto decoded = DecodeTextureResource(pack(nativeDepth));
+            Require(decoded.iterate256 && decoded.samples == (1u << log2) && decoded.tileMode == TextureTileMode::kZ64KBX && decoded.format == format, "a native multisampled depth descriptor lost ITERATE_256 or its identity");
+            auto wrongTile = nativeDepth;
+            wrongTile.tileModeRaw = 27;
+            rejectFields(wrongTile, "ITERATE_256");
+            auto wrongFormat = nativeDepth;
+            wrongFormat.format = 56;
+            rejectFields(wrongFormat, "ITERATE_256");
+            auto wrongType = nativeDepth;
+            wrongType.typeRaw = 9;
+            rejectFields(wrongType, "ITERATE_256");
+        }
+    }
     Fields badType = base;
     badType.typeRaw = 0;
     rejectFields(badType, "unsupported image type");
@@ -315,7 +337,7 @@ void RunGuestTextureResourceTests() {
 
     Fields badMsaa = base;
     badMsaa.msaaDepth = true;
-    rejectFields(badMsaa, "MSAA");
+    rejectFields(badMsaa, "ITERATE_256");
 
     Fields blockSize = base;
     blockSize.maxUncompBlkSize = 1;
