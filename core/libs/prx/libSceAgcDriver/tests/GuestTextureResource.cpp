@@ -294,6 +294,7 @@ void RunGuestTextureResourceTests() {
             nativeDepth.msaaDepth = true;
             const auto decoded = DecodeTextureResource(pack(nativeDepth));
             Require(decoded.iterate256 && decoded.samples == (1u << log2) && decoded.tileMode == TextureTileMode::kZ64KBX && decoded.format == format, "a native multisampled depth descriptor lost ITERATE_256 or its identity");
+            Require(decoded.mipCount == 1 && decoded.allocatedMipCount == 1 && decoded.baseLevel == 0 && decoded.lastLevel == 0, "native multisampled depth retained sample counts as mip levels");
             auto wrongTile = nativeDepth;
             wrongTile.tileModeRaw = 27;
             rejectFields(wrongTile, "ITERATE_256");
@@ -303,6 +304,11 @@ void RunGuestTextureResourceTests() {
             auto wrongType = nativeDepth;
             wrongType.typeRaw = 9;
             rejectFields(wrongType, "ITERATE_256");
+            wrongType.typeRaw = 15;
+            rejectFields(wrongType, "ITERATE_256");
+            auto mismatchedSamples = nativeDepth;
+            mismatchedSamples.maxMip = log2 - 1u;
+            rejectFields(mismatchedSamples, "same sample count");
         }
     }
     Fields badType = base;
