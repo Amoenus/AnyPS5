@@ -1747,7 +1747,7 @@ std::string requestPrefix(std::string_view text, std::size_t bytes) {
     return result;
 }
 
-void verifyCanonicalVersion20Requests() {
+void verifyCanonicalVersion20And21Requests() {
     using namespace ShaderRecompiler;
     struct Fixture { ShaderStage stage; std::uint32_t selector; bool subgroups; std::string_view text; };
     static constexpr std::array<Fixture, 12> fixtures{{
@@ -1887,29 +1887,37 @@ void verifyCanonicalVersion20Requests() {
     constexpr std::array<std::uint32_t, 3> userData{0x13579bdfu, 0x2468ace0u, 0xdeadbeefu};
     constexpr std::array<std::byte, 4> bytes{std::byte{0x12}, std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
     const RequestSerializer serializer;
-    for (const auto& fixture : fixtures) {
-        const auto legacy = serializer.Deserialize(fixture.text);
-        const auto& request = legacy.request;
-        require(request.shader.stage == fixture.stage && request.shader.codeAddress == 0x30000u && request.shader.code.size() == 1u && request.shader.code[0] == 0xbf810000u, "canonical version20 shader identity was misread");
-        require(request.context.waveSize == 64u && request.context.userDataBaseRegister == 8u && request.context.userData.size() == userData.size() && std::equal(request.context.userData.begin(), request.context.userData.end(), userData.begin()), "canonical version20 guest context was misread");
-        require(request.context.memory.size() == 1u && request.context.memory[0].guestAddress == 0x50000u && request.context.memory[0].bytes.size() == bytes.size() && std::equal(request.context.memory[0].bytes.begin(), request.context.memory[0].bytes.end(), bytes.begin()), "canonical version20 trailing memory was misread");
-        require(request.layout.descriptorSet == 2u && request.layout.firstBinding == 11u && request.layout.pushConstantOffsetBytes == 16u && request.layout.pushConstantSizeBytes == 64u && !request.useCache, "canonical version20 trailing layout or cache flag was misread");
-        require(request.target.vertexSubgroups == fixture.subgroups && request.target.float64DenormPreserve && request.target.registrationModules && request.target.registrationWordLimit == 12345u && request.target.nonConstantImageOffsets && request.target.srgbDecodeFormats == 0x12345678u && request.target.narrowSubgroupClock, "canonical version20 target fields were misread");
-        if (fixture.stage == ShaderStage::Fragment) {
-            require(request.context.pixel.has_value() && !request.context.vertex, "canonical version20 pixel presence was misread");
-            const auto& pixel = *request.context.pixel;
-            require(pixel.rasterPrimitive == static_cast<RasterPrimitive>(fixture.selector) && !pixel.ditheredAlphaToCoverage && pixel.alphaToCoverage && pixel.stencilRefExportEnable && pixel.targetOutputMode[0] == 9u && pixel.targetExportMapping[0] == 0xe4u, "canonical version20 pixel fields were misread");
-        } else {
-            require(request.context.vertex.has_value() && !request.context.pixel, "canonical version20 vertex presence was misread");
-            const auto& vertex = *request.context.vertex;
-            require(vertex.paClVsOutCntl == fixture.selector && vertex.fetchAttribReg == 9u && vertex.fetchBufferReg == 13u && vertex.fetchEmbedded, "canonical version20 vertex fields were misread");
+    // Original serializers at 4bb2c7f394 (20) and 075169f7b3 (21) emitted these
+    // twelve payloads independently; every pair differs only in its version header.
+    for (const auto version : {20u, 21u}) {
+        for (const auto& fixture : fixtures) {
+            auto text = std::string(fixture.text);
+            if (version == 21u) {
+                constexpr std::string_view prefix = "NVNQQRUAAAA";
+                text.replace(0, prefix.size(), prefix);
+            }
+            const auto legacy = serializer.Deserialize(text);
+            const auto& request = legacy.request;
+            require(request.shader.stage == fixture.stage && request.shader.codeAddress == 0x30000u && request.shader.code.size() == 1u && request.shader.code[0] == 0xbf810000u, "canonical version20/21 shader identity was misread");
+            require(request.context.waveSize == 64u && request.context.userDataBaseRegister == 8u && request.context.userData.size() == userData.size() && std::equal(request.context.userData.begin(), request.context.userData.end(), userData.begin()), "canonical version20/21 guest context was misread");
+            require(request.context.memory.size() == 1u && request.context.memory[0].guestAddress == 0x50000u && request.context.memory[0].bytes.size() == bytes.size() && std::equal(request.context.memory[0].bytes.begin(), request.context.memory[0].bytes.end(), bytes.begin()), "canonical version20/21 trailing memory was misread");
+            require(request.layout.descriptorSet == 2u && request.layout.firstBinding == 11u && request.layout.pushConstantOffsetBytes == 16u && request.layout.pushConstantSizeBytes == 64u && !request.useCache, "canonical version20/21 trailing layout or cache flag was misread");
+            require(request.target.vertexSubgroups == fixture.subgroups && request.target.float64DenormPreserve && request.target.registrationModules && request.target.registrationWordLimit == 12345u && request.target.nonConstantImageOffsets && request.target.srgbDecodeFormats == 0x12345678u && request.target.narrowSubgroupClock, "canonical version20/21 target fields were misread");
+            if (fixture.stage == ShaderStage::Fragment) {
+                require(request.context.pixel.has_value() && !request.context.vertex, "canonical version20/21 pixel presence was misread");
+                const auto& pixel = *request.context.pixel;
+                require(pixel.rasterPrimitive == static_cast<RasterPrimitive>(fixture.selector) && !pixel.ditheredAlphaToCoverage && pixel.alphaToCoverage && pixel.stencilRefExportEnable && pixel.targetOutputMode[0] == 9u && pixel.targetExportMapping[0] == 0xe4u, "canonical version20/21 pixel fields were misread");
+            } else {
+                require(request.context.vertex.has_value() && !request.context.pixel, "canonical version20/21 vertex presence was misread");
+                const auto& vertex = *request.context.vertex;
+                require(vertex.paClVsOutCntl == fixture.selector && vertex.fetchAttribReg == 9u && vertex.fetchBufferReg == 13u && vertex.fetchEmbedded, "canonical version20/21 vertex fields were misread");
+            }
+            const auto upgraded = serializer.Deserialize(serializer.Serialize(request));
+            require(RecompileCacheKey::ContextHash(request) == RecompileCacheKey::ContextHash(upgraded.request), "upgrading canonical version20/21 changed shader identity");
+            require(serializer.Serialize(upgraded.request) == serializer.Serialize(request), "upgrading canonical version20/21 changed request fields");
         }
-        const auto upgraded = serializer.Deserialize(serializer.Serialize(request));
-        require(RecompileCacheKey::ContextHash(request) == RecompileCacheKey::ContextHash(upgraded.request), "upgrading canonical version20 changed shader identity");
-        require(serializer.Serialize(upgraded.request) == serializer.Serialize(request), "upgrading canonical version20 changed request fields");
     }
 }
-
 void verifyPixelRequestSerialization() {
     using namespace ShaderRecompiler;
     const auto fields = [](const ShaderPixelStageInfo& value) {
@@ -3852,7 +3860,7 @@ int main(int argc, char** argv) {
         verifySingleLaneVertexWave();
         verifyMeshConfiguration();
         verifyPixelInputs();
-        verifyCanonicalVersion20Requests();
+        verifyCanonicalVersion20And21Requests();
         verifyPixelRequestSerialization();
         verifyVertexInfoVersion19();
         verifyPositionExportComponents();
