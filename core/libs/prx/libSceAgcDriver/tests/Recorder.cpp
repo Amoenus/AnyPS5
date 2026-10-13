@@ -5787,12 +5787,19 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
     target.surfaceExtent = target.extent;
     target.samples = 4;
     VkImageView previous = VK_NULL_HANDLE;
+    std::shared_ptr<Texture> previousTexture;
     for (const bool removeAllocation : {false, true}) {
         VkImageView view = VK_NULL_HANDLE;
+        std::shared_ptr<Texture> texture;
         {
+            const auto sampled = sampledProgram(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side, 2u, address));
+            const CompiledShader sampledCompute{ShaderRecompiler::ShaderStage::Compute, &sampled, 0};
             std::lock_guard gpu(GpuMutex());
             view = MultisampleTargetView(context, target);
             Require(view != VK_NULL_HANDLE && view != previous, "a remapped allocation reused its retired multisampled image");
+            ShaderResources resources(context, sampledCompute);
+            texture = resources.SampledTextures().front();
+            Require(texture != nullptr && texture != previousTexture, "a remapped allocation sampled its retired multisampled image");
             recorder.Submit();
             device.WaitQueue();
             recorder.Sync();
@@ -5819,7 +5826,9 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         }
         RequireNoMultisampleTarget(address, bytes, "a texture read");
         AgcDriver::GuestMemory::Read(address + 256u, texels);
+        refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side, 2u, address), "which no draw rendered to", "sampling a multisampled target whose allocation was unmapped");
         previous = view;
+        previousTexture = texture;
     }
     clearTargets();
     std::cout << "Multisampled target guest access tests passed\n";
