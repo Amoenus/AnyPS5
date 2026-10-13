@@ -3,10 +3,13 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include "Recompiler.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include "VulkanTestDevice.hpp"
@@ -27,6 +30,7 @@
 #include <iostream>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -76,11 +80,17 @@ constexpr std::array<std::array<float, 4>, 3> Triangle{{
 alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
 
 struct Block {
-    explicit Block(std::size_t bytes) : bytes(bytes) {
+    explicit Block(std::size_t bytes, bool watched = false) : bytes(bytes), watched(watched) {
 #ifdef _WIN32
-        data = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (watched) {
+            data = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, BlockBytes));
+            section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE, 0u, static_cast<DWORD>(bytes), nullptr);
+            Require(section != nullptr, "cannot create the watched target's shared backing");
+            GuestArena::GuestArenaMap_nid_postfix(data, bytes, section, 0u, PAGE_READWRITE);
+        } else data = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
 #else
         data = static_cast<std::uint8_t*>(std::aligned_alloc(BlockBytes, bytes));
+        if (watched && data != nullptr) GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(data, bytes);
 #endif
         Require(data != nullptr, "cannot allocate the multisampled color target");
         std::memset(data, 0, bytes);
@@ -93,8 +103,13 @@ struct Block {
             mutation.Remove(data);
         }
 #ifdef _WIN32
-        VirtualFree(data, 0, MEM_RELEASE);
+        if (watched) {
+            GuestArena::GuestArenaReset_nid_postfix(data, bytes);
+            GuestArena::GuestArenaRelease_nid_postfix(data, bytes);
+            CloseHandle(section);
+        } else VirtualFree(data, 0, MEM_RELEASE);
 #else
+        if (watched) GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(data, bytes);
         std::free(data);
 #endif
     }
@@ -102,6 +117,10 @@ struct Block {
     Block& operator=(const Block&) = delete;
     std::uint64_t Address() const { return reinterpret_cast<std::uintptr_t>(data); }
     std::size_t bytes;
+    bool watched;
+#ifdef _WIN32
+    HANDLE section = nullptr;
+#endif
     std::uint8_t* data = nullptr;
 };
 
@@ -217,9 +236,9 @@ ShaderRecompiler::RecompileResult CompileLoad(AgcDriver::VulkanDevice& device, c
     return ShaderRecompiler::Recompile(request);
 }
 
-std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block) {
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture) {
     std::vector<std::uint32_t> userData;
-    const auto program = CompileLoad(device, TargetDescriptor(block, SampleShift), userData);
+    const auto program = CompileLoad(device, texture, userData);
     std::vector<std::array<float, 4>> loaded(Side * Side * Samples);
     for (std::uint32_t first = 0; first < loaded.size(); first += Threads) {
         Buffer.fill(0xdeadbeefu);
@@ -233,9 +252,68 @@ std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, c
         device.WaitIdle();
         for (std::uint32_t tid = 0; tid < Threads; ++tid) {
             for (std::uint32_t component = 0; component < 4u; ++component) loaded[first + tid][component] = std::bit_cast<float>(Buffer[tid * Words + LoadResult + component]);
+            for (std::uint32_t word = 6u; word < Words; ++word) {
+                if (word >= LoadResult && word < LoadResult + 4u) continue;
+                Require(Buffer[tid * Words + word] == 0xdeadbeefu, "multisampled image load changed an output guard");
+            }
         }
     }
     return loaded;
+}
+
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block) {
+    return LoadSamples(device, TargetDescriptor(block, SampleShift));
+}
+
+void CheckDepthClear(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    alignas(256) constexpr std::array<std::uint32_t, 17> clearCode{
+        0xd7460000, 0x04010c06, 0x34000084, 0xdc388000, 0x04020000,
+        0xbf8c3f70, 0xd7710008, 0x00120805, 0xd7710009, 0x00120a05,
+        0xd771000a, 0x00120c05, 0xd771000b, 0x00120e05,
+        0xdc788000, 0x00020800, 0xbf810000,
+    };
+    Block color(4u * BlockBytes), depth(BlockBytes, true), metadata(BlockBytes, true);
+    DepthTarget target{depth.Address(), 0u, {Side, Side}, VK_FORMAT_D32_SFLOAT, 0.0f, 0u, metadata.Address(), false, Samples};
+    target.depthSwizzle = 24u;
+    target.iterate256 = target.htilePipeAligned = true;
+    auto state = TargetState(DecodeTarget(color));
+    state.depth = target;
+    state.depthTest = state.depthWrite = true;
+    const auto base = target.address >> 8u;
+    const auto htile = target.htileAddress >> 8u;
+    const std::array<std::uint32_t, 8> texture{
+        static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 255u) | (22u << 20u) | (((Side - 1u) & 3u) << 30u),
+        ((Side - 1u) >> 2u) | ((Side - 1u) << 14u), (14u << 28u) | (24u << 20u) | (SampleShift << 16u) | 0x204u,
+        0u, SampleShift << 4u, (1u << 10u) | (1u << 19u) | (1u << 21u) | (static_cast<std::uint32_t>(htile & 255u) << 24u), static_cast<std::uint32_t>(htile >> 8u),
+    };
+    for (std::uint32_t cycle = 0u; cycle < 3u; ++cycle) {
+        Draw(device, state);
+        const auto drawn = LoadSamples(device, texture);
+        Require(AgcDriver::GuestMemory::Watched(depth.Address(), depth.bytes) && AgcDriver::GuestMemory::Watched(metadata.Address(), metadata.bytes), "native depth producer imports lost guest write tracking");
+        Require(std::count_if(drawn.begin(), drawn.end(), [](const auto& sample) { return sample[0] == 0.5f; }) != 0, "native depth clear producer fixture did not rasterize depth");
+        const std::array<std::uint32_t, 6> userData{0u, 0u, static_cast<std::uint32_t>(metadata.Address()), static_cast<std::uint32_t>(metadata.Address() >> 32u), 0xf0u, 0xf0u};
+        const ShaderRecompiler::ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u};
+        const std::array<std::uint32_t, 5> packet{0u, 32u, 1u, 1u, 1u};
+        const auto bytes = HtileDepthClearBytes_nid_no_patch(clearCode, userData, compute, packet, 0u);
+        Require(bytes == HtileMetadataBytes(target.extent), "native depth clear producer did not prove its complete dispatch range");
+        const auto address = reinterpret_cast<std::uintptr_t>(clearCode.data());
+        const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{address, std::as_bytes(std::span(clearCode))}}};
+        ShaderRecompiler::RecompileRequest request{
+            {ShaderStage::Compute, address, clearCode, 0u, {}},
+            {32u, 0u, userData, compute, std::nullopt, std::nullopt, memory},
+            device.ComputeTarget(32u), {0u, 0u, 0u, 128u}
+        };
+        request.useCache = false;
+        const auto program = ShaderRecompiler::Recompile(request);
+        Require(std::any_of(program.bindings.begin(), program.bindings.end(), [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable; }), "native depth clear producer did not use the BDA binding path");
+        NoteHtileDepthClear(target.htileAddress, bytes, bytes);
+        device.Dispatch(program, packet[1], packet[2], packet[3], {}, address);
+        device.WaitIdle();
+        const auto cleared = LoadSamples(device, texture);
+        for (const auto& sample : cleared) Require(sample == std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}, "completed GPU HTILE mask producer did not clear every native depth sample");
+        std::printf("Native depth GPU mask producer cycle=%u: %zu HTILE bytes, BDA binding, every sample cleared\n", cycle, bytes);
+    }
 }
 
 double EdgeDistance(double x, double y, std::size_t from) {
@@ -308,10 +386,15 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--depth-clear") {
+            CheckDepthClear(*device);
+            return 0;
+        }
+        Require(argc == 1, "invalid multisampled target fixture arguments");
         Block block(4u * BlockBytes);
         Block other(BlockBytes);
         const auto color = DecodeTarget(block);
