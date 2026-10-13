@@ -537,7 +537,7 @@ void CheckClearDispatch() {
             case 9u: changedPacket[4] = 0u; break;
             case 10u: changedPacket[4] = 0x21u; break;
             case 11u: changedUserData[2] = 65537u; break;
-            case 12u: changedUserData[4] = 0u; break;
+            case 12u: changedUserData[4] = 1u; break;
             case 13u: changedUserData[2] = 0xfffffff0u; changedUserData[3] = 0xffffffffu; break;
         }
         Require(HtileDepthClearBytes_nid_no_patch(code, changedUserData, changedCompute, changedPacket, 0u) == 0u, "unproven HTILE mask dispatch was accepted");
