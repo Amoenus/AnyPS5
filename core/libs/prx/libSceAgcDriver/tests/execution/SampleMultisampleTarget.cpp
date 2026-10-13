@@ -7,6 +7,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include "Recompiler.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include "VulkanTestDevice.hpp"
@@ -78,9 +80,11 @@ alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
 struct Block {
     explicit Block(std::size_t bytes) : bytes(bytes) {
 #ifdef _WIN32
-        data = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        data = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, BlockBytes));
+        GuestArena::GuestArenaCommit_nid_postfix(data, bytes, PAGE_READWRITE, bytes);
 #else
         data = static_cast<std::uint8_t*>(std::aligned_alloc(BlockBytes, bytes));
+        GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(data, bytes);
 #endif
         Require(data != nullptr, "cannot allocate the multisampled color target");
         std::memset(data, 0, bytes);
@@ -93,8 +97,10 @@ struct Block {
             mutation.Remove(data);
         }
 #ifdef _WIN32
-        VirtualFree(data, 0, MEM_RELEASE);
+        GuestArena::GuestArenaReset_nid_postfix(data, bytes);
+        GuestArena::GuestArenaRelease_nid_postfix(data, bytes);
 #else
+        GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(data, bytes);
         std::free(data);
 #endif
     }
@@ -111,6 +117,7 @@ AgcDriver::Graphics::ColorTarget DecodeTarget(const Block& block) {
     cx[0x31b] = 0;
     cx[0x31c] = Float16x4Info;
     cx[0x31d] = MultisampledAttrib;
+    cx[0x321] = 0u;
     cx[0x3b0] = ((Side - 1u) << 14u) | (Side - 1u);
     cx[0x3b8] = TiledAttrib3;
     cx[0x390] = static_cast<std::uint32_t>(block.Address() >> 40u);
@@ -217,16 +224,17 @@ ShaderRecompiler::RecompileResult CompileLoad(AgcDriver::VulkanDevice& device, c
     return ShaderRecompiler::Recompile(request);
 }
 
-std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block) {
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t sampleShift = SampleShift) {
     std::vector<std::uint32_t> userData;
-    const auto program = CompileLoad(device, TargetDescriptor(block, SampleShift), userData);
-    std::vector<std::array<float, 4>> loaded(Side * Side * Samples);
+    const auto samples = 1u << sampleShift;
+    const auto program = CompileLoad(device, TargetDescriptor(block, sampleShift), userData);
+    std::vector<std::array<float, 4>> loaded(Side * Side * samples);
     for (std::uint32_t first = 0; first < loaded.size(); first += Threads) {
         Buffer.fill(0xdeadbeefu);
         for (std::uint32_t tid = 0; tid < Threads; ++tid) {
             const auto index = first + tid;
-            const auto pixel = index / Samples;
-            const std::array<std::uint32_t, 6> words{0u, 0u, 0u, pixel % Side, pixel / Side, index % Samples};
+            const auto pixel = index / samples;
+            const std::array<std::uint32_t, 6> words{0u, 0u, 0u, pixel % Side, pixel / Side, index % samples};
             std::copy(words.begin(), words.end(), &Buffer[tid * Words]);
         }
         device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(LoadCode.data()));
@@ -292,20 +300,6 @@ void CheckFilled(const std::vector<std::array<float, 4>>& loaded) {
     }
 }
 
-void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, const std::string& expected, const std::string& what) {
-    std::string refusal;
-    try {
-        std::vector<std::uint32_t> userData;
-        const auto program = CompileLoad(device, texture, userData);
-        Buffer.fill(0u);
-        device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(LoadCode.data()));
-        device.WaitIdle();
-    } catch (const std::exception& error) {
-        refusal = error.what();
-    }
-    Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
-}
-
 }
 
 int main() {
@@ -321,9 +315,11 @@ int main() {
         const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
         Require(colorBytes != 0 && colorBytes <= block.bytes, "the 4x target's color memory does not fit its block");
         AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
+        AgcDriver::GuestMemory::StoreOwnBytes(block.Address(), static_cast<std::size_t>(colorBytes), [&] { std::fill_n(reinterpret_cast<std::uint32_t*>(block.data), colorBytes / 4u, FillOnes); });
         CheckFilled(LoadSamples(*device, block));
-        RequireRefused(*device, TargetDescriptor(block, 3u), "texture of 8 samples", "loading a 4x target as an 8x texture");
-        RequireRefused(*device, TargetDescriptor(other, SampleShift), "which no draw rendered to", "loading a multisampled texture no draw rendered to");
+        CheckFilled(LoadSamples(*device, block, 3u));
+        const auto guestSamples = LoadSamples(*device, other);
+        Require(std::all_of(guestSamples.begin(), guestSamples.end(), [](const auto& texel) { return texel == std::array<float, 4>{}; }), "a guest-only multisampled texture did not load its zero samples");
         std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it, then the fill of its color memory");
         return 0;
     } catch (const std::exception& error) {

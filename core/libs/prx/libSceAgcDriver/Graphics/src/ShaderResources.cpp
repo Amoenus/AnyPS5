@@ -8,6 +8,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include <algorithm>
@@ -406,7 +409,7 @@ bool SampledFromStorageEligible(const Context& context, std::uint32_t format, st
 }
 
 bool SampledFromStorageEligible(const Context& context, const GuestTextureResource& resource, std::uint64_t guestBytes) {
-    return SampledFromStorageEligible(context, resource.format, resource.baseAddress, guestBytes);
+    return resource.samples == 1u && SampledFromStorageEligible(context, resource.format, resource.baseAddress, guestBytes);
 }
 
 // Whether a sampled texture over a fast-cleared, storage-eligible surface views the cleared storage
@@ -515,19 +518,103 @@ std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
     return budget;
 }
 
+std::shared_ptr<Texture> multisampleDepthSnapshot(const Context& context, const GuestTextureResource& resource, VkComponentMapping components) {
+    Require(resource.format == 7u || resource.format == 22u, "multisampled Z depth format is not implemented");
+    Require(resource.dccAddress == 0u || (resource.iterate256 && resource.dccPipeAligned && !resource.dccAlphaOnMsb), "multisampled HTILE snapshot requires pipe-aligned ITERATE_256 depth");
+    const auto geometry = DescribeSurface(resource);
+    const auto metadataBytes = resource.dccAddress != 0u ? MultisampleHtileBytes_nid_no_patch(resource.width, resource.height, geometry.layers) : 0u;
+    if (auto* recorder = Recorder::Active()) {
+        recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+        if (metadataBytes != 0u) recorder->SyncThrough(resource.dccAddress, metadataBytes);
+    }
+    StorageTexture::FlushPending(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+    if (metadataBytes != 0u) StorageTexture::FlushPending(resource.dccAddress, metadataBytes);
+    Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, resource.baseAddress, geometry.guestBytes), "sample-preserving readback of a resident depth surface is not implemented");
+    if (metadataBytes != 0u) Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, resource.dccAddress, metadataBytes), "HTILE overlaps a resident depth surface");
+    std::vector<std::byte> snapshot(geometry.guestBytes);
+    GuestMemory::Read(resource.baseAddress, snapshot);
+    if (metadataBytes != 0u) {
+        std::vector<std::uint32_t> metadata(metadataBytes / sizeof(std::uint32_t));
+        GuestMemory::Read(resource.dccAddress, std::as_writable_bytes(std::span(metadata)));
+        const bool uniform = std::all_of(metadata.begin(), metadata.end(), [&](auto word) { return word == metadata.front(); });
+        if (uniform) {
+            const auto state = MultisampleHtileState_nid_no_patch(metadata.front());
+            if (state != HtileDepthState::Uncompressed) Require(FillDccClear(ResolveTextureFormat(resource.format), state == HtileDepthState::ClearZero ? DccKeys::Clear0000 : DccKeys::Clear1111, false, snapshot), "HTILE clear has no supported depth encoding");
+        } else {
+            const auto elementBytes = BytesPerElement(resource.format);
+            const MultisampleTextureLayout address(resource.tileMode, elementBytes, resource.samples, resource.width, resource.height, geometry.layers, resource.pipeBankXor);
+            for (std::uint32_t layer = 0u; layer < geometry.layers; ++layer) {
+                for (std::uint32_t y = 0u; y < resource.height; y += 8u) {
+                    for (std::uint32_t x = 0u; x < resource.width; x += 8u) {
+                        const auto offset = MultisampleHtileOffset_nid_no_patch(resource.samples, resource.width, resource.height, geometry.layers, resource.pipeBankXor, x, y, layer);
+                        const auto state = MultisampleHtileState_nid_no_patch(metadata.at(offset / sizeof(std::uint32_t)));
+                        if (state == HtileDepthState::Uncompressed) continue;
+                        const std::uint32_t value = state == HtileDepthState::ClearZero ? 0u : elementBytes == 2u ? 0xffffu : 0x3f800000u;
+                        for (auto yy = y; yy < std::min(y + 8u, resource.height); ++yy) {
+                            for (auto xx = x; xx < std::min(x + 8u, resource.width); ++xx) {
+                                for (std::uint32_t sample = 0u; sample < resource.samples; ++sample) std::memcpy(snapshot.data() + address.Offset(xx, yy, layer, sample), &value, elementBytes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    auto decoded = resource;
+    decoded.dccAddress = 0u;
+    decoded.dccPipeAligned = false;
+    decoded.dccAlphaOnMsb = false;
+    decoded.iterate256 = false;
+    return std::make_shared<Texture>(context, *context.detiler, decoded, components, snapshot);
+}
+
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false) {
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
-    if (resource.dimension == TextureDimension::k2DMsaa) {
-        auto target = MultisampleTargetTexture(context, resource, components);
-        logLookup({target.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
-        return target;
+    if (resource.samples != 1u) {
+        Require(!depthCompare, "multisampled depth comparison sampling is not implemented");
+        if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
+        if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
+            logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
+            return depth;
+        }
+        if (auto color = NativeMultisampleSnapshot_nid_no_patch(context, resource, components)) {
+            logLookup({color.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
+            return color;
+        }
     }
-    RequireNoMultisampleTarget(resource.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a texture read");
+    SynchronizeMultisampleTargetRead(resource.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u);
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
-    if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
-        logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
-        return depth;
+    if (resource.samples != 1u) {
+        Require(!depthCompare, "multisampled depth comparison sampling is not implemented");
+        if (resource.tileMode == TextureTileMode::kZ64KBX) return multisampleDepthSnapshot(context, resource, components);
+        Require(resource.tileMode == TextureTileMode::kR64KBX, "unsupported multisampled texture tile mode");
+        const auto geometry = DescribeSurface(resource);
+        if (resource.dccAddress != 0u) {
+            const auto metadataBytes = MultisampleDccBytes_nid_no_patch(BytesPerElement(resource.format), resource.samples, resource.width, resource.height, geometry.layers);
+            if (auto* recorder = Recorder::Active()) {
+                recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+                recorder->SyncThrough(resource.dccAddress, metadataBytes);
+            }
+            std::vector<std::byte> metadata(metadataBytes);
+            GuestMemory::Read(resource.dccAddress, metadata);
+            const auto keys = MultisampleDccKeys_nid_no_patch(resource, metadata);
+            std::vector<std::byte> snapshot(geometry.guestBytes);
+            if (keys == DccKeys::Uncompressed) GuestMemory::Read(resource.baseAddress, snapshot);
+            else Require(FillDccClear(ResolveTextureFormat(resource.format), keys, resource.dccAlphaOnMsb, snapshot), "multisampled DCC clear has no supported texel encoding");
+            auto decoded = resource;
+            decoded.dccAddress = 0u;
+            decoded.dccPipeAligned = false;
+            decoded.dccAlphaOnMsb = false;
+            return std::make_shared<Texture>(context, *context.detiler, decoded, components, snapshot);
+        }
+        if (auto* recorder = Recorder::Active()) recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+    }
+    if (resource.samples == 1u) {
+        if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
+            logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
+            return depth;
+        }
     }
     const auto depthBitsWidth = words.size() >= 4 ? ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) : 0u;
     if (depthBitsWidth == 32u) {
@@ -843,7 +930,7 @@ GuestTextureResource StorageSurface(const Context& context, const GuestTextureRe
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, std::uint32_t mip, std::uint64_t guestBytes) {
-    Require(viewed.dimension != TextureDimension::k2DMsaa, "storage image access to a multisampled texture is not implemented");
+    Require(viewed.samples == 1u, "storage image access to a multisampled texture is not implemented");
     RequireNoMultisampleTarget(viewed.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a storage image access");
     if (auto depth = DepthSurfaceStorage(context, words, viewed, mip)) return depth;
     static const bool disabled = std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
@@ -3205,7 +3292,7 @@ bool ShaderResources::precollectImages() {
                 record.guestBytes = memo != nullptr ? memo->guestBytes : DescribeSurface(record.resource).guestBytes;
                 record.generation = GuestMemory::CollectWrites(record.resource.baseAddress, static_cast<std::size_t>(record.guestBytes));
                 record.decoded = true;
-                if (record.sampled && !noRecords && words.size() == 8 && (binding.imageDepthCompare.empty() || !binding.imageDepthCompare.at(element))) {
+                if (record.sampled && record.resource.samples == 1u && !noRecords && words.size() == 8 && (binding.imageDepthCompare.empty() || !binding.imageDepthCompare.at(element))) {
                     std::copy(words.begin(), words.end(), record.words.begin());
                     record.components = memo->components;
                     record.keys = TextureClearKeys(record.resource, record.guestBytes);
@@ -3316,7 +3403,7 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
             const auto resource = record != nullptr && record->decoded ? record->resource : DecodeTextureResource(words);
             RequireDegammaFormat(resource.format, binding.imageSamplers[element], shaderSamplers);
             RequireNonSeamlessCube(resource.dimension == TextureDimension::kCube, binding.imageSamplers[element], shaderSamplers);
-            const bool firstLayer = binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray;
+            const bool firstLayer = (binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray) || (binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DMultisample && resource.dimension == TextureDimension::k2DMsaaArray);
             if (!firstLayer && !MatchesGuestDimension(*binding.imageShape, resource.dimension)) throw std::runtime_error("AGC graphics: guest texture dimension disagrees with the shader's declared image shape (shape " + std::to_string(static_cast<int>(*binding.imageShape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
             const VkComponentMapping components = ViewComponents(resource);
             const auto guestBytes = record != nullptr && record->decoded ? record->guestBytes : DescribeSurface(resource).guestBytes;
@@ -3330,7 +3417,7 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
                 (texture != nullptr ? counters.fastHits : counters.fastMisses).fetch_add(1, std::memory_order_relaxed);
             }
             if (texture == nullptr) texture = cachedTexture(context, words, resource, components, guestBytes, depthCompare);
-            if (resource.dimension == TextureDimension::k2DMsaa) multisampleSources.push_back(resource.baseAddress);
+            if (resource.samples != 1u) multisampleSources.push_back(resource.baseAddress);
             bool baseLevel = false;
             if (element < binding.imageUnnormalized.size() && binding.imageUnnormalized[element]) {
                 const auto range = texture->SampledViewRange(firstLayer);
@@ -3382,7 +3469,7 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
             continue;
         }
         const auto resource = record != nullptr && record->decoded ? record->resource : DecodeTextureResource(words);
-        const bool firstLayer = binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray;
+        const bool firstLayer = (binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray) || (binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DMultisample && resource.dimension == TextureDimension::k2DMsaaArray);
         if (binding.imageShape.has_value() && !firstLayer && !MatchesGuestDimension(*binding.imageShape, resource.dimension)) throw std::runtime_error("AGC graphics: guest storage texture dimension disagrees with the shader's declared image shape (shape " + std::to_string(static_cast<int>(*binding.imageShape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
         const auto mip = std::min(resource.baseLevel + mipOffset, resource.mipCount - 1u);
         Require(resource.minLod <= mip * 256u, "guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");

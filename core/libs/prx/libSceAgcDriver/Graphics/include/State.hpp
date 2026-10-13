@@ -46,6 +46,10 @@ struct ColorTarget {
     std::uint64_t dccAddress = 0;
     bool dccAlphaOnMsb = false;
     bool dccPipeAligned = false;
+    std::uint32_t dccControl = 0;
+    std::uint64_t fmaskAddress = 0;
+    std::uint32_t fmaskSwizzle = 0;
+    std::uint32_t arrayLayers = 1;
     std::uint64_t cmaskAddress = 0;
     std::size_t cmaskBytes = 0;
     bool cmaskFastClear = false;
@@ -78,6 +82,14 @@ struct DepthTarget {
     std::uint64_t htileAddress = 0;
     bool htileStencil = false;
     std::uint32_t samples = 1;
+    std::uint32_t depthSwizzle = 0;
+    std::uint32_t pipeBankXor = 0;
+    std::uint32_t firstSlice = 0;
+    std::uint32_t lastSlice = 0;
+    bool iterate256 = false;
+    bool htilePipeAligned = false;
+    std::uint32_t htileVrsEncoding = 0;
+    bool htileDepthOnly = false;
 };
 
 struct State {
@@ -197,9 +209,9 @@ inline constexpr std::array<DrawKeyRange, 49> DrawKeyRegisters{{
     {RegisterBank::Context, 0x191, 32}, {RegisterBank::Context, 0x1b3, 2}, {RegisterBank::Context, 0x1b6, 1}, {RegisterBank::Context, 0x1c3, 3}, {RegisterBank::Context, 0x1e0, 8}, {RegisterBank::Context, 0x1ff, 1},
     // DB_DEPTH_CONTROL .. PA_CL_VS_OUT_CNTL, PA_SC_MODE_CNTL_0/1, VGT_GS_MODE, VGT_GS_VERT_ITEMSIZE,
     // PA_SU_VTX_CNTL, the sample masks, PA_SC_CONSERVATIVE_RASTERIZATION_CNTL.
-    {RegisterBank::Context, 0x200, 8}, {RegisterBank::Context, 0x286, 2}, {RegisterBank::Context, 0x292, 2}, {RegisterBank::Context, 0x29b, 1}, {RegisterBank::Context, 0x2ab, 1}, {RegisterBank::Context, 0x2ce, 1}, {RegisterBank::Context, 0x2d5, 2}, {RegisterBank::Context, 0x2db, 2}, {RegisterBank::Context, 0x2de, 6}, {RegisterBank::Context, 0x2f8, 2}, {RegisterBank::Context, 0x2fe, 16}, {RegisterBank::Context, 0x30e, 2}, {RegisterBank::Context, 0x313, 1},
+    {RegisterBank::Context, 0x200, 8}, {RegisterBank::Context, 0x286, 2}, {RegisterBank::Context, 0x292, 2}, {RegisterBank::Context, 0x29b, 1}, {RegisterBank::Context, 0x2ab, 1}, {RegisterBank::Context, 0x2af, 1}, {RegisterBank::Context, 0x2ce, 1}, {RegisterBank::Context, 0x2d5, 2}, {RegisterBank::Context, 0x2db, 2}, {RegisterBank::Context, 0x2de, 6}, {RegisterBank::Context, 0x2f8, 2}, {RegisterBank::Context, 0x2fe, 16}, {RegisterBank::Context, 0x30e, 2}, {RegisterBank::Context, 0x313, 1},
     // CB_COLOR0..7_BASE .. DCC_BASE (15 words a slot), CB_COLOR0..7_BASE_EXT, DCC_BASE_EXT, ATTRIB2, ATTRIB3.
-    {RegisterBank::Context, 0x318, 0x78}, {RegisterBank::Context, 0x390, 8}, {RegisterBank::Context, 0x398, 8}, {RegisterBank::Context, 0x3a8, 0x18},
+    {RegisterBank::Context, 0x318, 0x78}, {RegisterBank::Context, 0x390, 0x18}, {RegisterBank::Context, 0x3a8, 0x18},
     // The pixel program address, RSRC2 and user words; the geometry-back user pointer and program
     // address; the vertex/geometry-front RSRC1/RSRC2 and user words; the vertex program address;
     // the hull user pointer, program address, RSRC2 and user words; the local program address.

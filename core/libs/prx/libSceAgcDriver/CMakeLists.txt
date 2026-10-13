@@ -57,6 +57,45 @@ add_custom_command(
         VERBATIM
 )
 
+set(agcMultisampleUploadShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MultisampleUpload.comp)
+set(agcMultisampleUploadShaderSpv ${agcTextureDetileGeneratedDir}/MultisampleUpload.spv)
+set(agcMultisampleUploadShaderHeader ${agcTextureDetileGeneratedDir}/MultisampleUpload_spv.h)
+add_custom_command(
+        OUTPUT "${agcMultisampleUploadShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcMultisampleUploadShaderSpv}" "${agcMultisampleUploadShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcMultisampleUploadShaderSpv} -DOUTPUT=${agcMultisampleUploadShaderHeader}
+        -DSYMBOL=MULTISAMPLE_UPLOAD_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcMultisampleUploadShaderSource}" glslang-standalone
+        VERBATIM
+)
+
+set(agcMultisampleReadbackShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MultisampleReadback.comp)
+set(agcMultisampleReadbackShaderSpv ${agcTextureDetileGeneratedDir}/MultisampleReadback.spv)
+set(agcMultisampleReadbackShaderHeader ${agcTextureDetileGeneratedDir}/MultisampleReadback_spv.h)
+add_custom_command(
+        OUTPUT "${agcMultisampleReadbackShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcMultisampleReadbackShaderSpv}" "${agcMultisampleReadbackShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcMultisampleReadbackShaderSpv} -DOUTPUT=${agcMultisampleReadbackShaderHeader}
+        -DSYMBOL=MULTISAMPLE_READBACK_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcMultisampleReadbackShaderSource}" glslang-standalone
+        VERBATIM
+)
+
+set(agcMultisampleTileShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MultisampleTile.comp)
+set(agcMultisampleTileShaderSpv ${agcTextureDetileGeneratedDir}/MultisampleTile.spv)
+set(agcMultisampleTileShaderHeader ${agcTextureDetileGeneratedDir}/MultisampleTile_spv.h)
+add_custom_command(
+        OUTPUT "${agcMultisampleTileShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcMultisampleTileShaderSpv}" "${agcMultisampleTileShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcMultisampleTileShaderSpv} -DOUTPUT=${agcMultisampleTileShaderHeader}
+        -DSYMBOL=MULTISAMPLE_TILE_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcMultisampleTileShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 set(agcMeshArgumentsShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/MeshArguments.comp)
 set(agcMeshArgumentsShaderSpv ${agcTextureDetileGeneratedDir}/MeshArguments.spv)
 set(agcMeshArgumentsShaderHeader ${agcTextureDetileGeneratedDir}/MeshArguments_spv.h)
@@ -178,6 +217,8 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DepthSurface.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleTarget.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleDcc.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleInitialContents.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetTransfer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Pipeline.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PipelineLibrary.cpp
@@ -198,9 +239,16 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestSamplerResource.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureFormat.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DccMetadata.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleHtile.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleTextureLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureDetiler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureMultisample.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleUpload.cpp
+        ${agcMultisampleUploadShaderHeader}
+        ${agcMultisampleReadbackShaderHeader}
+        ${agcMultisampleTileShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PassHazards.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/UnitShadow.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
@@ -273,6 +321,62 @@ set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceAgcDriver)
 
 if(BUILD_TESTING)
+    add_test_executable(agc_driver_msaa_initial_contents_tests tests/MultisampleInitialContents.cpp)
+    target_include_directories(agc_driver_msaa_initial_contents_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR} ${ANYPS5_SPIRV_HEADERS_INCLUDE_DIR})
+    target_link_libraries(agc_driver_msaa_initial_contents_tests PRIVATE libSceAgcDriver libc shader_recompiler_agc_driver)
+    set_target_properties(agc_driver_msaa_initial_contents_tests PROPERTIES CXX_EXTENSIONS OFF)
+    configure_windows_unwind(agc_driver_msaa_initial_contents_tests)
+    add_test(NAME agc_driver_msaa_initial_contents COMMAND agc_driver_msaa_initial_contents_tests)
+    set_tests_properties(agc_driver_msaa_initial_contents PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_driver_msaa_initial_contents PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    endif()
+    add_test_executable(agc_driver_msaa_runtime_tests tests/MultisampleTexture.cpp)
+    target_include_directories(agc_driver_msaa_runtime_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR} ${ANYPS5_SPIRV_HEADERS_INCLUDE_DIR})
+    target_link_libraries(agc_driver_msaa_runtime_tests PRIVATE libSceAgcDriver libc SDL2-static shader_recompiler_agc_driver)
+    set_target_properties(agc_driver_msaa_runtime_tests PROPERTIES CXX_EXTENSIONS OFF)
+    configure_windows_unwind(agc_driver_msaa_runtime_tests)
+    add_test(NAME agc_driver_msaa_runtime COMMAND agc_driver_msaa_runtime_tests)
+    add_test(NAME agc_driver_msaa_readback COMMAND agc_driver_msaa_runtime_tests --readback)
+    add_test(NAME agc_driver_msaa_tile_transfer COMMAND agc_driver_msaa_runtime_tests --tile-transfer)
+    add_test(NAME agc_driver_msaa_xor_views COMMAND agc_driver_msaa_runtime_tests --xor-views)
+    add_test(NAME agc_driver_msaa_target_import COMMAND agc_driver_msaa_runtime_tests --targets)
+    add_test(NAME agc_driver_msaa_depth_target COMMAND agc_driver_msaa_runtime_tests --depth-targets)
+    add_test(NAME agc_driver_msaa_depth_refusals COMMAND agc_driver_msaa_runtime_tests --depth-refusals)
+    add_test(NAME agc_driver_msaa_depth_clear COMMAND agc_driver_msaa_runtime_tests --depth-clears)
+    add_test(NAME agc_driver_msaa_metadata_reset COMMAND agc_driver_msaa_runtime_tests --metadata-reset)
+    add_test(NAME agc_driver_msaa_native_snapshot COMMAND agc_driver_msaa_runtime_tests --native-snapshots)
+    add_test(NAME agc_driver_msaa_depth_retirement COMMAND agc_driver_msaa_runtime_tests --depth-retirement)
+    add_test(NAME agc_driver_msaa_retirement COMMAND agc_driver_msaa_runtime_tests --retirement)
+    set_tests_properties(agc_driver_msaa_retirement agc_driver_msaa_depth_retirement PROPERTIES TIMEOUT 20 SKIP_RETURN_CODE 77 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+    if(WIN32)
+        set_tests_properties(agc_driver_msaa_retirement agc_driver_msaa_depth_retirement PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    endif()
+    add_test(NAME agc_shader_msaa_shapes COMMAND agc_driver_msaa_runtime_tests --shapes)
+    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_tile_transfer agc_driver_msaa_xor_views agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot agc_shader_msaa_shapes PROPERTIES TIMEOUT 20)
+    set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_tile_transfer agc_driver_msaa_xor_views agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+    if(WIN32)
+        set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_tile_transfer agc_driver_msaa_xor_views agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    endif()
+    add_test_executable(agc_driver_msaa_layout_tests
+            tests/MultisampleTextureLayout.cpp
+            Graphics/src/MultisampleTextureLayout.cpp
+    )
+    target_include_directories(agc_driver_msaa_layout_tests PRIVATE
+            ${LIBS_INCLUDE_DIR}
+            ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+            ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
+    )
+    target_link_libraries(agc_driver_msaa_layout_tests PRIVATE libc)
+    set_target_properties(agc_driver_msaa_layout_tests PROPERTIES CXX_EXTENSIONS OFF)
+    configure_windows_unwind(agc_driver_msaa_layout_tests)
+    add_test(NAME agc_driver_msaa_layout COMMAND agc_driver_msaa_layout_tests)
+    set_tests_properties(agc_driver_msaa_layout PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_driver_msaa_layout PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
     add_test_executable(agc_write_watch_coverage_tests tests/WriteWatchCoverage.cpp)
     target_include_directories(agc_write_watch_coverage_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(agc_write_watch_coverage_tests PRIVATE libc)
@@ -974,11 +1078,18 @@ if(BUILD_TESTING)
     add_test(NAME agc_draw_snapshot_cap COMMAND agc_driver_recorder_tests --draw-snapshot-cap-only)
     set_tests_properties(agc_draw_snapshot_cap PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME agc_multisample_guest_access COMMAND agc_driver_recorder_tests --multisample-only)
+    add_test(NAME agc_stored_all_since COMMAND agc_driver_recorder_tests --stored-all-since-only)
+    set_tests_properties(agc_stored_all_since PROPERTIES TIMEOUT 20 SKIP_RETURN_CODE 77)
+    if(WIN32)
+        set_tests_properties(agc_stored_all_since PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    endif()
     set_tests_properties(agc_multisample_guest_access PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME agc_multisample_initial_content_refusals COMMAND agc_driver_recorder_tests --multisample-initial-content-refusals-only)
+    set_tests_properties(agc_multisample_initial_content_refusals PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME agc_draw_inputs_in_place COMMAND agc_driver_recorder_tests --draw-inputs-in-place-only)
     set_tests_properties(agc_draw_inputs_in_place PROPERTIES SKIP_RETURN_CODE 77)
     if(WIN32)
-        set_tests_properties(agc_host_import_unmap agc_parked_import_unmap agc_host_import_retirement agc_unit_shadow agc_descriptor_pool_recycling agc_draw_snapshot_cap agc_multisample_guest_access agc_draw_inputs_in_place PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_host_import_unmap agc_parked_import_unmap agc_host_import_retirement agc_unit_shadow agc_descriptor_pool_recycling agc_draw_snapshot_cap agc_multisample_guest_access agc_multisample_initial_content_refusals agc_draw_inputs_in_place PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()

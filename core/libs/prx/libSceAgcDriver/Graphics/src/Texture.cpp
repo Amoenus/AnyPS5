@@ -203,13 +203,14 @@ VkImageType ImageTypeFor(TextureDimension dimension) {
 VkImageViewType ViewTypeFor(TextureDimension dimension, [[maybe_unused]] std::uint32_t viewLayerCount) {
     switch (dimension) {
         case TextureDimension::k1D: return VK_IMAGE_VIEW_TYPE_1D;
+        case TextureDimension::k2DMsaa:
         case TextureDimension::k2D: return VK_IMAGE_VIEW_TYPE_2D;
+        case TextureDimension::k2DMsaaArray:
         case TextureDimension::k2DArray: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         // Shaders address cube maps as 2D arrays of faces.
         case TextureDimension::kCube: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         case TextureDimension::k3D: return VK_IMAGE_VIEW_TYPE_3D;
         case TextureDimension::k1DArray: return VK_IMAGE_VIEW_TYPE_1D_ARRAY;
-        case TextureDimension::k2DMsaa: break;
     }
     throw std::runtime_error("AGC graphics: Texture encountered an unknown guest texture dimension");
 }
@@ -243,6 +244,13 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PhaseTimer timer;
     try {
+        if (descriptor.samples != 1u) {
+            Require(!depthCompare, "multisampled comparison texture sampling is not implemented");
+            initializeMultisample(detiler, descriptor, components, snapshot);
+            countedBytes = allocationBytes;
+            SampledMemoryCounter().fetch_add(countedBytes, std::memory_order_relaxed);
+            return;
+        }
         const auto colorFormat = SampledTextureFormat(context, descriptor.format);
         Require(!depthCompare || colorFormat == VK_FORMAT_R32_SFLOAT || colorFormat == VK_FORMAT_R16_UNORM, "comparison sampling requires an R32 float or R16 unorm depth texture");
         Require(!depthCompare || descriptor.dimension != TextureDimension::k3D, "comparison sampling does not support 3D depth textures");
@@ -615,7 +623,7 @@ Texture::DepthCopyCounts Texture::TakeDepthCopyCounts() {
 
 bool Texture::CanCopyFrom(const StorageTexture& source, const GuestTextureResource& descriptor) {
     const auto& from = source.Descriptor();
-    if (IsBlockCompressed(descriptor.format) || IsBlockCompressed(from.format)) return false;
+    if (descriptor.samples != 1u || from.samples != 1u || IsBlockCompressed(descriptor.format) || IsBlockCompressed(from.format)) return false;
     // Same memory, same layout, same texel size: the GPU copy reinterprets the texels exactly as a
     // guest read through the sampled descriptor would.
     return descriptor.baseAddress == from.baseAddress && descriptor.pipeBankXor == from.pipeBankXor && descriptor.width == from.width && descriptor.height == from.height && descriptor.dimension == from.dimension && descriptor.tileMode == from.tileMode && descriptor.mipCount <= from.mipCount && descriptor.depthOrLastArray == from.depthOrLastArray && BytesPerElement(descriptor.format) == BytesPerElement(from.format) && BlockWidth(descriptor.format) == BlockWidth(from.format);
@@ -661,6 +669,17 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
     }
 }
 
+Texture::Texture(const Context& context, VkImage sourceImage, std::shared_ptr<void> sourceOwner, const GuestTextureResource& descriptor, VkComponentMapping components, NativeSnapshotTag) : context(context) {
+    try {
+        initializeNativeMultisample(sourceImage, std::move(sourceOwner), descriptor, components);
+        countedBytes = allocationBytes;
+        SampledMemoryCounter().fetch_add(countedBytes, std::memory_order_relaxed);
+    } catch (...) {
+        release();
+        throw;
+    }
+}
+
 Texture::Texture(const Context& context, VkImage depthImage, VkFormat depthFormat, VkImageAspectFlags aspect, VkComponentMapping components, VkImageViewType viewType) : context(context) {
     layout = VK_IMAGE_LAYOUT_GENERAL;
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -684,7 +703,7 @@ Texture::~Texture() {
 }
 
 void Texture::createFirstLayerView(const GuestTextureResource& descriptor, VkImageViewCreateInfo viewInfo) {
-    if (descriptor.dimension != TextureDimension::k2DArray) return;
+    if (descriptor.dimension != TextureDimension::k2DArray && descriptor.dimension != TextureDimension::k2DMsaaArray) return;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.subresourceRange.layerCount = 1;
     Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &firstLayerView), "vkCreateImageView first layer");
@@ -898,6 +917,7 @@ std::shared_ptr<StorageTexture> StorageTexture::Create(const Context& context, T
 
 StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, std::uint32_t mipLevel) : context(context), detiler(detiler), descriptor(descriptor) {
     try {
+        Require(descriptor.samples == 1u, "multisampled storage texture writes are not implemented");
         Require(!IsBlockCompressed(descriptor.format), "block-compressed textures cannot be storage images");
         Require(mipLevel < descriptor.mipCount, "storage texture mip level is outside the texture");
         const auto vkFormat = StorageFormatFor(context, ResolveTextureFormat(descriptor.format));

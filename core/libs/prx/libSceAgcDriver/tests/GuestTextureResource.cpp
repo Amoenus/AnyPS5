@@ -273,7 +273,8 @@ void RunGuestTextureResourceTests() {
     rejectFields(multisampledSlice, "nonzero depth or base array");
     Fields multisampledArray = multisampled;
     multisampledArray.typeRaw = 15;
-    rejectFields(multisampledArray, "unsupported image type");
+    const auto arrayResource = DecodeTextureResource(pack(multisampledArray));
+    Require(arrayResource.dimension == TextureDimension::k2DMsaaArray && arrayResource.samples == DecodeTextureResource(pack(multisampled)).samples, "the multisampled array descriptor lost its dimension or sample count");
 
     Fields badType = base;
     badType.typeRaw = 0;
@@ -346,7 +347,32 @@ void RunGuestTextureResourceTests() {
 
     Fields badMsaa = base;
     badMsaa.msaaDepth = true;
-    rejectFields(badMsaa, "MSAA");
+    rejectFields(badMsaa, "ITERATE_256");
+    for (const auto format : {7u, 22u}) {
+        for (const auto type : {14u, 15u}) {
+            for (const auto count : {1u, 2u, 3u}) {
+                Fields depth = base;
+                depth.msaaDepth = true;
+                depth.format = format;
+                depth.typeRaw = type;
+                depth.tileModeRaw = 24u;
+                depth.lastLevel = count;
+                depth.maxMip = count;
+                depth.depth = type == 15u ? 2u : 0u;
+                const auto decoded = DecodeTextureResource(pack(depth));
+                Require(decoded.iterate256 && decoded.samples == (1u << count) && decoded.depthOrLastArray == depth.depth, "multisampled depth descriptor lost ITERATE_256 or its samples/layers");
+                depth.metaCompress = true;
+                rejectFields(depth, "null metadata");
+                depth.metaCompress = false;
+                depth.tileModeRaw = 27u;
+                rejectFields(depth, "ITERATE_256");
+                depth.tileModeRaw = 24u;
+                depth.format = 20u;
+                rejectFields(depth, "ITERATE_256");
+            }
+        }
+    }
+
 
     Fields blockSize = base;
     blockSize.maxUncompBlkSize = 1;
@@ -479,6 +505,43 @@ void RunGuestTextureResourceTests() {
     Require(!MatchesGuestDimension(Shape::Image3D, TextureDimension::k2D), "3D shape must never match a guest dimension");
     Require(!MatchesGuestDimension(Shape::Image3D, TextureDimension::k2DArray), "3D shape must never match a guest dimension");
     Require(!MatchesGuestDimension(Shape::Image3D, TextureDimension::kCube), "3D shape must never match a guest dimension");
+
+    for (const auto type : {14u, 15u}) {
+        for (const auto logFragments : {1u, 2u, 3u}) {
+            Fields ms = base;
+            ms.base40 = 0x120080u;
+            ms.typeRaw = type;
+            ms.tileModeRaw = 27u;
+            ms.format = 71u;
+            ms.lastLevel = logFragments;
+            ms.maxMip = logFragments;
+            ms.width = 129u;
+            ms.height = 67u;
+            ms.depth = type == 15u ? 2u : 0u;
+            ms.baseArray = type == 15u ? 1u : 0u;
+            const auto descriptor = DecodeTextureResource(pack(ms));
+            Require(descriptor.samples == (1u << logFragments), "MS descriptor lost its fragment count");
+            Require(descriptor.mipCount == 1u && descriptor.allocatedMipCount == 1u && descriptor.baseLevel == 0u && descriptor.lastLevel == 0u, "MS fragment levels were decoded as mip levels");
+            Require(descriptor.pipeBankXor == 0x8000u && descriptor.baseAddress == 0x12000000u, "MS descriptor lost its pipe/bank XOR");
+            const auto dimension = type == 14u ? TextureDimension::k2DMsaa : TextureDimension::k2DMsaaArray;
+            const auto shape = type == 14u ? Shape::Image2DMultisample : Shape::Image2DMultisampleArray;
+            Require(descriptor.dimension == dimension && MatchesGuestDimension(shape, dimension), "MS descriptor shape or dimension differs");
+            Require(!MatchesGuestDimension(Shape::Image2D, dimension) && !MatchesGuestDimension(Shape::Image2DArray, dimension), "MS descriptor matched a single-sample shape");
+            Require(DescriptorSingleLevel(pack(ms)), "MS fragment count was treated as multiple mip levels");
+            const auto geometry = DescribeSurface(descriptor);
+            const auto layers = type == 15u ? 3u : 1u;
+            Require(geometry.layers == layers && geometry.imageLayers == layers && geometry.mips.size() == 1u, "MS geometry lost its layers or gained mip levels");
+            Require(geometry.sliceLinearBytes == 129u * 67u * (1u << logFragments) * 8u && geometry.guestBytes == geometry.layerBytes * layers, "MS geometry lost fragment bytes");
+            ms.maxMip = 0u;
+            rejectFields(ms, "same sample count");
+            ms.maxMip = logFragments;
+            ms.baseLevel = 1u;
+            rejectFields(ms, "same sample count");
+            ms.baseLevel = 0u;
+            ms.minLod = 1u;
+            rejectFields(ms, "nonzero minimum LOD");
+        }
+    }
 
     Fields streamed = base;
     streamed.minLodWarn = 0xabc;

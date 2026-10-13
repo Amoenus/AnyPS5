@@ -59,7 +59,8 @@ enum class TextureDimension {
     kCube,
     k3D,
     k1DArray,
-    k2DMsaa
+    k2DMsaa,
+    k2DMsaaArray
 };
 
 struct GuestTextureResource {
@@ -85,6 +86,7 @@ struct GuestTextureResource {
     std::uint64_t dccAddress = 0;
     bool dccAlphaOnMsb = false;
     bool dccPipeAligned = false;
+    bool iterate256 = false;
     std::uint32_t minLod = 0;
     std::uint32_t allocatedMipCount = 0;
     std::uint32_t samples = 1;

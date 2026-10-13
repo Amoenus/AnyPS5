@@ -1,4 +1,5 @@
 #include <cstdio>
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
@@ -255,22 +256,37 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, bool testValEx
     Require(!depthClear || (zFormat != 0 && !depthReadOnly), "depth clear requires a writable depth plane");
     DepthTarget depth{};
     depth.samples = 1u << ((read(cx, 0x010) >> 2u) & 3u);
+    depth.depthSwizzle = (read(cx, 0x010) >> 4u) & 31u;
+    depth.iterate256 = (read(cx, 0x010) & (1u << 20u)) != 0u;
+    depth.firstSlice = view & 0x1fffu;
+    depth.lastSlice = (view >> 13u) & 0x7ffu;
+    Require(depth.samples == 1u || ((zFormat == 0u || ((read(cx, 0x010) >> 4u) & 31u) == 24u) && (!stencil || ((read(cx, 0x011) >> 4u) & 31u) == 24u)), "multisampled depth/stencil footprint requires 64KB_Z_X");
     depth.address = zFormat != 0 ? base(0x012, 0x01a) : 0;
     depth.stencilAddress = stencil ? base(0x013, 0x01b) : 0;
     Require(zFormat == 0 || depthReadOnly || base(0x014, 0x01c) == depth.address, "depth read and written at different addresses is unsupported");
     Require(!stencil || stencilReadOnly || base(0x015, 0x01d) == depth.stencilAddress, "stencil read and written at different addresses is unsupported");
+    if (depth.samples != 1u) {
+        depth.pipeBankXor = static_cast<std::uint32_t>(depth.address & 65535u);
+        depth.address &= ~std::uint64_t{65535u};
+        depth.stencilAddress &= ~std::uint64_t{65535u};
+        if (const auto surface = find(cx, 0x2af); surface != cx.end()) {
+            depth.htilePipeAligned = (surface->second & (1u << 18u)) != 0u;
+            depth.htileVrsEncoding = (surface->second >> 19u) & 3u;
+        }
+    }
     const auto size = read(cx, 0x007);
     depth.extent = {(size & 0x3fffu) + 1u, ((size >> 16u) & 0x3fffu) + 1u};
     if (const auto slice = view & 0x1fffu; slice != 0) {
-        if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, zFormat == 1 ? 2u : 4u);
-        if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, 1u);
+        if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * DepthPlaneBytes_nid_no_patch(depth.extent, zFormat == 1 ? 2u : 4u, depth.samples);
+        if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * DepthPlaneBytes_nid_no_patch(depth.extent, 1u, depth.samples);
     }
     depth.format = zFormat == 1 ? (stencil ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D16_UNORM) : (stencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT);
     depth.clearDepth = readFloat(cx, 0x00b);
     depth.clearStencil = static_cast<std::uint8_t>(read(cx, 0x00a) & 0xffu);
+    depth.htileDepthOnly = (read(cx, 0x011) & (1u << 29u)) != 0u;
     if (const auto htile = find(cx, 0x005); zFormat != 0 && htile != cx.end() && htile->second != 0 && (read(cx, 0x010) & (1u << 29u)) != 0) {
         depth.htileAddress = base(0x005, 0x01e);
-        depth.htileStencil = stencil && (read(cx, 0x011) & (1u << 29u)) == 0;
+        depth.htileStencil = stencil && !depth.htileDepthOnly;
     }
     result.depth = depth;
     result.depthTest = (depthControl & 2u) != 0;
@@ -734,6 +750,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     result.samples = decodeSamples(cx);
     Require(coveredCentroidSupported(queue), "COVERED_CENTROID_IS_CENTER with active or unspecified centroid inputs is not implemented");
     decodeSampleLocations(cx, result);
+    Require(coveredCentroidSupported(queue), "COVERED_CENTROID_IS_CENTER with active centroid inputs is not implemented");
     {
         const auto depthControl = read(cx, 0x200);
         const auto renderControl = find(cx, 0x000);
@@ -1091,18 +1108,6 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     Require(color.samples <= 8u, "color targets with more than eight samples are unsupported");
     Require((1u << ((attrib >> 15u) & 3u)) == color.samples, "color targets with fewer fragments than samples (EQAA) are unsupported");
     const auto multisampleInfo = color.samples > 1 ? 0x0c006000u : 0u;
-    if (color.samples > 1 && (info & 0x10000000u) != 0) {
-        const auto registerText = [&](std::uint32_t key) {
-            const auto value = find(cx, key);
-            if (value == cx.end()) return std::string("absent");
-            char text[16];
-            std::snprintf(text, sizeof(text), "0x%08x", value->second);
-            return std::string(text);
-        };
-        char text[512];
-        std::snprintf(text, sizeof(text), "AGC graphics: DCC over a multisampled color target is unsupported (slot %u, samples %u, CB_COLOR_INFO 0x%08x, CB_COLOR_CONTROL %s, CB_COLOR_ATTRIB2 %s, CB_COLOR_ATTRIB3 %s, CB_COLOR_VIEW %s, CB_DCC_CONTROL %s)", slot, color.samples, info, registerText(0x202).c_str(), registerText(0x3b0 + slot).c_str(), registerText(0x3b8 + slot).c_str(), registerText(0x31b + stride).c_str(), registerText(0x31e + stride).c_str());
-        throw std::runtime_error(text);
-    }
     // ROUND_MODE (bit 18) only affects unorm rounding. With DCC_ENABLE (bit 28) the target is written
     if ((info & ~(0x00039f7cu | 0x00040000u | 0x10000000u | 0x00002000u | multisampleInfo)) != 0) throw std::runtime_error("AGC graphics: color compression, DCC, endian conversion, nonstandard rounding or color optimization is unsupported (CB_COLOR_INFO 0x" + [&] { char text[16]; std::snprintf(text, sizeof(text), "%08x", info); return std::string(text); }() + ")");
     Require((info & 0x8000u) != 0 || number == 7 || number == 4 || number == 5, "unclamped normalized color is unsupported");
@@ -1119,6 +1124,9 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     const auto attrib3 = read(cx, 0x3b8 + slot);
     color.tileMode = DecodeColorTileMode(attrib3);
     const bool volume = ((attrib3 >> 24u) & 3u) == 2u;
+    color.arrayLayers = volume ? 1u : (attrib3 & 0x1fffu) + 1u;
+    color.arraySlice = volume ? 0u : slice;
+    Require(color.samples == 1 || (!volume && color.arrayLayers == 1u && slice == 0u), "multisampled array or 3D color targets are not implemented");
     Require(((attrib3 >> 24u) & 3u) != 0u || (attrib2 & 0x3fffu) == 0u, "1D color targets taller than one row are unsupported");
     if (volume) {
         color.depth = (attrib3 & 0x1fffu) + 1u;
@@ -1172,7 +1180,16 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     }
     color.address = color.surfaceAddress + mipOffset;
     color.bytes = colorLayout.Bytes();
+    if (color.samples > 1 && color.tileMode == ColorTileMode::RenderTarget) {
+        const MultisampleTextureLayout samples(TextureTileMode::kR64KBX, color.elementBytes, color.samples, color.extent.width, color.extent.height, 1u, color.pipeBankXor);
+        color.bytes = samples.Bytes();
+    }
     GuestMemory::CheckRange(reinterpret_cast<const void*>(color.address), color.bytes, colorLayout.Alignment(), true);
+    if (color.samples > 1) {
+        const auto fmaskHigh = find(cx, 0x3a0 + slot);
+        color.fmaskAddress = ((fmaskHigh == cx.end() ? 0ull : static_cast<std::uint64_t>(fmaskHigh->second & 0xffu)) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x321 + stride)) << 8u);
+        color.fmaskSwizzle = (attrib3 >> 19u) & 0x1fu;
+    }
     color.format = decoded.format;
     color.componentMapping = decoded.componentMapping;
     color.packing = decoded.packing;
@@ -1202,6 +1219,11 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
             color.dccAddress = ((dccHigh == cx.end() ? 0ull : static_cast<std::uint64_t>(dccHigh->second & 0xffu)) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x325 + stride)) << 8u);
             color.dccAlphaOnMsb = DccAlphaOnMsb(color.format, swap);
             color.dccPipeAligned = ((attrib3 >> 30u) & 1u) != 0;
+            if (color.samples > 1) {
+                Require(color.tileMode == ColorTileMode::RenderTarget && color.dccAddress != 0u && color.dccPipeAligned, "multisampled DCC targets need pipe-aligned R_X metadata");
+                color.dccControl = read(cx, 0x31e + stride);
+                Require((color.dccControl & 0x3ff80u) == 0u, "multisampled DCC color transforms or lossy modes are not implemented");
+            }
         } else {
             static bool reported = false;
             if (!reported) {

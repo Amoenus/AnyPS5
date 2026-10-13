@@ -1,6 +1,7 @@
 #include "BdaTests.hpp"
 #include "GraphicsTests.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferFill.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
@@ -9,6 +10,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ParallelCompare.hpp"
@@ -52,6 +54,7 @@ using AgcDriver::Graphics::Require;
 alignas(256) std::array<std::byte, 1024> colorMemory{};
 alignas(256) std::array<std::byte, 2048> sliceMemory{};
 alignas(256) std::array<std::uint8_t, 4> volumeKeyMemory{};
+alignas(256) std::array<std::byte, 196608> multisampleColorMemory{};
 
 AgcDriver::QueueState makeState() {
     AgcDriver::QueueState queue;
@@ -65,7 +68,7 @@ AgcDriver::QueueState makeState() {
         {0x206, 0x43f}, {0x204, 0x80000}, {0x205, 0x240},
         {0x8e, 0xf}, {0x8f, 0xf}, {0x202, 0xcc0010},
         {0x1c4, 0}, {0x1c5, 9}, {0x1c3, 4}, {0x31c, 0x28028},
-        {0x31b, 0}, {0x31d, 0}, {0x3b0, (63u << 14u) | 3u},
+        {0x31b, 0}, {0x31d, 0}, {0x321, 0}, {0x3b0, (63u << 14u) | 3u},
         {0x3b8, 0x9000000}, {0x1e0, 0},
         {0xc, 0}, {0xd, 0x40040},
         {0x81, 0x80000000}, {0x82, 0x40040},
@@ -93,7 +96,7 @@ void expectFailure(TAction action, std::string_view reason) {
     try {
         action();
     } catch (const std::runtime_error& error) {
-        Require(std::string_view(error.what()).find(reason) != std::string_view::npos, std::string("unexpected failure: ") + error.what());
+        Require(std::string_view(error.what()).find(reason) != std::string_view::npos, std::string("expected rejection containing ") + std::string(reason) + "; got: " + error.what());
         return;
     }
     throw std::runtime_error("expected graphics rejection: " + std::string(reason));
@@ -1213,6 +1216,17 @@ void DepthStencilTests() {
     const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
     Require(rejection.empty(), "precheck rejected a stencil draw with a surface: " + rejection);
     Require(state.depth && state.depth->address == 0x10000 && state.depth->stencilAddress == 0x20000 && state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT && state.depth->clearStencil == 7 && state.depth->htileAddress == 0x10000030000ull && !state.depth->htileStencil, "depth surface decode changed");
+    Require(state.depth->htileDepthOnly, "TILE_STENCIL_DISABLE did not retain the depth-only HTILE layout");
+    {
+        auto depthOnly = queue;
+        depthOnly.context[0x011] &= ~1u;
+        depthOnly.context[0x200] |= 6u;
+        const auto depthOnlyState = AgcDriver::Graphics::DecodeState(depthOnly);
+        Require(depthOnlyState.depth && depthOnlyState.depth->htileDepthOnly, "absence of a stencil plane lost TILE_STENCIL_DISABLE");
+        depthOnly.context[0x011] &= ~(1u << 29u);
+        const auto sharedLayout = AgcDriver::Graphics::DecodeState(depthOnly);
+        Require(sharedLayout.depth && !sharedLayout.depth->htileDepthOnly && !sharedLayout.depth->htileStencil, "HTILE encoding was inferred from absence of a stencil plane");
+    }
     {
         queue.context[0x011] &= ~(1u << 29u);
         const auto stencilTiled = AgcDriver::Graphics::DecodeState(queue);
@@ -1410,6 +1424,19 @@ void OneDimensionalColorTests() {
 }
 
 void htileDepthClearTests() {
+    using AgcDriver::Graphics::HtileDepthState;
+    using AgcDriver::Graphics::MultisampleHtileClearState_nid_no_patch;
+    for (const auto stencil : {0u, 0x30u, 0x40u, 0xf0u, 0x3f0u, 0xff0u}) {
+        Require(MultisampleHtileClearState_nid_no_patch(stencil, false) == HtileDepthState::ClearZero, "stencil metadata changed a depth/stencil-layout zero clear");
+        Require(MultisampleHtileClearState_nid_no_patch(0xfffc0000u | stencil, false) == HtileDepthState::ClearOne, "stencil metadata changed a depth/stencil-layout one clear");
+    }
+    Require(MultisampleHtileClearState_nid_no_patch(0u, true) == HtileDepthState::ClearZero && MultisampleHtileClearState_nid_no_patch(0xfffffff0u, true) == HtileDepthState::ClearOne, "depth-only HTILE clear ranges differ");
+    for (const bool depthOnly : {false, true}) {
+        Require(MultisampleHtileClearState_nid_no_patch(0xffffffffu, depthOnly) == HtileDepthState::Uncompressed, "expanded metadata was taken for a fast clear");
+        for (const auto word : {1u, 0x1000u, depthOnly ? 0xfffc00f0u : 0xfffffff0u}) {
+            expectFailure([&] { static_cast<void>(MultisampleHtileClearState_nid_no_patch(word, depthOnly)); }, "compression or clear layout");
+        }
+    }
     static constexpr std::array<std::uint32_t, 17> kernel{0xd7460000u, 0x04010c06u, 0x34000084u, 0xdc388000u, 0x04020000u, 0xbf8c3f70u, 0xd7710008u, 0x00120805u, 0xd7710009u, 0x00120a05u, 0xd771000au, 0x00120c05u, 0xd771000bu, 0x00120e05u, 0xdc788000u, 0x00020800u, 0xbf810000u};
     const std::array<std::uint32_t, 3> wave{64, 1, 1};
     const auto address = [&](std::span<const std::uint32_t> code, std::array<std::uint32_t, 6> userData, std::array<std::uint32_t, 3> threads) {
@@ -1423,6 +1450,100 @@ void htileDepthClearTests() {
     other[6] ^= 1u;
     Require(address(other, {0, 0, 0x0dc50000u, 0x40u, 0u, 0x00000ff0u}, wave) == 0, "a different kernel was taken for RADV's HTILE update");
     Require(address(std::span(kernel).first(16), {0, 0, 0x0dc50000u, 0x40u, 0u, 0x00000ff0u}, wave) == 0, "a truncated kernel was taken for RADV's HTILE update");
+    const std::array<std::uint32_t, 6> users{0u, 0u, 0x91b00000u, 0x40u, 0u, 0xff0u};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u, {}};
+    const std::array<std::uint32_t, 5> dispatch{0xc0031500u, 640u, 1u, 1u, 0x2045u};
+    using AgcDriver::Graphics::HtileDepthClearBytes_nid_no_patch;
+    Require(HtileDepthClearBytes_nid_no_patch(kernel, users, compute, dispatch, 0u) == 655360u, "the captured full HTILE dispatch coverage differs");
+    for (const auto groups : {1u, 32u, 63u, 64u, 639u, 641u}) {
+        auto changed = dispatch;
+        changed[1] = groups;
+        Require(HtileDepthClearBytes_nid_no_patch(kernel, users, compute, changed, 0u) == static_cast<std::uint64_t>(groups) * 1024u, "HTILE coverage did not follow the dispatch extent");
+    }
+    for (std::uint32_t field = 0u; field < 14u; ++field) {
+        auto changed = compute;
+        auto packet = dispatch;
+        auto data = users;
+        std::uint64_t indirect = 0u;
+        switch (field) {
+            case 0u: changed.numThreads[0] = 32u; break;
+            case 1u: changed.numThreads[1] = 2u; break;
+            case 2u: changed.groupIdEnable[0] = false; break;
+            case 3u: changed.threadIdComponentCount = 0u; break;
+            case 4u: changed.threadIdComponentCount = 4u; break;
+            case 5u: changed.partialThreads = {63u, 1u, 1u}; break;
+            case 6u: packet[1] = 0u; break;
+            case 7u: packet[2] = 2u; break;
+            case 8u: packet[3] = 2u; break;
+            case 9u: packet[4] &= ~1u; break;
+            case 10u: packet[4] |= 0x2u; break;
+            case 11u: packet[4] |= 0x20u; break;
+            case 12u: indirect = 0x10000u; break;
+            case 13u: data[2] = 0xffffff00u; data[3] = 0xffffffffu; break;
+        }
+        Require(HtileDepthClearBytes_nid_no_patch(kernel, data, changed, packet, indirect) == 0u, "malformed HTILE input or dispatch coverage was accepted");
+    }
+    Require(HtileDepthClearBytes_nid_no_patch(kernel, std::span(users).first(5u), compute, dispatch, 0u) == 0u, "a missing user SGPR was accepted");
+    const std::array<std::uint32_t, 7> shiftedUsers{0u, 0u, 0x91b00000u, 0x40u, 0u, 0xff0u, 0u};
+    Require(HtileDepthClearBytes_nid_no_patch(kernel, shiftedUsers, compute, dispatch, 0u) == 0u, "a shifted group SGPR was accepted");
+    Require(HtileDepthClearBytes_nid_no_patch(other, users, compute, dispatch, 0u) == 0u, "another kernel acquired HTILE coverage");
+    auto additional = compute;
+    additional.groupIdEnable[1] = additional.groupIdEnable[2] = additional.tgSizeEnable = true;
+    additional.threadIdComponentCount = 3u;
+    additional.ldsSizeDwords = 128u;
+    additional.scratchDwords = 1u;
+    auto wave32 = dispatch;
+    wave32[4] |= 0x8000u;
+    Require(HtileDepthClearBytes_nid_no_patch(kernel, users, additional, wave32, 0u) == 655360u, "unused shader inputs or wave size changed the kernel's linear coverage");
+}
+
+void constantFillTests() {
+    using AgcDriver::DriverDetail::ConstantFillKernel;
+    using AgcDriver::DriverDetail::MatchConstantFill;
+    const std::array<std::uint32_t, 6> users{0u, 0u, 0x819f4000u, 0x40u, 0x86ff0u, 0u};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u, {}};
+    const std::array<std::uint32_t, 5> packet{0xc0031502u, 540u, 1u, 1u, 0x2047u};
+    const auto fill = MatchConstantFill(ConstantFillKernel, users, compute, packet);
+    Require(fill.has_value() && fill->address == 0x40819f4000ull && fill->bytes == 552960u && fill->value == 0u, "constant metadata fill coverage differs from its inputs");
+    for (const auto groups : {1u, 2u, 63u, 64u, 80u, 539u, 540u, 541u, 641u}) {
+        auto changed = packet;
+        changed[1] = groups;
+        const auto range = MatchConstantFill(ConstantFillKernel, users, compute, changed);
+        Require(range.has_value() && range->bytes == std::min<std::uint64_t>(static_cast<std::uint64_t>(groups) * 1024u, 552960u), "constant fill ignored dispatch count or maximum offset");
+    }
+    auto cmask = users;
+    cmask[2] = 0x819e0000u;
+    cmask[4] = 0x13ff0u;
+    cmask[5] = 0xccccccccu;
+    const auto collapsed = MatchConstantFill(ConstantFillKernel, cmask, compute, packet);
+    Require(collapsed.has_value() && collapsed->bytes == 81920u && collapsed->value == 0xccccccccu, "constant CMASK fill clipped or replicated the wrong value");
+    for (std::uint32_t field = 0u; field < 15u; ++field) {
+        auto stage = compute;
+        auto words = users;
+        auto dispatch = packet;
+        switch (field) {
+            case 0u: stage.numThreads[0] = 32u; break;
+            case 1u: stage.numThreads[1] = 2u; break;
+            case 2u: stage.groupIdEnable[0] = false; break;
+            case 3u: stage.threadIdComponentCount = 0u; break;
+            case 4u: stage.threadIdComponentCount = 4u; break;
+            case 5u: stage.partialThreads = {34559u, 1u, 1u}; break;
+            case 6u: dispatch[1] = 0u; break;
+            case 7u: dispatch[2] = 2u; break;
+            case 8u: dispatch[3] = 2u; break;
+            case 9u: dispatch[4] |= 0x20u; break;
+            case 10u: dispatch[4] &= ~1u; break;
+            case 11u: ++words[4]; break;
+            case 12u: ++words[2]; break;
+            case 13u: words[2] = words[3] = 0u; break;
+            case 14u: words[2] = 0xfffffff0u; words[3] = 0xffffffffu; break;
+        }
+        Require(!MatchConstantFill(ConstantFillKernel, words, stage, dispatch), "unsupported constant fill inputs were accepted");
+    }
+    auto other = ConstantFillKernel;
+    other[7] ^= 1u;
+    Require(!MatchConstantFill(other, users, compute, packet) && !MatchConstantFill(std::span(ConstantFillKernel).first(10u), users, compute, packet), "a changed or truncated constant fill kernel was accepted");
+    Require(!MatchConstantFill(ConstantFillKernel, std::span(users).first(5u), compute, packet) && !MatchConstantFill(ConstantFillKernel, users, compute, std::span(packet).first(4u)), "short constant fill inputs were accepted");
 }
 
 void memoryValueFillTests() {
@@ -2001,35 +2122,14 @@ void multisampleTests() {
         auto queue = makeState();
         queue.context[0x2f8] = 0x00100001;
         queue.context[0x292] = 3;
-        queue.context[0x3b8] = 0x0dc00000u;
         for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0xcc44;
         queue.context[0x31d] = 0x9000;
+        queue.context[0x321] = 0;
+        queue.context[0x3b8] |= (0x18u << 19u) | 0x4000000u;
         queue.context[0x1b3] = 2;
         queue.context[0x1b4] = 2;
         return queue;
     };
-    for (const auto log2 : {1u, 2u, 3u}) {
-        for (const auto mode : {1u, 5u}) {
-            auto rejected = makeState();
-            rejected.context[0x31d] = (log2 << 12u) | (log2 << 15u);
-            rejected.context[0x31c] |= 0x10000000u;
-            rejected.context[0x202] = 0xcc0000u | (mode << 4u);
-            rejected.context[0x3b0] = 0x003fc007u;
-            rejected.context[0x3b8] = 0x4ec0001bu;
-            rejected.context[0x31b] = 0x00002000u;
-            rejected.context[0x31e] = 0x00000050u;
-            const auto reason = "slot 0, samples " + std::to_string(1u << log2) + ", CB_COLOR_INFO 0x10028028, CB_COLOR_CONTROL 0x00cc00" + (mode == 1u ? "10" : "50") + ", CB_COLOR_ATTRIB2 0x003fc007, CB_COLOR_ATTRIB3 0x4ec0001b, CB_COLOR_VIEW 0x00002000, CB_DCC_CONTROL 0x00000050";
-            expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(rejected.context, 0); }, reason);
-        }
-    }
-    auto withoutControl = makeState();
-    withoutControl.context[0x31d] = 0x1b000u;
-    withoutControl.context[0x31c] |= 0x10000000u;
-    withoutControl.context.erase(0x202);
-    for (const auto key : {0x3b0u, 0x3b8u, 0x31bu, 0x31eu}) withoutControl.context.erase(key);
-    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(withoutControl.context, 0); }, "slot 0, samples 8, CB_COLOR_INFO 0x10028028, CB_COLOR_CONTROL absent, CB_COLOR_ATTRIB2 absent, CB_COLOR_ATTRIB3 absent, CB_COLOR_VIEW absent, CB_DCC_CONTROL absent");
-    withoutControl.context[0x31e] = 0;
-    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(withoutControl.context, 0); }, "CB_DCC_CONTROL 0x00000000");
     const auto cmaskAddress = reinterpret_cast<std::uintptr_t>(cmaskMemory.data());
     const auto setCmaskAddress = [&](auto& target, std::uint32_t slot = 0u) {
         const auto stride = slot * 0xfu;
@@ -2037,6 +2137,37 @@ void multisampleTests() {
         target.context[0x398 + slot] = static_cast<std::uint32_t>(cmaskAddress >> 40u);
     };
     auto queue = multisampled();
+    auto dccQueue = queue;
+    const auto multisampleAddress = (reinterpret_cast<std::uintptr_t>(multisampleColorMemory.data()) + 65535u) & ~std::uintptr_t{65535u};
+    dccQueue.context[0x318] = static_cast<std::uint32_t>(multisampleAddress >> 8u);
+    dccQueue.context[0x390] = static_cast<std::uint32_t>(multisampleAddress >> 40u);
+    dccQueue.context[0x3b8] = (dccQueue.context[0x3b8] & ~(31u << 14u)) | (27u << 14u) | (1u << 30u);
+    dccQueue.context[0x31c] |= 0x10000000u;
+    dccQueue.context[0x31e] = 0x100038u;
+    dccQueue.context[0x325] = 0x1234;
+    std::vector<AgcDriver::Graphics::RegisterRead> dccReads;
+    AgcDriver::Graphics::RegisterReadLog() = &dccReads;
+    const auto dccColor = DecodeState(dccQueue).colors.front();
+    AgcDriver::Graphics::RegisterReadLog() = nullptr;
+    Require(dccColor.samples == 2u && dccColor.bytes == 65536u && dccColor.address == multisampleAddress && dccColor.dccAddress == 0x123400u && dccColor.dccControl == 0x100038u && dccColor.dccPipeAligned, "multisampled DCC target state did not decode its footprint or metadata fields");
+    for (const auto log2 : {1u, 2u, 3u}) {
+        for (const auto mode : {1u, 5u}) {
+            auto encoded = dccQueue;
+            encoded.context[0x31d] = (log2 << 12u) | (log2 << 15u);
+            encoded.context[0x202] = 0xcc0000u | (mode << 4u);
+            const auto decoded = AgcDriver::Graphics::DecodeColorBuffer(encoded.context, 0);
+            Require(decoded.bytes <= multisampleColorMemory.size() - (multisampleAddress - reinterpret_cast<std::uintptr_t>(multisampleColorMemory.data())), "the aligned multisampled DCC fixture exceeds its writable allocation");
+            Require(decoded.samples == (1u << log2) && decoded.dccAddress == dccColor.dccAddress && decoded.dccControl == dccColor.dccControl && decoded.dccPipeAligned, "DCC target decoding lost its samples or metadata when the color-control mode changed");
+        }
+    }
+    auto withoutControl = dccQueue;
+    withoutControl.context.erase(0x31e);
+    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(withoutControl.context, 0); }, "missing register in context bank at DWORD 0x31e");
+    withoutControl.context[0x31e] = 0u;
+    Require(AgcDriver::Graphics::DecodeColorBuffer(withoutControl.context, 0).dccControl == 0u, "a zero DCC control register did not decode as zero");
+    for (const auto read : dccReads) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a multisampled DCC target register");
+    dccQueue.context[0x31e] |= 1u << 10u;
+    expectFailure([&] { DecodeState(dccQueue); }, "lossy modes");
     auto state = DecodeState(queue);
     Require(state.samples == 2 && state.colors.size() == 1 && state.colors[0].samples == 2 && state.colors[0].cmaskAddress == 0, "2x multisampling did not decode");
     const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
@@ -2179,6 +2310,46 @@ void multisampleTests() {
         expectFailure([&] { DecodeState(queue); }, "coverage conversion or nonstandard multisampling");
         Require(AgcDriver::Graphics::DrawRejection(queue, false).find("coverage conversion or nonstandard multisampling") != std::string::npos, "covered-centroid handling admitted unrelated AA bits");
     }
+    for (const auto extent : {VkExtent2D{5u, 3u}, VkExtent2D{129u, 67u}, VkExtent2D{3840u, 2160u}}) {
+        for (const auto format : {1u, 3u}) {
+            for (const auto layer : {0u, 1u, 3u}) {
+                auto depthQueue = multisampled();
+                depthQueue.context[0x2f8] = 0x00300003u;
+                depthQueue.context[0x31d] = 0x1b000u;
+                for (std::uint32_t pixel = 0u; pixel < 4u; ++pixel) {
+                    depthQueue.context[0x2fe + pixel * 4u] = 0xbd153fd1u;
+                    depthQueue.context[0x2ff + pixel * 4u] = 0x9773f95bu;
+                }
+                depthQueue.context[0x000] = 0x20u;
+                depthQueue.context[0x002] = layer | (layer << 13u);
+                depthQueue.context[0x007] = (extent.width - 1u) | ((extent.height - 1u) << 16u);
+                depthQueue.context[0x00a] = depthQueue.context[0x00b] = 0u;
+                depthQueue.context[0x010] = 0x2290098cu | format;
+                depthQueue.context[0x011] = 0x20000181u;
+                depthQueue.context[0x012] = depthQueue.context[0x014] = 0x400000u;
+                depthQueue.context[0x013] = depthQueue.context[0x015] = 0x800000u;
+                depthQueue.context[0x200] = 2u;
+                depthQueue.context[0x2af] = 0x40002u;
+                const auto depthState = DecodeState(depthQueue);
+                Require(depthState.depth && depthState.depth->samples == 8u, "multisample depth slice lost its sample count");
+                Require(depthState.depth->address == 0x40000000ull + layer * AgcDriver::Graphics::DepthPlaneBytes_nid_no_patch(extent, format == 1u ? 2u : 4u, 8u), "multisample depth array slice uses a single-sample stride");
+                Require(depthState.depth->stencilAddress == 0x80000000ull + layer * AgcDriver::Graphics::DepthPlaneBytes_nid_no_patch(extent, 1u, 8u), "multisample stencil array slice uses a single-sample stride");
+                Require(depthState.depth->depthSwizzle == 24u && depthState.depth->pipeBankXor == 0u && depthState.depth->firstSlice == layer && depthState.depth->lastSlice == layer && depthState.depth->iterate256 && depthState.depth->htilePipeAligned && depthState.depth->htileVrsEncoding == 0u && AgcDriver::Graphics::DrawKeyCovers({AgcDriver::Graphics::RegisterBank::Context, 0x2af}), "multisample depth identity or HTILE draw-key coverage was lost");
+                auto xorQueue = depthQueue;
+                xorQueue.context[0x012] |= 0x80u;
+                xorQueue.context[0x014] |= 0x80u;
+                xorQueue.context[0x2af] |= 2u << 19u;
+                const auto xorDepth = DecodeState(xorQueue).depth;
+                Require(xorDepth && xorDepth->address == depthState.depth->address && xorDepth->pipeBankXor == 0x8000u && xorDepth->htileVrsEncoding == 2u, "multisample depth XOR or VRS encoding did not survive decode");
+                auto unsupported = depthQueue;
+                unsupported.context[0x010] &= ~(31u << 4u);
+                expectFailure([&] { DecodeState(unsupported); }, "64KB_Z_X");
+                unsupported = depthQueue;
+                unsupported.context[0x011] &= ~(31u << 4u);
+                expectFailure([&] { DecodeState(unsupported); }, "64KB_Z_X");
+            }
+        }
+    }
     queue = multisampled();
     queue.context[0x31d] = 0x1000;
     expectFailure([&] { DecodeState(queue); }, "fewer fragments than samples");
@@ -2257,6 +2428,54 @@ void multisampleTests() {
     queue.context[0x0] = 0;
     queue.context[0x202] = 0xcc0020;
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "multisampled color target");
+
+    for (const auto log2 : {1u, 2u, 3u}) {
+        queue = multisampled();
+        queue.context[0x2f8] = (log2 << 20u) | 0xe000u | log2;
+        queue.context[0x31d] = (log2 << 12u) | (log2 << 15u);
+        const auto word0 = log2 == 1u ? 0x0000cc44u : log2 == 2u ? 0x622ae6aeu : 0xbd153fd1u;
+        for (std::uint32_t pixel = 0u; pixel < 4u; ++pixel) {
+            queue.context[0x2fe + pixel * 4u] = word0;
+            queue.context[0x2ff + pixel * 4u] = log2 == 3u ? 0x9773f95bu : 0u;
+        }
+        std::vector<AgcDriver::Graphics::RegisterRead> sampleReads;
+        AgcDriver::Graphics::RegisterReadLog() = &sampleReads;
+        const auto standard = DecodeState(queue);
+        AgcDriver::Graphics::RegisterReadLog() = nullptr;
+        Require(standard.samples == (1u << log2) && standard.colors[0].samples == standard.samples, "independent standard sample register pattern did not decode");
+        for (const auto read : sampleReads) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a standard sample location register");
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "standard MSAA pattern was refused by the precheck");
+        if (log2 == 3u) {
+            queue.context[0x2ff] = 0x8773f95bu;
+            expectFailure([&] { DecodeState(queue); }, "nonstandard sample locations");
+            queue.context[0x2ff] = 0x9773f95bu;
+        }
+        queue.context[0x2f8] |= 0x20000000u;
+        sampleReads.clear();
+        AgcDriver::Graphics::RegisterReadLog() = &sampleReads;
+        const auto coveredCenter = DecodeState(queue);
+        AgcDriver::Graphics::RegisterReadLog() = nullptr;
+        Require(coveredCenter.samples == (1u << log2), "covered-centroid mode changed the sample count without centroid inputs");
+        for (const auto read : sampleReads) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a covered-centroid register");
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "covered-centroid mode without centroid inputs was refused");
+        for (const auto centroid : {4u, 64u}) {
+            queue.context[0x1b3] = 2u | centroid;
+            queue.context[0x1b4] = 2u | centroid;
+            expectFailure([&] { DecodeState(queue); }, "COVERED_CENTROID_IS_CENTER with active or unspecified centroid inputs");
+            Require(AgcDriver::Graphics::DrawRejection(queue, false).find("COVERED_CENTROID_IS_CENTER with active or unspecified centroid inputs") != std::string::npos, "the precheck accepted active covered-centroid interpolation");
+            queue.context[0x1b4] = 2u;
+            Require(DecodeState(queue).samples == (1u << log2), "an unaddressed centroid input changed covered-centroid mode");
+            queue.context[0x1b3] = 2u;
+            queue.context[0x1b4] = 2u | centroid;
+            Require(DecodeState(queue).samples == (1u << log2), "a disabled centroid input changed covered-centroid mode");
+        }
+        queue.context[0x1b3] = 2u;
+        queue.context[0x1b4] = 2u;
+        queue.context[0x2f8] |= 0x10u;
+        expectFailure([&] { DecodeState(queue); }, "coverage conversion or nonstandard multisampling");
+    }
+
+    expectFailure([&] { AgcDriver::Graphics::MultisampleTargetView({}, {}); }, "multisample target requires a device, format queries and a detiler");
 
     using AgcDriver::Graphics::DccKeys;
     using AgcDriver::Graphics::MultisampledCmask;
@@ -2478,6 +2697,7 @@ void AlphaToCoverageTests() {
     dithered.context[0x2f8] = 0x0030e003;
     dithered.context[0x292] = 3;
     dithered.context[0x31d] = 0x1b000;
+    dithered.context[0x321] = 0;
     dithered.context[0x1b3] = 2;
     dithered.context[0x1b4] = 2;
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
@@ -5712,6 +5932,7 @@ int main(int argc, char** argv) {
         DepthStencilTests();
         OneDimensionalColorTests();
         htileDepthClearTests();
+        constantFillTests();
         memoryValueFillTests();
         ZExportTests();
         unorm10_11_11TargetTests();
