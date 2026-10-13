@@ -1064,6 +1064,14 @@ void CheckDepthRetirement(Context context, VkFormat format, std::uint32_t fragme
     const auto depthBytes = static_cast<std::size_t>(DepthPlaneBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
     Require(depthBytes == 65536u, "depth retirement fixture has unexpected plane geometry");
     TargetMemory memory(3u * 65536u);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory.Data(), 3u * 65536u, true, true, true);
+    }
+    struct Registration {
+        void* address;
+        ~Registration() { GuestAllocations::Mutation mutation; mutation.Remove(address); }
+    } registration{memory.Data()};
     const auto metadataBytes = MultisampleHtileBytes_nid_no_patch(extent.width, extent.height, 1u);
     DepthTarget target{memory.Address(), 0u, extent, format, 0.0f, 0u, memory.Address() + 65536u, false, fragments};
     target.depthSwizzle = 24u;
