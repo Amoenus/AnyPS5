@@ -1029,6 +1029,16 @@ bool DepthSurfaceHolds(const Context& context, const GuestTextureResource& resou
     return true;
 }
 
+void RequireNoNativeDepthFeedback_nid_no_patch(const Context& context, const DepthTarget& target, std::span<const std::shared_ptr<Texture>> sampled) {
+    if (target.samples == 1u || sampled.empty()) return;
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::lock_guard lock(surfacesMutex());
+    for (const auto& surface : surfaces()) {
+        if (surface->context.device != context.device || !sameSurface(surface->target, target)) continue;
+        Require(std::none_of(sampled.begin(), sampled.end(), [&](const auto& texture) { return texture != nullptr && surface->Holds(texture.get()); }), "sampling a native multisampled depth target the draw attaches is not implemented");
+    }
+}
+
 VkImageAspectFlags HtileFillClears(std::uint32_t pattern, bool stencilInHtile) {
     VkImageAspectFlags cleared = (pattern & 0xfu) == 0 ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u;
     if (stencilInHtile && ((pattern >> 8u) & 0x3u) == 0) cleared |= VK_IMAGE_ASPECT_STENCIL_BIT;
