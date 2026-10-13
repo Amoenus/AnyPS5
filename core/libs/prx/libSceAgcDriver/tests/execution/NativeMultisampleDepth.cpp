@@ -855,6 +855,85 @@ void CheckRetirement(Context context, VkFormat format, std::uint32_t samples, st
     }
 }
 
+void CheckColorRetirement(Context context, bool remap) {
+    constexpr VkExtent2D extent{5u, 3u};
+    constexpr std::size_t bytes = 65536u;
+    constexpr std::uint32_t samples = 4u;
+    TargetMemory memory(bytes);
+    Recorder recorder(context);
+    recorder.Activate();
+    const auto cleanup = [&] {
+        recorder.Sync();
+        ClearCachedTextures(context.device);
+        ClearMultisampleTargets(context.device);
+        GuestAllocations::Mutation mutation;
+        if (mutation.Overlaps(memory.Data(), bytes)) mutation.Remove(memory.Data());
+    };
+    struct Cleanup {
+        decltype(cleanup)& action;
+        ~Cleanup() { action(); }
+    } cleanupScope{cleanup};
+    const auto add = [&] {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory.Data(), bytes, true, true, true);
+    };
+    add();
+    ColorTarget color{memory.Address(), extent, VK_FORMAT_R8G8B8A8_UNORM, extent.width * extent.height * 4u, 0u};
+    color.tileMode = ColorTileMode::RenderTarget;
+    color.samples = samples;
+    color.surfaceAddress = color.address;
+    const auto base = memory.Address() >> 8u;
+    const auto width = extent.width - 1u, height = extent.height - 1u;
+    const std::array<std::uint32_t, 8> words{static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 255u) | (56u << 20u) | ((width & 3u) << 30u), (width >> 2u) | (height << 14u), (14u << 28u) | (27u << 20u) | (2u << 16u) | 0xfacu, 0u, 2u << 4u, 0u, 0u};
+    const auto resource = DecodeTextureResource(words);
+    const auto firstView = MultisampleTargetView(context, color);
+    auto first = MultisampleTargetTexture(context, resource, VkComponentMapping{});
+    Require(first != nullptr, "color retirement has no initial sampled view");
+    recorder.Sync();
+    const auto count = extent.width * extent.height * samples;
+    Buffer output(context, (count + 2u) * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const auto check = [&](const Texture& texture, float expected) {
+        std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+        const Fetch fetch(context, texture, output, FetchShader(extent.width, extent.height, samples, false, true));
+        CommandBatch batch(context);
+        fetch.Run(batch.Handle(), count);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        output.Invalidate();
+        for (std::uint32_t i = 0u; i < count; ++i) {
+            std::array<float, 4> value{};
+            std::memcpy(value.data(), output.Bytes().data() + (i + 1u) * 16u, 16u);
+            const std::array<float, 4> wanted{expected, expected, expected, expected};
+            if (value != wanted) std::printf("Color retirement sample=%u expected=%g actual=(%g,%g,%g,%g)\n", i, expected, value[0], value[1], value[2], value[3]);
+            Require(value == wanted, "a color allocation remap sampled the retired image contents");
+        }
+        Require(std::all_of(output.Bytes().begin(), output.Bytes().begin() + 16u, [](std::byte value) { return value == std::byte{0xa5}; }) && std::all_of(output.Bytes().end() - 16u, output.Bytes().end(), [](std::byte value) { return value == std::byte{0xa5}; }), "color retirement fetch wrote beyond its output");
+    };
+    check(*first, 0.0f);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Remove(memory.Data());
+    }
+    RequireNoMultisampleTarget(memory.Address(), bytes, "a CPU read");
+    if (!remap) {
+        TargetRefuses([&] { MultisampleTargetTexture(context, resource, VkComponentMapping{}); }, "which no draw rendered to");
+        std::puts("Color sampled lookup refused the fully released owner");
+        return;
+    }
+    add();
+    const auto freshView = MultisampleTargetView(context, color);
+    Require(freshView != firstView, "color attachment acquisition reused the retired image");
+    NoteColorMetadataFill(memory.Address(), bytes, 0xffffffffu);
+    Require(MultisampleTargetView(context, color) == freshView, "the remapped color target was not reused");
+    auto fresh = MultisampleTargetTexture(context, resource, VkComponentMapping{});
+    recorder.Sync();
+    Require(fresh != nullptr, "the remapped color target has no sampled view");
+    check(*first, 0.0f);
+    check(*fresh, 1.0f);
+    Require(fresh->View() != first->View(), "color sampled lookup reused the retired image view");
+    std::puts("Color address reuse sampled fresh ones while the held retired view retained zeroes");
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -868,6 +947,10 @@ int main(int argc, char** argv) {
         }
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        if (argc == 2 && (std::string_view(argv[1]) == "--color-retirement" || std::string_view(argv[1]) == "--color-remap")) {
+            CheckColorRetirement(context, std::string_view(argv[1]) == "--color-remap");
+            return 0;
+        }
         Require(DepthSupported(context, VK_FORMAT_D32_SFLOAT, 4u), "the native depth regression requires sampled D32 with four samples");
         Require(argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--retirement"), "invalid native depth fixture arguments");
         if (argc == 2) {
