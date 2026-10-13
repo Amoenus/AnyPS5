@@ -153,6 +153,8 @@ public:
 
     bool ReadBool() { return ReadU8() != 0u; }
 
+    std::uint64_t RemainingBytes() const { return m_data.size() - m_offset; }
+
     std::uint32_t ReadU32() {
         std::uint32_t value = 0u;
         for (std::uint32_t i = 0; i < 4u; i++) {
@@ -806,7 +808,17 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     if (version >= 17u) result.request.target.registrationModules = reader.ReadBool();
     if (version >= 17u) result.request.target.registrationWordLimit = reader.ReadU32();
     if (version >= 18u) result.request.target.vertexSubgroups = reader.ReadBool();
-    if (version >= 21u) result.request.target.float16DenormPreserve = reader.ReadBool();
+    if (version == 21u) {
+        const auto remaining = reader.RemainingBytes();
+        if (remaining > 1u) throw std::runtime_error("RequestSerializer: invalid version 21 target trailer");
+        if (remaining == 1u) {
+            const auto value = reader.ReadU8();
+            if (value > 1u) throw std::runtime_error("RequestSerializer: invalid version 21 target boolean");
+            result.request.target.float16DenormPreserve = value != 0u;
+        }
+    } else if (version >= 22u) {
+        result.request.target.float16DenormPreserve = reader.ReadBool();
+    }
     return result;
 }
 
