@@ -386,7 +386,7 @@ ShaderPixelStageInfo readPixelInfo(Reader& reader, std::uint32_t version) {
     if (version >= 16u) info.alphaToCoverage = reader.ReadBool();
     if (version >= 17u) info.stencilRefExportEnable = reader.ReadBool();
     if (version >= 19u) info.rasterPrimitive = readRasterPrimitive(reader);
-    if (version >= 20u) info.ditheredAlphaToCoverage = reader.ReadBool();
+    if (version >= 21u) info.ditheredAlphaToCoverage = reader.ReadBool();
     if (version < 5u) {
         const auto input = [](PixelInput value, bool present) { return present ? PixelInputBit(value) : 0u; };
         info.inputAddr = input(PixelInput::PerspectiveSample, info.hasPerspectiveCenterVgpr && inputAddrOrCenterVgpr == 2u) | input(PixelInput::PerspectiveCenter, info.hasPerspectiveCenterVgpr) |
