@@ -128,6 +128,7 @@ public:
         Require(cmask.Refusal().empty(), cmask.Refusal());
         Require(cmask.Keys() != DccKeys::Clear0000, "sampling a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
         Require(Recorder::Active() != nullptr, "a multisampled color target is only sampled by recorded draws and dispatches");
+        ApplyFastClear(target);
         recordCommands(context, [&](VkCommandBuffer commands, Recorder*) {
             RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
             Recorder::CountBarriers(Recorder::CommandClass::Draw, 1);
