@@ -2032,11 +2032,11 @@ void verifyVertexInfoVersion19() {
     while (offset < plain.size() && plain[offset] == flagged[offset]) ++offset;
     require(offset + 4u <= plain.size() && flagged[offset] == 0xefu && flagged[offset + 1u] == 0xcdu && flagged[offset + 2u] == 0xabu && flagged[offset + 3u] == 0x89u, "PA_CL_VS_OUT_CNTL is not the four bytes the version 20 vertex info adds");
     require(std::equal(plain.begin() + offset + 4u, plain.end(), flagged.begin() + offset + 4u), "PA_CL_VS_OUT_CNTL moved the fields after it");
-    auto version20 = flagged;
-    version20[4] = 20u;
-    const auto replay20 = serializer.Deserialize(encodeBase64(version20));
-    require(replay20.request.context.vertex.has_value() && replay20.request.context.vertex->paClVsOutCntl == 0x89abcdefu, "a version 20 vertex info lost its position export layout");
-    require(serializer.Serialize(replay20.request) == marked, "a version 20 vertex info misread the fields after its position export layout");
+    auto version20Vertex = flagged;
+    version20Vertex[4] = 20u;
+    const auto replay20Vertex = serializer.Deserialize(encodeBase64(version20Vertex));
+    require(replay20Vertex.request.context.vertex.has_value() && replay20Vertex.request.context.vertex->paClVsOutCntl == 0x89abcdefu, "a main version20 request lost PA_CL_VS_OUT_CNTL");
+    require(serializer.Serialize(replay20Vertex.request) == marked, "a main version20 vertex request misread trailing fields");
     vertex.context.vertex->paClVsOutCntl = (1u << 18u) | (1u << 21u) | 0xfu;
     const auto layered = serializer.Deserialize(serializer.Serialize(vertex));
     require(layered.request.context.vertex.has_value() && layered.request.context.vertex->paClVsOutCntl == vertex.context.vertex->paClVsOutCntl, "a layered vertex info lost its clip distances or render target index");
@@ -2054,11 +2054,22 @@ void verifyVertexInfoVersion19() {
     pixel.context.pixel = ShaderPixelStageInfo{};
     pixel.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     const auto encodedPixel = serializer.Serialize(pixel);
-    auto legacyPixel = decodeBase64(encodedPixel);
-    legacyPixel[4] = 19u;
-    const auto replayPixel = serializer.Deserialize(encodeBase64(legacyPixel));
-    require(replayPixel.request.context.pixel.has_value() && replayPixel.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle, "a main version 19 request lost its pixel primitive class");
-    require(serializer.Serialize(replayPixel.request) == encodedPixel, "a main version 19 request misread the fields after its pixel primitive class");
+    const auto plainPixel = decodeBase64(encodedPixel);
+    pixel.context.pixel->ditheredAlphaToCoverage = true;
+    const auto ditheredPixel = decodeBase64(serializer.Serialize(pixel));
+    require(plainPixel.size() == ditheredPixel.size(), "the pixel dither mode changed request size");
+    std::size_t ditherOffset = 0;
+    while (ditherOffset < plainPixel.size() && plainPixel[ditherOffset] == ditheredPixel[ditherOffset]) ++ditherOffset;
+    require(ditherOffset < plainPixel.size() && plainPixel[ditherOffset] == 0u && ditheredPixel[ditherOffset] == 1u, "the pixel dither mode did not occupy one byte");
+    require(std::equal(plainPixel.begin() + ditherOffset + 1u, plainPixel.end(), ditheredPixel.begin() + ditherOffset + 1u), "the pixel dither mode changed trailing fields");
+    auto legacyPixel = plainPixel;
+    legacyPixel.erase(legacyPixel.begin() + ditherOffset);
+    for (const auto version : {19u, 20u}) {
+        legacyPixel[4] = static_cast<std::uint8_t>(version);
+        const auto replayPixel = serializer.Deserialize(encodeBase64(legacyPixel));
+        require(replayPixel.request.context.pixel.has_value() && replayPixel.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && !replayPixel.request.context.pixel->ditheredAlphaToCoverage, "a main version19/20 request lost its pixel primitive or acquired dithering");
+        require(serializer.Serialize(replayPixel.request) == encodedPixel, "a main version19/20 request misread trailing pixel fields");
+    }
 }
 
 void verifyLegacyPixelRequests() {
