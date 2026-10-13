@@ -214,7 +214,13 @@ int main() {
                 rejected = std::string_view(error.what()) == "RequestSerializer: truncated data";
             }
             Require(rejected);
-            if (!fixture.pixel) continue;
+            if (!fixture.pixel) {
+                auto vertex23 = bytes;
+                vertex23[4] = 23u;
+                const auto vertexReplay = serializer.Deserialize(EncodeBase64(vertex23));
+                Require(serializer.Serialize(vertexReplay.request) == EncodeBase64(upgraded));
+                continue;
+            }
             for (const bool layer : {false, true}) {
                 auto layered = bytes;
                 layered[4] = 23u;
@@ -223,6 +229,15 @@ int main() {
                 Require(layerReplay.request.context.pixel->layerExported == layer && !layerReplay.request.context.pixel->ditheredAlphaToCoverage);
                 Require(layerReplay.request.target.float16DenormPreserve == preserve && layerReplay.request.graphics->tessellation.has_value() == fixture.tessellation);
                 Require(!fixture.tessellation || layerReplay.request.graphics->tessellation->patchesPerGroup == 63u);
+                auto truncatedLayer = layered;
+                truncatedLayer.pop_back();
+                bool layerRejected = false;
+                try {
+                    static_cast<void>(serializer.Deserialize(EncodeBase64(truncatedLayer)));
+                } catch (const std::runtime_error& error) {
+                    layerRejected = std::string_view(error.what()) == "RequestSerializer: truncated data";
+                }
+                Require(layerRejected);
                 layered[4] = 24u;
                 layered.insert(layered.begin() + 259u, 0u);
                 Require(serializer.Serialize(layerReplay.request) == EncodeBase64(layered));
