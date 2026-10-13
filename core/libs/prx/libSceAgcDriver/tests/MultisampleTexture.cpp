@@ -29,6 +29,7 @@
 #include <limits>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
@@ -1058,6 +1059,115 @@ bool DepthSupported(const Context& context, VkFormat format, std::uint32_t fragm
     return result == VK_SUCCESS && (properties.sampleCounts & fragments) != 0u && (context.limits.framebufferDepthSampleCounts & fragments) != 0u;
 }
 
+void CheckDepthRetirement(Context context, VkFormat format, std::uint32_t fragments, std::uint32_t releaseMode) {
+    const VkExtent2D extent{5u, 3u};
+    const auto depthBytes = static_cast<std::size_t>(DepthPlaneBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
+    Require(depthBytes == 65536u, "depth retirement fixture has unexpected plane geometry");
+    TargetMemory memory(3u * 65536u);
+    const auto metadataBytes = MultisampleHtileBytes_nid_no_patch(extent.width, extent.height, 1u);
+    DepthTarget target{memory.Address(), 0u, extent, format, 0.0f, 0u, memory.Address() + 65536u, false, fragments};
+    target.depthSwizzle = 24u;
+    target.iterate256 = target.htilePipeAligned = true;
+    Recorder recorder(context);
+    recorder.Activate();
+    struct Cleanup {
+        Recorder& recorder;
+        Context context;
+        ~Cleanup() { recorder.Sync(); ClearCachedTextures(context.device); ClearDepthSurfaces(context.device); }
+    } cleanup{recorder, context};
+    std::memset(memory.Data() + 65536u, 0, metadataBytes);
+    const auto oldView = DepthSurfaceView(context, target);
+    auto oldTexture = CachedSampledTexture(context, DepthSampleWords(target));
+    Require(oldView != VK_NULL_HANDLE && oldTexture != nullptr, "initial native depth retirement target was not created");
+    recorder.Sync();
+    ClearMultisampleTargets(context.device);
+    const auto retained = [&] {
+        for (const auto address : {target.address, target.htileAddress}) TargetRefuses([&] { RequireNoResidentDepthRead_nid_no_patch(address, 1u); }, "sample-preserving guest publication");
+    };
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Protect(memory.Data(), 3u * 65536u, true, true, true, [] {});
+    }
+    retained();
+    bool failed = false;
+    bool attempted = false;
+    try {
+        GuestAllocations::Mutation mutation;
+        mutation.Unmap(memory.Data(), 3u * 65536u, [&](const void*, std::size_t, const void*, bool) { attempted = true; throw std::runtime_error("depth host unmap failed"); });
+    } catch (const std::runtime_error&) { failed = true; }
+    Require(failed && attempted, "failed depth host unmap did not throw from the callback");
+    retained();
+    if (releaseMode == 2u) {
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Unmap(memory.Data(), depthBytes / 2u, [](const void*, std::size_t, const void*, bool) {});
+        }
+        retained();
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Unmap(memory.Data() + depthBytes / 2u, depthBytes / 2u, [](const void*, std::size_t, const void*, bool) {});
+        }
+        retained();
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Unmap(memory.Data() + depthBytes, 3u * 65536u - depthBytes, [](const void*, std::size_t, const void*, bool) {});
+        }
+    } else if (releaseMode == 3u) {
+        for (const auto [offset, bytes] : std::array<std::pair<std::size_t, std::size_t>, 3>{{
+                 {depthBytes / 4u, depthBytes / 2u}, {0u, depthBytes / 4u}, {3u * depthBytes / 4u, depthBytes / 4u}}}) {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Unmap(memory.Data() + offset, bytes, [](const void*, std::size_t, const void*, bool) {});
+            }
+            retained();
+        }
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Unmap(memory.Data() + depthBytes, 3u * 65536u - depthBytes, [](const void*, std::size_t, const void*, bool) {});
+        }
+    } else {
+        GuestAllocations::Mutation mutation;
+        if (releaseMode == 0u) mutation.Remove(memory.Data());
+        else mutation.Unmap(memory.Data(), 3u * 65536u, [](const void*, std::size_t, const void*, bool) {});
+    }
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory.Data(), 3u * 65536u, true, true, true);
+    }
+    std::array<std::byte, 1> probe{};
+    for (const auto address : {target.address, target.address + depthBytes - 1u, target.htileAddress, target.htileAddress + metadataBytes - 1u}) {
+        RequireNoResidentDepthRead_nid_no_patch(address, 1u);
+        Require(!DepthSurfaceGuestOverlap_nid_no_patch(context, address, 1u), "a retired native depth target still owns its allocation");
+        AgcDriver::GuestMemory::Read(address, probe);
+    }
+    const std::uint32_t one = 0xfffc00f0u;
+    for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(memory.Data() + 65536u + i * 4u, &one, 4u);
+    target.clearDepth = 1.0f;
+    const auto newView = DepthSurfaceView(context, target);
+    auto texture = CachedSampledTexture(context, DepthSampleWords(target));
+    Require(newView != VK_NULL_HANDLE && newView != oldView && texture != nullptr && texture != oldTexture, "remapped native depth reused its retired image or sampled view");
+    recorder.Sync();
+    const auto count = extent.width * extent.height * fragments;
+    Buffer output(context, (count + 2u) * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+    const Fetch fetch(context, *texture, output, FetchShader(extent.width, extent.height, fragments, false, true));
+    {
+        CommandBatch batch(context);
+        fetch.Run(batch.Handle(), count);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+    }
+    output.Invalidate();
+    for (std::uint32_t i = 0u; i < count; ++i) {
+        std::array<float, 4> value{};
+        std::memcpy(value.data(), output.Bytes().data() + (i + 1u) * 16u, 16u);
+        Require(value == std::array<float, 4>{1.0f, 0.0f, 0.0f, 1.0f}, "remapped native depth did not preserve its new clear samples");
+    }
+    Require(std::all_of(output.Bytes().begin(), output.Bytes().begin() + 16u, [](auto byte) { return byte == std::byte{0xa5}; }) && std::all_of(output.Bytes().end() - 16u, output.Bytes().end(), [](auto byte) { return byte == std::byte{0xa5}; }), "depth retirement sampled fetch overwrote output guards");
+    retained();
+    std::printf("Native depth retirement format=%u samples=%u release=%u: retained live/partial/failed/protected, recreated exact clear-one samples\n", static_cast<std::uint32_t>(format), fragments, releaseMode);
+}
+
 void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing = false, bool depthOnly = false) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(DepthPlaneBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
@@ -2074,6 +2184,16 @@ int main(int argc, char** argv) {
             }
             Require(checked != 0u && (unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr), "required native GPU snapshot configurations are unsupported");
             std::printf("Native GPU snapshots checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--depth-retirement") {
+            device->PrintDevice();
+            for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
+                for (const auto fragments : {2u, 4u, 8u}) {
+                    Require(DepthSupported(context, format, fragments), "native depth retirement fixture requires every depth configuration");
+                    for (std::uint32_t mode = 0u; mode < 4u; ++mode) CheckDepthRetirement(context, format, fragments, mode);
+                }
+            }
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--retirement") {

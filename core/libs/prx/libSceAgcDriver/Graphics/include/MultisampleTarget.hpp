@@ -5,11 +5,17 @@
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
+
+namespace AgcDriver::GuestMemory {
+struct UnchangedQuery;
+}
 
 namespace AgcDriver::Graphics {
 
@@ -40,6 +46,8 @@ std::shared_ptr<Texture> NativeMultisampleSnapshot_nid_no_patch(const Context& c
 void MarkMultisampleTargetDirty(const Context& context, const ColorTarget& target);
 void SynchronizeMultisampleTargetRead(std::uint64_t address, std::size_t bytes);
 void InstallResidentImageReadGuard_nid_no_patch();
+void GuardResidentDepthRanges_nid_no_patch(const Context& context, std::span<const GuestMemory::UnchangedQuery> ranges, const std::shared_ptr<std::atomic<bool>>& active);
+void ClearResidentDepthGuards_nid_no_patch(VkDevice device);
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
 void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
 void NoteNativeColorClear_nid_no_patch(std::uint64_t address, std::uint64_t bytes, std::uint32_t value, std::uint32_t mask);

@@ -434,6 +434,8 @@ struct GuardedRange {
     std::uint64_t bytes;
     std::uint32_t samples;
     std::shared_ptr<std::atomic<bool>> active;
+    bool depth;
+    std::vector<GuestMemory::UnchangedQuery> live;
 };
 
 std::shared_mutex& guardedMutex() {
@@ -456,14 +458,28 @@ void guardReads(std::uint64_t address, std::size_t bytes) {
 }
 
 void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
+    Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "resident image release range overflows");
+    const auto end = address + bytes;
     std::unique_lock lock(guardedMutex());
+    for (auto& range : guarded()) {
+        if (std::ranges::none_of(range.live, [&](const auto& part) { return address < part.address + part.bytes && part.address < end; })) continue;
+        std::vector<GuestMemory::UnchangedQuery> remaining;
+        remaining.reserve(range.live.size() + 1u);
+        for (const auto& part : range.live) {
+            const auto finish = part.address + part.bytes;
+            const auto first = std::max<std::uint64_t>(address, part.address);
+            const auto last = std::min<std::uint64_t>(end, finish);
+            if (first >= last) remaining.push_back(part);
+            else {
+                if (part.address < first) remaining.push_back({part.address, static_cast<std::size_t>(first - part.address), 0u});
+                if (last < finish) remaining.push_back({last, static_cast<std::size_t>(finish - last), 0u});
+            }
+        }
+        range.live = std::move(remaining);
+    }
     for (const auto& range : guarded()) {
         if (!range.active->load(std::memory_order_acquire)) continue;
-        const auto covered = [&](const auto& part) {
-            if (part.active != range.active) return true;
-            return part.address >= address && part.address - address <= bytes && part.bytes <= bytes - (part.address - address);
-        };
-        if (std::ranges::all_of(guarded(), covered)) range.active->store(false, std::memory_order_release);
+        if (std::ranges::all_of(guarded(), [&](const auto& part) { return part.active != range.active || part.live.empty(); })) range.active->store(false, std::memory_order_release);
     }
     std::erase_if(guarded(), [](const auto& range) { return !range.active->load(std::memory_order_acquire); });
     anyGuarded().store(!guarded().empty(), std::memory_order_release);
@@ -471,10 +487,9 @@ void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
 
 void guard(const Context& context, const MultisampleTarget& target) {
     std::unique_lock lock(guardedMutex());
-    for (const auto& range : target.Ranges()) guarded().push_back({context.device, range.address, range.bytes, target.target.samples, target.active});
+    for (const auto& range : target.Ranges()) guarded().push_back({context.device, range.address, range.bytes, target.target.samples, target.active, false, {{range.address, range.bytes, 0u}}});
     anyGuarded().store(true, std::memory_order_release);
     InstallResidentImageReadGuard_nid_no_patch();
-    GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(&retireUnmapped);
 }
 
 std::mutex& targetsMutex() {
@@ -506,6 +521,28 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
 void InstallResidentImageReadGuard_nid_no_patch() {
     static std::once_flag installed;
     std::call_once(installed, [] { GuestMemory::SetReadGuard(&guardReads); });
+    GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(&retireUnmapped);
+}
+
+void GuardResidentDepthRanges_nid_no_patch(const Context& context, std::span<const GuestMemory::UnchangedQuery> ranges, const std::shared_ptr<std::atomic<bool>>& active) {
+    std::unique_lock lock(guardedMutex());
+    for (const auto& range : ranges) guarded().push_back({context.device, range.address, range.bytes, 0u, active, true, {{range.address, range.bytes, 0u}}});
+    anyGuarded().store(true, std::memory_order_release);
+    InstallResidentImageReadGuard_nid_no_patch();
+}
+
+void ClearResidentDepthGuards_nid_no_patch(VkDevice device) {
+    std::unique_lock lock(guardedMutex());
+    std::erase_if(guarded(), [&](const auto& range) { return range.device == device && range.depth; });
+    anyGuarded().store(!guarded().empty(), std::memory_order_release);
+    if (guarded().empty()) GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(nullptr);
+}
+
+void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0u || !anyGuarded().load(std::memory_order_acquire)) return;
+    Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "native depth read range overflows");
+    std::shared_lock lock(guardedMutex());
+    for (const auto& range : guarded()) if (range.depth) Require(address >= range.address + range.bytes || range.address >= address + bytes, "sample-preserving guest publication of native multisample depth is not implemented");
 }
 
 void MultisampledCmask::NoteFill(std::uint64_t fillAddress, std::size_t fillBytes, std::uint32_t pattern) {
@@ -613,7 +650,7 @@ void SynchronizeMultisampleTargetRead(std::uint64_t address, std::size_t bytes) 
     Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "multisample read range overflows");
     {
         std::shared_lock lock(guardedMutex());
-        if (std::ranges::none_of(guarded(), [&](const auto& range) { return address < range.address + range.bytes && range.address < address + bytes; })) return;
+        if (std::ranges::none_of(guarded(), [&](const auto& range) { return !range.depth && address < range.address + range.bytes && range.address < address + bytes; })) return;
     }
     static thread_local bool publishing = false;
     Require(!publishing, "recursive multisample guest publication is not implemented");
@@ -659,7 +696,7 @@ void ClearMultisampleTargets(VkDevice device) {
     std::lock_guard lock(targetsMutex());
     std::erase_if(targets(), [&](const auto& target) { return target->context.device == device; });
     std::unique_lock guardLock(guardedMutex());
-    std::erase_if(guarded(), [&](const auto& range) { return range.device == device; });
+    std::erase_if(guarded(), [&](const auto& range) { return range.device == device && !range.depth; });
     anyGuarded().store(!guarded().empty(), std::memory_order_release);
     if (guarded().empty()) GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(nullptr);
 }
@@ -669,7 +706,7 @@ void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const 
     if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return;
     std::shared_lock lock(guardedMutex());
     for (const auto& range : guarded()) {
-        if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
+        if (range.depth || address >= range.address + range.bytes || range.address >= address + bytes) continue;
         char text[256];
         std::snprintf(text, sizeof(text), "AGC graphics: %s of 0x%llx+0x%zx overlaps multisampled color target 0x%llx+0x%llx (%u samples), whose samples are only on the host: guest access to it is not implemented", access, static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(range.address), static_cast<unsigned long long>(range.bytes), range.samples);
         throw std::runtime_error(text);
