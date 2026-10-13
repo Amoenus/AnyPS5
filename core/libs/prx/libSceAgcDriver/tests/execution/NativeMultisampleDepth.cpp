@@ -590,7 +590,7 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                     raster.Run(batch.Handle(), static_cast<float>(iteration) / 16.0f);
                     batch.SubmitAndWait();
                 }
-                NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes));
+                NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), static_cast<std::size_t>(metadataBytes));
                 AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, static_cast<std::size_t>(metadataBytes), [&] {
                     for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
                 });
