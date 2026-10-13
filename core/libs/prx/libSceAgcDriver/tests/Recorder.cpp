@@ -5236,7 +5236,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
     }, "storage image access to a multisampled texture", "multisampled storage access");
     for (const auto samples : {2u, 4u, 8u}) {
         if ((base.limits.framebufferColorSampleCounts & samples) == 0u) continue;
-        ClearMultisampleTargets(context.device);
+        clearTargets();
         target.extent = target.surfaceExtent = samples == 2u ? VkExtent2D{128u, 64u} : samples == 8u ? VkExtent2D{64u, 32u} : VkExtent2D{side, side};
         target.samples = samples;
         target.bytes = MultisampledColorBytes(target);
@@ -5245,7 +5245,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         readZero(address + target.bytes - texels.size(), [](auto source, auto& destination) { AgcDriver::GuestMemory::Read(source, destination); }, "a CPU read lost multisample tile padding");
         readZero(address + target.bytes, [](auto source, auto& destination) { AgcDriver::GuestMemory::Read(source, destination); }, "a resident guard blocked an unrelated range");
     }
-    ClearMultisampleTargets(context.device);
+    clearTargets();
     readZero(address + 256u, [](auto source, auto& destination) { AgcDriver::GuestMemory::Read(source, destination); }, "clearing resident targets left a stale read guard");
     std::cout << "Multisampled target guest publication and sampled access tests passed\n";
 }
