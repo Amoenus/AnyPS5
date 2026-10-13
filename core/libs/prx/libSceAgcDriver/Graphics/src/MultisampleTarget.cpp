@@ -1,5 +1,6 @@
 #include <shared_mutex>
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -231,10 +232,7 @@ void guard(const Context& context, const ColorTarget& target, const std::shared_
     std::unique_lock lock(guardedMutex());
     guarded().push_back({context.device, target.address, bytes, target.samples, active});
     anyGuarded().store(true, std::memory_order_release);
-    static std::once_flag installed;
-    std::call_once(installed, [] {
-        GuestMemory::SetReadGuard(&guardReads);
-    });
+    InstallResidentImageReadGuard_nid_no_patch();
     GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(&retireUnmapped);
 }
 
@@ -264,6 +262,11 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
     return created;
 }
 
+}
+
+void InstallResidentImageReadGuard_nid_no_patch() {
+    static std::once_flag installed;
+    std::call_once(installed, [] { GuestMemory::SetReadGuard(&guardReads); });
 }
 
 void MultisampledCmask::NoteFill(std::uint64_t fillAddress, std::size_t fillBytes, std::uint32_t pattern) {
@@ -434,6 +437,7 @@ void ClearMultisampleTargets(VkDevice device) {
 }
 
 void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const char* access) {
+    RequireNoResidentDepthRead_nid_no_patch(address, bytes);
     if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return;
     std::shared_lock lock(guardedMutex());
     for (const auto& range : guarded()) {
