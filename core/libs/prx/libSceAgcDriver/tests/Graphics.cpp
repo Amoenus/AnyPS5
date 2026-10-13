@@ -2008,6 +2008,21 @@ void multisampleTests() {
         queue.context[0x1b4] = 2;
         return queue;
     };
+    for (const auto log2 : {1u, 2u, 3u}) {
+        for (const auto mode : {1u, 5u}) {
+            auto rejected = makeState();
+            rejected.context[0x31d] = (log2 << 12u) | (log2 << 15u);
+            rejected.context[0x31c] |= 0x10000000u;
+            rejected.context[0x202] = 0xcc0000u | (mode << 4u);
+            const auto reason = "slot 0, samples " + std::to_string(1u << log2) + ", CB_COLOR_INFO 0x10028028, CB_COLOR_CONTROL 0x00cc00" + (mode == 1u ? "10" : "50");
+            expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(rejected.context, 0); }, reason);
+        }
+    }
+    auto withoutControl = makeState();
+    withoutControl.context[0x31d] = 0x1b000u;
+    withoutControl.context[0x31c] |= 0x10000000u;
+    withoutControl.context.erase(0x202);
+    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(withoutControl.context, 0); }, "slot 0, samples 8, CB_COLOR_INFO 0x10028028, CB_COLOR_CONTROL absent");
     const auto cmaskAddress = reinterpret_cast<std::uintptr_t>(cmaskMemory.data());
     const auto setCmaskAddress = [&](auto& target, std::uint32_t slot = 0u) {
         const auto stride = slot * 0xfu;

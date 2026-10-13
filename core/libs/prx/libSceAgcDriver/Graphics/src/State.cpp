@@ -1091,7 +1091,13 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     Require(color.samples <= 8u, "color targets with more than eight samples are unsupported");
     Require((1u << ((attrib >> 15u) & 3u)) == color.samples, "color targets with fewer fragments than samples (EQAA) are unsupported");
     const auto multisampleInfo = color.samples > 1 ? 0x0c006000u : 0u;
-    Require(color.samples == 1 || (info & 0x10000000u) == 0, "DCC over a multisampled color target is unsupported");
+    if (color.samples > 1 && (info & 0x10000000u) != 0) {
+        const auto control = find(cx, 0x202);
+        const auto controlText = control == cx.end() ? std::string("absent") : [&] { char text[16]; std::snprintf(text, sizeof(text), "0x%08x", control->second); return std::string(text); }();
+        char text[240];
+        std::snprintf(text, sizeof(text), "AGC graphics: DCC over a multisampled color target is unsupported (slot %u, samples %u, CB_COLOR_INFO 0x%08x, CB_COLOR_CONTROL %s)", slot, color.samples, info, controlText.c_str());
+        throw std::runtime_error(text);
+    }
     // ROUND_MODE (bit 18) only affects unorm rounding. With DCC_ENABLE (bit 28) the target is written
     if ((info & ~(0x00039f7cu | 0x00040000u | 0x10000000u | 0x00002000u | multisampleInfo)) != 0) throw std::runtime_error("AGC graphics: color compression, DCC, endian conversion, nonstandard rounding or color optimization is unsupported (CB_COLOR_INFO 0x" + [&] { char text[16]; std::snprintf(text, sizeof(text), "%08x", info); return std::string(text); }() + ")");
     Require((info & 0x8000u) != 0 || number == 7 || number == 4 || number == 5, "unclamped normalized color is unsupported");
