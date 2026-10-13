@@ -848,6 +848,7 @@ void CheckRetirement(Context context, VkFormat format, std::uint32_t samples, st
         for (std::uint32_t i = 0u; i < count; ++i) {
             std::array<float, 4> value{};
             std::memcpy(value.data(), output.Bytes().data() + (i + 1u) * 16u, 16u);
+            if (value != std::array<float, 4>{expected, expected, expected, 1.0f}) std::printf("Retirement sample format=%d samples=%u mode=%u index=%u expected=%g actual=(%g,%g,%g,%g)\n", format, samples, mode, i, expected, value[0], value[1], value[2], value[3]);
             Require(value == std::array<float, 4>{expected, expected, expected, 1.0f}, "retired or remapped depth image lost its exact contents");
         }
         Require(std::all_of(output.Bytes().begin(), output.Bytes().begin() + 16u, [](std::byte value) { return value == std::byte{0xa5}; }) && std::all_of(output.Bytes().end() - 16u, output.Bytes().end(), [](std::byte value) { return value == std::byte{0xa5}; }), "retirement fetch wrote beyond its output");
