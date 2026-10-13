@@ -44,6 +44,7 @@ extern "C" int* APS5_VABI __error_nid_postfix();
 namespace {
 
 constexpr int sceInvalidArgument = static_cast<int>(0x80020016u);
+constexpr int errnoNoSuchProcess = 3;
 constexpr int errnoNoChild = 10;
 constexpr int errnoBadAddress = 14;
 constexpr int errnoInvalidArgument = 22;
@@ -214,8 +215,9 @@ int APS5_VABI getpid_nid_postfix(void) {
 }
 
 int APS5_VABI getsid_nid_postfix(int pid) {
-    (void)pid;
-    NotImplemented_nid_no_patch("getsid: process sessions");
+    const int self = getpid_nid_postfix();
+    if (pid == 0 || pid == self) return self;
+    *__error_nid_postfix() = errnoNoSuchProcess;
     return -1;
 }
 

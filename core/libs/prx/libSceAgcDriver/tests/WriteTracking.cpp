@@ -15,6 +15,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -23,6 +24,9 @@ namespace {
 using namespace AgcDriver::GuestMemory;
 
 constexpr std::size_t Block = 65536;
+#ifdef _WIN32
+constexpr wchar_t HostHoleMode[] = L"--host-hole";
+#endif
 
 void Require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
@@ -211,28 +215,49 @@ void CheckPrivateMappingReuse() {
     GuestArena::GuestArenaRelease_nid_postfix(replacement, 3 * Block);
 }
 
-std::uint64_t ArenaHostHole() {
+std::uint64_t ChildHostHole() {
     std::uintptr_t arena = 0;
     std::size_t arenaBytes = 0;
     GuestArena::GuestArenaRange_nid_postfix(&arena, &arenaBytes);
-    for (auto cursor = arena; cursor < arena + arenaBytes;) {
-        MEMORY_BASIC_INFORMATION info{};
-        Require(VirtualQuery(reinterpret_cast<void*>(cursor), &info, sizeof(info)) == sizeof(info), "cannot enumerate arena host holes");
-        if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(cursor, 1)) return cursor;
-        const auto next = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
-        Require(next > cursor, "arena enumeration did not advance");
-        cursor = next;
+    return (arena + arenaBytes / 2) & ~(std::uint64_t{Block} - 1);
+}
+
+void CheckHostHoleInChild() {
+    std::array<wchar_t, 32768> executable{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    Require(length != 0 && length < executable.size(), "cannot name the test executable");
+    const std::wstring command = L"\"" + std::wstring(executable.data(), length) + L"\" " + HostHoleMode;
+    std::vector<wchar_t> commandLine(command.begin(), command.end());
+    commandLine.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION process{};
+    Require(CreateProcessW(executable.data(), commandLine.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup, &process) != 0, "cannot create the host-hole child");
+    const bool reserved = VirtualAllocEx(process.hProcess, reinterpret_cast<void*>(ChildHostHole()), Block, MEM_RESERVE, PAGE_NOACCESS) != nullptr;
+    const bool resumed = reserved && ResumeThread(process.hThread) != static_cast<DWORD>(-1);
+    const bool exited = resumed && WaitForSingleObject(process.hProcess, 60000) == WAIT_OBJECT_0;
+    if (!exited) {
+        TerminateProcess(process.hProcess, 1);
+        WaitForSingleObject(process.hProcess, INFINITE);
     }
-    return 0;
+    DWORD exitCode = 1;
+    const bool reported = GetExitCodeProcess(process.hProcess, &exitCode) != 0;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    Require(reserved, "cannot reserve a host range in the child's arena interval");
+    Require(resumed, "cannot resume the host-hole child");
+    Require(exited, "the host-hole child did not exit");
+    Require(reported && exitCode == 0, "the host-hole child failed");
 }
 
 void CheckHostHole() {
     constexpr std::size_t bytes = 64;
-    const auto hole = ArenaHostHole();
-    if (hole == 0) {
-        std::cout << "host-hole query checks skipped: the arena contains no host hole\n";
-        return;
-    }
+    const auto hole = ChildHostHole();
+    Require(GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(hole, bytes), "the range reserved before the arena is not an arena host region");
     const auto before = TrackerGeneration();
     Require(!Watched(hole, bytes), "an arena host hole reads as watched");
     Require(CollectWrites(hole, bytes) == 0 && CollectWritesUncached(hole, bytes) == 0, "an arena host hole was collected");
@@ -394,13 +419,19 @@ int main() {
             std::cout << "no write watching: skipped\n";
             return 77;
         }
+#ifdef _WIN32
+        if (std::wstring_view(GetCommandLineW()).ends_with(HostHoleMode)) {
+            CheckHostHole();
+            return 0;
+        }
+#endif
         CheckSharedBlock();
         CheckOwnStore();
         CheckUnwatch();
         CheckNewestStamp();
 #ifdef _WIN32
         CheckPrivateMappingReuse();
-        CheckHostHole();
+        CheckHostHoleInChild();
 #endif
         CheckVersionRanges();
         CheckCollectBoundaries();

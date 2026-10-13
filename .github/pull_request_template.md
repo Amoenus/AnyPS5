@@ -1,7 +1,7 @@
 ### What
 
 ### Tested
-<!-- OS, title or homebrew, what was checked. "Not tested" is a valid answer. -->
+<!-- OS, title or homebrew, what was checked. "Not tested" is a valid answer. A performance change: the summary lines of main and of this PR from the same machine and scene, with the traces attached, captured as the Performance report issue form describes. -->
 
 ### Checklist
 <!-- Rules behind each item: https://github.com/boykopovar/AnyPS5/blob/main/CONTRIBUTING.md -->

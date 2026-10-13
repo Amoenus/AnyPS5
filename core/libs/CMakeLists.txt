@@ -149,6 +149,24 @@ foreach(LIB_DIR ${LIBS_DIRS})
     endif()
 endforeach()
 
+if(APS5_ENABLE_TRACY)
+    set_target_properties(TracyClient PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
+            LIBRARY_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
+            ARCHIVE_OUTPUT_DIRECTORY ${IMPLIB_DIR}
+    )
+    set(TRACY_CLIENT_COPIED ${CMAKE_CURRENT_BINARY_DIR}/TracyClient.copied)
+    add_custom_command(
+            OUTPUT ${TRACY_CLIENT_COPIED}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${PATCHED_DIR}
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:TracyClient> ${PATCHED_DIR}
+            COMMAND ${CMAKE_COMMAND} -E touch ${TRACY_CLIENT_COPIED}
+            DEPENDS TracyClient
+            COMMENT "Copying the Tracy client next to the patched libraries"
+    )
+    list(APPEND PATCHED_OUTPUTS ${TRACY_CLIENT_COPIED})
+endif()
+
 add_custom_target(libs DEPENDS ${PATCHED_OUTPUTS})
 
 if(BUILD_TESTING)

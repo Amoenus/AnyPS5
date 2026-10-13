@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_PERFORMANCETIMER_HPP
 
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
+#include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -275,6 +276,7 @@ public:
     }
 
     void Finish() {
+        zone.End();
         if (frame == nullptr && trace == nullptr) return;
         const auto end = Clock::now();
         if (trace != nullptr) trace->Add(scope, nullptr, start, end);
@@ -307,6 +309,7 @@ private:
     FrameTiming* frame;
     TraceThread* trace;
     const char* scope;
+    [[no_unique_address]] TracyZone zone{scope};
     FrameTiming::Metric* total = nullptr;
     FrameTiming::Metric* tail = nullptr;
     Clock::time_point start{};

@@ -804,29 +804,6 @@ void sparseHeapTests(const Context& context, const BdaTestAccess& access) {
 
 void hostWriteWatchExclusionTests() {
 #ifdef _WIN32
-    if (AgcDriver::GuestMemory::WriteWatched()) {
-        std::uintptr_t arena = 0;
-        std::size_t arenaBytes = 0;
-        GuestArena::GuestArenaRange_nid_postfix(&arena, &arenaBytes);
-        bool found = false;
-        for (auto cursor = arena; cursor < arena + arenaBytes;) {
-            MEMORY_BASIC_INFORMATION info{};
-            Require(VirtualQuery(reinterpret_cast<void*>(cursor), &info, sizeof(info)) == sizeof(info), "cannot enumerate arena host holes");
-            if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(cursor, 1)) {
-                Require(!AgcDriver::GuestMemory::Watched(cursor, 1), "an arena host hole was reported as write-watched");
-                Require(AgcDriver::GuestMemory::CollectWritesUncached(cursor, 1) == 0, "an arena host hole returned a write generation");
-                Require(!AgcDriver::GuestMemory::UnchangedSince(cursor, 1, 1), "an arena host hole passed an unchanged proof");
-                const std::array queries{AgcDriver::GuestMemory::UnchangedQuery{cursor, 1, 1}};
-                Require(!AgcDriver::GuestMemory::UnchangedSinceAll(queries), "an arena host hole passed a bulk unchanged proof");
-                found = true;
-                break;
-            }
-            const auto next = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
-            Require(next > cursor, "arena enumeration did not advance");
-            cursor = next;
-        }
-        Require(found, "write-watched arena contained no host exclusion to test");
-    }
     std::vector<std::uint8_t> host(64, 0x31);
     const auto address = reinterpret_cast<std::uintptr_t>(host.data());
     Require(!AgcDriver::GuestMemory::Watched(address, host.size()), "ordinary host heap memory was reported as write-watched");

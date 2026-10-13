@@ -329,6 +329,9 @@ constexpr short GuestPollReadable = 0x1 | 0x40;
 constexpr short GuestPollWritable = 0x4;
 constexpr short GuestPollHangUp = 0x10;
 constexpr short GuestPollError = 0x8;
+[[noreturn]] void ThrowReadEndWritable(int descriptor) {
+    throw std::runtime_error("poll: POLLOUT on the read end of pipe descriptor " + std::to_string(descriptor) + " is not supported");
+}
 #ifdef _WIN32
 struct PipeIoStatus {
     void* status;
@@ -363,19 +366,24 @@ bool PipeReadiness(int descriptor, short events, short& revents) {
     if (query(handle, &status, &access, sizeof(access), FileAccessInformationClass) < 0 ||
         query(handle, &status, &pipe, sizeof(pipe), FilePipeLocalInformationClass) < 0)
         throw std::runtime_error("poll: querying pipe descriptor " + std::to_string(descriptor) + " failed");
+    if ((events & GuestPollWritable) && !(access & FILE_WRITE_DATA)) ThrowReadEndWritable(descriptor);
     const bool closed = pipe.state == PipeClosingState;
     revents = 0;
     if ((access & FILE_READ_DATA) && pipe.readDataAvailable > 0)
         revents = static_cast<short>(revents | (events & GuestPollReadable));
-    if ((access & FILE_WRITE_DATA) && (closed || pipe.writeQuotaAvailable >= PipeAtomicBytes))
+    if ((access & FILE_WRITE_DATA) && !closed && pipe.writeQuotaAvailable >= PipeAtomicBytes)
         revents = static_cast<short>(revents | (events & GuestPollWritable));
     if (closed) revents = static_cast<short>(revents | (events & GuestPollReadable) | GuestPollHangUp);
     return true;
 }
 #else
-bool IsPipe(int descriptor) {
+bool IsPipe(int descriptor, short events) {
     struct stat status{};
-    return ::fstat(descriptor, &status) == 0 && S_ISFIFO(status.st_mode);
+    if (::fstat(descriptor, &status) != 0 || !S_ISFIFO(status.st_mode)) return false;
+    const int flags = ::fcntl(descriptor, F_GETFL);
+    if (flags < 0) throw std::runtime_error("poll: querying pipe descriptor " + std::to_string(descriptor) + " failed");
+    if ((events & GuestPollWritable) && (flags & O_ACCMODE) == O_RDONLY) ThrowReadEndWritable(descriptor);
+    return true;
 }
 #endif
 }
@@ -1048,7 +1056,7 @@ int APS5_VABI poll_nid_postfix(GuestPollDescriptor* descriptors, std::uint32_t c
             short revents = 0;
             if (!PipeReadiness(entry.descriptor, entry.events, revents))
 #else
-            if (!IsPipe(entry.descriptor))
+            if (!IsPipe(entry.descriptor, entry.events))
 #endif
                 throw std::runtime_error("poll: descriptor " + std::to_string(entry.descriptor) + " is neither a socket nor a pipe");
             pipes.push_back(i);
@@ -1095,10 +1103,9 @@ int APS5_VABI poll_nid_postfix(GuestPollDescriptor* descriptors, std::uint32_t c
                 entry.revents = static_cast<short>(entry.revents | flag.guest);
         for (const auto& flag : StatusFlags)
             if (native[i].revents & flag.native) entry.revents = static_cast<short>(entry.revents | flag.guest);
-        if (pipe && (entry.revents & GuestPollError)) {
-            entry.revents = static_cast<short>((entry.revents & ~GuestPollError) | (entry.events & GuestPollWritable) | GuestPollHangUp);
-        }
-        if (pipe && (entry.revents & GuestPollHangUp)) entry.revents = static_cast<short>(entry.revents | (entry.events & GuestPollReadable));
+        if (pipe && (entry.revents & GuestPollError)) entry.revents = static_cast<short>((entry.revents & ~GuestPollError) | GuestPollHangUp);
+        if (pipe && (entry.revents & GuestPollHangUp))
+            entry.revents = static_cast<short>((entry.revents & ~GuestPollWritable) | (entry.events & GuestPollReadable));
         if (entry.revents) ++ready;
     };
 #ifdef _WIN32

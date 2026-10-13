@@ -1,8 +1,10 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <stdexcept>
 #include <thread>
 struct PollDescriptor {
     int descriptor;
@@ -45,7 +47,9 @@ static void TestPipes(int socket) {
     PollDescriptor writer{ends[1], In, -1};
     Require(poll_nid_postfix(&writer, 1, 0) == 0 && writer.revents == 0);
     PollDescriptor readerOut{ends[0], Out, -1};
-    Require(poll_nid_postfix(&readerOut, 1, 0) == 0 && readerOut.revents == 0);
+    bool threw = false;
+    try { poll_nid_postfix(&readerOut, 1, 0); } catch (const std::runtime_error&) { threw = true; }
+    Require(threw);
     PollDescriptor mixed[2]{{socket, In, -1}, {ends[0], In, -1}};
     Require(poll_nid_postfix(mixed, 2, 1000) == 1 && mixed[0].revents == 0 && mixed[1].revents == In);
     char buffer[8]{};
@@ -78,7 +82,7 @@ static void TestPipes(int socket) {
     Require(close_nid_postfix(ends[0]) == 0);
     int full[2];
     Require(pipe_nid_postfix(full) == 0);
-    static char block[1024];
+    static char block[4096];
     std::int64_t queued = 0;
     PollDescriptor fill{full[1], Out, -1};
     while (poll_nid_postfix(&fill, 1, 0) == 1) {
@@ -87,7 +91,11 @@ static void TestPipes(int socket) {
         queued += 256;
     }
     Require(queued > 0 && fill.revents == 0);
-    Require(read_nid_postfix(full[0], block, sizeof(block)) == sizeof(block));
+    while (queued > 0) {
+        const std::int64_t taken = read_nid_postfix(full[0], block, static_cast<std::uint64_t>(std::min<std::int64_t>(queued, sizeof(block))));
+        Require(taken > 0);
+        queued -= taken;
+    }
     Require(poll_nid_postfix(&fill, 1, 0) == 1 && fill.revents == Out);
     Require(close_nid_postfix(full[0]) == 0);
     Require(close_nid_postfix(full[1]) == 0);
@@ -95,7 +103,9 @@ static void TestPipes(int socket) {
     Require(pipe_nid_postfix(other) == 0);
     Require(close_nid_postfix(other[0]) == 0);
     PollDescriptor orphan{other[1], Out, -1};
-    Require(poll_nid_postfix(&orphan, 1, 0) == 1 && orphan.revents == (Out | Hup));
+    Require(poll_nid_postfix(&orphan, 1, 0) == 1 && orphan.revents == Hup);
+    orphan.events = In | Out;
+    Require(poll_nid_postfix(&orphan, 1, 0) == 1 && orphan.revents == (In | Hup));
     Require(close_nid_postfix(other[1]) == 0);
 }
 int main() {

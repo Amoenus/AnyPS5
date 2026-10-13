@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Queues/WorkerAffinity.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
 #include <cstdlib>
 
 namespace AgcDriver::DriverDetail {
@@ -127,6 +128,7 @@ void Driver::Present(const PresentationWindow& window, const DisplayBuffer* buff
         }
         gpuReady(context);
         timing.Mark("release_and_callback");
+        TracyZone::MarkFrame();
         if (profile) reportPresents(waitedMs, inFlight);
         CheckFailure();
     } catch (const ProcessShutdown&) {

@@ -567,6 +567,16 @@ if(BUILD_TESTING)
         set_tests_properties(log_macros PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+
+    add_test_executable(guest_heap_report_for_game_tests ${LIBS_INCLUDE_DIR}/tests/GuestHeapReportForGame.cpp)
+    target_include_directories(guest_heap_report_for_game_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_heap_report_for_game_tests PRIVATE libc)
+    configure_windows_unwind(guest_heap_report_for_game_tests)
+    add_test(NAME guest_heap_report_for_game COMMAND guest_heap_report_for_game_tests)
+    if(WIN32)
+        set_tests_properties(guest_heap_report_for_game PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
 
 if(WIN32)
