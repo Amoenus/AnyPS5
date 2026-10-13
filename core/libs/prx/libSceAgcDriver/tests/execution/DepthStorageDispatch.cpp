@@ -357,13 +357,16 @@ void TwoViewsCase(AgcDriver::VulkanDevice& device, std::uint8_t* block) {
 
 int main() {
     try {
-        GuestBlock block;
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        GuestBlock block;
         const auto shaders = DepthFastClearHarness::Compile(*device);
         StoreBackCase(*device, shaders, block.Data());
         ArrayViewCase(*device, shaders, block.Data());
-        MultisampledCase(*device, shaders, block.Data());
+        {
+            GuestBlock multisampled;
+            MultisampledCase(*device, shaders, multisampled.Data());
+        }
         TwoViewsCase(*device, block.Data());
         SampledCopyCase(*device, shaders, block.Data());
         std::puts("depth storage dispatch tests passed");
