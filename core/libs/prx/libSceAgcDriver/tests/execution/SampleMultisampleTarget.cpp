@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -51,6 +52,7 @@ constexpr std::uint32_t Words = 32;
 constexpr std::uint32_t LoadResult = 12;
 constexpr std::array<float, 4> Drawn{0.25f, 0.5f, 0.125f, 1.0f};
 constexpr double EdgeMargin = 1.0 / 32.0;
+constexpr std::uint32_t FillOnes = 0x3c003c00u;
 
 alignas(256) constexpr std::array<std::uint32_t, 6> VertexCode{
     0xe0382000, 0x80000005, 0xbf8c3f70, 0xf80008cf, 0x03020100, 0xbf810000,
@@ -281,6 +283,15 @@ void CheckSamples(const AgcDriver::Graphics::State& state, const std::vector<std
     Require(std::adjacent_find(coveredBySample.begin(), coveredBySample.end(), std::not_equal_to<>()) != coveredBySample.end(), "every sample index has the same coverage, so the sample index was not told apart");
 }
 
+void CheckFilled(const std::vector<std::array<float, 4>>& loaded) {
+    for (std::size_t index = 0; index < loaded.size(); ++index) {
+        const auto& texel = loaded[index];
+        char where[160];
+        std::snprintf(where, sizeof(where), "sample %zu of pixel (%zu, %zu) loaded (%g, %g, %g, %g)", index % Samples, index / Samples % Side, index / Samples / Side, texel[0], texel[1], texel[2], texel[3]);
+        Require(texel == std::array<float, 4>{1.0f, 1.0f, 1.0f, 1.0f}, std::string(where) + " after a fill of the target's color memory with half-float ones");
+    }
+}
+
 void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, const std::string& expected, const std::string& what) {
     std::string refusal;
     try {
@@ -307,9 +318,13 @@ int main() {
         const auto state = TargetState(color);
         Draw(*device, state);
         CheckSamples(state, LoadSamples(*device, block));
+        const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
+        Require(colorBytes != 0 && colorBytes <= block.bytes, "the 4x target's color memory does not fit its block");
+        AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
+        CheckFilled(LoadSamples(*device, block));
         RequireRefused(*device, TargetDescriptor(block, 3u), "texture of 8 samples", "loading a 4x target as an 8x texture");
         RequireRefused(*device, TargetDescriptor(other, SampleShift), "which no draw rendered to", "loading a multisampled texture no draw rendered to");
-        std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it");
+        std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it, then the fill of its color memory");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
