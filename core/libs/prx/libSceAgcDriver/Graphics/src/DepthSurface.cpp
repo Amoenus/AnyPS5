@@ -154,7 +154,7 @@ public:
             Require(GuestMemory::UnchangedSince(initial[0].address, initial[0].bytes, initial[0].generation), "guest writes over native multisample depth are not implemented");
             const auto& metadata = initial[1];
             Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
-            Require(GuestMemory::StoredOver(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no completed HTILE store");
+            Require(GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no completed HTILE store");
             Require(clearDepth == 0.0f || clearDepth == 1.0f, "native multisample depth clear value is not implemented");
             auto current = initial;
             current[1].generation = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
