@@ -193,7 +193,7 @@ AgcDriver::Graphics::ColorTarget DecodeTarget(const Block& block, std::uint32_t 
     cx[0x3b8] = TiledAttrib3;
     cx[0x390] = static_cast<std::uint32_t>(block.Address() >> 40u);
     const auto color = AgcDriver::Graphics::DecodeColorBuffer(cx, 0);
-    Require(color.format == VK_FORMAT_R16G16B16A16_SFLOAT && color.elementBytes == 8 && color.samples == samples && color.bytes * samples == block.bytes, "the 16_16_16_16 float target did not decode as a 256x128 RGBA16F surface");
+    Require(color.format == VK_FORMAT_R16G16B16A16_SFLOAT && color.elementBytes == 8 && color.samples == samples && color.bytes == block.bytes, "the 16_16_16_16 float target did not decode as a 256x128 RGBA16F surface");
     return color;
 }
 

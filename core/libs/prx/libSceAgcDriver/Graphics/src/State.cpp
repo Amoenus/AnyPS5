@@ -1125,7 +1125,6 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     color.tileMode = DecodeColorTileMode(attrib3);
     const bool volume = ((attrib3 >> 24u) & 3u) == 2u;
     color.arrayLayers = volume ? 1u : (attrib3 & 0x1fffu) + 1u;
-    color.arraySlice = volume ? 0u : slice;
     Require(color.samples == 1 || (!volume && color.arrayLayers == 1u && slice == 0u), "multisampled array or 3D color targets are not implemented");
     Require(((attrib3 >> 24u) & 3u) != 0u || (attrib2 & 0x3fffu) == 0u, "1D color targets taller than one row are unsupported");
     if (volume) {

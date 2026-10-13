@@ -1,8 +1,13 @@
 #include "DepthFastClearHarness.hpp"
 #include "VulkanTestDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleHtile.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -44,6 +49,7 @@ constexpr std::size_t StencilOffset = 1u << 16u;
 constexpr std::size_t OutputOffset = 2u << 16u;
 constexpr std::size_t MultisampledOffset = 4u << 16u;
 constexpr std::size_t MultisampledColorOffset = 5u << 16u;
+constexpr std::size_t MultisampledHtileOffset = 6u << 16u;
 constexpr std::size_t SampledOffset = 8u << 16u;
 constexpr std::size_t LaterDepthOffset = 10u << 16u;
 constexpr std::size_t ArrayDepthOffset = 12u << 16u;
@@ -89,9 +95,11 @@ class GuestBlock {
 public:
     GuestBlock() {
 #ifdef _WIN32
-        block = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, BlockBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        block = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(BlockBytes, 65536u));
+        GuestArena::GuestArenaCommit_nid_postfix(block, BlockBytes, PAGE_READWRITE, BlockBytes);
 #else
         block = static_cast<std::uint8_t*>(std::aligned_alloc(65536, BlockBytes));
+        GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(block, BlockBytes);
 #endif
         Require(block != nullptr, "depth storage dispatch: cannot allocate the guest block");
         std::memset(block, 0, BlockBytes);
@@ -101,8 +109,10 @@ public:
     ~GuestBlock() {
         GuestAllocations::Mutation().Remove(block);
 #ifdef _WIN32
-        VirtualFree(block, 0, MEM_RELEASE);
+        GuestArena::GuestArenaReset_nid_postfix(block, BlockBytes);
+        GuestArena::GuestArenaRelease_nid_postfix(block, BlockBytes);
 #else
+        GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(block, BlockBytes);
         std::free(block);
 #endif
     }
@@ -266,9 +276,27 @@ void MultisampledCase(AgcDriver::VulkanDevice& device, const Shaders& compiled, 
     state.stages = {AgcDriver::Graphics::ShaderPath::Vertex, 0u, 32u, 32u, std::nullopt, std::nullopt};
     state.color = {reinterpret_cast<std::uintptr_t>(block + MultisampledColorOffset), {Width, Height}, VK_FORMAT_R8G8B8A8_UNORM, Width * Height * 16u, 0xe4u};
     state.color.samples = 4;
+    state.color.tileMode = AgcDriver::Graphics::ColorTileMode::RenderTarget;
+    state.color.elementBytes = 4;
+    state.color.surfaceAddress = state.color.address;
+    state.color.surfaceExtent = state.color.extent;
+    const AgcDriver::Graphics::MultisampleTextureLayout colorLayout(AgcDriver::Graphics::TextureTileMode::kR64KBX, state.color.elementBytes, state.color.samples, Width, Height, 1u, 0u);
+    state.color.bytes = colorLayout.Bytes();
+    Require(state.color.bytes <= MultisampledHtileOffset - MultisampledColorOffset, "multisampled color storage producer footprint overlaps HTILE");
     state.colors = {state.color};
     state.hasColorTarget = true;
     state.depth = AgcDriver::Graphics::DepthTarget{reinterpret_cast<std::uintptr_t>(depth), 0, {Width, Height}, VK_FORMAT_D32_SFLOAT, 1.0f, 0, 0, false, 4};
+    state.depth->depthSwizzle = 24;
+    state.depth->htileAddress = reinterpret_cast<std::uintptr_t>(block + MultisampledHtileOffset);
+    state.depth->iterate256 = true;
+    state.depth->htilePipeAligned = true;
+    const auto depthBytes = AgcDriver::Graphics::DepthPlaneBytes_nid_no_patch(state.depth->extent, 4u, state.depth->samples);
+    const auto htileBytes = AgcDriver::Graphics::MultisampleHtileBytes_nid_no_patch(Width, Height, 1u);
+    Require(depthBytes <= MultisampledColorOffset - MultisampledOffset && htileBytes <= SampledOffset - MultisampledHtileOffset, "multisampled depth storage producer footprints overlap");
+    Require(AgcDriver::GuestMemory::Watched(state.depth->address, depthBytes) && AgcDriver::GuestMemory::Watched(state.depth->htileAddress, htileBytes), "multisampled depth storage producer requires watched memory");
+    const std::uint32_t clear = 0xfffc00f0u;
+    auto* htile = reinterpret_cast<std::uint32_t*>(block + MultisampledHtileOffset);
+    std::fill(htile, htile + htileBytes / sizeof(clear), clear);
     state.depthTest = true;
     state.depthWrite = true;
     state.depthCompare = VK_COMPARE_OP_ALWAYS;
@@ -286,6 +314,7 @@ void MultisampledCase(AgcDriver::VulkanDevice& device, const Shaders& compiled, 
     const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(DepthFastClearHarness::Triangles().size()), 0, 1, 0, false};
     device.Draw(state, draw, shaders);
     device.WaitIdle();
+    Require(AgcDriver::Graphics::DepthSurfaceAt(reinterpret_cast<std::uintptr_t>(depth)), "multisampled depth storage producer did not create a resident surface");
     std::vector<std::uint32_t> userData(16, 0u);
     const auto texture = TextureDescriptor(depth, Format32Float);
     std::copy(texture.begin(), texture.end(), userData.begin() + 4);
