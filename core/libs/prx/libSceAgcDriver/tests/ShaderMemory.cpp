@@ -1903,6 +1903,128 @@ std::string encodeBase64(const std::vector<std::uint8_t>& bytes) {
     return text;
 }
 
+void verifyVersion21TargetCompatibility() {
+    using namespace ShaderRecompiler;
+    struct Case {
+        ShaderStage stage;
+        std::string_view request;
+    };
+    static constexpr std::array<Case, 4> cases{{
+        {ShaderStage::Compute,
+            "NVNQQRUAAAAAAAADAAAAAAABAAAAAAAAAAAAgb8AAAAAAAAAAAAAAAAAAAAAQAAAAAgAAAADAAAAAAAAAN+bVxPgrGgk776t3gEI"
+            "AAAAAgAAAAEAAAANAAAAAQABAQMAAAAAAAEAAAAAAAAAAAAFAAAAAAAEAAAAAAAAABI0VngAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAALAAAAEAAAAEAAAAAAAAcAAAABAAAAAAAAAAF4VjQSFwAAAAEB"
+            "ATkwAAAA"},
+        {ShaderStage::Fragment,
+            "NVNQQRUAAAAFAAADAAAAAAABAAAAAAAAAAAAgb8AAAAAAAAAAAAAAAAAAAAAQAAAAAgAAAADAAAAAAAAAN+bVxPgrGgk776t3gAB"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAJAAAAAAAAAOQAAAAAAAAAAAAAAAAAAAAAAQEDAAEAAAAAAAAAAAAFAAAAAAAEAAAAAAAAABI0VngAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAALAAAAEAAAAEAAAAAAAAF4VjQSAQEBOTAAAAA="},
+        {ShaderStage::Vertex,
+            "NVNQQRUAAAABAAADAAAAAAABAAAAAAAAAAAAgb8AAAAAAAAAAAAAAAAAAAAAQAAAAAgAAAADAAAAAAAAAN+bVxPgrGgk776t3gAA"
+            "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACQAAAA0AAAABBQoFAAEAAAAAAAAA"
+            "AAAFAAAAAAAEAAAAAAAAABI0VngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAIAAAALAAAAEAAAAEAAAAAAAAF4VjQSAQEBOTAAAAA="},
+        {ShaderStage::Mesh,
+            "NVNQQRUAAAAHAAADAAAAAAABAAAAAAAAAAAAgb8AAAAAAAAAAAAAAAAAAAAAQAAAAAgAAAADAAAAAAAAAN+bVxPgrGgk776t3gAA"
+            "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACQAAAA0AAAABBQoFAAEAAAAAAAAA"
+            "AAAFAAAAAAAEAAAAAAAAABI0VngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"
+            "IAAAAAIAAAABAAAAQAAAAAAEAAAQAAAACAAAAIAAAAAACAAABAAAAAQAAAAAAgAAAAsAAAAQAAAAQAAAAAEFAAAAAAAAAAAAAAAB"
+            "BAAAAAIAAAAGAAAAEAAAAAgAAABAAAAAIAAAAAEAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAF4VjQSAQEBOTAAAAA="},
+    }};
+    const RequestSerializer serializer;
+    for (const auto& test : cases) {
+        const auto verify = [&](const RecompileRequest& request) {
+            require(request.shader.stage == test.stage && request.shader.codeAddress == 0x30000u && request.shader.code.size() == 1u && request.shader.code[0] == 0xbf810000u, "version 21 shader identity was lost");
+            require(request.context.waveSize == 64u && request.context.userDataBaseRegister == 8u && request.context.userData.size() == 3u && request.context.userData[0] == 0x13579bdfu && request.context.userData[1] == 0x2468ace0u && request.context.userData[2] == 0xdeadbeefu, "version 21 user data was lost");
+            const std::array<std::byte, 4> bytes{std::byte{0x12}, std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
+            require(request.context.memory.size() == 1u && request.context.memory[0].guestAddress == 0x50000u && request.context.memory[0].bytes.size() == bytes.size() && std::equal(bytes.begin(), bytes.end(), request.context.memory[0].bytes.begin()), "version 21 memory was lost");
+            require(request.layout.descriptorSet == 2u && request.layout.firstBinding == 11u && request.layout.pushConstantOffsetBytes == 16u && request.layout.pushConstantSizeBytes == 64u && !request.useCache, "version 21 layout was lost");
+            require(request.target.nonConstantImageOffsets && request.target.srgbDecodeFormats == 0x12345678u && request.target.narrowSubgroupClock && request.target.float64DenormPreserve && request.target.registrationModules && request.target.registrationWordLimit == 12345u && !request.target.vertexSubgroups, "version 21 target fields were lost");
+            require(request.context.compute.has_value() == (test.stage == ShaderStage::Compute) && request.context.pixel.has_value() == (test.stage == ShaderStage::Fragment) && request.context.vertex.has_value() == (test.stage == ShaderStage::Vertex || test.stage == ShaderStage::Mesh), "version 21 stage presence was lost");
+            if (request.context.compute) {
+                const auto& compute = *request.context.compute;
+                require(compute.numThreads == std::array<std::uint32_t, 3>{8u, 2u, 1u} && compute.ldsSizeDwords == 13u && compute.groupIdEnable == std::array<bool, 3>{true, false, true} && compute.tgSizeEnable && compute.threadIdComponentCount == 3u && compute.partialThreads == std::array<std::uint32_t, 3>{7u, 1u, 0u} && compute.scratchDwords == 23u, "version 21 compute fields were lost");
+            }
+            if (request.context.pixel) {
+                const auto& pixel = *request.context.pixel;
+                require(pixel.alphaToCoverage && pixel.stencilRefExportEnable && pixel.rasterPrimitive == RasterPrimitive::Rectangle && pixel.targetOutputMode[0] == 9u && pixel.targetExportMapping[0] == 0xe4u, "version 21 pixel fields were lost");
+            }
+            if (request.context.vertex) {
+                const auto& vertex = *request.context.vertex;
+                require(vertex.fetchAttribReg == 9u && vertex.fetchBufferReg == 13u && vertex.fetchEmbedded && vertex.paClVsOutCntl == 0x00050a05u, "version 21 vertex fields were lost");
+            }
+            require(request.target.mesh.has_value() == (test.stage == ShaderStage::Mesh) && request.graphics.has_value() == (test.stage == ShaderStage::Mesh), "version 21 mesh presence was lost");
+            if (request.graphics) {
+                const auto& graphics = *request.graphics;
+                require(graphics.firstUserSgpr == 5u && graphics.mesh.has_value() && graphics.mesh->inputPrimitive == 4u && graphics.mesh->primitivesPerGroup == 2u && graphics.mesh->verticesPerGroup == 6u && graphics.mesh->maxVertices == 16u && graphics.mesh->maxPrimitives == 8u && graphics.mesh->threadsPerGroup == 64u && graphics.mesh->ldsSizeDwords == 32u && graphics.mesh->provokingVertex == 1u && graphics.mesh->esgsItemSize == 12u, "version 21 mesh configuration was lost");
+            }
+        };
+        const auto original = serializer.Deserialize(test.request);
+        verify(original.request);
+        require(!original.request.target.float16DenormPreserve, "an original version 21 request read an F16 target flag");
+        const auto originalBytes = decodeBase64(test.request);
+        for (const bool preserve : {false, true}) {
+            auto bytes = originalBytes;
+            bytes.push_back(preserve ? 1u : 0u);
+            const auto encoded = encodeBase64(bytes);
+            const auto replay = serializer.Deserialize(encoded);
+            verify(replay.request);
+            require(replay.request.target.float16DenormPreserve == preserve, "a version 21 F16 target flag was lost");
+            auto expected = original.request;
+            expected.target.float16DenormPreserve = preserve;
+            const auto canonical = serializer.Serialize(replay.request);
+            require(serializer.Serialize(expected) == canonical, "version 21 replay changed the canonical request bytes");
+            const auto roundtrip = serializer.Deserialize(canonical);
+            verify(roundtrip.request);
+            require(roundtrip.request.target.float16DenormPreserve == preserve, "a version 21 F16 target flag was lost in canonical replay");
+            std::vector<std::uint64_t> expectedKey;
+            std::vector<std::uint64_t> actualKey;
+            RecompileCacheKey::Build(expected, expectedKey);
+            RecompileCacheKey::Build(replay.request, actualKey);
+            require(expectedKey == actualKey && RecompileCacheKey::ContextHash(expected) == RecompileCacheKey::ContextHash(replay.request), "version 21 replay changed shader identity");
+            RecompileCacheKey::Build(roundtrip.request, actualKey);
+            require(expectedKey == actualKey && RecompileCacheKey::ContextHash(expected) == RecompileCacheKey::ContextHash(roundtrip.request), "version 21 canonical replay changed shader identity");
+        }
+        auto invalid = originalBytes;
+        invalid.push_back(2u);
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalid))); }, "version 21 target boolean", "an invalid version 21 F16 target boolean was accepted");
+        invalid.back() = 0u;
+        invalid.push_back(1u);
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalid))); }, "version 21 target trailer", "an extra version 21 target byte was accepted");
+        invalid = originalBytes;
+        invalid.pop_back();
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalid))); }, "truncated data", "a version 21 request missing its vertex subgroup flag was accepted");
+    }
+}
+
 void verifyVertexInfoVersion19() {
     using namespace ShaderRecompiler;
     const std::array<std::uint32_t, 1> code{0xbf810000u};
@@ -3519,6 +3641,7 @@ int main(int argc, char** argv) {
         verifyVertexInfoVersion19();
         verifyPositionExportComponents();
         verifyLegacyPixelRequests();
+        verifyVersion21TargetCompatibility();
         verifyPixelExportReplay();
         verifyPixelParameterSlots();
         verifyF16PixelParameterSlots();
