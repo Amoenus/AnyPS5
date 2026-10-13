@@ -72,7 +72,42 @@ static void CheckUnsupportedOpcodeDiagnostic(std::uint32_t encoding, std::string
     }
     Require(false);
 }
+static void CheckVccSampler(std::uint32_t encoding, std::uint32_t dmask) {
+    const std::array<std::uint32_t, 2> code{(0x3cu << 26u) | (encoding << 18u) | (dmask << 8u) | (1u << 3u), (18u << 16u) | (26u << 21u)};
+    const auto instruction = DecodeRdnaMimg(0u, code, 0u);
+    Require(instruction.source1.reg == 72u);
+    Require(instruction.source2.reg == 104u);
+    IrProgram program;
+    auto& block = program.CreateBlock();
+    program.SetEntryBlock(block);
+    TranslationContext context(program, block, 256);
+    context.TranslateInstruction(instruction);
+    const IrValue* sampler = nullptr;
+    for (const auto* value : block.Instructions()) {
+        if (value->Opcode() == IrOpcode::GetSamplerResource) sampler = value;
+    }
+    Require(sampler != nullptr && sampler->Arguments().size() == 4u);
+    Require(sampler->Arguments()[0]->Opcode() == IrOpcode::GetScalarRegister);
+    Require(sampler->Arguments()[1]->Opcode() == IrOpcode::GetScalarRegister);
+    Require(sampler->Arguments()[2]->Opcode() == IrOpcode::GetVccLo);
+    Require(sampler->Arguments()[3]->Opcode() == IrOpcode::GetVccHi);
+}
+static void CheckSamplerRangeRefusal(std::uint32_t sampler) {
+    const std::array<std::uint32_t, 2> code{0xf0800f08u, sampler << 21u};
+    try {
+        DecodeRdnaMimg(0u, code, 0u);
+    } catch (const std::runtime_error& error) {
+        Require(std::string_view(error.what()) == "MIMG descriptor register range overflow");
+        return;
+    }
+    Require(false);
+}
 int main() {
+    CheckVccSampler(0x20u, 0xfu);
+    CheckVccSampler(0x40u, 0x1u);
+    CheckVccSampler(0x60u, 0x3u);
+    for (std::uint32_t sampler = 27u; sampler < 32u; ++sampler) CheckSamplerRangeRefusal(sampler);
+
     CheckSamplerVccTuple();
     CheckSamplerVccTupleOverflow();
     Check(0x26u, RdnaOpcode::ImageSampleBCl, 0xfu);
