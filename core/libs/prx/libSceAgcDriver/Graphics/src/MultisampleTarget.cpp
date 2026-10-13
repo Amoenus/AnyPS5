@@ -11,6 +11,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -337,6 +338,7 @@ public:
     }
 
     Context context;
+    std::shared_ptr<std::atomic<bool>> active = std::make_shared<std::atomic<bool>>(true);
     ColorTarget target;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -431,6 +433,7 @@ struct GuardedRange {
     std::uint64_t address;
     std::uint64_t bytes;
     std::uint32_t samples;
+    std::shared_ptr<std::atomic<bool>> active;
 };
 
 std::shared_mutex& guardedMutex() {
@@ -452,11 +455,26 @@ void guardReads(std::uint64_t address, std::size_t bytes) {
     SynchronizeMultisampleTargetRead(address, bytes);
 }
 
+void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
+    std::unique_lock lock(guardedMutex());
+    for (const auto& range : guarded()) {
+        if (!range.active->load(std::memory_order_acquire)) continue;
+        const auto covered = [&](const auto& part) {
+            if (part.active != range.active) return true;
+            return part.address >= address && part.address - address <= bytes && part.bytes <= bytes - (part.address - address);
+        };
+        if (std::ranges::all_of(guarded(), covered)) range.active->store(false, std::memory_order_release);
+    }
+    std::erase_if(guarded(), [](const auto& range) { return !range.active->load(std::memory_order_acquire); });
+    anyGuarded().store(!guarded().empty(), std::memory_order_release);
+}
+
 void guard(const Context& context, const MultisampleTarget& target) {
     std::unique_lock lock(guardedMutex());
-    for (const auto& range : target.Ranges()) guarded().push_back({context.device, range.address, range.bytes, target.target.samples});
+    for (const auto& range : target.Ranges()) guarded().push_back({context.device, range.address, range.bytes, target.target.samples, target.active});
     anyGuarded().store(true, std::memory_order_release);
     InstallResidentImageReadGuard_nid_no_patch();
+    GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(&retireUnmapped);
 }
 
 std::mutex& targetsMutex() {
@@ -471,6 +489,7 @@ std::vector<std::shared_ptr<MultisampleTarget>>& targets() {
 
 MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
     for (const auto& target : targets()) {
+        if (!target->active->load(std::memory_order_acquire)) continue;
         if (target->context.device != context.device) continue;
         if (target->target.address >= use.address + use.bytes || use.address >= target->target.address + target->target.bytes) continue;
         target->CheckCurrent(use);
@@ -543,6 +562,7 @@ std::vector<std::byte> ReadMultisampleTargetSamples(const Context& context, cons
     std::lock_guard gpu(GuestMemory::GpuMutex());
     std::lock_guard lock(targetsMutex());
     for (const auto& resident : targets()) {
+        if (!resident->active->load(std::memory_order_acquire)) continue;
         if (resident->context.device == context.device && sameAllocation(resident->target, target)) {
             resident->CheckCurrent(target);
             return resident->ReadSamples();
@@ -557,6 +577,7 @@ std::shared_ptr<Texture> NativeMultisampleSnapshot_nid_no_patch(const Context& c
     std::lock_guard gpu(GuestMemory::GpuMutex());
     std::lock_guard lock(targetsMutex());
     for (const auto& resident : targets()) {
+        if (!resident->active->load(std::memory_order_acquire)) continue;
         const auto& target = resident->target;
         if (resident->context.device != context.device || target.address != resource.baseAddress) continue;
         if (resource.width != target.extent.width || resource.height != target.extent.height || resource.fragments != target.samples || resource.pipeBankXor != target.pipeBankXor || resource.tileMode != TextureTileMode::kR64KBX || resource.baseArray != 0u || resource.depthOrLastArray != 0u || resource.mipCount != 1u || resource.baseLevel != 0u || resource.lastLevel != 0u || resource.minLod != 0u || IsConvertedTextureFormat(resource.format) || IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != target.elementBytes) return nullptr;
@@ -570,13 +591,14 @@ std::shared_ptr<Texture> NativeMultisampleSnapshot_nid_no_patch(const Context& c
 void NoteNativeColorClear_nid_no_patch(std::uint64_t address, std::uint64_t bytes, std::uint32_t value, std::uint32_t mask) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
     std::lock_guard lock(targetsMutex());
-    for (const auto& resident : targets()) if (resident->target.dccAddress != 0u && resident->target.dccAddress == address) resident->NoteClear(bytes, value, mask);
+    for (const auto& resident : targets()) if (resident->active->load(std::memory_order_acquire) && resident->target.dccAddress != 0u && resident->target.dccAddress == address) resident->NoteClear(bytes, value, mask);
 }
 
 void MarkMultisampleTargetDirty(const Context& context, const ColorTarget& target) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
     std::lock_guard lock(targetsMutex());
     for (const auto& resident : targets()) {
+        if (!resident->active->load(std::memory_order_acquire)) continue;
         if (resident->context.device == context.device && sameTarget(resident->target, target)) {
             resident->MarkDirty();
             return;
@@ -602,7 +624,7 @@ void SynchronizeMultisampleTargetRead(std::uint64_t address, std::size_t bytes) 
         explicit Publishing(bool& flag) : flag(flag) { flag = true; }
         ~Publishing() { flag = false; }
     } publication(publishing);
-    for (const auto& resident : targets()) if (resident->Overlaps(address, bytes)) resident->PublishGuest();
+    for (const auto& resident : targets()) if (resident->active->load(std::memory_order_acquire) && resident->Overlaps(address, bytes)) resident->PublishGuest();
 }
 
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView) {
@@ -630,7 +652,7 @@ void ResolveMultisampleTarget(const Context& context, const ColorTarget& source,
 
 void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
     std::lock_guard lock(targetsMutex());
-    for (const auto& target : targets()) target->NoteFill(address, bytes);
+    for (const auto& target : targets()) if (target->active->load(std::memory_order_acquire)) target->NoteFill(address, bytes);
 }
 
 void ClearMultisampleTargets(VkDevice device) {
@@ -639,6 +661,7 @@ void ClearMultisampleTargets(VkDevice device) {
     std::unique_lock guardLock(guardedMutex());
     std::erase_if(guarded(), [&](const auto& range) { return range.device == device; });
     anyGuarded().store(!guarded().empty(), std::memory_order_release);
+    if (guarded().empty()) GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(nullptr);
 }
 
 void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const char* access) {

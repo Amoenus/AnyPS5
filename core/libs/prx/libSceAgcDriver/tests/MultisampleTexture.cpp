@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
@@ -489,6 +490,92 @@ void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragm
     }
     std::array<std::byte, 1> probe{};
     TargetRefuses([&] { AgcDriver::GuestMemory::Read(target.address + layout.Offset(64u, 0u, 0u, fragments - 1u), probe); }, AgcDriver::GuestMemory::Watched(target.address, target.bytes) ? "unimplemented residency transition" : "watched guest memory");
+}
+
+void CheckTargetRetirement(Context context, bool removeAllocation, bool partialMetadata) {
+    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    constexpr std::uint32_t fragments = 4u;
+    constexpr std::uint32_t width = 65u, height = 5u;
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, 4u, fragments, width, height, 1u, 0u);
+    const auto total = static_cast<std::size_t>(layout.Bytes()) + 3u * 65536u;
+    TargetMemory memory(total);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory.Data(), total, true, true, true);
+    }
+    struct Registration {
+        void* address;
+        ~Registration() { GuestAllocations::Mutation mutation; mutation.Remove(address); }
+    } registration{memory.Data()};
+    auto detiler = std::make_unique<TextureDetiler>(context);
+    context.detiler = detiler.get();
+    Recorder recorder(context);
+    recorder.Activate();
+    struct Cleanup {
+        Recorder& recorder;
+        VkDevice device;
+        ~Cleanup() { recorder.Sync(); ClearCachedTextures(device); ClearMultisampleTargets(device); }
+    } cleanup{recorder, context.device};
+    ColorTarget target{};
+    target.address = target.surfaceAddress = memory.Address();
+    target.bytes = layout.Bytes();
+    target.extent = target.surfaceExtent = {width, height};
+    target.format = VK_FORMAT_R8G8B8A8_UNORM;
+    target.tileMode = ColorTileMode::RenderTarget;
+    target.elementBytes = 4u;
+    target.samples = fragments;
+    target.dccAddress = target.address + target.bytes;
+    target.cmaskAddress = target.dccAddress + 65536u;
+    target.fmaskAddress = target.cmaskAddress + 65536u;
+    target.fmaskSwizzle = 0x18u;
+    target.dccPipeAligned = target.dccAlphaOnMsb = true;
+    target.dccControl = 0x100038u;
+    target.cmaskBytes = CmaskBytes(width, height);
+    const auto initialize = [&](std::byte value) {
+        std::vector<std::byte> physical(total, std::byte{0xff});
+        const std::vector<std::byte> logical(layout.LinearBytes(), value);
+        layout.Tile(logical, std::span(physical).first(static_cast<std::size_t>(target.bytes)));
+        std::fill(physical.begin() + (target.cmaskAddress - target.address), physical.begin() + (target.cmaskAddress - target.address) + target.cmaskBytes, std::byte{0xee});
+        const auto bytes = MultisampleFmaskBytes(target);
+        std::fill(physical.begin() + (target.fmaskAddress - target.address), physical.begin() + (target.fmaskAddress - target.address) + bytes, std::byte{0xe4});
+        AgcDriver::GuestMemory::StoreOwnBytes(target.address, physical);
+    };
+    initialize(std::byte{0x17});
+    const auto oldView = MultisampleTargetView(context, target);
+    recorder.Sync();
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Protect(memory.Data(), total, true, true, true, [] {});
+    }
+    TargetRefuses([&] { RequireNoMultisampleTarget(target.address, 1u, "retirement probe"); }, "retirement probe");
+    bool failed = false;
+    try {
+        GuestAllocations::Mutation mutation;
+        mutation.Unmap(memory.Data(), total, [](const void*, std::size_t, const void*, bool) { throw std::runtime_error("retirement unmap failed"); });
+    } catch (const std::runtime_error& error) { failed = std::string_view(error.what()) == "retirement unmap failed"; }
+    Require(failed, "a failed retirement unmap did not throw");
+    TargetRefuses([&] { RequireNoMultisampleTarget(target.address, 1u, "retirement probe"); }, "retirement probe");
+    const auto partial = partialMetadata ? target.cmaskAddress : target.address;
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Unmap(reinterpret_cast<void*>(partial), 65536u, [](const void*, std::size_t, const void*, bool) {});
+    }
+    TargetRefuses([&] { RequireNoMultisampleTarget(target.address, 1u, "retirement probe"); }, "retirement probe");
+    TargetRefuses([&] { RequireNoMultisampleTarget(target.cmaskAddress, 1u, "retirement probe"); }, "retirement probe");
+    {
+        GuestAllocations::Mutation mutation;
+        if (removeAllocation) mutation.Remove(memory.Data());
+        else mutation.Unmap(memory.Data(), total, [](const void*, std::size_t, const void*, bool) {});
+        mutation.Add(memory.Data(), total, true, true, true);
+    }
+    RequireNoMultisampleTarget(target.address, total, "retired color and metadata read");
+    initialize(std::byte{0x92});
+    const auto newView = MultisampleTargetView(context, target);
+    Require(newView != oldView, "a remapped allocation reused a retired native attachment");
+    const auto samples = ReadMultisampleTargetSamples(context, target);
+    const std::vector<std::byte> expected(samples.size(), std::byte{0x92});
+    Require(samples == expected, "a remapped native attachment retained its old contents");
+    std::puts("native color-plus-metadata retirement: protect/failed/partial retained; full removal/unmap recreated exact samples");
 }
 
 void CheckMetadataReset(Context context, VkFormat format, std::uint32_t fragments) {
@@ -1987,6 +2074,14 @@ int main(int argc, char** argv) {
             }
             Require(checked != 0u && (unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr), "required native GPU snapshot configurations are unsupported");
             std::printf("Native GPU snapshots checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
+        if (argc > 1 && std::string(argv[1]) == "--retirement") {
+            device->PrintDevice();
+            Require(context.storageImageReadWithoutFormat && TargetSupported(context, VK_FORMAT_R8G8B8A8_UNORM, 4u), "native retirement fixture requires four-sample formatless transfers");
+            for (const bool remove : {false, true}) {
+                for (const bool metadata : {false, true}) CheckTargetRetirement(context, remove, metadata);
+            }
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--metadata-reset") {
