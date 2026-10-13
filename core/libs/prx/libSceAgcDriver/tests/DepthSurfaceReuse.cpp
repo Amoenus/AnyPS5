@@ -35,9 +35,12 @@ THandle newHandle() {
 }
 
 VkFormat lastImageFormat = VK_FORMAT_UNDEFINED;
+VkImageUsageFlags lastImageUsage = 0;
+std::uint32_t imagesDestroyed = 0;
 
 VKAPI_ATTR VkResult VKAPI_CALL createImage(VkDevice, const VkImageCreateInfo* info, const VkAllocationCallbacks*, VkImage* image) {
     lastImageFormat = info->format;
+    lastImageUsage = info->usage;
     *image = newHandle<VkImage>();
     return VK_SUCCESS;
 }
@@ -93,7 +96,7 @@ VKAPI_ATTR VkResult VKAPI_CALL getFenceStatus(VkDevice, VkFence) {
 VKAPI_ATTR void VKAPI_CALL freeCommandBuffers(VkDevice, VkCommandPool, std::uint32_t, const VkCommandBuffer*) {}
 VKAPI_ATTR void VKAPI_CALL destroyFence(VkDevice, VkFence, const VkAllocationCallbacks*) {}
 VKAPI_ATTR void VKAPI_CALL destroyImageView(VkDevice, VkImageView, const VkAllocationCallbacks*) {}
-VKAPI_ATTR void VKAPI_CALL destroyImage(VkDevice, VkImage, const VkAllocationCallbacks*) {}
+VKAPI_ATTR void VKAPI_CALL destroyImage(VkDevice, VkImage, const VkAllocationCallbacks*) { ++imagesDestroyed; }
 VKAPI_ATTR void VKAPI_CALL freeMemory(VkDevice, VkDeviceMemory, const VkAllocationCallbacks*) {}
 VKAPI_ATTR void VKAPI_CALL cmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {}
 VKAPI_ATTR void VKAPI_CALL cmdClearDepthStencilImage(VkCommandBuffer, VkImage, VkImageLayout, const VkClearDepthStencilValue*, std::uint32_t, const VkImageSubresourceRange*) {}
@@ -101,6 +104,19 @@ VKAPI_ATTR void VKAPI_CALL cmdClearDepthStencilImage(VkCommandBuffer, VkImage, V
 VKAPI_ATTR void VKAPI_CALL formatProperties(VkPhysicalDevice, VkFormat, VkFormatProperties* properties) {
     *properties = {};
     properties->optimalTilingFeatures = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL sampledDepthProperties(VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags, VkImageCreateFlags, VkImageFormatProperties* properties) {
+    *properties = {};
+    properties->maxExtent = {16384, 16384, 1};
+    properties->maxArrayLayers = 1;
+    properties->maxMipLevels = 1;
+    properties->sampleCounts = VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL attachmentOnlyProperties(VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags, VkImageCreateFlags, VkImageFormatProperties*) {
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
 }
 
 VKAPI_ATTR void VKAPI_CALL formatPropertiesWithoutD16S8(VkPhysicalDevice, VkFormat format, VkFormatProperties* properties) {
@@ -218,6 +234,31 @@ void TestD16StencilFallback(const Context& context) {
     Require(threw, "a constant 16-bit depth bias on D32_SFLOAT_S8_UINT storage must throw");
 }
 
+void TestMultisampleDepthOwnership(Context context) {
+    Require(MultisampledDepthBytes_nid_no_patch({3840, 2160}, 4, 8) == 0xff00000u, "the eight-sample D32 guard must cover its complete footprint");
+    for (const auto bytes : {2u, 4u}) {
+        for (const auto samples : {2u, 4u, 8u}) {
+            Require(MultisampledDepthBytes_nid_no_patch({1, 1}, bytes, samples) == 65536u, "a small native depth guard must occupy one sample-aware block");
+        }
+    }
+    context.imageFormatProperties = attachmentOnlyProperties;
+    DepthTarget target{0x71000000, 0, {129, 67}, VK_FORMAT_D32_SFLOAT, 0.0f, 0, 0, false, 4};
+    Require(DepthSurfaceView(context, target) != VK_NULL_HANDLE, "lack of sampled MSAA support must retain attachment rendering");
+    Require((lastImageUsage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0, "unsupported sampled usage must not be requested for a native depth attachment");
+    ClearDepthSurfaces(context.device);
+    context.imageFormatProperties = sampledDepthProperties;
+    Require(DepthSurfaceView(context, target) != VK_NULL_HANDLE, "a supported sampled MSAA format must retain attachment rendering without import eligibility");
+    Require((lastImageUsage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0, "a supported MSAA depth image must allow sampled views");
+    ClearDepthSurfaces(context.device);
+    const auto destroyed = imagesDestroyed;
+    auto owner = std::make_shared<OwnedImage>(context, newHandle<VkImage>(), newHandle<VkDeviceMemory>());
+    auto texture = std::make_shared<Texture>(context, owner->image, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT, VkComponentMapping{}, VK_IMAGE_VIEW_TYPE_2D, owner);
+    owner.reset();
+    Require(imagesDestroyed == destroyed, "a depth image must stay alive while its sampled view is held");
+    texture.reset();
+    Require(imagesDestroyed == destroyed + 1u, "the last sampled view must release its native depth image exactly once");
+}
+
 }
 
 void RunDepthSurfaceReuseTests() {
@@ -232,6 +273,7 @@ void RunDepthSurfaceReuseTests() {
     context.limits.maxFramebufferHeight = 16384;
     context.limits.maxFramebufferLayers = 1;
     TestD16StencilFallback(context);
+    TestMultisampleDepthOwnership(context);
     constexpr std::uint64_t depth32 = 0x40000000;
     constexpr std::uint64_t depth16 = 0x50000000;
     constexpr std::uint64_t depthStencil = 0x60000000;
