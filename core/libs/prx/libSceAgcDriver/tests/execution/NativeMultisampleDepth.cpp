@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -500,17 +501,18 @@ bool DepthSupported(const Context& context, VkFormat format, std::uint32_t fragm
     return result == VK_SUCCESS && (properties.sampleCounts & fragments) != 0u && (context.limits.framebufferDepthSampleCounts & fragments) != 0u;
 }
 
-void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one) {
+void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing = false, std::optional<bool> depthOnlyOverride = std::nullopt) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
     TargetMemory memory(bytes), metadata(65536u);
     const auto metadataBytes = HtileMetadataBytes(extent);
-    const std::uint32_t pattern = one ? 0xfffffff0u : 0u;
+    const bool depthOnly = depthOnlyOverride.value_or(one);
+    const std::uint32_t pattern = one ? (depthOnly ? 0xfffffff0u : 0xfffc00f0u) : 0u;
     for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
     DepthTarget target{memory.Address(), 0u, extent, format, one ? 1.0f : 0.0f, 0u, metadata.Address(), false, fragments};
     target.depthSwizzle = 24u;
     target.pipeBankXor = one ? 0x8c00u : 0u;
-    target.htileDepthOnly = one;
+    target.htileDepthOnly = depthOnly;
     target.iterate256 = target.htilePipeAligned = true;
     Recorder recorder(context);
     recorder.Activate();
@@ -580,6 +582,29 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
             RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
             batch.SubmitAndWait();
             check(true, offset);
+        }
+        if (clearing) {
+            for (std::uint32_t iteration = 0u; iteration < 3u; ++iteration) {
+                {
+                    CommandBatch batch(context);
+                    raster.Run(batch.Handle(), static_cast<float>(iteration) / 16.0f);
+                    batch.SubmitAndWait();
+                }
+                NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes));
+                AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, static_cast<std::size_t>(metadataBytes), [&] {
+                    for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
+                });
+                Require(DepthSurfaceHolds(context, DecodeTextureResource(words), texture.get()), "completed native depth clear lost its sampled view");
+                recorder.Sync();
+                Require(DepthSurfaceView(context, target) == view && CachedSampledTexture(context, words) == texture, "completed native depth clear replaced an attachment or cached view");
+                std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+                CommandBatch batch(context);
+                fetch.Run(batch.Handle(), count);
+                RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+                batch.SubmitAndWait();
+                check(false, 0.0f);
+            }
+            std::printf("Native depth completed clear format=%d samples=%u depthOnly=%u value=%u cycles=3\n", format, fragments, depthOnly, one);
         }
     }
     Require(std::all_of(memory.Data(), memory.Data() + bytes, [](auto value) { return value == std::byte{0xa5}; }), "native depth sampling silently published guest memory");
@@ -869,6 +894,19 @@ int main(int argc, char** argv) {
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         Require(DepthSupported(context, VK_FORMAT_D32_SFLOAT, 4u), "the native depth regression requires sampled D32 with four samples");
+        if (argc == 2 && std::string_view(argv[1]) == "--clears") {
+            std::uint32_t checked = 0u, unavailable = 0u;
+            for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
+                for (const auto samples : {2u, 4u, 8u}) {
+                    if (!DepthSupported(context, format, samples)) { unavailable += 4u; continue; }
+                    for (const bool depthOnly : {false, true}) {
+                        for (const bool one : {false, true}) { CheckDepthTarget(context, format, samples, one, true, depthOnly); ++checked; }
+                    }
+                }
+            }
+            std::printf("Native depth completed clear cases checked=%u unavailable=%u\n", checked, unavailable);
+            return 0;
+        }
         Require(argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--retirement"), "invalid native depth fixture arguments");
         if (argc == 2) {
             std::uint32_t checked = 0u, unavailable = 0u;
