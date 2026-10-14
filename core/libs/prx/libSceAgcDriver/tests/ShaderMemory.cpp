@@ -1710,10 +1710,10 @@ void verifyMeshConfiguration() {
     RecompileRequest hull{};
     hull.shader = {ShaderStage::TessellationControl, 0x10000u, code, 0, {}};
     hull.context.waveSize = 64;
-    hull.graphics = GraphicsCompileContext{0u, {}, std::nullopt, TessellationConfiguration{4u, 4u, 2u, 2u, 3u, 63u}, {}};
+    hull.graphics = GraphicsCompileContext{0u, {}, std::nullopt, TessellationConfiguration{4u, 4u, 2u, 2u, 3u, 63u, 63u, true}, {}};
     const auto hullReplay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(hull));
     const auto* replayed = hullReplay.request.graphics && hullReplay.request.graphics->tessellation ? &*hullReplay.request.graphics->tessellation : nullptr;
-    require(replayed != nullptr && replayed->domain == 2u && replayed->outputTopology == 3u && replayed->patchesPerGroup == 63u, "the quad tessellation configuration or its patches per group were lost in serialization");
+    require(replayed != nullptr && replayed->domain == 2u && replayed->outputTopology == 3u && replayed->patchesPerGroup == 63u && replayed->primitiveGroupSize == 63u && replayed->breakAtInstance, "the quad tessellation configuration, its patches per group, its primitive group size or BREAK_WAVE_AT_EOI were lost in serialization");
     auto grouped = hull;
     grouped.graphics->tessellation->patchesPerGroup = 62u;
     for (const auto stage : {ShaderStage::Local, ShaderStage::TessellationControl, ShaderStage::TessellationEvaluation}) {
@@ -1723,6 +1723,26 @@ void verifyMeshConfiguration() {
         const auto patchKey = key;
         RecompileCacheKey::Build(grouped, key);
         require((key != patchKey) == (stage != ShaderStage::Local), "only the hull and domain cache keys may depend on the patches per group, which bound their relative patch index");
+    }
+    auto primitiveGrouped = hull;
+    primitiveGrouped.graphics->tessellation->primitiveGroupSize = 126u;
+    for (const auto stage : {ShaderStage::Local, ShaderStage::TessellationControl, ShaderStage::TessellationEvaluation}) {
+        hull.shader.stage = stage;
+        primitiveGrouped.shader.stage = stage;
+        RecompileCacheKey::Build(hull, key);
+        const auto patchKey = key;
+        RecompileCacheKey::Build(primitiveGrouped, key);
+        require((key != patchKey) == (stage != ShaderStage::Local), "only the hull and domain cache keys may depend on the primitive group size, which rebuilds their relative patch index");
+    }
+    auto shared = hull;
+    shared.graphics->tessellation->breakAtInstance = false;
+    for (const auto stage : {ShaderStage::Local, ShaderStage::TessellationControl, ShaderStage::TessellationEvaluation}) {
+        hull.shader.stage = stage;
+        shared.shader.stage = stage;
+        RecompileCacheKey::Build(hull, key);
+        const auto patchKey = key;
+        RecompileCacheKey::Build(shared, key);
+        require((key != patchKey) == (stage != ShaderStage::Local), "only the hull and domain cache keys may depend on BREAK_WAVE_AT_EOI, which decides whether their relative patch index can be rebuilt");
     }
     const std::array<std::uint32_t, 8> users{};
     request.context.waveSize = 32u;
@@ -2042,7 +2062,7 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel->layerExported = true;
     minimal.context.pixel->ditheredAlphaToCoverage = true;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRgAAAA=", "new requests did not use serialization version 24");
+    require(requestPrefix(encoded, 8u) == "NVNQQRkAAAA=", "new requests did not use serialization version 25");
     require(serializer.Deserialize(encoded).request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && serializer.Deserialize(encoded).request.context.pixel->ditheredAlphaToCoverage, "the pixel primitive class or dither mode did not round-trip");
     require(serializer.Deserialize(encoded).request.context.pixel->layerExported, "the pixel layer export did not round-trip");
     const auto legacy16 = serializer.Deserialize(
@@ -2154,7 +2174,7 @@ void verifyPixelRequestSerialization() {
     for (std::size_t bytes = 0; bytes < 23u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class, layer export or dither flag was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRkAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRoAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{

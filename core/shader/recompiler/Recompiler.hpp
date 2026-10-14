@@ -290,6 +290,8 @@ struct TessellationConfiguration {
     std::uint32_t partitioning;
     std::uint32_t outputTopology;
     std::uint32_t patchesPerGroup = 256;
+    std::uint32_t primitiveGroupSize = 0;
+    bool breakAtInstance = false;
 };
 
 inline constexpr std::uint32_t MeshDrawPushOffsetBytes = 104;

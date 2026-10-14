@@ -833,6 +833,8 @@ void pipelineKey(std::vector<std::byte>& key, const Context& context, const Stat
         append(key, tessellation.partitioning);
         append(key, tessellation.outputTopology);
         append(key, tessellation.patchesPerGroup);
+        append(key, tessellation.primitiveGroupSize);
+        append(key, tessellation.breakAtInstance);
     }
 }
 
