@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -145,6 +146,37 @@ ColorTarget MultisampledTarget(const GuestBlock& color) {
     return target;
 }
 
+#ifdef _WIN32
+void DirectImportDropsColorTracking(AgcDriver::VulkanDevice& device) {
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+    struct Cleanup {
+        AgcDriver::VulkanDevice& device;
+        VkDevice handle;
+        ~Cleanup() {
+            device.SubmitRecorded(true);
+            device.WaitIdle();
+            AgcDriver::Graphics::ClearMultisampleTargets(handle);
+            AgcDriver::Graphics::ClearHostImports(handle);
+        }
+    } cleanup{device, context.device};
+    auto& color = NewBlock();
+    const auto target = MultisampledTarget(color);
+    Require(AgcDriver::GuestMemory::Watched(target.address, target.bytes), "the color allocation is not watched before import");
+    const auto* imported = AgcDriver::Graphics::HostImportFor(context, target.address, target.bytes);
+    Require(imported != nullptr && imported->alias == nullptr && imported->unwatched, "the color fixture did not select a direct unwatched host import");
+    Require(!AgcDriver::GuestMemory::Watched(target.address, target.bytes), "a direct host import left the color allocation watched");
+    Require(AgcDriver::Graphics::MultisampleTargetView(context, target) != VK_NULL_HANDLE, "initial imported color contents have no native view");
+    bool refused = false;
+    try {
+        static_cast<void>(AgcDriver::Graphics::MultisampleTargetView(context, target));
+    } catch (const std::runtime_error& error) {
+        refused = std::string_view(error.what()).find("color: range outside write-watch coverage") != std::string_view::npos;
+    }
+    Require(refused, "direct host import did not reproduce the resident color tracking refusal");
+}
+#endif
+
 bool FillsTakenAsMultisampledClearsAreNotStored(AgcDriver::VulkanDevice& device) {
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
     if ((context.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0) {
@@ -253,6 +285,9 @@ int main() {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+#ifdef _WIN32
+        DirectImportDropsColorTracking(*device);
+#endif
         const bool tested = FillsTakenAsMultisampledClearsAreNotStored(*device);
         LibcRunShutdown_nid_postfix();
         if (!tested) return VulkanTestSkipped;
