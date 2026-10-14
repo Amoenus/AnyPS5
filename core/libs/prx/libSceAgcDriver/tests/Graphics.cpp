@@ -2732,7 +2732,11 @@ void multisampleTests() {
         Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "standard MSAA pattern was refused by the precheck");
         if (log2 == 3u) {
             queue.context[0x2ff] = 0x8773f95bu;
-            expectFailure([&] { DecodeState(queue); }, "nonstandard sample locations");
+            const auto custom = DecodeState(queue);
+            Require(custom.customSampleLocations && custom.sampleLocationGrid && custom.sampleLocations[7] == 0x87u && custom.sampleLocations[15] == 0x97u, "an independent custom eight-sample grid did not preserve the changed pixel");
+            const auto locations = AgcDriver::Graphics::SampleLocations(custom);
+            Require(locations[7].x == 15.0f / 16.0f && locations[7].y == 0.0f && locations[15].x == 15.0f / 16.0f && locations[15].y == 1.0f / 16.0f, "an independent custom eight-sample grid changed signed coordinates");
+            expectFailure([&] { AgcDriver::Graphics::ValidateSampleLocations({}, custom); }, "VK_EXT_sample_locations");
             queue.context[0x2ff] = 0x9773f95bu;
         }
         queue.context[0x2f8] |= 0x20000000u;
