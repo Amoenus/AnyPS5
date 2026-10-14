@@ -808,7 +808,7 @@ void NoteMemoryValueFill(const MemoryValueFill& fill) {
 
 std::size_t HtileDepthClearBytes_nid_no_patch(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, std::span<const std::uint32_t> packet, std::uint64_t indirectArguments) {
     if (userData.size() != 6u || packet.size() < 5u || indirectArguments != 0u || compute.PartialGroups() || !compute.groupIdEnable[0] || compute.threadIdComponentCount == 0u || compute.threadIdComponentCount > 3u) return 0u;
-    if (packet[1] == 0u || packet[2] != 1u || packet[3] != 1u || (packet[4] & 0x23u) != 1u) return 0u;
+    if (packet[1] == 0u || packet[1] > 0x400000u || packet[2] != 1u || packet[3] != 1u || (packet[4] & 0x23u) != 1u) return 0u;
     const auto address = HtileDepthClearAddress(code, userData, compute.numThreads);
     if (address == 0u || (address & 15u) != 0u) return 0u;
     const auto bytes = static_cast<std::uint64_t>(packet[1]) * 1024u;
