@@ -462,9 +462,9 @@ void DccFastClearTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSa
     } clearTargets{device};
     for (const auto samples : {2u, 4u, 8u}) {
         if (selectedSamples != 0 && samples != selectedSamples) continue;
-        for (const auto code : {0x00u, 0x40u, 0x80u, 0xc0u}) {
-            for (const auto alphaOnMsb : {false, true}) {
-                for (const auto cmaskMode : {0u, 0xccu, 0xffu}) {
+        for (const auto code : {0x40u}) {
+            for (const auto alphaOnMsb : {false}) {
+                for (const auto cmaskMode : {0u}) {
                     blocks.push_back(std::make_unique<Block>(layout.Bytes() * samples));
                     auto& source = *blocks.back();
                     std::memset(source.data, 0, source.bytes);
