@@ -185,7 +185,10 @@ public:
 #ifdef _WIN32
                 if (!GuestMemory::WriteWatched()) reason = "write watching unavailable";
                 else if (!GuestArena::GuestArenaContains_nid_postfix(reinterpret_cast<const void*>(range.address), range.bytes)) reason = "outside guest arena";
-                else if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(static_cast<std::uintptr_t>(range.address), range.bytes)) reason = "host-mapped guest range";
+                else if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(static_cast<std::uintptr_t>(range.address), range.bytes)) reason = "host region in guest arena";
+                else if (!watched) {
+                    if (const auto* excluded = GuestMemory::ExclusionReason_nid_no_patch(range.address, range.bytes)) reason = excluded;
+                }
 #endif
                 Require(false, std::string("multisample target reuse requires watched guest memory; untracked writes are not implemented (") + plane + ": " + reason + ")");
             }

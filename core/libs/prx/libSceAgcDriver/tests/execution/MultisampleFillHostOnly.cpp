@@ -166,12 +166,14 @@ void DirectImportDropsColorTracking(AgcDriver::VulkanDevice& device) {
     const auto* imported = AgcDriver::Graphics::HostImportFor(context, target.address, target.bytes);
     Require(imported != nullptr && imported->alias == nullptr && imported->unwatched, "the color fixture did not select a direct unwatched host import");
     Require(!AgcDriver::GuestMemory::Watched(target.address, target.bytes), "a direct host import left the color allocation watched");
+    const auto* exclusion = AgcDriver::GuestMemory::ExclusionReason_nid_no_patch(target.address, target.bytes);
+    Require(exclusion != nullptr && std::string_view(exclusion).find("host import") != std::string_view::npos, "a direct host import lost its exclusion cause");
     Require(AgcDriver::Graphics::MultisampleTargetView(context, target) != VK_NULL_HANDLE, "initial imported color contents have no native view");
     bool refused = false;
     try {
         static_cast<void>(AgcDriver::Graphics::MultisampleTargetView(context, target));
     } catch (const std::runtime_error& error) {
-        refused = std::string_view(error.what()).find("color: range outside write-watch coverage") != std::string_view::npos;
+        refused = std::string_view(error.what()).find("color: range excluded by host import") != std::string_view::npos;
     }
     Require(refused, "direct host import did not reproduce the resident color tracking refusal");
 }

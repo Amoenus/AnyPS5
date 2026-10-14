@@ -1236,12 +1236,13 @@ void beforeUnwatch(std::uint64_t address, std::size_t bytes) {
     if (const auto hook = unwatchHook.load(std::memory_order_acquire)) hook(address, bytes);
 }
 
-void unwatchLocked(WriteTracker& tracker, std::uint64_t address, std::size_t bytes) {
+void unwatchLocked(WriteTracker& tracker, std::uint64_t address, std::size_t bytes, WriteWatchCoverage::Reason reason = WriteWatchCoverage::Reason::ExplicitUnwatch) {
     if (!tracker.watched) return;
 #ifdef _WIN32
     tracker.startHints(address, bytes);
-    if (tracker.coverage.Exclude(address, bytes, GuestArena::GuestArenaCommitGeneration_nid_postfix())) unwatchSerial.fetch_add(1, std::memory_order_release);
+    if (tracker.coverage.Exclude(address, bytes, GuestArena::GuestArenaCommitGeneration_nid_postfix(), reason)) unwatchSerial.fetch_add(1, std::memory_order_release);
 #else
+    static_cast<void>(reason);
     if (GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(address), bytes)) unwatchSerial.fetch_add(1, std::memory_order_release);
 #endif
 }
@@ -1295,12 +1296,12 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
     }
     if (!imported) return false;
     if (!staysWatched) {
-        if (!before || !walkWrites(tracker, first, stop, StampKind::ImportWindow, true)) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first));
-        unwatchLocked(tracker, address, bytes);
+        if (!before || !walkWrites(tracker, first, stop, StampKind::ImportWindow, true)) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first), WriteWatchCoverage::Reason::IncompleteCollect);
+        unwatchLocked(tracker, address, bytes, WriteWatchCoverage::Reason::HostImport);
         return true;
     }
     const WindowCopy window{first, saved};
-    if (!before || !walkWrites(tracker, first, stop, StampKind::Cpu, true, &window)) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first));
+    if (!before || !walkWrites(tracker, first, stop, StampKind::Cpu, true, &window)) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first), WriteWatchCoverage::Reason::IncompleteCollect);
     return true;
 }
 
@@ -1317,6 +1318,25 @@ bool Watched(std::uint64_t address, std::size_t bytes) {
     const auto lock = lockTracker(tracker);
     tracker.initialize();
     return tracker.watched && bytes != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address && tracker.covers(address, bytes);
+}
+
+const char* ExclusionReason_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+#ifdef _WIN32
+    auto& tracker = Tracker();
+    const auto lock = lockTracker(tracker);
+    tracker.initialize();
+    const auto mask = tracker.coverage.ExclusionMask(address, bytes);
+    using Reason = WriteWatchCoverage::Reason;
+    if (mask == static_cast<std::uint8_t>(Reason::HostImport)) return "range excluded by host import";
+    if (mask == static_cast<std::uint8_t>(Reason::ExplicitUnwatch)) return "range explicitly unwatched";
+    if (mask == static_cast<std::uint8_t>(Reason::IncompleteCollect)) return "range excluded after incomplete write collection";
+    if ((mask & static_cast<std::uint8_t>(Reason::HostImport)) != 0) return "range excluded by host import and other events";
+    if (mask != 0) return "range excluded by multiple events";
+#else
+    static_cast<void>(address);
+    static_cast<void>(bytes);
+#endif
+    return nullptr;
 }
 
 bool UnchangedSince(std::uint64_t address, std::size_t bytes, std::uint64_t generation) {
@@ -1432,7 +1452,7 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
         const bool complete = GuestWriteWatch::GuestWriteWatchCollectFresh_nid_postfix(static_cast<std::uintptr_t>(blockFirst), static_cast<std::size_t>(blockStop - blockFirst), &stampWrittenRun, &runs);
 #endif
         if (!complete) {
-            unwatchLocked(tracker, blockFirst, static_cast<std::size_t>(blockStop - blockFirst));
+            unwatchLocked(tracker, blockFirst, static_cast<std::size_t>(blockStop - blockFirst), WriteWatchCoverage::Reason::IncompleteCollect);
             tracker.noteUnstampedStore(address, address + bytes);
             return 0;
         }

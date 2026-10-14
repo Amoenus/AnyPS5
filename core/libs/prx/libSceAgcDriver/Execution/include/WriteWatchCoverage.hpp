@@ -12,6 +12,8 @@ namespace AgcDriver::GuestMemory {
 
 class WriteWatchCoverage {
 public:
+    enum class Reason : std::uint8_t { ExplicitUnwatch = 2, HostImport = 4, IncompleteCollect = 8 };
+
     void Initialize(std::uint64_t address, std::size_t bytes) {
         base = address;
         size = bytes;
@@ -26,7 +28,16 @@ public:
         return std::none_of(excluded.begin() + first, excluded.begin() + last + 1, [](auto generation) { return generation != 0; });
     }
 
-    bool Exclude(std::uint64_t address, std::size_t bytes, std::uint64_t generation = 1) {
+    std::uint8_t ExclusionMask(std::uint64_t address, std::size_t bytes) const {
+        if (bytes == 0 || bytes > size || address < base || address - base > size - bytes) return 0;
+        const auto first = (address - base) / BlockBytes;
+        const auto last = (address - base + bytes - 1) / BlockBytes;
+        std::uint8_t reasons = 0;
+        for (auto block = first; block <= last; ++block) reasons |= excluded[block];
+        return reasons & ~std::uint8_t{1};
+    }
+
+    bool Exclude(std::uint64_t address, std::size_t bytes, std::uint64_t generation = 1, Reason reason = Reason::ExplicitUnwatch) {
         if (bytes == 0 || size == 0) return false;
         if (address < base) {
             if (base - address >= bytes) return false;
@@ -43,7 +54,7 @@ public:
             changed = changed || excluded[block] == 0;
             auto& stamp = excludedGenerations[block];
             stamp = std::max(stamp, std::max<std::uint64_t>(generation, 1));
-            excluded[block] = 1;
+            excluded[block] |= std::uint8_t{1} | static_cast<std::uint8_t>(reason);
         }
         return changed;
     }

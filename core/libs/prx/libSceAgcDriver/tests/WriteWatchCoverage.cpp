@@ -53,6 +53,22 @@ int main() {
         coverage.Exclude(base, block, 7);
         require(!coverage.Restore(base, block, 6) && !coverage.Covers(base, block), "a delayed mapping notification erased a repeated import");
         require(coverage.Restore(base, block, 8), "a fresh replacement did not restore the latest import exclusion");
+        coverage.Initialize(base, 3 * block);
+        using Reason = WriteWatchCoverage::Reason;
+        const auto explicitReason = static_cast<std::uint8_t>(Reason::ExplicitUnwatch);
+        const auto importReason = static_cast<std::uint8_t>(Reason::HostImport);
+        const auto collectReason = static_cast<std::uint8_t>(Reason::IncompleteCollect);
+        require(coverage.ExclusionMask(base, block) == 0 && coverage.ExclusionMask(base - 1, block) == 0, "watched or outside memory reports an exclusion cause");
+        coverage.Exclude(base, block, 2, Reason::HostImport);
+        coverage.Exclude(base + block, block, 2, Reason::IncompleteCollect);
+        require(coverage.ExclusionMask(base, block) == importReason && coverage.ExclusionMask(base + block, block) == collectReason, "exclusion causes were not retained per block");
+        require(coverage.ExclusionMask(base, 2 * block) == (importReason | collectReason), "a spanning query lost an exclusion cause");
+        require(!coverage.Exclude(base, block, 3, Reason::ExplicitUnwatch) && coverage.ExclusionMask(base, block) == (importReason | explicitReason), "a repeated exclusion changed coverage or erased a cause");
+        require(!coverage.Restore(base, block, 3) && coverage.ExclusionMask(base, block) == (importReason | explicitReason), "a stale restore erased exclusion causes");
+        require(coverage.Restore(base, block, 4) && coverage.ExclusionMask(base, block) == 0 && coverage.Covers(base, block), "fresh backing kept an old exclusion cause");
+        require(coverage.ExclusionMask(base + block, block) == collectReason, "restoring a neighbour erased an unrelated exclusion cause");
+        coverage.Initialize(base, block);
+        require(coverage.ExclusionMask(base, block) == 0, "initialization kept exclusion causes");
         std::cout << "write watch coverage passed\n";
         return 0;
     } catch (const std::exception& error) {
