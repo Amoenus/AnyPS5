@@ -8,7 +8,7 @@ using namespace ShaderRecompiler;
 
 int main() {
     try {
-        for (const auto first : {0xe0000000u, 0xe0300000u, 0xe0700000u, 0xe8b00000u, 0xe8b40000u}) {
+        for (const auto first : {0xe8b00000u, 0xe8b40000u, 0xe0000000u, 0xe0300000u, 0xe0700000u}) {
             const auto decode = [&](std::uint32_t resource) {
                 const std::array<std::uint32_t, 2> code{first, (128u << 24u) | (resource << 16u) | (7u << 8u) | 3u};
                 return first >> 26u == 0x3au ? DecodeRdnaMtbuf(0x100u, code, 0u) : DecodeRdnaMubuf(0x100u, code, 0u);
