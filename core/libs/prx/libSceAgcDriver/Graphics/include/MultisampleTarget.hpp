@@ -65,6 +65,7 @@ std::vector<std::byte> ReadMultisampleTargetSamples(const Context& context, cons
 std::shared_ptr<Texture> NativeMultisampleSnapshot_nid_no_patch(const Context& context, const GuestTextureResource& resource, VkComponentMapping components);
 void MarkMultisampleTargetDirty(const Context& context, const ColorTarget& target);
 void SynchronizeMultisampleTargetRead(std::uint64_t address, std::size_t bytes);
+void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget& target);
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
 bool MultisampledColorFillAbsorbs(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
 void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern, bool hostOnly = false);

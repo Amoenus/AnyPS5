@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferCopy.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferFill.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -75,7 +76,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     const bool partialLastGroup = partialGroups != std::array<std::uint32_t, 3>{};
     if (resolving) {
         if (!partialLastGroup && matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
-        if (!partialLastGroup && indirectArguments == 0 && matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
+        if (!partialLastGroup && indirectArguments == 0 && (matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute) || MatchesStreamCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute))) return;
     } else {
         if (!partialLastGroup && indirectArguments == 0u) {
             if (const auto fill = MatchConstantFill(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet)) Graphics::NoteNativeColorClear_nid_no_patch(fill->address, fill->bytes, fill->value, 0u);
@@ -379,7 +380,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         std::shared_ptr<PreparedDispatch> prepared;
         if (recipeHit == nullptr || VulkanDevice::VerifyRecipes()) {
             try {
-                prepared = localDevice->PrepareDispatch(compiled, snapshots, dispatchThreads);
+                prepared = localDevice->PrepareDispatch(compiled, snapshots, dispatchThreads, address);
             } catch (const std::exception& error) {
                 if (rethrow(error)) return;
             }

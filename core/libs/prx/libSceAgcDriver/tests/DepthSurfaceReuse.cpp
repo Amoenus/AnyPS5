@@ -43,12 +43,15 @@ VkImageUsageFlags lastImageUsage = 0;
 std::uint32_t imagesDestroyed = 0;
 std::vector<VkImage> createdImages;
 std::vector<std::tuple<VkImage, VkImage, VkImageAspectFlags>> imageCopies;
+VkImage lastImage = VK_NULL_HANDLE;
+std::vector<VkImage> clearedImages;
 
 VKAPI_ATTR VkResult VKAPI_CALL createImage(VkDevice, const VkImageCreateInfo* info, const VkAllocationCallbacks*, VkImage* image) {
     lastImageFormat = info->format;
     lastImageUsage = info->usage;
     *image = newHandle<VkImage>();
     createdImages.push_back(*image);
+    lastImage = *image;
     return VK_SUCCESS;
 }
 
@@ -106,7 +109,9 @@ VKAPI_ATTR void VKAPI_CALL destroyImageView(VkDevice, VkImageView, const VkAlloc
 VKAPI_ATTR void VKAPI_CALL destroyImage(VkDevice, VkImage, const VkAllocationCallbacks*) { ++imagesDestroyed; }
 VKAPI_ATTR void VKAPI_CALL freeMemory(VkDevice, VkDeviceMemory, const VkAllocationCallbacks*) {}
 VKAPI_ATTR void VKAPI_CALL cmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {}
-VKAPI_ATTR void VKAPI_CALL cmdClearDepthStencilImage(VkCommandBuffer, VkImage, VkImageLayout, const VkClearDepthStencilValue*, std::uint32_t, const VkImageSubresourceRange*) {}
+VKAPI_ATTR void VKAPI_CALL cmdClearDepthStencilImage(VkCommandBuffer, VkImage image, VkImageLayout, const VkClearDepthStencilValue*, std::uint32_t, const VkImageSubresourceRange*) {
+    clearedImages.push_back(image);
+}
 VKAPI_ATTR void VKAPI_CALL cmdCopyImage(VkCommandBuffer, VkImage source, VkImageLayout, VkImage destination, VkImageLayout, std::uint32_t count, const VkImageCopy* regions) {
     for (std::uint32_t i = 0; i < count; ++i) imageCopies.emplace_back(source, destination, regions[i].dstSubresource.aspectMask);
 }
@@ -270,6 +275,31 @@ void TestMultisampleDepthOwnership(Context context) {
     Require(imagesDestroyed == destroyed + 1u, "the last sampled view must release its native depth image exactly once");
 }
 
+void TestMultisampleStencilAliases(Context context) {
+    context.imageFormatProperties = sampledDepthProperties;
+    for (const auto format : {VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}) {
+        for (const auto samples : {2u, 4u, 8u}) {
+            DepthTarget target{0x73000000, 0x73800000, {1920, 1080}, format, 1.0f, 0};
+            target.samples = samples;
+            Require(DepthSurfaceView(context, target) != VK_NULL_HANDLE, "a multisampled stencil alias fixture must retain attachment rendering");
+            for (const auto colorFormat : {FormatR11G11B10Float, FormatR8G8B8A8Unorm, FormatR32Float}) {
+                Require(lookup(context, {target.stencilAddress, colorFormat, 1920, 1080, TileRenderTarget64KB}) == nullptr, "a non-stencil color format at a multisampled stencil address must remain reused memory");
+            }
+            const auto depthFormat = format == VK_FORMAT_D16_UNORM_S8_UINT ? FormatR16Unorm : FormatR32Float;
+            for (const auto view : {View{target.stencilAddress, FormatR8Uint, 1920, 1080}, View{target.address, depthFormat, 1920, 1080}}) {
+                bool refused = false;
+                try {
+                    lookup(context, view);
+                } catch (const std::runtime_error& error) {
+                    refused = std::string_view(error.what()).find("only by recorded draws and dispatches") != std::string_view::npos;
+                }
+                Require(refused, "a genuine multisample stencil or depth reader must retain its recording requirement");
+            }
+            ClearDepthSurfaces(context.device);
+        }
+    }
+}
+
 }
 
 void RunDepthSurfaceReuseTests() {
@@ -285,6 +315,7 @@ void RunDepthSurfaceReuseTests() {
     context.limits.maxFramebufferLayers = 1;
     TestD16StencilFallback(context);
     TestMultisampleDepthOwnership(context);
+    TestMultisampleStencilAliases(context);
     constexpr std::uint64_t depth32 = 0x40000000;
     constexpr std::uint64_t depth16 = 0x50000000;
     constexpr std::uint64_t depthStencil = 0x60000000;
@@ -374,6 +405,29 @@ void RunDepthSurfaceReuseTests() {
     imageCopies.clear();
     const auto otherWithA = pairing(otherDepth, stencilA);
     Require(imageCopies.size() == 1 && imageCopies[0] == std::make_tuple(withA, otherWithA, static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_STENCIL_BIT)), "a stencil plane paired with another depth plane must carry its stencil over");
+    {
+        constexpr std::uint64_t arrayBase = 0x80000000;
+        constexpr std::uint64_t htile = 0x81000000;
+        constexpr VkExtent2D extent{1024, 512};
+        const auto sliceHtile = HtileMetadataBytes(extent);
+        DepthTarget first{arrayBase, 0, extent, VK_FORMAT_D32_SFLOAT, 1.0f, 0};
+        first.htileAddress = htile;
+        DepthTarget second{arrayBase + DepthSliceBytes(extent, 4u), 0, extent, VK_FORMAT_D32_SFLOAT, 1.0f, 0};
+        second.htileAddress = htile + sliceHtile;
+        DepthSurfaceView(context, first);
+        const auto firstImage = lastImage;
+        DepthSurfaceView(context, second);
+        const auto secondImage = lastImage;
+        const auto clearsAfter = [&](std::size_t bytes) {
+            clearedImages.clear();
+            NoteHtileDepthClear(htile, static_cast<std::size_t>(bytes));
+            DepthSurfaceView(context, first);
+            DepthSurfaceView(context, second);
+            return clearedImages;
+        };
+        Require(clearsAfter(sliceHtile) == std::vector<VkImage>{firstImage}, "an HTILE clear of the first slice must clear that slice alone");
+        Require(clearsAfter(2u * sliceHtile) == std::vector<VkImage>{firstImage, secondImage}, "an HTILE clear over both slices must clear both");
+    }
 
     ClearDepthSurfaces(context.device);
     std::uint32_t checked = 0u;

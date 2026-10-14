@@ -108,7 +108,14 @@ RdnaProgram DecodeStageProgram(ShaderStageKind stage, std::span<const std::uint3
 
 ShaderStageInputInfo RequestInputInfo(const RecompileRequest& request) {
     const auto* mesh = request.graphics && request.graphics->mesh ? &*request.graphics->mesh : nullptr;
-    const auto* tessellation = request.graphics && request.graphics->tessellation ? &*request.graphics->tessellation : nullptr;
+    std::optional<TessellationConfiguration> tessellationCopy;
+    if (request.graphics && request.graphics->tessellation) {
+        tessellationCopy = *request.graphics->tessellation;
+        tessellationCopy->instancePatches = TessellationInstancePatches(request);
+        const auto& capabilities = request.target.supportedCapabilities;
+        tessellationCopy->drawParameters = std::find(capabilities.begin(), capabilities.end(), static_cast<std::uint32_t>(spv::CapabilityDrawParameters)) != capabilities.end();
+    }
+    const auto* tessellation = tessellationCopy ? &*tessellationCopy : nullptr;
     return BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), mesh, tessellation);
 }
 
@@ -124,7 +131,7 @@ std::atomic<std::uint64_t> frontEndBuilds{0};
 
 struct PreparedControlFlow {
     PreparedControlFlow(const RecompileRequest& request, const SwappcInfo& swappcInfo)
-        : stage(request.shader.stage), swappc(swappcInfo), code(request.shader.code.begin(), request.shader.code.end()),
+        : stage(request.shader.stage), fallbacks(swappcInfo.linkedCallFallbacks.begin(), swappcInfo.linkedCallFallbacks.end()), swappc(WithFallbacks(swappcInfo, fallbacks)), code(request.shader.code.begin(), request.shader.code.end()),
           decoded(DecodeStageProgram(toShaderStageKind(request.shader.stage), code)), cfg(GraphBuilder{}.Build(decoded, &swappc)) {
         Structurizer{}.Structurize(cfg);
     }
@@ -135,10 +142,16 @@ struct PreparedControlFlow {
     bool Matches(const RecompileRequest& request, const SwappcInfo& swappcInfo) const {
         return stage == request.shader.stage && swappc.fetchCallAllowed == swappcInfo.fetchCallAllowed &&
                swappc.userDataBaseRegister == swappcInfo.userDataBaseRegister && swappc.userDataCount == swappcInfo.userDataCount &&
-               std::ranges::equal(code, request.shader.code);
+               std::ranges::equal(fallbacks, swappcInfo.linkedCallFallbacks) && std::ranges::equal(code, request.shader.code);
+    }
+
+    static SwappcInfo WithFallbacks(SwappcInfo info, const std::vector<std::uint32_t>& fallbacks) {
+        info.linkedCallFallbacks = fallbacks;
+        return info;
     }
 
     ShaderStage stage;
+    std::vector<std::uint32_t> fallbacks;
     SwappcInfo swappc;
     std::vector<std::uint32_t> code;
     RdnaProgram decoded;
@@ -147,7 +160,7 @@ struct PreparedControlFlow {
 
 std::shared_ptr<const PreparedControlFlow> ShaderPreparationContext::AcquireFrontend(const RecompileRequest& request) {
     const auto inputInfo = RequestInputInfo(request);
-    const SwappcInfo swappc{inputInfo.vertex != nullptr, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size())};
+    const SwappcInfo swappc{inputInfo.vertex != nullptr, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size()), 0u, request.context.linkedCallFallbacks};
     static const bool reuse = std::getenv("APS5_NO_PERF_FRONTEND_PAIR") == nullptr;
     if (reuse && frontend != nullptr && frontend->Matches(request, swappc)) {
         return frontend;
@@ -310,6 +323,7 @@ struct SourceEntry : std::enable_shared_from_this<SourceEntry> {
     // accepted only when its code matches word for word. Owned here because the request's span
     // points into a registration the driver may replace while the entry lives on.
     std::vector<std::uint32_t> code;
+    std::vector<std::uint32_t> linkedCallFallbacks;
     std::shared_ptr<const IrResourcePlan> plan;
     // A plan build that threw (an unsupported resource chain or control flow) is remembered and
     // rethrown: the front end ran every pass before failing, ~13 ms per dispatch of a shader the
@@ -408,6 +422,7 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPr
         if (source == nullptr) {
             source = std::make_shared<SourceEntry>();
             source->code.assign(request.shader.code.begin(), request.shader.code.end());
+            source->linkedCallFallbacks.assign(request.context.linkedCallFallbacks.begin(), request.context.linkedCallFallbacks.end());
             auto& bucket = sources[key];
             if (!bucket.empty()) {
                 // A second entry under one key is a code hash collision (or the unhashed key with
@@ -1363,7 +1378,9 @@ std::span<const std::uint32_t> GetPreparedCode(const SourceHandle& handle) {
     return handle.source->code;
 }
 
-PreparedShaderInvocation::PreparedShaderInvocation(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle) : request(request), handle(handle) {}
+PreparedShaderInvocation::PreparedShaderInvocation(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle) : request(request), handle(handle) {
+    this->request.context.linkedCallFallbacks = handle->source->linkedCallFallbacks;
+}
 
 std::optional<PreparedShaderInvocation> PreparedShaderInvocation::TryCreate(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle) {
     struct PreparedKeyStorage {};

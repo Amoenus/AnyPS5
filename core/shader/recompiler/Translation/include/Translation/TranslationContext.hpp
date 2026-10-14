@@ -27,6 +27,7 @@ public:
     void SetNativeFloat16(bool enabled) { nativeFloat16 = enabled; }
     void AddBranchCondition(const BasicBlock& source, BlockInfo& info);
     void TranslateCodeTableLoad(const RdnaInstruction& instruction, const ControlFlowGraph::CodeTableLoad& table);
+    void TranslateUnlinkedCall(const RdnaInstruction& instruction);
 
 private:
     struct AddressOperands {

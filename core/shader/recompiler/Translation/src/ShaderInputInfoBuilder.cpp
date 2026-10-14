@@ -133,6 +133,7 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         pixelStorage.psPosZ = pixel.posZ;
         pixelStorage.psPosW = pixel.posW;
         pixelStorage.psFrontFace = pixel.frontFace;
+        pixelStorage.psFrontFaceAllBits = pixel.frontFaceAllBits;
         pixelStorage.psAncillary = pixel.ancillary;
         pixelStorage.psNoPerspective = pixel.noPerspective;
         pixelStorage.psPixelKillEnable = pixel.pixelKillEnable;
@@ -195,6 +196,8 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
             target.patchesPerGroup = tessellation->patchesPerGroup;
             target.primitiveGroupSize = tessellation->primitiveGroupSize;
             target.breakAtInstance = tessellation->breakAtInstance;
+            target.instancePatches = tessellation->instancePatches;
+            target.drawParameters = tessellation->drawParameters;
         }
         if (stage == ShaderStageKind::Mesh) {
             if (mesh == nullptr) throw std::runtime_error("ShaderInputInfoBuilder: a mesh-stage program has no mesh configuration");

@@ -93,7 +93,7 @@ struct SpirvEmitterState {
     SpirvModule module;
     const IrProgram& program;
     ShaderStageInputInfo inputInfo;
-    std::array<std::uint32_t, 7> tessVariables {};
+    std::array<std::uint32_t, 9> tessVariables {};
     std::uint32_t tessInnerVariable = 0;
 
     SpirvRequirements requirements;
@@ -134,6 +134,7 @@ struct SpirvEmitterState {
     bool nativeF16ModesEmitted = false;
     bool f16DenormPreserveEmitted = false;
     std::uint32_t dot2F32F16Function = 0;
+    std::map<std::pair<bool, std::uint32_t>, std::uint32_t> interpolateFunctions;
     std::array<std::array<std::uint32_t, 2>, 2> bdaDwordReadFunctions {};
     std::array<std::array<std::uint32_t, 2>, 2> bdaSpanReadFunctions {};
     std::unordered_map<const IrValue*, std::pair<std::uint32_t, std::uint32_t>> bdaGroupedLoads;

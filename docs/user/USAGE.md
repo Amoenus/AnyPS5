@@ -94,11 +94,12 @@ libs/
     *.prx
 app0/
     <app resources>
+    eboot.bin
     sce_module/
         <converted modules>
 ```
 
-Use `sce_modules/` or `prx/` instead of `sce_module/` if that is the input directory name. Relinker preserves each module's directory under `app0/` and prints its exact path. Place app resources in `app0/` separately. Copy the built system libraries from `build/core/libs/libs/*.prx` into `libs/`; use libraries built for the target OS. A custom `--rpath` changes the system library location.
+Use `sce_modules/` or `prx/` instead of `sce_module/` if that is the input directory name. Relinker preserves each module's directory under `app0/` and prints its exact path. Place app resources in `app0/` separately, including the title's original `eboot.bin`: titles test `/app0/eboot.bin` to find their own directory, as it is always present on the console (ProsperoTV, ProsperoRadio, ProsperoLight and ProsperoLichess fall back to an empty `/data/homebrew/<title id>` and fail to load their fonts without it). Only the converted executable runs. Copy the built system libraries from `build/core/libs/libs/*.prx` into `libs/`; use libraries built for the target OS. A custom `--rpath` changes the system library location.
 
 Use the generated files printed as `Guest module:` for bundled title modules. `libs/` is for AnyPS5 system libraries, not the original PS5 `.prx` files. Placing an original PS5 module in `libs/` on Windows makes Windows try to load it as a DLL and can fail with error 193 (not a valid Win32 application).
 
@@ -161,6 +162,8 @@ $env:VK_LOADER_DRIVERS_DISABLE = '*dzn*'
 
 Do not disable Dozen if it is the only Vulkan driver available; the application would have no device to use. `VK_LOADER_DRIVERS_DISABLE` matches Vulkan driver manifest filenames and requires a Vulkan loader built with headers 1.3.234 or later ([loader documentation](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderInterfaceArchitecture.md#filter-environment-variables)).
 
+On Windows, NVIDIA driver 610.47 can crash in its shader compiler while pipelines are created: the log ends in `FATAL: unhandled exception 0xc0000005` with `nvgpucomp64.dll` in `rip`, on a driver thread. PPSA25344 on an RTX 3060 stopped this way in 3 of 3 New Game loads, also with `APS5_NO_PIPELINE_LTO=1`; with driver 617.42 the same build and scene ran for 40 minutes. Update the driver when the crash is in `nvgpucomp64.dll`.
+
 ### HDR output
 
 HDR output is available on Windows only. Titles see it when the monitor showing the window runs in HDR mode (Settings > Display > Use HDR), the window's Vulkan surface offers an HDR10 (`VK_COLOR_SPACE_HDR10_ST2084_EXT`) swapchain in a 10-bit format, the instance has `VK_EXT_swapchain_colorspace` and the device `VK_EXT_hdr_metadata`. The monitor's luminance comes from DXGI; a monitor that reports no peak luminance is taken as 1000 nits peak and full-frame, 0 nits black. On Linux and other hosts the output is always SDR, because the surface's formats do not show whether the display is in HDR. A title's BT.2100 PQ display buffers then reach the display unchanged; without HDR output they are converted to SDR.
@@ -212,7 +215,9 @@ python3 tools/import_audit.py app.registry.json app.libc.prx.guest.prx.registry.
 
 Each `--modules` file is also audited itself: its undefined symbols are classified against the built libraries and the other modules' exports, with the module file named in the report, and the libraries it needs must have a file in `--libs` or `--modules`. The audit reads dynamic tables from ELF section headers or, for sectionless files, from `PT_DYNAMIC` and a SysV or GNU hash table.
 
-The report also lists needed libraries that have no file in `--libs` or `--modules`, and imports exported only by a library other than the one they name; those resolve on Linux and can fail on Windows.
+Each registry has a companion with the same prefix and the suffix `.needed.json`, listing its host library dependencies, including declared `DT_NEEDED` entries with no imports. Dependencies supplied by converted bundled modules, including their aliases, are omitted. The executable's companion includes host dependencies of its bundled modules. The audit reads these companions automatically; keep them beside the registries. Older registries without companions still work, but cannot report dependencies that have no imports; regenerate them with `--registry` to include those dependencies.
+
+The report also lists needed libraries that have no file in `--libs` or `--modules`, including dependencies with zero imports. These do not increase the import or reference counts. Windows can skip a missing dependency when no import needs it; Linux still needs the file. The audit also lists imports exported only by a library other than the one they name; those resolve on Linux and can fail on Windows.
 
 | Option | Effect |
 |--------|--------|

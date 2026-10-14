@@ -308,7 +308,7 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, bool testValEx
     depth.clearStencil = static_cast<std::uint8_t>(read(cx, 0x00a) & 0xffu);
     depth.htileDepthOnly = (read(cx, 0x011) & (1u << 29u)) != 0u;
     if (const auto htile = find(cx, 0x005); zFormat != 0 && htile != cx.end() && htile->second != 0 && (read(cx, 0x010) & (1u << 29u)) != 0) {
-        depth.htileAddress = base(0x005, 0x01e);
+        depth.htileAddress = base(0x005, 0x01e) + static_cast<std::uint64_t>(view & 0x1fffu) * HtileMetadataBytes(depth.extent);
         depth.htileStencil = stencil && !depth.htileDepthOnly;
     }
     result.depth = depth;
@@ -1123,7 +1123,7 @@ GuestTextureResource SurfaceForTarget(const ColorTarget& color) {
     return surface;
 }
 
-ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
+ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allowMultisampleDcc) {
     const auto stride = slot * 0xfu;
     ColorTarget color{};
     color.slot = slot;
@@ -1279,8 +1279,9 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
     const auto sourceAttrib = find(cx, 0x31d);
     const bool sourceSamples = sourceAttrib != cx.end() && ((sourceAttrib->second >> 12u) & 7u) != 0;
     const bool resolve = mode == 3u && (rasterizerSamples || sourceSamples);
-    if (mode != 2u && mode != 6u && !resolve) return std::nullopt;
-    ColorMetadataPass pass{resolve ? ColorMetadataPass::Mode::Resolve : mode == 2u ? ColorMetadataPass::Mode::EliminateFastClear : ColorMetadataPass::Mode::DccDecompress, {}, std::nullopt};
+    const bool fmaskDecompress = mode == 5u;
+    if (mode != 2u && mode != 6u && !resolve && !fmaskDecompress) return std::nullopt;
+    ColorMetadataPass pass{resolve ? ColorMetadataPass::Mode::Resolve : fmaskDecompress ? ColorMetadataPass::Mode::FmaskDecompress : mode == 2u ? ColorMetadataPass::Mode::EliminateFastClear : ColorMetadataPass::Mode::DccDecompress, {}, std::nullopt};
     Require((control->second & ~0x70u) == 0xcc0000u, "CB metadata pass with a nonstandard ROP, dual quads disabled or degamma");
     const auto value = [&](std::uint32_t offset) {
         const auto found = find(cx, offset);
@@ -1330,8 +1331,13 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
     const auto targetMask = read(cx, 0x8e);
     for (std::uint32_t slot = 0; slot < 8; ++slot) {
         if (((targetMask >> (4u * slot)) & 0xfu) == 0 || ((read(cx, 0x31c + slot * 0xfu) >> 2u) & 0x1fu) == 0) continue;
-        const auto target = DecodeColorBuffer(cx, slot);
-        Require(target.samples == 1, "CB metadata pass over a multisampled color target, whose texels are on the host, is unsupported (only a CB resolve is modeled)");
+        const auto target = DecodeColorBuffer(cx, slot, fmaskDecompress);
+        if (fmaskDecompress) {
+            Require(target.samples > 1, "CB metadata pass over a single-sample target");
+            Require(target.cmaskAddress != 0, "FMASK decompress of a target without a CMASK address");
+        } else {
+            Require(target.samples == 1, "CB metadata pass over a multisampled color target, whose texels are on the host, is unsupported (only a CB resolve is modeled)");
+        }
         Require((read(cx, 0x31c + slot * 0xfu) & 0x10000000u) == 0 || target.dccAddress != 0, "CB metadata pass over a mipmapped DCC color target, whose keys are not modeled");
         requireCovered(target);
         pass.targets.push_back(target);

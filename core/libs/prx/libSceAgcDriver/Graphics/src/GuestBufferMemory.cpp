@@ -2359,7 +2359,13 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& 
 bool RegisteredReadableCovers(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
     const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
-    return containingRange(lease, address, address + bytes) != nullptr;
+    const auto end = address + bytes;
+    for (auto at = address; at < end;) {
+        const auto* range = containingRange(lease, at, at + 1);
+        if (range == nullptr) return false;
+        at = range->address + range->bytes;
+    }
+    return true;
 }
 
 std::uint64_t RegisteredReadableEnd(std::uint64_t address) {
@@ -3267,14 +3273,31 @@ void GuestBufferMemory::UploadPrepare(bool addressable) {
     }
 }
 
+void GuestBufferMemory::completeSpaceWrites() const {
+    auto* recorder = Recorder::Active();
+    if (recorder == nullptr || Recorder::InCompletion()) return;
+    const auto& base = space->base;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+    std::vector<std::size_t> candidates;
+    std::size_t next = 0;
+    while (next < base.size()) {
+        recorder->PendingWriteRanges(writes);
+        OverlappedRanges(std::span<const Region>(base), next, writes, candidates);
+        next = base.size();
+        for (const auto index : candidates) {
+            if (!CompletePendingCpuWrites(context, base[index].begin, static_cast<std::size_t>(base[index].end - base[index].begin))) continue;
+            next = index + 1;
+            break;
+        }
+    }
+}
+
 void GuestBufferMemory::UploadFinish(bool addressable) {
     Require(prepared && !uploaded, "guest memory upload was not prepared");
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto started = std::chrono::steady_clock::now();
     for (const auto& region : regions) CompletePendingCpuWrites(context, region.begin, static_cast<std::size_t>(region.end - region.begin));
-    if (space != nullptr) {
-        for (const auto& region : space->base) CompletePendingCpuWrites(context, region.begin, static_cast<std::size_t>(region.end - region.begin));
-    }
+    if (space != nullptr) completeSpaceWrites();
     uploaded = true;
     for (const auto& [begin, end] : writes) StorageTexture::FlushPending(begin, static_cast<std::size_t>(end - begin), nullptr, "written buffer range");
     if (context.hostImportAlignment != 0) {

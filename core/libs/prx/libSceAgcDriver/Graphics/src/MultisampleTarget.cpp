@@ -1,12 +1,12 @@
 #include <shared_mutex>
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
-#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleInitialContents.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
@@ -20,8 +20,8 @@
 #include <bit>
 #include <cstdio>
 #include <cstring>
-#include <memory>
 #include <map>
+#include <memory>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -71,14 +71,17 @@ void recordCommands(const Context& context, Record&& record) {
 
 class MultisampleTarget {
 public:
-    MultisampleTarget(const Context& context, const ColorTarget& target) : context(context), target(target), cmask(target.cmaskAddress, target.cmaskBytes), colorFill(target) {
+    MultisampleTarget(const Context& context, const ColorTarget& target, std::optional<std::uint32_t> uniform = std::nullopt) : context(context), target(target), cmask(target.cmaskAddress, target.cmaskBytes), colorFill(target) {
         Require(context.device != VK_NULL_HANDLE && context.formatProperties != nullptr && context.imageFormatProperties != nullptr && context.detiler != nullptr, "multisample target requires a device, format queries and a detiler");
         Require(target.samples == 2u || target.samples == 4u || target.samples == 8u, "unsupported initial multisample fragment count");
-        Require(target.tileMode == ColorTileMode::RenderTarget && target.arrayLayers == 1u && target.arraySlice == 0u && target.depth == 1u && target.depthSlice == 0u && target.mipCount == 1u && target.mip == 0u && !target.mipTail, "initial multisample array, volume, mip or non-R_X contents are not implemented");
-        const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u, target.pipeBankXor);
+        Require((target.tileMode == ColorTileMode::RenderTarget || (uniform.has_value() && (target.tileMode == ColorTileMode::Standard4KB || target.tileMode == ColorTileMode::Standard64KB))) && target.arrayLayers == 1u && target.arraySlice == 0u && target.depth == 1u && target.depthSlice == 0u && target.mipCount == 1u && target.mip == 0u && !target.mipTail, "initial multisample array, volume, mip or non-R_X contents are not implemented");
         Require((target.fmaskAddress & 65535u & ~0xcf00u) == 0u, "initial multisample FMASK XOR tag is not implemented");
-        backingExtent = {layout.Pitch(), layout.PaddedHeight()};
-        Require(target.bytes == layout.Bytes(), "initial multisample target footprint mismatch");
+        backingExtent = target.extent;
+        if (target.tileMode == ColorTileMode::RenderTarget) {
+            const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u, target.pipeBankXor);
+            backingExtent = {layout.Pitch(), layout.PaddedHeight()};
+            Require(target.bytes == layout.Bytes(), "initial multisample target footprint mismatch");
+        }
         Require(context.storageImageMultisample && context.storageImageWriteWithoutFormat && context.storageImageReadWithoutFormat, "multisample target requires enabled formatless image transfers");
         this->context.bufferPool.reset();
         const auto samples = static_cast<VkSampleCountFlagBits>(target.samples);
@@ -86,16 +89,29 @@ public:
         VkFormatProperties properties{};
         context.formatProperties(context.physical, target.format, &properties);
         Require((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0, "multisampled render-target format cannot be a color attachment");
-        constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+        VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
         constexpr VkImageCreateFlags flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
         VkImageFormatProperties supported{};
+        sampleable = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0 && context.imageFormatProperties(context.physical, target.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage | VK_IMAGE_USAGE_SAMPLED_BIT, flags, &supported) == VK_SUCCESS && (supported.sampleCounts & samples) != 0;
+        if (sampleable) usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
         Check(context.imageFormatProperties(context.physical, target.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, flags, &supported), "vkGetPhysicalDeviceImageFormatProperties multisampled target");
         Require((supported.sampleCounts & samples) != 0 && backingExtent.width <= supported.maxExtent.width && backingExtent.height <= supported.maxExtent.height, "multisampled render target exceeds device image limits");
-        auto color = readInitialRange(target.address, target.bytes, MultisampleTextureLayout::Alignment);
+        auto color = readInitialRange(target.address, target.tileMode == ColorTileMode::RenderTarget ? target.bytes : MultisampledColorBytes(target), target.tileMode == ColorTileMode::Standard4KB ? 4096u : MultisampleTextureLayout::Alignment);
         auto dcc = target.dccAddress != 0u ? readInitialRange(target.dccAddress, MultisampleDccBytes_nid_no_patch(target.elementBytes, target.samples, target.extent.width, target.extent.height, 1u), 256u) : std::vector<std::byte>{};
         auto cmask = target.cmaskAddress != 0u ? readInitialRange(target.cmaskAddress, target.cmaskBytes, CmaskLayout::Alignment) : std::vector<std::byte>{};
         auto fmask = target.fmaskAddress != 0u ? readInitialRange(target.fmaskAddress & ~std::uint64_t{65535u}, MultisampleFmaskBytes(target), 65536u) : std::vector<std::byte>{};
-        const auto initial = DecodeMultisampleInitialContents(target, color, dcc, cmask, fmask, true);
+        MultisampleInitialContents initial;
+        if (target.tileMode == ColorTileMode::RenderTarget) initial = DecodeMultisampleInitialContents(target, color, dcc, cmask, fmask, true);
+        else {
+            Require(uniform.has_value() && target.dccAddress == 0u && target.cmaskAddress == 0u && target.fmaskAddress == 0u, "uniform standard multisample targets with metadata are not implemented");
+            std::uint32_t first = 0u;
+            Require(color.size() >= sizeof(first), "uniform multisample target is empty");
+            std::memcpy(&first, color.data(), sizeof(first));
+            Require(first == *uniform && std::equal(color.begin() + sizeof(first), color.end(), color.begin()), "guest writes changed uniform multisample initial contents");
+            VkClearColorValue clear{};
+            Require(MultisampledFillClearColor(target, first, clear), "uniform multisample initial contents have no exact native clear");
+            initial.clear = clear;
+        }
         try {
             VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
             info.flags = flags;
@@ -313,6 +329,7 @@ public:
 
     void PublishGuest() {
         CheckCurrent(target);
+        Require(target.tileMode == ColorTileMode::RenderTarget, "guest publication of a uniform standard multisample target is not implemented");
         if (!dirty) return;
         for (const auto& range : initialRanges) GuestMemory::CheckRange(reinterpret_cast<const void*>(range.address), range.bytes, 1u, true);
         for (std::size_t first = 0; first < initialRanges.size(); ++first) {
@@ -373,6 +390,24 @@ public:
         return std::make_shared<Texture>(context, image, owner, resource, components, Texture::NativeSnapshotTag{});
     }
 
+    std::shared_ptr<Texture> Sampled(VkComponentMapping components) {
+        CheckCurrent(target);
+        Require(sampleable, "the device cannot sample the multisampled color target's format at its sample count");
+        Require(cmask.Refusal().empty(), cmask.Refusal());
+        Require(cmask.Keys() != DccKeys::Clear0000, "sampling a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
+        Require(Recorder::Active() != nullptr, "a multisampled color target is only sampled by recorded draws and dispatches");
+        ApplyFastClear(target);
+        recordCommands(context, [&](VkCommandBuffer commands, Recorder*) {
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+            Recorder::CountBarriers(Recorder::CommandClass::Draw, 1);
+        });
+        const std::array<std::uint32_t, 4> key{static_cast<std::uint32_t>(components.r), static_cast<std::uint32_t>(components.g), static_cast<std::uint32_t>(components.b), static_cast<std::uint32_t>(components.a)};
+        if (const auto found = textures.find(key); found != textures.end()) return found->second;
+        auto texture = std::make_shared<Texture>(context, image, target.format, VK_IMAGE_ASPECT_COLOR_BIT, components);
+        textures.emplace(key, texture);
+        return texture;
+    }
+
     VkRenderPass ResolvePass() {
         if (resolvePass != VK_NULL_HANDLE) return resolvePass;
         std::array<VkAttachmentDescription, 2> attachments{};
@@ -418,6 +453,8 @@ public:
     MultisampledColorFill colorFill;
 
 private:
+    bool sampleable = false;
+    std::map<std::array<std::uint32_t, 4>, std::shared_ptr<Texture>> textures;
     VkExtent2D backingExtent{};
     std::vector<GuestMemory::UnchangedQuery> initialRanges;
     std::vector<GuestMemory::UnchangedQuery> fillRanges;
@@ -545,6 +582,7 @@ private:
     }
 
     void release() noexcept {
+        textures.clear();
         if (resolvePass) context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, resolvePass, nullptr);
         if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
         if (transferView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, transferView, nullptr);
@@ -647,6 +685,55 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
     targets().push_back(std::make_shared<MultisampleTarget>(context, use));
     guard(context, *targets().back());
     auto& created = *targets().back();
+    return created;
+}
+
+MultisampleTarget& createFilled(const Context& context, const GuestTextureResource& resource, VkFormat format) {
+    const auto refuse = [&](const std::string& reason) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "AGC graphics: sampling the %ux%u multisampled texture 0x%llx of %u samples, which no draw rendered to and ", resource.width, resource.height, static_cast<unsigned long long>(resource.baseAddress), resource.samples);
+        throw std::runtime_error(text + reason + ", is not implemented");
+    };
+    ColorTarget use{};
+    switch (resource.tileMode) {
+        case TextureTileMode::kStandard4KB: use.tileMode = ColorTileMode::Standard4KB; break;
+        case TextureTileMode::kStandard64KB: use.tileMode = ColorTileMode::Standard64KB; break;
+        case TextureTileMode::kR64KBX: use.tileMode = ColorTileMode::RenderTarget; break;
+        default: refuse("whose tile mode " + std::to_string(static_cast<int>(resource.tileMode)) + " has no modeled multisampled color footprint");
+    }
+    use.address = resource.baseAddress;
+    use.surfaceAddress = resource.baseAddress;
+    use.extent = {resource.width, resource.height};
+    use.surfaceExtent = use.extent;
+    use.format = format;
+    use.elementBytes = BytesPerElement(resource.format);
+    use.pipeBankXor = resource.pipeBankXor;
+    use.samples = resource.samples;
+    const auto bytes = MultisampledColorBytes(use);
+    if (bytes == 0) refuse("whose " + std::to_string(use.elementBytes) + "-byte elements have no modeled multisampled color footprint");
+    use.bytes = ColorTargetLayout(use.extent.width, use.extent.height, use.tileMode, use.elementBytes).Bytes();
+    char range[64];
+    std::snprintf(range, sizeof(range), "0x%llx+0x%llx", static_cast<unsigned long long>(use.address), static_cast<unsigned long long>(bytes));
+    RequireNoMultisampleTarget(use.address, static_cast<std::size_t>(bytes), "sampling a multisampled texture no draw rendered to");
+    GuestMemory::FlushGpuWrites(use.address, static_cast<std::size_t>(bytes));
+    if (!GuestMemory::Accessible(reinterpret_cast<const void*>(use.address), static_cast<std::size_t>(bytes))) refuse(std::string("whose color memory ") + range + " is not mapped");
+    const auto* memory = reinterpret_cast<const std::byte*>(use.address);
+    std::uint32_t value = 0;
+    std::memcpy(&value, memory, sizeof(value));
+    char held[16];
+    std::snprintf(held, sizeof(held), "0x%08x", value);
+    const auto repeated = std::mismatch(memory + sizeof(value), memory + bytes, memory).first;
+    if (repeated != memory + bytes) {
+        char offset[32];
+        std::snprintf(offset, sizeof(offset), "+0x%llx", static_cast<unsigned long long>(repeated - memory));
+        refuse(std::string("whose color memory ") + range + " does not hold one repeated 32-bit value (" + held + " until " + offset + ")");
+    }
+    VkClearColorValue clear{};
+    if (!MultisampledFillClearColor(use, value, clear)) refuse(std::string("whose color memory ") + range + " holds " + held + ", which has no exact clear value in its format");
+    if (use.tileMode == ColorTileMode::RenderTarget) use.bytes = bytes;
+    targets().push_back(std::make_shared<MultisampleTarget>(context, use, value));
+    auto& created = *targets().back();
+    guard(context, created);
     return created;
 }
 
@@ -787,8 +874,12 @@ std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const 
     for (const auto& target : targets()) {
         if (!target->active->load(std::memory_order_acquire) || target->context.device != context.device || target->target.surfaceAddress != resource.baseAddress) continue;
         const auto& rendered = target->target;
-        if (rendered.format == format && rendered.extent.width == resource.width && rendered.extent.height == resource.height && rendered.samples == resource.samples && rendered.mip == 0) return target->Snapshot(resource, components, target);
+        if (rendered.format == format && rendered.extent.width == resource.width && rendered.extent.height == resource.height && rendered.samples == resource.samples && rendered.mip == 0) return rendered.tileMode == ColorTileMode::RenderTarget ? target->Snapshot(resource, components, target) : target->Sampled(components);
         other = target.get();
+    }
+    if (other == nullptr) {
+        Require(Recorder::Active() != nullptr, "a multisampled texture is only sampled by recorded draws and dispatches");
+        return createFilled(context, resource, format).Sampled(components);
     }
     char text[320];
     if (other != nullptr) std::snprintf(text, sizeof(text), "AGC graphics: sampling multisampled color target 0x%llx (%ux%u, %u samples, vk format %d) as a %ux%u texture of %u samples and guest format %u (vk %d) is not implemented", static_cast<unsigned long long>(resource.baseAddress), other->target.extent.width, other->target.extent.height, other->target.samples, static_cast<int>(other->target.format), resource.width, resource.height, resource.samples, resource.format, static_cast<int>(format));
@@ -863,6 +954,12 @@ void SynchronizeMultisampleTargetRead(std::uint64_t address, std::size_t bytes) 
         ~Publishing() { flag = false; }
     } publication(publishing);
     for (const auto& resident : targets()) if (resident->active->load(std::memory_order_acquire) && resident->Overlaps(address, bytes)) resident->PublishGuest();
+}
+
+void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget& target) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::lock_guard lock(targetsMutex());
+    acquire(context, target);
 }
 
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView) {

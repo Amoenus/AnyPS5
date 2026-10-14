@@ -2575,6 +2575,10 @@ void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass)
         ResolveMultisampleTarget(context, *pass.source, *resident, resident->AttachmentView(destination.format, destination.mip));
         return;
     }
+    if (pass.mode == ColorMetadataPass::Mode::FmaskDecompress) {
+        for (const auto& color : pass.targets) MaterializeMultisampleTargetClear(context, color);
+        return;
+    }
     for (const auto& color : pass.targets) {
         if (color.cmaskAddress != 0) {
             const auto resident = metadataPassResident(context, color);
