@@ -595,5 +595,44 @@ class RepositoryChecksTests(unittest.TestCase):
         self.assertIn("file=docs/name%2Cwith%3Acolon%25%0A.md,line=2", annotation)
 
 
+def grouped_names(group):
+    groups = {"silent-stubs": ("SilentStubSectionTests",), "repository": ("RepositoryChecksTests",)}
+    if group in groups:
+        return groups[group]
+    if group != "other":
+        raise ValueError(f"unknown conventions test group: {group}")
+    isolated = {name for names in groups.values() for name in names}
+    return tuple(name for name, value in globals().items()
+                 if isinstance(value, type) and issubclass(value, unittest.TestCase) and name not in isolated)
+
+
+class GroupedSelectionTests(unittest.TestCase):
+    def test_groups_cover_all_discovered_cases_once(self):
+        loader = unittest.defaultTestLoader
+        module = sys.modules[__name__]
+        all_cases = {case.id() for tests in loader.loadTestsFromModule(module) for case in tests}
+        selected = []
+        for group in ("other", "silent-stubs", "repository"):
+            selected.extend(case.id() for tests in loader.loadTestsFromNames(grouped_names(group), module) for case in tests)
+        self.assertEqual(set(selected), all_cases)
+        self.assertEqual(len(selected), len(all_cases))
+
+    def test_future_class_is_discovered_in_other_group(self):
+        future = type("FutureConventionTests", (unittest.TestCase,), {"test_future": lambda self: None})
+        with patch.dict(globals(), {"FutureConventionTests": future}):
+            self.assertIn("FutureConventionTests", grouped_names("other"))
+            self.assertNotIn("FutureConventionTests", grouped_names("silent-stubs"))
+            self.assertNotIn("FutureConventionTests", grouped_names("repository"))
+
+    def test_unknown_group_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown conventions test group"):
+            grouped_names("missing")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:2] == ["--group"]:
+        names = grouped_names(sys.argv[2])
+        del sys.argv[1:3]
+        unittest.main(defaultTest=names)
+    else:
+        unittest.main()
