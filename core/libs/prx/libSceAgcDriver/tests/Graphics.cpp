@@ -903,10 +903,10 @@ bool readsBuiltin(const std::vector<spv::BuiltIn>& read, spv::BuiltIn builtin) {
     return std::find(read.begin(), read.end(), builtin) != read.end();
 }
 
-std::vector<std::uint32_t> pixelNoPerspectiveLocations(bool barycentricEnabled) {
+std::vector<std::uint32_t> pixelNoPerspectiveLocations(bool barycentricEnabled, std::uint32_t inputs = 0x22u) {
     auto queue = makeState();
-    queue.context[0x1b3] = 0x22u;
-    queue.context[0x1b4] = 0x22u;
+    queue.context[0x1b3] = inputs;
+    queue.context[0x1b4] = inputs;
     queue.context[0x1b6] = 2u;
     queue.context[0x191] = 0u;
     queue.context[0x192] = 1u;
@@ -940,6 +940,7 @@ std::vector<std::uint32_t> pixelNoPerspectiveLocations(bool barycentricEnabled) 
         }
     }
     if (barycentricEnabled) Require(perVertex == 2u && perspectiveBarycentrics && linearBarycentrics, "explicit interpolation must preserve both parameter vertices and both barycentric inputs");
+    if (!barycentricEnabled) Require(!result.barycentricEmulation.active, "v_interp_p1/p2 of their own I/J pairs did not keep host interpolation");
     std::vector<std::uint32_t> result2;
     for (const auto id : noPerspective) result2.push_back(locations.count(id) != 0 ? locations.at(id) : 0xffffffffu);
     return result2;
@@ -1159,6 +1160,19 @@ void PixelInputLayoutTests() {
     const auto noPerspective = pixelNoPerspectiveLocations(false);
     Require(noPerspective.size() == 1 && noPerspective[0] == 1u, "only the parameter interpolated through the linear pair must be NoPerspective");
     Require(pixelNoPerspectiveLocations(true).empty(), "explicit interpolation must not interpolate parameter arrays a second time");
+    for (const auto inputs : {0x11u, 0x12u, 0x21u}) {
+        const auto sampleNoPerspective = pixelNoPerspectiveLocations(false, inputs);
+        Require(sampleNoPerspective.size() == 1 && sampleNoPerspective[0] == 1u, "a parameter interpolated through a sample I/J pair lost its interpolation mode: inputs " + std::to_string(inputs));
+        Require(pixelNoPerspectiveLocations(true, inputs).empty(), "explicit interpolation through a sample I/J pair interpolated parameter arrays a second time: inputs " + std::to_string(inputs));
+    }
+    for (const auto source : {0u, 1u}) {
+        const auto read = pixelBuiltinsRead(0x3u, 0x3u, source);
+        Require(readsBuiltin(read, spv::BuiltInBaryCoordKHR) && !readsBuiltin(read, spv::BuiltInFragCoord), "PERSP_SAMPLE does not hold the perspective barycentrics: v" + std::to_string(source));
+    }
+    for (const auto source : {2u, 3u}) {
+        const auto read = pixelBuiltinsRead(0x12u, 0x12u, source);
+        Require(readsBuiltin(read, spv::BuiltInBaryCoordNoPerspKHR) && !readsBuiltin(read, spv::BuiltInBaryCoordKHR), "LINEAR_SAMPLE does not hold the linear barycentrics: v" + std::to_string(source));
+    }
     auto read = pixelBuiltinsRead(0x106u, 0x106u, 4u);
     Require(readsBuiltin(read, spv::BuiltInFragCoord) && !readsBuiltin(read, spv::BuiltInBaryCoordKHR), "POS_X is not in v4 after the center and centroid pairs");
     read = pixelBuiltinsRead(0x326u, 0x326u, 5u);
@@ -2944,7 +2958,10 @@ void AlphaToCoverageTests() {
     dithered.context[0x2f8] = 0x0030e003;
     dithered.context[0x292] = 3;
     dithered.context[0x31d] = 0x1b000;
+<<<<<<< HEAD
     dithered.context[0x321] = 0;
+=======
+>>>>>>> 23be5a02b075bd05c7c27d8b18a3d47ead6fd0e5
     dithered.context[0x1b3] = 2;
     dithered.context[0x1b4] = 2;
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
@@ -6215,6 +6232,11 @@ int main(int argc, char** argv) {
             Require(!snapshotAcquired, "pipeline cache snapshot overlapped pipeline creation");
             pipelineUse.unlock();
             Require(synchronization.TryLockForSnapshot().owns_lock(), "pipeline cache snapshot stayed blocked after pipeline creation finished");
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--undithered-alpha-to-coverage-state") {
+            UnditheredAlphaToCoverageTests();
+            std::cout << "Existing undithered alpha-to-coverage states passed\n";
+            return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-layout-flags") {
             descriptorLayoutFlagTests();

@@ -20,6 +20,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DisplayFormat.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PqToSdr.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
@@ -2858,13 +2859,14 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             }
         } else {
             if (display != nullptr) {
-                state->colorTransfer->Detile(commands, DisplayRedLow(display->pixelFormat), DisplayTenBit(display->pixelFormat), DisplayHalfFloat(display->pixelFormat));
+                const bool pq = DisplayPq(display->pixelFormat);
+                state->colorTransfer->Detile(commands, DisplayRedLow(display->pixelFormat), DisplayTenBit(display->pixelFormat) && !pq, DisplayHalfFloat(display->pixelFormat), pq ? std::optional<float>(SdrToneMapLuminanceNits) : std::nullopt);
             }
             if (uniform != nullptr) state->scaler->RecordClear(commands, *uniform);
             else state->scaler->RecordUpload(commands, display != nullptr ? state->colorTransfer->LinearBuffer() : state->uploadBuffer);
         }
         if (drawn) {
-            state->presentation->Bind(slotIndex, resident->Image(), width, height, display->pixelFormat, residentLayer);
+            state->presentation->Bind(slotIndex, resident->Image(), width, height, display->pixelFormat, SdrToneMapLuminanceNits, residentLayer);
             state->presentation->RecordPresent(commands, slotIndex, barrier.image, state->surfaceFormat, state->extent, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         } else {
             state->scaler->RecordLetterbox(commands, width, height, barrier.image, state->extent.width, state->extent.height);
