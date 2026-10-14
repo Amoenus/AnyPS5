@@ -340,6 +340,7 @@ const char* createDmaBufImport(const Context& context, HostImport& entry, int fi
 
 #ifndef _WIN32
 constexpr std::uint64_t ImportChunkBytes = std::uint64_t{64} << 20u;
+constexpr VkBufferUsageFlags ChunkImportUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 
 struct ImportChunk {
     VkDevice device = VK_NULL_HANDLE;
@@ -442,7 +443,7 @@ const char* createChunkedDmaBufImport(const Context& context, HostImport& entry,
     const VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, nullptr, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &external};
     info.size = entry.bytes;
-    info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    info.usage = ChunkImportUsage;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VkBuffer buffer = VK_NULL_HANDLE;
     if (const auto result = context.Function<PFN_vkCreateBuffer>("vkCreateBuffer")(context.device, &info, nullptr, &buffer); result != VK_SUCCESS) {
@@ -481,6 +482,101 @@ const char* createChunkedDmaBufImport(const Context& context, HostImport& entry,
     entry.dmaBuf = true;
     return nullptr;
 }
+
+constexpr VkBufferUsageFlags SparseImportUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+
+[[noreturn]] void throwSparseImport(const HostImport& entry, const char* step, VkResult result) {
+    char text[256];
+    std::snprintf(text, sizeof(text), "AGC graphics: sparse dma-buf import of 0x%llx+0x%llx failed at %s (%d)", static_cast<unsigned long long>(entry.base), static_cast<unsigned long long>(entry.bytes), step, static_cast<int>(result));
+    throw std::runtime_error(text);
+}
+
+VkMemoryRequirements dmaBufBufferRequirements(const Context& context, const HostImport& entry, VkBufferCreateFlags flags, VkBufferUsageFlags usage, VkDeviceSize size, VkBuffer* kept) {
+    const VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, nullptr, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
+    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &external};
+    info.flags = flags;
+    info.size = size;
+    info.usage = usage;
+    const std::uint32_t families[] = {context.queueFamily, context.sparseFamily};
+    const bool concurrent = (flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) != 0 && context.sparseQueue != VK_NULL_HANDLE;
+    info.sharingMode = concurrent ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+    info.queueFamilyIndexCount = concurrent ? 2u : 0u;
+    info.pQueueFamilyIndices = concurrent ? families : nullptr;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    if (const auto result = context.Function<PFN_vkCreateBuffer>("vkCreateBuffer")(context.device, &info, nullptr, &buffer); result != VK_SUCCESS) throwSparseImport(entry, "vkCreateBuffer", result);
+    VkMemoryRequirements requirements{};
+    context.Function<PFN_vkGetBufferMemoryRequirements>("vkGetBufferMemoryRequirements")(context.device, buffer, &requirements);
+    if (kept != nullptr) {
+        *kept = buffer;
+    } else {
+        context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, buffer, nullptr);
+    }
+    return requirements;
+}
+
+bool createSparseDmaBufImport(const Context& context, HostImport& entry, int file, std::uint64_t offset) {
+    const bool ownQueue = context.sparseQueue != VK_NULL_HANDLE && context.sparseQueueMutex != nullptr;
+    if (!context.sparseBinding || entry.bytes <= ImportChunkBytes || (!ownQueue && !GuestMemory::GpuMutex().HeldByThisThread()) || udmabufDevice() < 0) return false;
+    struct stat backing {};
+    if (fstat(file, &backing) != 0) throwSparseImport(entry, "fstat of the shared backing", VK_ERROR_INVALID_EXTERNAL_HANDLE);
+    const auto chunkTypes = dmaBufBufferRequirements(context, entry, 0, ChunkImportUsage, ImportChunkBytes, nullptr).memoryTypeBits;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    const auto requirements = dmaBufBufferRequirements(context, entry, VK_BUFFER_CREATE_SPARSE_BINDING_BIT, SparseImportUsage, entry.bytes, &buffer);
+    const auto alignment = requirements.alignment;
+    const bool chosen = alignment != 0 && offset % alignment == 0 && ImportChunkBytes % alignment == 0 && (chunkTypes & ~requirements.memoryTypeBits) == 0 && (requirements.memoryTypeBits & chunkTypes) != 0 &&
+        (offset + requirements.size + ImportChunkBytes - 1) / ImportChunkBytes * ImportChunkBytes <= static_cast<std::uint64_t>(backing.st_size);
+    const auto fail = [&](const char* step, VkResult result) {
+        context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, buffer, nullptr);
+        throwSparseImport(entry, step, result);
+    };
+    if (!chosen) {
+        context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, buffer, nullptr);
+        return false;
+    }
+    auto chunks = std::make_shared<std::vector<std::shared_ptr<ImportChunk>>>();
+    std::vector<VkSparseMemoryBind> binds;
+    for (VkDeviceSize resource = 0; resource < requirements.size;) {
+        const auto position = offset + resource;
+        const auto index = position / ImportChunkBytes;
+        const auto within = position - index * ImportChunkBytes;
+        const auto size = std::min<VkDeviceSize>(ImportChunkBytes - within, requirements.size - resource);
+        const char* step = nullptr;
+        VkResult failure = VK_SUCCESS;
+        auto chunk = importChunk(context, file, index, requirements.memoryTypeBits, step, failure);
+        if (chunk == nullptr) fail(step, failure);
+        if (((requirements.memoryTypeBits >> chunk->memoryType) & 1u) == 0) fail("the memory type of a chunk import", VK_ERROR_FORMAT_NOT_SUPPORTED);
+        binds.push_back({resource, size, chunk->memory, within, 0});
+        chunks->push_back(std::move(chunk));
+        resource += size;
+    }
+    const VkSparseBufferMemoryBindInfo bufferBinds{buffer, static_cast<std::uint32_t>(binds.size()), binds.data()};
+    VkBindSparseInfo bind{VK_STRUCTURE_TYPE_BIND_SPARSE_INFO};
+    bind.bufferBindCount = 1;
+    bind.pBufferBinds = &bufferBinds;
+    const VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence = VK_NULL_HANDLE;
+    if (const auto result = context.Function<PFN_vkCreateFence>("vkCreateFence")(context.device, &fenceInfo, nullptr, &fence); result != VK_SUCCESS) fail("vkCreateFence", result);
+    VkResult bound = VK_SUCCESS;
+    VkResult waited = VK_SUCCESS;
+    {
+        std::unique_lock<std::mutex> queueLock;
+        if (ownQueue) queueLock = std::unique_lock(*context.sparseQueueMutex);
+        bound = context.Function<PFN_vkQueueBindSparse>("vkQueueBindSparse")(ownQueue ? context.sparseQueue : context.queue, 1, &bind, fence);
+        if (bound == VK_SUCCESS) waited = context.Function<PFN_vkWaitForFences>("vkWaitForFences")(context.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    }
+    context.Function<PFN_vkDestroyFence>("vkDestroyFence")(context.device, fence, nullptr);
+    if (bound != VK_SUCCESS) fail("vkQueueBindSparse", bound);
+    if (waited != VK_SUCCESS) fail("vkWaitForFences", waited);
+    const VkBufferDeviceAddressInfo addressInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, buffer};
+    const auto address = context.Function<PFN_vkGetBufferDeviceAddressKHR>("vkGetBufferDeviceAddressKHR")(context.device, &addressInfo);
+    if (address == 0) fail("vkGetBufferDeviceAddressKHR", VK_ERROR_UNKNOWN);
+    entry.buffer = buffer;
+    entry.memory = VK_NULL_HANDLE;
+    entry.address = address;
+    entry.chunk = std::move(chunks);
+    entry.dmaBuf = true;
+    return true;
+}
 #endif
 
 #ifndef _WIN32
@@ -500,14 +596,11 @@ bool sharedBacking(const Context& context, const HostImport& entry, BackingFile&
 }
 
 const char* createBackingImport(const Context& context, HostImport& entry, BackingFile& backing, VkResult& failure) {
-    const int file = std::exchange(backing.file, -1);
     bool fits = false;
     VkResult chunkFailure = VK_SUCCESS;
-    if (createChunkedDmaBufImport(context, entry, file, backing.offset, fits, chunkFailure) == nullptr && fits) {
-        close(file);
-        return nullptr;
-    }
-    return createDmaBufImport(context, entry, file, backing.offset, failure);
+    if (createChunkedDmaBufImport(context, entry, backing.file, backing.offset, fits, chunkFailure) == nullptr && fits) return nullptr;
+    if (!fits && createSparseDmaBufImport(context, entry, backing.file, backing.offset)) return nullptr;
+    return createDmaBufImport(context, entry, std::exchange(backing.file, -1), backing.offset, failure);
 }
 #endif
 

@@ -307,6 +307,11 @@ struct VulkanDevice::State {
     bool occlusionQueryPrecise = false;
     VkDeviceSize hostImportAlignment = 0;
     bool dmaBufImport = false;
+    bool sparseBinding = false;
+    std::uint32_t queueFamily = 0;
+    std::uint32_t sparseFamily = VK_QUEUE_FAMILY_IGNORED;
+    VkQueue sparseQueue = VK_NULL_HANDLE;
+    std::mutex sparseQueueMutex;
     bool memoryBudget = false;
     bool depthRangeUnrestricted = false;
     bool samplerAnisotropy = false;
@@ -1386,6 +1391,34 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     // Guest shaders routinely read past descriptor ranges; robust access turns that into zeros
     // instead of a GPU fault that loses the device.
     enabled.robustBufferAccess = available.robustBufferAccess;
+    VkDeviceQueueCreateInfo queueInfos[2]{queueInfo, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
+    if (available.sparseBinding && state->dmaBufImport) {
+        std::uint32_t families = 0;
+        auto getFamilies = state->InstanceFunction<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
+        getFamilies(selected, &families, nullptr);
+        std::vector<VkQueueFamilyProperties> queues(families);
+        getFamilies(selected, &families, queues.data());
+        const auto binds = [&](std::uint32_t index) { return index != family && queues[index].queueCount != 0 && (queues[index].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0; };
+        std::uint32_t sparseFamily = families;
+        for (std::uint32_t i = 0; i < families && sparseFamily == families; ++i) {
+            if (binds(i) && queues[i].queueFlags == VK_QUEUE_SPARSE_BINDING_BIT) sparseFamily = i;
+        }
+        for (std::uint32_t i = 0; i < families && sparseFamily == families; ++i) {
+            if (binds(i)) sparseFamily = i;
+        }
+        if (sparseFamily != families) {
+            queueInfos[1].queueFamilyIndex = sparseFamily;
+            queueInfos[1].queueCount = 1;
+            queueInfos[1].pQueuePriorities = &priority;
+            deviceInfo.queueCreateInfoCount = 2;
+            state->sparseFamily = sparseFamily;
+            state->sparseBinding = true;
+        } else {
+            state->sparseBinding = family < families && (queues[family].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
+        }
+        enabled.sparseBinding = state->sparseBinding ? VK_TRUE : VK_FALSE;
+    }
+    deviceInfo.pQueueCreateInfos = queueInfos;
     // Indirect draw records with a non-zero first instance, and several records per call.
     enabled.drawIndirectFirstInstance = available.drawIndirectFirstInstance;
     enabled.multiDrawIndirect = available.multiDrawIndirect;
@@ -1643,6 +1676,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         }
     }
     state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, 0, &state->queue);
+    state->queueFamily = family;
+    if (state->sparseFamily != VK_QUEUE_FAMILY_IGNORED) state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, state->sparseFamily, 0, &state->sparseQueue);
     APS5_LOG_OUT("Vulkan device ready device=%p queue=%p family=%u", reinterpret_cast<void*>(state->device), reinterpret_cast<void*>(state->queue), family);
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -3157,6 +3192,11 @@ Graphics::Context VulkanDevice::buildContext() const {
     };
     context.pipelineCacheSynchronization = state->pipelineCache ? &state->pipelineCache->Synchronization() : nullptr;
     context.dmaBufImport = state->dmaBufImport;
+    context.sparseBinding = state->sparseBinding;
+    context.queueFamily = state->queueFamily;
+    context.sparseFamily = state->sparseFamily;
+    context.sparseQueue = state->sparseQueue;
+    context.sparseQueueMutex = &state->sparseQueueMutex;
     context.recorder = state->recorder.get();
     context.descriptorCache = state->descriptorCache.get();
     context.samplerCache = state->samplerCache.get();

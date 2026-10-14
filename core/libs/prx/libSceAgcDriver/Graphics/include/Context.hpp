@@ -4,6 +4,7 @@
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES
 #endif
+#include <mutex>
 #include <vulkan/vulkan.h>
 #include <atomic>
 #include <cstdint>
@@ -138,6 +139,11 @@ struct Context {
     // Nonzero when VK_EXT_external_memory_host is enabled: the required host pointer alignment.
     VkDeviceSize hostImportAlignment = 0;
     bool dmaBufImport = false;
+    bool sparseBinding = false;
+    std::uint32_t queueFamily = 0;
+    std::uint32_t sparseFamily = VK_QUEUE_FAMILY_IGNORED;
+    VkQueue sparseQueue = VK_NULL_HANDLE;
+    std::mutex* sparseQueueMutex = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties2 memoryProperties2 = nullptr;
     RenderCache* renderCache = nullptr;
     DrawQueue* drawQueue = nullptr;
