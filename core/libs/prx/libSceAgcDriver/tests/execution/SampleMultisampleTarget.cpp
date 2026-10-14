@@ -225,10 +225,12 @@ ShaderRecompiler::RecompileResult CompileLoad(AgcDriver::VulkanDevice& device, c
     return ShaderRecompiler::Recompile(request);
 }
 
-std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t sampleShift = SampleShift) {
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t sampleShift = SampleShift, std::uint32_t tileMode = TileRenderTarget) {
     std::vector<std::uint32_t> userData;
     const auto samples = 1u << sampleShift;
-    const auto program = CompileLoad(device, TargetDescriptor(block, sampleShift), userData);
+    auto descriptor = TargetDescriptor(block, sampleShift);
+    descriptor[3] = (descriptor[3] & ~(0x1fu << 20u)) | (tileMode << 20u);
+    const auto program = CompileLoad(device, descriptor, userData);
     std::vector<std::array<float, 4>> loaded(Side * Side * samples);
     for (std::uint32_t first = 0; first < loaded.size(); first += Threads) {
         Buffer.fill(0xdeadbeefu);
@@ -345,6 +347,23 @@ int main() {
         const auto storedState = TargetState(DecodeTarget(stored));
         Draw(*device, storedState);
         CheckSamples(storedState, LoadSamples(*device, stored), Ones);
+        for (const auto tileMode : {5u, 9u}) {
+            Block uniform(BlockBytes);
+            StoreWords(uniform, uniform.bytes, FillOnes);
+            CheckUniform(LoadSamples(*device, uniform, SampleShift, tileMode), Ones, "from uniformly filled standard-tiled multisample memory");
+            CheckUniform(LoadSamples(*device, uniform, SampleShift, tileMode), Ones, "from the reused standard-tiled multisample target");
+            Block mixed(BlockBytes);
+            StoreWords(mixed, mixed.bytes, FillOnes);
+            auto standard = color;
+            standard.tileMode = tileMode == 5u ? AgcDriver::Graphics::ColorTileMode::Standard4KB : AgcDriver::Graphics::ColorTileMode::Standard64KB;
+            const auto bytes = AgcDriver::Graphics::MultisampledColorBytes(standard);
+            Require(bytes >= sizeof(std::uint32_t) && bytes <= mixed.bytes, "the standard-tiled multisample fixture footprint is invalid");
+            const std::uint32_t odd = 0x3c000000u;
+            std::memcpy(mixed.data + bytes - sizeof(odd), &odd, sizeof(odd));
+            auto descriptor = TargetDescriptor(mixed, SampleShift);
+            descriptor[3] = (descriptor[3] & ~(0x1fu << 20u)) | (tileMode << 20u);
+            RequireRefused(*device, descriptor, "does not hold one repeated 32-bit value", "nonuniform standard-tiled multisample initial contents");
+        }
         std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it, then the fill of its color memory");
         return 0;
     } catch (const std::exception& error) {

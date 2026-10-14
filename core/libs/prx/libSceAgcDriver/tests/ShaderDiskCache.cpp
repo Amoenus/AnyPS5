@@ -82,6 +82,9 @@ void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShade
     require(left.vertexOffsetSgpr == right.vertexOffsetSgpr && left.instanceOffsetSgpr == right.instanceOffsetSgpr, prefix + "offset SGPRs differ");
     require(left.vertexOffsetShared == right.vertexOffsetShared && left.instanceOffsetShared == right.instanceOffsetShared && left.vertexOffsetConflict == right.vertexOffsetConflict && left.instanceOffsetConflict == right.instanceOffsetConflict, prefix + "offset flags differ");
     require(left.parameterExports == right.parameterExports, prefix + "parameter exports differ");
+    require(left.stencilReferences == right.stencilReferences, prefix + "stencil reference set differs");
+    require(left.stencilReplaySafe == right.stencilReplaySafe, prefix + "stencil replay proof differs");
+    require(left.stencilReferenceDword == right.stencilReferenceDword, prefix + "stencil replay push offset differs");
     require(left.fragmentParameters.size() == right.fragmentParameters.size(), prefix + "fragment parameter count differs");
     for (std::size_t i = 0; i < left.fragmentParameters.size(); ++i) {
         const auto& a = left.fragmentParameters[i];
@@ -182,6 +185,9 @@ RecompileResult sampleResult() {
     result.instanceOffsetConflict = true;
     result.parameterExports = {0, 3, 7};
     result.fragmentParameters = {{0, 1, true, false, true}, {2, 3, false, true}};
+    result.stencilReferences = {0u, 17u, 255u};
+    result.stencilReplaySafe = true;
+    result.stencilReferenceDword = 23u;
     result.poisonedSrtReads = 3;
     result.barycentricEmulation = {true, false, true};
     result.variantId = 99;
@@ -236,6 +242,7 @@ CompiledVariant sampleVariant() {
     image.constantSwizzle = true;
     image.constantSwizzleCompatible = false;
     image.flatVolumeCompatible = false;
+    image.singleMipPlaneBiasCompatible = true;
     image.flatLineCompatible = false;
     image.flatVolumeLineCompatible = false;
     image.foldTexelOffsetsOnly = true;
@@ -272,6 +279,7 @@ CompiledVariant sampleVariant() {
     info.bindings.pushDataStartDword = 2;
     info.bindings.memoryOffsetDword = 1;
     info.bindings.memoryOffsetCount = 5;
+    info.bindings.stencilReferenceDword = 23u;
     info.bindings.userDataRegisters = {4, 5, 9};
     info.bindings.descriptors = {{DescriptorBindingKind::Buffers, {0, 1}}, {DescriptorBindingKind::FlattenedSrt, {}}};
     variant.bindings.layout = info.bindings;
@@ -373,6 +381,12 @@ void verifyEntryRoundTrip() {
     auto previousVersion = file;
     previousVersion[4] = static_cast<std::byte>(ShaderDiskCache::FormatVersion - 1u);
     require(ShaderDiskCache::DecodeEntry(previousVersion, key, decoded) == ShaderDiskCache::LoadStatus::Rejected, "an entry with the previous format version loads");
+    auto priorStencilVersion = file;
+    priorStencilVersion[4] = std::byte{32};
+    require(ShaderDiskCache::DecodeEntry(priorStencilVersion, key, decoded) == ShaderDiskCache::LoadStatus::Rejected, "an artifact with the prior stencil format loads");
+    auto upstreamVersion = file;
+    upstreamVersion[4] = std::byte{33};
+    require(ShaderDiskCache::DecodeEntry(upstreamVersion, key, decoded) == ShaderDiskCache::LoadStatus::Rejected, "a stencil artifact with the upstream resource plan format loads");
     auto incompatible = variant;
     incompatible.artifact.runtimeAbiVersion = RuntimeAbi::Version + 1u;
     const auto incompatibleFile = ShaderDiskCache::EncodeEntry(key, incompatible);
@@ -2072,6 +2086,19 @@ void verifyDefaultDirectory(const char* self) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--resource-plan-codec") {
+            verifyResultRoundTrip();
+            verifyEntryRoundTrip();
+            verifyPlanRoundTrip();
+            std::cout << "resource plan codec tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--artifact-codec") {
+            verifyResultRoundTrip();
+            verifyEntryRoundTrip();
+            std::cout << "artifact codec tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--load") return runLoadingProcess();
         if (argc == 2 && std::string_view(argv[1]) == "--load-prebuilt") return runPrebuiltLoadingProcess();
         if (argc == 2 && std::string_view(argv[1]) == "--no-failure-memo") return runWithoutFailureMemo();

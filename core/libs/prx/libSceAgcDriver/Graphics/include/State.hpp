@@ -111,6 +111,7 @@ struct State {
     bool stencilTest = false;
     VkStencilOpState stencilFront{};
     VkStencilOpState stencilBack{};
+    std::optional<std::uint32_t> stencilReplayReference;
     ColorTarget color;
     std::vector<ColorTarget> colors;
     std::vector<VkPipelineColorBlendAttachmentState> blends;

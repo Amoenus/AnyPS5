@@ -2,6 +2,10 @@
 
 [**Online relinker**](https://boykopovar.github.io/AnyPS5/) - files stay on your device.
 
+### Browser folder output
+
+The online converter can save Linux output as an uncompressed folder in supported browsers. It does not overwrite an existing destination folder. If conversion fails or is cancelled, it aborts the active file and attempts to remove the newly created output folder. If the browser prevents cleanup, the error names the folder that may contain incomplete files.
+
 ## Input and conversion
 
 Use a clean ELF executable. Place its bundled ELF modules in `sce_module/`, `sce_modules/`, or `prx/` beside the input executable, or under the parent directory selected with `--sce-module-path <path>`. The option accepts absolute paths and paths relative to the current working directory; do not include the `sce_module` directory itself. Only files directly inside the module directories are processed. SELF/fSELF containers are skipped with a warning; unwrap them before relinking if they need to be included. `tools/unwrap_self.py <input.self> <output.elf>` does that for a decrypted container: it places the segments at the offsets of the SELF segment records and restores `p_offset % p_align == p_vaddr % p_align`, and it refuses a container whose load segments all look encrypted. `prx/` can coexist with either `sce_module/` or `sce_modules/`. Both `sce_module/` and `sce_modules/` present, or all three absent, is an error.
@@ -100,6 +104,8 @@ app0/
 ```
 
 Use `sce_modules/` or `prx/` instead of `sce_module/` if that is the input directory name. Relinker preserves each module's directory under `app0/` and prints its exact path. Place app resources in `app0/` separately, including the title's original `eboot.bin`: titles test `/app0/eboot.bin` to find their own directory, as it is always present on the console (ProsperoTV, ProsperoRadio, ProsperoLight and ProsperoLichess fall back to an empty `/data/homebrew/<title id>` and fail to load their fonts without it). Only the converted executable runs. Copy the built system libraries from `build/core/libs/libs/*.prx` into `libs/`; use libraries built for the target OS. A custom `--rpath` changes the system library location.
+
+Some applications also need their original `app0/sce_sys/param.json` at runtime. AnyPS5 reads this file for the title ID and display name; it must contain a non-empty `titleId` string and a non-empty `localizedParameters` object with a language entry that has a non-empty `titleName`. It selects the entry named by `defaultLanguage` (inside `localizedParameters`, or at the top level); if that entry is absent, it tries `en-US`, then the first object-valued language entry. Preserve the values from the title's own metadata and place the file under the same `app0/` directory as the other app resources. At startup, its presence in the working directory creates `data/`; a non-zero `downloadDataSize` also creates `download0/`. Without the file, neither directory is created. If it is missing or invalid, metadata calls such as title/window setup can fail with a `param.json` error.
 
 Use the generated files printed as `Guest module:` for bundled title modules. `libs/` is for AnyPS5 system libraries, not the original PS5 `.prx` files. Placing an original PS5 module in `libs/` on Windows makes Windows try to load it as a DLL and can fail with error 193 (not a valid Win32 application).
 
