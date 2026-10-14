@@ -2738,7 +2738,8 @@ void multisampleTests() {
     queue.context[0x202] = 0xcc0020;
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "multisampled color target");
     queue.context[0x31c] |= 0x10000000u;
-    expectFailure([&] { DecodeColorMetadataPass(queue); }, "DCC over a multisampled color target is unsupported");
+    queue.context[0x325] = 0u;
+    expectFailure([&] { DecodeColorMetadataPass(queue); }, "pipe-aligned R_X metadata");
     queue = multisampled();
     queue.context[0x2f8] = 0;
     queue.context[0x0] = 0;

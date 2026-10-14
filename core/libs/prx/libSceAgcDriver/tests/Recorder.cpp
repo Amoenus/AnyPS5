@@ -6170,12 +6170,13 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
         return;
     }
     constexpr std::uint32_t side = 128;
-    constexpr std::size_t targetBytes = 65536u;
+    constexpr std::size_t targetBytes = 4u * 65536u;
     constexpr std::size_t cmaskBytes = 4096u;
-    constexpr std::size_t destBytes = targetBytes;
-    constexpr std::size_t bytes = 5u * 65536u + cmaskBytes + 2u * destBytes;
+    constexpr std::size_t destBytes = 65536u;
+    constexpr std::size_t bytes = 8u * 65536u;
 #ifdef _WIN32
-    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    void* block = GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536u);
+    Require(block != nullptr && GuestArena::GuestArenaCommit_nid_postfix(block, bytes, GuestArena::Read | GuestArena::Write), "cannot commit the FMASK decompress block");
 #else
     void* block = std::aligned_alloc(65536, bytes);
 #endif
@@ -6183,7 +6184,7 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
     std::memset(block, 0, bytes);
     const auto address = reinterpret_cast<std::uint64_t>(block);
     const auto cmaskAddress = address + 5u * 65536u;
-    const auto destAddress = cmaskAddress + cmaskBytes;
+    const auto destAddress = address + 6u * 65536u;
     const auto destAddress2 = destAddress + destBytes;
     {
         GuestAllocations::Mutation mutation;
@@ -6200,7 +6201,8 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
                 mutation.Remove(block);
             }
 #ifdef _WIN32
-            VirtualFree(block, 0, MEM_RELEASE);
+            GuestArena::GuestArenaReset_nid_postfix(block, bytes);
+            GuestArena::GuestArenaRelease_nid_postfix(block, bytes);
 #else
             std::free(block);
 #endif
@@ -6218,6 +6220,8 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
     source.elementBytes = 4;
     source.bytes = targetBytes;
     source.samples = 4;
+    source.tileMode = ColorTileMode::RenderTarget;
+    Require(source.bytes == MultisampledColorBytes(source), "the FMASK decompress source footprint differs from its four-sample R_X layout");
     source.cmaskAddress = cmaskAddress;
     source.cmaskBytes = cmaskBytes;
     source.cmaskFastClear = true;
