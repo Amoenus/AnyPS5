@@ -578,6 +578,7 @@ void CheckPrivateImportSameValueStore() {
     const auto outside = CollectWritesUncached(base, Block);
     Require(outside != 0u, "the private same-value control is not collected");
     bytes[0x100] = 0x5a;
+    Require(CollectWritesUncached(base, Block) != 0u, "the outside same-value CPU store could not be collected");
     Require(!UnchangedSince(base, Block, outside) && WrittenSince(base, Block, outside), "a same-value CPU store outside the import window was missed");
     const auto before = CollectWritesUncached(base, Block);
     Require(ImportWatched(base, Block, [&] {
