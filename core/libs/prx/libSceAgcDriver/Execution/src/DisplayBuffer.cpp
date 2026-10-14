@@ -2,7 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/DisplayFormat.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
-#include "prx/libSceAgcDriver/Execution/include/PqToSdr.hpp"
+#include "prx/libSceAgcDriver/Execution/include/HostHdr.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/HalfFloatScanout.hpp"
 #include <algorithm>
@@ -59,11 +59,11 @@ void decodeHalfFloatTexel(const std::byte* texel, std::byte* pixel, bool redLow)
     pixel[3] = static_cast<std::byte>(Graphics::HalfFloatScanoutCode(halves[3], true));
 }
 
-void decodeTexel(const std::byte* texel, std::byte* pixel, bool rgba, bool tenBit, bool pq) {
+void decodeTexel(const std::byte* texel, std::byte* pixel, bool rgba, bool tenBit, bool pq, float whiteNits) {
     if (pq) {
         std::uint32_t word = 0;
         std::memcpy(&word, texel, 4);
-        const auto converted = PqToSdrPixel(word, rgba, SdrToneMapLuminanceNits);
+        const auto converted = PqToSdrPixel(word, rgba, whiteNits);
         for (std::size_t i = 0; i < converted.size(); ++i) pixel[i] = static_cast<std::byte>(converted[i]);
         return;
     }
@@ -167,6 +167,7 @@ std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::spa
     const auto blocksPerRow = (buffer.width + 127u) / 128u;
     const bool rgba = DisplayRedLow(buffer.pixelFormat);
     const bool pq = DisplayPq(buffer.pixelFormat);
+    const float whiteNits = pq ? PqToSdrWhiteNits(AgcDriver::CurrentHostHdr()) : 0.0f;
     // Bit 56 marks the 10-bit variant: A2B10G10R10 with red in the low bits (the scanout draws render
     // COLOR_2_10_10_10 into it). Presented as 8-bit BGRA by dropping the low two bits of each channel.
     const bool tenBit = (buffer.pixelFormat & PixelFormatUnormBit) != 0;
@@ -177,14 +178,14 @@ std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::spa
             const auto tiled = buffer.tilingMode == 1 ? (static_cast<std::size_t>(y) * pitch + x) * 4u
                 : (static_cast<std::size_t>(y / 128u) * blocksPerRow + x / 128u) * 65536u + tileOffset(x, y);
             const auto linear = (static_cast<std::size_t>(y) * buffer.width + x) * 4;
-            decodeTexel(source.data() + tiled, pixels.data() + linear, rgba, tenBit, pq);
+            decodeTexel(source.data() + tiled, pixels.data() + linear, rgba, tenBit, pq, whiteNits);
         }
     }
     timing.Mark("detile_convert");
     return pixels;
 }
 
-std::array<std::byte, 4> DisplayBufferClearPixel(const DisplayBuffer& buffer, Graphics::DccKeys keys) {
+std::array<std::byte, 4> DisplayBufferClearTexel(const DisplayBuffer& buffer, Graphics::DccKeys keys) {
     static_cast<void>(DisplayBufferSize(buffer));
     require(buffer.dccAddress != 0, "VideoOut: a display buffer without DCC metadata has no fast-clear value");
     std::array<std::byte, 4> texel{};
@@ -201,8 +202,13 @@ std::array<std::byte, 4> DisplayBufferClearPixel(const DisplayBuffer& buffer, Gr
         std::snprintf(message, sizeof(message), "VideoOut: display buffer 0x%llx (format 0x%016llx) reads %s DCC keys at 0x%llx: only uncompressed keys or a uniform clear code that the display format encodes can be presented", static_cast<unsigned long long>(buffer.address), static_cast<unsigned long long>(buffer.pixelFormat), Graphics::DccKeysName(keys), static_cast<unsigned long long>(buffer.dccAddress));
         throw std::runtime_error(message);
     }
+    return texel;
+}
+
+std::array<std::byte, 4> DisplayBufferClearPixel(const DisplayBuffer& buffer, Graphics::DccKeys keys) {
+    const auto texel = DisplayBufferClearTexel(buffer, keys);
     std::array<std::byte, 4> pixel{};
-    decodeTexel(texel.data(), pixel.data(), DisplayRedLow(buffer.pixelFormat) && !DisplayHalfFloat(buffer.pixelFormat), (buffer.pixelFormat & PixelFormatUnormBit) != 0, DisplayPq(buffer.pixelFormat));
+    decodeTexel(texel.data(), pixel.data(), DisplayRedLow(buffer.pixelFormat) && !DisplayHalfFloat(buffer.pixelFormat), (buffer.pixelFormat & PixelFormatUnormBit) != 0, DisplayPq(buffer.pixelFormat), PqToSdrWhiteNits(AgcDriver::CurrentHostHdr()));
     return pixel;
 }
 
@@ -246,6 +252,23 @@ std::vector<std::byte> ReadDisplayBuffer(const DisplayBuffer& buffer) {
     GuestMemory::CheckRange(reinterpret_cast<const void*>(buffer.address), size, 65536);
     const auto* source = reinterpret_cast<const std::byte*>(buffer.address);
     return DecodeDisplayBuffer(buffer, {source, size});
+}
+
+std::vector<std::byte> DisplayBufferTexels(const DisplayBuffer& buffer, std::span<const std::byte> source) {
+    require(source.size() == DisplayBufferSize(buffer), "VideoOut: invalid display buffer size");
+    require(DisplayTexelBytes(buffer.pixelFormat) == 4u, "VideoOut: raw display texels are only read for 4-byte formats");
+    std::vector<std::byte> texels(static_cast<std::size_t>(buffer.width) * buffer.height * 4);
+    for (std::uint32_t y = 0; y < buffer.height; ++y) {
+        for (std::uint32_t x = 0; x < buffer.width; ++x) std::memcpy(texels.data() + (static_cast<std::size_t>(y) * buffer.width + x) * 4, source.data() + texelOffset(buffer, x, y, 4u), 4);
+    }
+    return texels;
+}
+
+std::vector<std::byte> ReadDisplayBufferTexels(const DisplayBuffer& buffer) {
+    const auto size = DisplayBufferSize(buffer);
+    GuestMemory::FlushGpuWrites(buffer.address, size);
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(buffer.address), size, 65536);
+    return DisplayBufferTexels(buffer, {reinterpret_cast<const std::byte*>(buffer.address), size});
 }
 
 }

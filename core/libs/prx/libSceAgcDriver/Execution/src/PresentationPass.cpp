@@ -285,7 +285,7 @@ void PresentationPass::draw(VkCommandBuffer commands, const Slot& slot, const Ta
     context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(commands);
 }
 
-void PresentationPass::RecordPresent(VkCommandBuffer commands, std::size_t index, VkImage destination, VkFormat format, VkExtent2D extent, VkImageLayout finalLayout) {
+void PresentationPass::RecordPresent(VkCommandBuffer commands, std::size_t index, VkImage destination, VkFormat format, VkColorSpaceKHR colorSpace, VkExtent2D extent, VkImageLayout finalLayout) {
     Graphics::Require(index < slots.size() && slots[index].source != VK_NULL_HANDLE, "presentation pass slot has no source");
     Graphics::Require(destination != VK_NULL_HANDLE && extent.width != 0 && extent.height != 0, "presentation pass destination is unavailable");
     auto& slot = slots[index];
@@ -300,7 +300,9 @@ void PresentationPass::RecordPresent(VkCommandBuffer commands, std::size_t index
     }
     slot.transient.emplace_back(view, framebuffer);
     const auto rect = ComputeContainRect_nid_postfix(slot.width, slot.height, extent.width, extent.height);
-    const std::uint32_t mode = slot.mode | (TenBitFormat(format) ? ModeKeepTenBit : 0u);
+    const bool hdr10 = colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT;
+    Graphics::Require(colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR || (hdr10 && (slot.mode & ModePq) != 0 && TenBitFormat(format)), "presentation pass presents only PQ display buffers to a 10-bit HDR10 destination");
+    const std::uint32_t mode = (hdr10 ? slot.mode & ~ModePq : slot.mode) | (TenBitFormat(format) ? ModeKeepTenBit : 0u);
     const std::int32_t parameters[9] = {rect.x, rect.y, static_cast<std::int32_t>(rect.width), static_cast<std::int32_t>(rect.height), static_cast<std::int32_t>(slot.width), static_cast<std::int32_t>(slot.height), 1, static_cast<std::int32_t>(mode), std::bit_cast<std::int32_t>(slot.whiteNits)};
     draw(commands, slot, entry, framebuffer, extent, parameters);
 }

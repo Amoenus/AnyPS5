@@ -275,7 +275,7 @@ std::vector<std::byte> convertPathPresent(const Context& context, const Source& 
     return bytesOf(readback, bytes);
 }
 
-std::vector<std::byte> passPresent(const Context& context, PresentationPass& pass, const Source& source, const Image& resident, VkExtent2D extent, VkFormat format, std::uint32_t layer = 0, float whiteNits = AgcDriver::SdrToneMapLuminanceNits) {
+std::vector<std::byte> passPresent(const Context& context, PresentationPass& pass, const Source& source, const Image& resident, VkExtent2D extent, VkFormat format, std::uint32_t layer = 0, float whiteNits = AgcDriver::SdrToneMapLuminanceNits, VkColorSpaceKHR colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
     Image destination(context, format, extent, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     const auto bytes = static_cast<std::size_t>(extent.width) * extent.height * 4;
     Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -283,7 +283,7 @@ std::vector<std::byte> passPresent(const Context& context, PresentationPass& pas
     {
         CommandBatch batch(context);
         const auto commands = batch.Handle();
-        pass.RecordPresent(commands, 0, destination.Handle(), format, extent, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        pass.RecordPresent(commands, 0, destination.Handle(), format, colorSpace, extent, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         readImage(context, commands, destination, readback);
         batch.SubmitAndWait();
     }
@@ -348,6 +348,48 @@ bool renderable(const Context& context, VkFormat format) {
     context.formatProperties(context.physical, format, &properties);
     constexpr VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
     return (properties.optimalTilingFeatures & needed) == needed;
+}
+
+void passPassesPqThrough(const Context& context, PresentationPass& pass, const Source& source, const Image& resident) {
+    const bool redLowSource = AgcDriver::DisplayRedLow(source.pixelFormat);
+    for (const auto format : {VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2R10G10B10_UNORM_PACK32}) {
+        if (!renderable(context, format)) {
+            std::printf("  10-bit destination VkFormat %d is not renderable here; skipped\n", static_cast<int>(format));
+            continue;
+        }
+        const bool redLowDestination = format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        const VkExtent2D extent{source.width + 40, source.height};
+        const auto rect = AgcDriver::ComputeContainRect_nid_postfix(source.width, source.height, extent.width, extent.height);
+        const auto drawn = passPresent(context, pass, source, resident, extent, format, 0, 1000.0f, VK_COLOR_SPACE_HDR10_ST2084_EXT);
+        for (std::uint32_t y = 0; y < extent.height; ++y) {
+            for (std::uint32_t x = 0; x < extent.width; ++x) {
+                std::uint32_t word = 0;
+                std::memcpy(&word, drawn.data() + (static_cast<std::size_t>(y) * extent.width + x) * 4, 4);
+                if (static_cast<std::int32_t>(x) < rect.x || static_cast<std::int32_t>(x) >= rect.x + static_cast<std::int32_t>(rect.width)) {
+                    Require(word == 0xc0000000u, "an HDR10 letterbox band is not opaque PQ black: " + describe(source, extent));
+                    continue;
+                }
+                std::uint32_t sourceWord = 0;
+                std::memcpy(&sourceWord, source.words.data() + (static_cast<std::size_t>(y) * source.width + (x - static_cast<std::uint32_t>(rect.x))) * 4, 4);
+                const auto red = [](std::uint32_t value, bool redLow) { return redLow ? value & 0x3ffu : (value >> 20u) & 0x3ffu; };
+                const auto blue = [](std::uint32_t value, bool redLow) { return redLow ? (value >> 20u) & 0x3ffu : value & 0x3ffu; };
+                Require(red(word, redLowDestination) == red(sourceWord, redLowSource) && ((word >> 10u) & 0x3ffu) == ((sourceWord >> 10u) & 0x3ffu) && blue(word, redLowDestination) == blue(sourceWord, redLowSource) && (word >> 30u) == 3u, "the HDR10 presentation changed the PQ code values: " + describe(source, extent) + " into VkFormat " + std::to_string(static_cast<int>(format)));
+            }
+        }
+    }
+}
+
+void passRefusesSdrToHdr10(const Context& context, PresentationPass& pass) {
+    const auto source = makeSource(Bgra8 | TenBit, VK_FORMAT_A2B10G10R10_UNORM_PACK32, 200, 130);
+    const auto resident = residentImage(context, source);
+    bool refused = false;
+    try {
+        static_cast<void>(passPresent(context, pass, source, *resident, {200, 130}, VK_FORMAT_A2B10G10R10_UNORM_PACK32, 0, AgcDriver::SdrToneMapLuminanceNits, VK_COLOR_SPACE_HDR10_ST2084_EXT));
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    pass.Release(0);
+    Require(refused, "the presentation pass presented an SDR display buffer to an HDR10 destination");
 }
 
 void passKeepsTenBits(const Context& context, PresentationPass& pass, const Source& source, const Image& resident) {
@@ -510,7 +552,9 @@ void residentPresentTests(const Context& context) {
         const auto resident = residentImage(context, source);
         passConvertsPq(context, pass, source, *resident, AgcDriver::SdrToneMapLuminanceNits);
         passConvertsPq(context, pass, source, *resident, 1000.0f);
+        passPassesPqThrough(context, pass, source, *resident);
     }
+    passRefusesSdrToHdr10(context, pass);
     passPresentsSlice(context, pass);
     blitLetterboxMatchesClear(context);
 }

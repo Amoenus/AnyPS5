@@ -21,7 +21,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libSceSystemService/SystemService.hpp"
-#include "prx/libSceAgcDriver/Execution/include/ToneMapLuminance.hpp"
+#include "prx/libSceAgcDriver/Execution/include/HostHdr.hpp"
 
 namespace {
 
@@ -226,9 +226,11 @@ int APS5_VABI sceSystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLumi
  if (luminance == nullptr) {
   return SYSTEM_SERVICE_ERROR_PARAMETER;
  }
- luminance->max_full_frame_tone_map_luminance = AgcDriver::SdrToneMapLuminanceNits;
- luminance->max_tone_map_luminance = AgcDriver::SdrToneMapLuminanceNits;
- luminance->min_tone_map_luminance = 0.0f;
+ const auto hdr = AgcDriver::CurrentHostHdr();
+ luminance->max_tone_map_luminance = AgcDriver::ToneMapPeakNits(hdr);
+ luminance->max_full_frame_tone_map_luminance = hdr.available ? hdr.display.maxFullFrameLuminance : AgcDriver::SdrToneMapLuminanceNits;
+ luminance->min_tone_map_luminance = hdr.available ? hdr.display.minLuminance : 0.0f;
+ AgcDriverNoteReportedToneMapPeak_nid_postfix(luminance->max_tone_map_luminance);
  return SYSTEM_SERVICE_OK;
 }
 

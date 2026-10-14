@@ -458,7 +458,7 @@ int main(int argc, char** argv) {
                 DitheredCoverage(*device);
             } catch (const std::runtime_error& error) {
                 if (std::string_view(error.what()) != "AGC graphics: the device cannot render color with the target's sample count") throw;
-                std::printf("skipped, eight-sample color attachments are unavailable: %s\n", error.what());
+                std::printf("skipped, the device lacks eight-sample color attachments: %s\n", error.what());
                 return VulkanTestSkipped;
             }
             std::puts("dithered eight-sample alpha-to-coverage tests passed");

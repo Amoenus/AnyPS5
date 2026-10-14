@@ -52,6 +52,7 @@ public:
     void ReportFailure(std::exception_ptr error);
     void Submit(const Packet* packet, std::uint32_t queue);
     void SuspendPoint();
+    std::uint32_t ReserveEopFlip(const FlipInfo& info);
     void RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output);
     void UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output);
     void AttachWindow(const PresentationWindow& window);
@@ -65,6 +66,12 @@ public:
     static std::optional<Graphics::IndirectDrawPath> ClassifyIndirectDraw(const ShaderRecompiler::RecompileResult& result, const Graphics::State& graphics, const DrawProgram& frontProgram, const std::shared_ptr<VulkanDevice>& localDevice, Pm4::DrawParameters& drawParameters, bool traceIndirect);
     static std::string dumpRequest(std::uint64_t address, const ShaderRecompiler::RecompileRequest& request);
     DrawEntryCounters DrawCacheCounters();
+    struct DispatchCacheFootprint {
+        std::size_t entries = 0;
+        std::uint64_t variantBytes = 0;
+    };
+    DispatchCacheFootprint DispatchCacheSize();
+    static std::uint64_t DispatchCacheBytes();
 
 private:
     friend class SampledReadScope;
@@ -149,6 +156,7 @@ private:
     static bool fillClearEnabled();
     static bool fillClearExactOnly();
     static void fillClearCount(const Graphics::StorageTexture::FillCoverage& coverage, std::size_t bytes, std::span<const std::uint32_t, 4> pattern, std::size_t discarded, bool cleared, const char* refusal);
+    void storeBufferFill(std::uint32_t queueId, std::uint64_t base, std::size_t bytes, const std::array<std::uint32_t, 4>& pattern, const std::shared_ptr<VulkanDevice>& localDevice, bool memoryValueFill, bool noteMetadata);
     bool fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, const std::shared_ptr<VulkanDevice>& localDevice);
     static bool matchesCopyKernel(std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute);
     static void countCopy(int path, std::size_t bytes, std::chrono::steady_clock::time_point started, std::chrono::steady_clock::time_point locked, const VulkanDevice::CopyOutcome* outcome = nullptr);
@@ -324,6 +332,12 @@ private:
 
     std::map<std::uint32_t, QueueState> queues;
     std::map<std::uint32_t, std::shared_ptr<IVideoOutput>> outputs;
+    struct EopFlip {
+        std::uint32_t handle;
+        std::shared_ptr<IFlipRequest> request;
+    };
+    std::map<std::uint32_t, EopFlip> eopFlips;
+    std::uint32_t nextEopToken = EopFlipTokenBase;
     DevicePointer device;
 
     std::mutex labelStoresMutex;

@@ -122,17 +122,32 @@ private:
     Clock::duration begun{};
 };
 
+inline thread_local std::uint64_t TraceBatchTag = 0;
+
 class TraceThread {
 public:
     using Clock = std::chrono::steady_clock;
     static constexpr std::size_t DefaultCapacity = 262144;
+    static constexpr std::size_t MaximumCapacity = 4194304;
     static constexpr Clock::duration MinimumSlice = std::chrono::microseconds(20);
+
+    static std::size_t ParseCapacity(const char* events) {
+        if (events == nullptr) return DefaultCapacity;
+        const std::string_view text = events;
+        std::size_t capacity = 0;
+        const auto end = text.data() + text.size();
+        const auto [last, error] = std::from_chars(text.data(), end, capacity);
+        if (text.empty() || error != std::errc{} || last != end || capacity == 0 || capacity > MaximumCapacity)
+            throw std::invalid_argument("APS5_TRACE_EVENTS=" + std::string(text) + " is not a whole number from 1 through " + std::to_string(MaximumCapacity));
+        return capacity;
+    }
 
     struct Slice {
         const char* scope;
         const char* stage;
         Clock::time_point begin;
         Clock::duration length;
+        std::uint64_t batch = 0;
     };
 
     struct Total {
@@ -170,7 +185,7 @@ public:
             folded = {};
         }
         if (length < MinimumSlice) folded += length;
-        else append({scope, stage, begin, length});
+        else append({scope, stage, begin, length, TraceBatchTag});
     }
 
     Snapshot Collect() const {
@@ -255,6 +270,7 @@ struct TraceGpuRange {
     const char* name;
     double beginNs;
     double endNs;
+    std::uint64_t batch = 0;
 };
 
 struct TraceClockSample {
@@ -317,13 +333,14 @@ public:
             std::stable_sort(slices.begin(), slices.end(), [](const auto& a, const auto& b) { return a.begin != b.begin ? a.begin < b.begin : a.length > b.length; });
             const auto folded = thread.name + " folded";
             for (const auto& slice : slices) {
-                char text[64];
+                char text[112];
                 if (slice.scope == nullptr) {
                     event(folded, "C", slice.begin, tid);
                     std::snprintf(text, sizeof text, ",\"args\":{\"ms\":%.3f}}", milliseconds(slice.length));
                 } else {
                     event(Name(slice.scope, slice.stage), "X", slice.begin, tid);
-                    std::snprintf(text, sizeof text, ",\"dur\":%.3f}", microseconds(slice.length));
+                    if (slice.batch != 0) std::snprintf(text, sizeof text, ",\"dur\":%.3f,\"args\":{\"batch\":%llu}}", microseconds(slice.length), static_cast<unsigned long long>(slice.batch));
+                    else std::snprintf(text, sizeof text, ",\"dur\":%.3f}", microseconds(slice.length));
                 }
                 output += text;
             }
@@ -345,7 +362,7 @@ public:
             const auto begin = map(range.beginNs);
             const auto end = map(range.endNs);
             if (end <= begin || begin < origin) continue;
-            slices.push_back({range.name, nullptr, begin, end - begin});
+            slices.push_back({range.name, nullptr, begin, end - begin, range.batch});
         }
         return slices;
     }
@@ -462,14 +479,14 @@ public:
     static void BindThread(const char* name, std::size_t capacity = TraceThread::DefaultCapacity);
     static void Present(std::uint32_t width, std::uint32_t height, const VulkanDevice* device);
 
-    static void GpuRange(const char* name, double beginNs, double endNs) {
+    static void GpuRange(const char* name, double beginNs, double endNs, std::uint64_t batch = 0) {
         if (!buffering.load(std::memory_order_relaxed)) return;
         std::lock_guard lock(gpuMutex);
         if (gpuRanges.size() == gpuRanges.capacity()) {
             gpuDropped = true;
             return;
         }
-        gpuRanges.push_back({name, beginNs, endNs});
+        gpuRanges.push_back({name, beginNs, endNs, batch});
     }
 
     static bool Recording() {

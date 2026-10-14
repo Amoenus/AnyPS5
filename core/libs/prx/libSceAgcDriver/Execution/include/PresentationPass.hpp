@@ -24,7 +24,7 @@ public:
     PresentationPass& operator=(const PresentationPass&) = delete;
 
     void Bind(std::size_t slot, VkImage image, std::uint32_t width, std::uint32_t height, std::uint64_t pixelFormat, float whiteNits, std::uint32_t layer = 0);
-    void RecordPresent(VkCommandBuffer commands, std::size_t slot, VkImage destination, VkFormat format, VkExtent2D extent, VkImageLayout finalLayout);
+    void RecordPresent(VkCommandBuffer commands, std::size_t slot, VkImage destination, VkFormat format, VkColorSpaceKHR colorSpace, VkExtent2D extent, VkImageLayout finalLayout);
     void RecordDump(VkCommandBuffer commands, std::size_t slot, std::uint32_t stride, VkBuffer destination);
     void Release(std::size_t slot) noexcept;
     static bool TenBitFormat(VkFormat format);

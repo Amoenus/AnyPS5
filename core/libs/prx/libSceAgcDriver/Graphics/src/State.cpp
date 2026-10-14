@@ -153,7 +153,8 @@ bool ditheredAlphaLocationsSupported(const Registers& cx) {
     return true;
 }
 constexpr std::uint32_t ScanModeMask = ~0x22u;
-constexpr std::uint32_t ScanControlMask = ~0x76023fffu;
+constexpr std::uint32_t ScanControlMask = ~0x76033fffu;
+constexpr std::uint32_t PixelShaderIteratesSamples = 0x10000u;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
 // Bits 26/27 (ZCLIP_NEAR/FAR_DISABLE) become depth clamping; bit 19 selects the [0, 1] clip space.
 constexpr std::uint32_t ClipControlMask = ~(0x80000u | 0x01000000u | 0x0c000000u);
@@ -448,12 +449,9 @@ void decodeSampleLocations(const Registers& cx, State& state) {
             const auto bits = (word >> (8u * (sample % 4u))) & 0xffu;
             const auto x = static_cast<std::int8_t>(static_cast<std::uint8_t>(bits << 4u)) >> 4;
             const auto y = static_cast<std::int8_t>(static_cast<std::uint8_t>(bits & 0xf0u)) >> 4;
-            if (pixel == 0) {
-                state.sampleLocations[sample] = static_cast<std::uint8_t>(bits);
-                state.customSampleLocations |= x != standard[sample][0] || y != standard[sample][1];
-            } else {
-                Require(bits == state.sampleLocations[sample], "nonstandard sample locations varying between pixels are unsupported");
-            }
+            state.sampleLocations[pixel * 8u + sample] = static_cast<std::uint8_t>(bits);
+            state.customSampleLocations |= x != standard[sample][0] || y != standard[sample][1];
+            state.sampleLocationGrid |= bits != state.sampleLocations[sample];
         }
     }
 }
@@ -639,19 +637,26 @@ void intersect(VkRect2D& result, const Registers& registers, std::uint32_t offse
 
 }
 
-std::array<VkSampleLocationEXT, 8> SampleLocations(const State& state) {
+VkExtent2D SampleLocationGrid(const State& state) {
+    return state.sampleLocationGrid ? VkExtent2D{2, 2} : VkExtent2D{1, 1};
+}
+
+std::array<VkSampleLocationEXT, 32> SampleLocations(const State& state) {
     Require(state.samples == 1 || state.samples == 2 || state.samples == 4 || state.samples == 8, "invalid sample count");
-    std::array<VkSampleLocationEXT, 8> locations{};
-    for (std::uint32_t sample = 0; sample < state.samples; ++sample) {
-        std::array<int, 2> position{};
-        if (state.customSampleLocations) {
-            const auto bits = state.sampleLocations[sample];
-            position = {static_cast<int>(bits & 7u) - static_cast<int>(bits & 8u), static_cast<int>((bits >> 4u) & 7u) - static_cast<int>((bits >> 4u) & 8u)};
-        } else if (state.samples != 1) {
-            const auto& standard = state.samples == 2 ? StandardLocations2[sample] : state.samples == 4 ? StandardLocations4[sample] : StandardLocations8[sample];
-            position = {standard[0], standard[1]};
+    std::array<VkSampleLocationEXT, 32> locations{};
+    const auto grid = SampleLocationGrid(state);
+    for (std::uint32_t pixel = 0; pixel < grid.width * grid.height; ++pixel) {
+        for (std::uint32_t sample = 0; sample < state.samples; ++sample) {
+            std::array<int, 2> position{};
+            if (state.customSampleLocations) {
+                const auto bits = state.sampleLocations[pixel * 8u + sample];
+                position = {static_cast<int>(bits & 7u) - static_cast<int>(bits & 8u), static_cast<int>((bits >> 4u) & 7u) - static_cast<int>((bits >> 4u) & 8u)};
+            } else if (state.samples != 1) {
+                const auto& standard = state.samples == 2 ? StandardLocations2[sample] : state.samples == 4 ? StandardLocations4[sample] : StandardLocations8[sample];
+                position = {standard[0], standard[1]};
+            }
+            locations[pixel * state.samples + sample] = {0.5f + position[0] / 16.0f, 0.5f + position[1] / 16.0f};
         }
-        locations[sample] = {0.5f + position[0] / 16.0f, 0.5f + position[1] / 16.0f};
     }
     return locations;
 }
@@ -820,7 +825,8 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         for (std::uint32_t pixel = 0; pixel < 4; ++pixel) static_cast<void>(read(cx, 0x2feu + pixel * 4u));
         if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) throw std::runtime_error(reason);
     }
-    zero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization");
+    zero(cx, 0x293, ScanControlMask, "primitive discard or out-of-order rasterization");
+    result.perSampleShading = result.samples > 1 && (read(cx, 0x293) & PixelShaderIteratesSamples) != 0;
     zero(cx, 0x80, ~0u, "window offset");
     zero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits");
     Require(read(cx, 0x83) == 0xffffu, "clip rectangles are unsupported");
@@ -1402,7 +1408,7 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (!multisampled && value(cx, 0x292, word) && (word & 1u) != 0) {
         if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) return reason;
     }
-    if (auto reason = nonzero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
+    if (auto reason = nonzero(cx, 0x293, ScanControlMask, "primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x80, ~0u, "window offset"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits"); !reason.empty()) return reason;
     if (value(cx, 0x83, word) && word != 0xffffu) return require(false, "clip rectangles are unsupported");
