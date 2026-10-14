@@ -514,6 +514,12 @@ void CheckClearDispatch() {
     const ShaderRecompiler::ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u};
     const std::array<std::uint32_t, 5> packet{0u, 32u, 1u, 1u, 1u};
     Require(HtileDepthClearBytes_nid_no_patch(code, userData, compute, packet, 0u) == 32768u, "complete HTILE mask dispatch was not recognized");
+    for (const auto groups : {0x3fffffu, 0x400000u, 0x400001u}) {
+        auto boundary = packet;
+        boundary[1] = groups;
+        const auto expected = groups > 0x400000u ? 0u : static_cast<std::uint64_t>(groups) * 1024u;
+        Require(HtileDepthClearBytes_nid_no_patch(code, userData, compute, boundary, 0u) == expected, "HTILE mask extent crossed its 32-bit byte-offset bound");
+    }
     Require(HtileDepthClearBytes_nid_no_patch(code, userData, compute, packet, 65536u) == 0u, "indirect HTILE clear was accepted");
     Require(HtileDepthClearBytes_nid_no_patch(code, userData, compute, std::span(packet).first(4u), 0u) == 0u, "short HTILE dispatch packet was accepted");
     Require(HtileDepthClearBytes_nid_no_patch(code, std::span(userData).first(5u), compute, packet, 0u) == 0u, "short HTILE user data was accepted");
