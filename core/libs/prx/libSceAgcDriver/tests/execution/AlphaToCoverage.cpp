@@ -537,9 +537,86 @@ void DccFastClearTests(AgcDriver::VulkanDevice& device) {
                         }
                         Require(refused, "an unwatched metadata range remained eligible for multisampled DCC reuse");
                     }
+                    if (code == 0x80u && alphaOnMsb && cmaskMode == 0) {
+                        {
+                            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+                            device.SubmitRecorded(true);
+                            device.WaitIdle();
+                        }
+                        {
+                            GuestAllocations::Mutation mutation;
+                            mutation.Remove(metadata.data);
+                        }
+                        {
+                            GuestAllocations::Mutation mutation;
+                            mutation.Add(metadata.data, metadata.bytes, true, true, true);
+                        }
+                        bool readRefused = false;
+                        try {
+                            AgcDriver::Graphics::RequireNoMultisampleTarget(source.Address(), source.bytes, "a CPU read");
+                        } catch (const std::runtime_error&) {
+                            readRefused = true;
+                        }
+                        Require(readRefused, "releasing DCC metadata removed the unpublished color read guard");
+                        bool reuseRefused = false;
+                        try {
+                            device.ColorMetadataPass(pass);
+                        } catch (const std::runtime_error& error) {
+                            reuseRefused = std::string_view(error.what()).find("metadata was released") != std::string_view::npos;
+                        }
+                        Require(reuseRefused, "recreated DCC metadata reused a resident color target");
+                    }
                     programCount = 0;
                 }
             }
+        }
+    }
+    for (const auto samples : {2u, 4u, 8u}) {
+        for (const auto mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u}) {
+            blocks.push_back(std::make_unique<Block>(layout.Bytes() * samples));
+            auto& source = *blocks.back();
+            std::memset(source.data, 0, source.bytes);
+            blocks.push_back(std::make_unique<Block>(BlockBytes));
+            auto& metadata = *blocks.back();
+            std::memset(metadata.data, mode == 0 ? 0xff : 0, metadata.bytes);
+            auto target = DecodeTarget(source, samples);
+            target.dccAddress = metadata.Address();
+            target.dccPipeAligned = true;
+            std::string_view expected = "not a supported uniform fast clear";
+            if (mode == 1) {
+                metadata.data[0] = 0x40u;
+                expected = "mixed multisampled DCC metadata";
+            }
+            if (mode == 2 || mode == 3) {
+                blocks.push_back(std::make_unique<Block>(BlockBytes));
+                auto& cmask = *blocks.back();
+                std::memset(cmask.data, mode == 2 ? 0 : 0xcc, cmask.bytes);
+                if (mode == 3) cmask.data[0] = 0xdd;
+                target.cmaskAddress = cmask.Address();
+                target.cmaskBytes = AgcDriver::Graphics::CmaskBytes(Width, Height);
+                target.cmaskFastClear = true;
+                expected = "CMASK compression or register clear";
+            }
+            if (mode == 4) {
+                AgcDriver::GuestMemory::Unwatch(metadata.Address(), 4096);
+                expected = "initial multisampled DCC contents require watched";
+            }
+            if (mode == 5) {
+                target.dccAddress = source.Address();
+                expected = "overlapping multisampled DCC";
+            }
+            if (mode == 6) {
+                target.dccAddress += 256u;
+                expected = "metadata base alignment";
+            }
+            bool refused = false;
+            try {
+                Draw(device, target, false, Float32Export, Program({0.25f, 0.25f, 0.25f, 0.25f}, Float32Export));
+            } catch (const std::runtime_error& error) {
+                refused = std::string_view(error.what()).find(expected) != std::string_view::npos;
+            }
+            Require(refused, "unsupported initial multisampled DCC contents were not refused explicitly");
+            programCount = 0;
         }
     }
 }

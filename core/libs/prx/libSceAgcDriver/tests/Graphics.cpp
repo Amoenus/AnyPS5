@@ -2614,7 +2614,11 @@ void multisampleDccStateTests() {
         queue.context[0x31e] = 0x00100038u;
         queue.context[0x325] = 0x1234u;
         queue.context[0x3b8] = 0x4dc6c000u;
-        queue.context[0x2f8] = (log2 << 16u) | log2;
+        queue.context[0x2f8] = (log2 << 20u) | log2;
+        for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+            queue.context[0x2fe + pixel * 4u] = 0;
+            queue.context[0x2ff + pixel * 4u] = 0;
+        }
         queue.context[0x292] = 3;
         queue.context[0x1b3] = queue.context[0x1b4] = 2;
         const auto state = AgcDriver::Graphics::DecodeState(queue);
