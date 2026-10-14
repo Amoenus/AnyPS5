@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -87,6 +89,8 @@ public:
             function<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(context.physical, &available);
             VkPhysicalDeviceFeatures enabled{};
             enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
+            enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
+            enabled.shaderStorageImageMultisample = available.shaderStorageImageMultisample;
             const float priority = 1.0f;
             VkDeviceQueueCreateInfo queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
             queue.queueFamilyIndex = family;
@@ -100,6 +104,9 @@ public:
             context.deviceProc = function<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
             context.formatProperties = function<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
             context.imageFormatProperties = function<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties");
+            context.storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
+            context.storageImageWriteWithoutFormat = enabled.shaderStorageImageWriteWithoutFormat == VK_TRUE;
+            context.storageImageMultisample = enabled.shaderStorageImageMultisample == VK_TRUE;
             function<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties")(context.physical, &context.memory);
             context.Function<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(context.device, family, 0u, &context.queue);
             VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -823,6 +830,8 @@ void CheckRetirement(Context context, VkFormat format, std::uint32_t samples, st
     const auto metadataBytes = static_cast<std::size_t>(HtileMetadataBytes(extent));
     const auto allocationBytes = depthBytes + 65536u;
     TargetMemory memory(allocationBytes), colorMemory(65536u);
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
     const auto release = [](const void*, std::size_t, const void*, bool) {};
     const auto add = [&](TargetMemory& allocation, std::size_t bytes) {
         GuestAllocations::Mutation mutation;
@@ -861,6 +870,8 @@ void CheckRetirement(Context context, VkFormat format, std::uint32_t samples, st
     color.tileMode = ColorTileMode::RenderTarget;
     color.samples = 4u;
     color.surfaceAddress = color.address;
+    color.elementBytes = 4u;
+    color.bytes = MultisampleTextureLayout(TextureTileMode::kR64KBX, color.elementBytes, color.samples, extent.width, extent.height, 1u).Bytes();
     Require(MultisampleTargetView(context, color) != VK_NULL_HANDLE, "retirement fixture has no color attachment");
     recorder.Sync();
     const auto guarded = [&] {
