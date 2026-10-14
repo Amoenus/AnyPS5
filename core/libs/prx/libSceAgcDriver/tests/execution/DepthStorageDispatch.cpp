@@ -318,8 +318,11 @@ void MultisampledCase(AgcDriver::VulkanDevice& device, const Shaders& compiled, 
     std::vector<std::uint32_t> userData(16, 0u);
     const auto texture = TextureDescriptor(depth, Format32Float);
     std::copy(texture.begin(), texture.end(), userData.begin() + 4);
+    AgcDriver::Graphics::Context context{};
+    context.device = device.Device();
+    ExpectRefusal([&] { static_cast<void>(AgcDriver::Graphics::DepthSurfaceStorage(context, texture, AgcDriver::Graphics::DecodeTextureResource(texture), 0u)); }, "storage image access to a multisampled depth surface", "the native depth storage API");
     const auto program = Compile(device, StoreCode, userData);
-    ExpectRefusal([&] { device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(StoreCode.data())); }, "storage image access to a multisampled depth surface", "a storage view of a multisampled depth plane");
+    ExpectRefusal([&] { device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(StoreCode.data())); }, "sample-preserving guest publication of native multisample depth", "a storage view of a protected multisampled depth plane");
 }
 
 void SampledCopyCase(AgcDriver::VulkanDevice& device, const Shaders& shaders, std::uint8_t* block) {
