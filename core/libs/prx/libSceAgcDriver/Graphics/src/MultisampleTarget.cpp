@@ -79,9 +79,16 @@ public:
             memory = created.memory;
             view = created.view;
             recordCommands(context, [&](VkCommandBuffer commands, Recorder* recorder) {
-                recordToGeneral(commands, image);
-                const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &initial, 1, &range);
+                VkImageMemoryBarrier toGeneral{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                toGeneral.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                toGeneral.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toGeneral.image = image;
+                toGeneral.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+                context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &initial, 1, &toGeneral.subresourceRange);
                 RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
                 if (recorder != nullptr) Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
             });
