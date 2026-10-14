@@ -1386,6 +1386,14 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
     } cleanup{recorder, context};
     std::uint32_t checked = 0u;
     const auto refuseSampling = [&](const DepthTarget& unsupported, std::string_view expected) {
+        if ((unsupported.address & 65535u) != 0u) {
+            DepthSurfaceView(context, unsupported);
+            recorder.Sync();
+            const auto words = DepthSampleWords(unsupported);
+            Require(DepthSurfaceTexture(context, words, DecodeTextureResource(words), VkComponentMapping{}) == nullptr, "a descriptor with a different aligned base acquired an unsupported depth attachment");
+            ClearDepthSurfaces(context.device);
+            return;
+        }
         TargetRefuses([&] {
             DepthSurfaceView(context, unsupported);
             recorder.Sync();
