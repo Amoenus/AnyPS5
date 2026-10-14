@@ -50,7 +50,7 @@ public:
     MultisampleTarget(const Context& context, const ColorTarget& target) : context(context), target(target), cmask(target.cmaskAddress, target.cmaskBytes), colorFill(target) {
         this->context.bufferPool.reset();
         if (target.dccAddress != 0) metadataValid = std::make_shared<std::atomic<bool>>(true);
-        const auto initial = InitialDccClear(target);
+        const auto initial = initialDccClear(target);
         const auto samples = static_cast<VkSampleCountFlagBits>(target.samples);
         Require((context.limits.framebufferColorSampleCounts & samples) != 0, "the device cannot render color with the target's sample count");
         VkFormatProperties properties{};
@@ -110,7 +110,7 @@ public:
     MultisampleTarget& operator=(const MultisampleTarget&) = delete;
 
     void ApplyFastClear(const ColorTarget& use) {
-        CheckDccCurrent(use);
+        checkDccCurrent(use);
         VkClearColorValue clear{};
         if (!TakeMultisampledClear(cmask, colorFill, use, clear)) return;
         recordCommands(context, [&](VkCommandBuffer commands, Recorder* recorder) {
@@ -169,7 +169,7 @@ public:
 private:
     std::vector<GuestMemory::UnchangedQuery> dccRanges;
 
-    VkClearColorValue InitialDccClear(const ColorTarget& use) {
+    VkClearColorValue initialDccClear(const ColorTarget& use) {
         if (use.dccAddress == 0) return {};
         const auto dccBytes = MultisampledDccBytes(use);
         Require((use.dccAddress & 4095u) == 0, "multisampled DCC metadata base alignment is not implemented");
@@ -201,7 +201,7 @@ private:
         return clear;
     }
 
-    void CheckDccCurrent(const ColorTarget& use) const {
+    void checkDccCurrent(const ColorTarget& use) const {
         if (dccRanges.empty()) {
             Require(use.dccAddress == 0, "adding DCC to a resident multisampled color target is not implemented");
             return;
