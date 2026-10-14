@@ -1492,7 +1492,7 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
                 expected = "clear value";
                 break;
             }
-            case 4u: expected = "compression"; break;
+            case 4u: expected = "clear value"; break;
             case 5u: metadata.Data()[metadataBytes - 1u] = std::byte{0}; expected = "CPU writes"; break;
             case 6u: memory.Data()[bytes - 1u] = std::byte{0}; expected = "guest writes"; break;
             case 7u: QueueTargetByteWrite(context, recorder, target.htileAddress + metadataBytes - 1u, std::byte{0}); expected = "external GPU writes"; break;
