@@ -8,7 +8,7 @@ using namespace ShaderRecompiler;
 
 int main() {
     try {
-        for (const auto first : {0xe0000000u, 0xe0300000u, 0xe0700000u, 0xeba00000u, 0xeba40000u}) {
+        for (const auto first : {0xe0000000u, 0xe0300000u, 0xe0700000u, 0xe8b00000u, 0xe8b40000u}) {
             const auto decode = [&](std::uint32_t resource) {
                 const std::array<std::uint32_t, 2> code{first, (128u << 24u) | (resource << 16u) | (7u << 8u) | 3u};
                 return first >> 26u == 0x3au ? DecodeRdnaMtbuf(0x100u, code, 0u) : DecodeRdnaMubuf(0x100u, code, 0u);
@@ -20,7 +20,7 @@ int main() {
                     instruction.source0.kind != RdnaOperandKind::VectorRegister || instruction.source0.reg != 3u ||
                     instruction.destination.kind != RdnaOperandKind::VectorRegister || instruction.destination.reg != 7u)
                     throw std::runtime_error("buffer descriptor decode changed another operand");
-                if (first >> 26u == 0x3au && (instruction.dataFormat != 4u || instruction.numberFormat != 7u))
+                if (first >> 26u == 0x3au && (instruction.dataFormat != 6u || instruction.numberFormat != 1u))
                     throw std::runtime_error("MTBUF VCC descriptor changed the instruction format");
             }
             for (std::uint32_t resource = 27u; resource < 32u; ++resource) {
