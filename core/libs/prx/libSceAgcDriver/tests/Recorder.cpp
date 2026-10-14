@@ -6174,12 +6174,7 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
     constexpr std::size_t cmaskBytes = 4096u;
     constexpr std::size_t destBytes = 65536u;
     constexpr std::size_t bytes = 8u * 65536u;
-#ifdef _WIN32
-    void* block = GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536u);
-    Require(block != nullptr && GuestArena::GuestArenaCommit_nid_postfix(block, bytes, GuestArena::Read | GuestArena::Write), "cannot commit the FMASK decompress block");
-#else
-    void* block = std::aligned_alloc(65536, bytes);
-#endif
+    void* block = AllocateWatched(bytes, 65536u);
     Require(block != nullptr, "cannot allocate the FMASK decompress block");
     std::memset(block, 0, bytes);
     const auto address = reinterpret_cast<std::uint64_t>(block);
@@ -6200,12 +6195,7 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
                 GuestAllocations::Mutation mutation;
                 mutation.Remove(block);
             }
-#ifdef _WIN32
-            GuestArena::GuestArenaReset_nid_postfix(block, bytes);
-            GuestArena::GuestArenaRelease_nid_postfix(block, bytes);
-#else
-            std::free(block);
-#endif
+            ReleaseWatched(block, bytes);
         }
     } unregister{base, block};
     TextureDetiler detiler(base);
