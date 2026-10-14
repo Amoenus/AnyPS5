@@ -263,7 +263,7 @@ void TestMultisampleDepthOwnership(Context context) {
     ClearDepthSurfaces(context.device);
     const auto destroyed = imagesDestroyed;
     auto owner = std::make_shared<OwnedImage>(context, newHandle<VkImage>(), newHandle<VkDeviceMemory>());
-    auto texture = std::make_shared<Texture>(context, owner->image, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT, VkComponentMapping{}, VK_IMAGE_VIEW_TYPE_2D, owner);
+    auto texture = std::make_shared<Texture>(context, owner->image, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT, VkComponentMapping{}, VK_IMAGE_VIEW_TYPE_2D, 0, owner);
     owner.reset();
     Require(imagesDestroyed == destroyed, "a depth image must stay alive while its sampled view is held");
     texture.reset();
