@@ -224,6 +224,9 @@ Outcome Run(const Case& test) {
     if (test.kind == Kind::Copied || test.kind == Kind::NeighbourCopied) source.emplace();
     const bool leaves = test.kind == Kind::LeftWatch || test.kind == Kind::WrittenThenLeftWatch || test.kind == Kind::ImportLeftWatch;
     Surface surface(leaves);
+    struct WaitForWork {
+        ~WaitForWork() { AgcDriverWaitIdle_nid_postfix(); }
+    } waitForWork;
     auto* bytes = surface.Bytes();
     const auto address = surface.Address();
     std::unique_lock hold(AgcDriver::GuestMemory::GpuMutex(), std::defer_lock);
