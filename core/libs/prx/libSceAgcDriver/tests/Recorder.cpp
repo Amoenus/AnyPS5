@@ -1382,6 +1382,41 @@ void hostImportRetirementTests(const Device& device) {
     Require(preservedEveryRecorder, "unlocked mapping changed recorder batches");
     std::cout << "Host import retirement locking and GPU readback tests passed\n";
 }
+#ifdef _WIN32
+void secondMappingImportTests(const Device& device) {
+    const auto& context = device.GetContext();
+    if (context.hostImportAlignment == 0) {
+        std::cout << "host imports unavailable: imports after a second mapping not tested\n";
+        return;
+    }
+    constexpr std::size_t bytes = 65536;
+    constexpr std::size_t page = 16384;
+    struct Release {
+        void* mapping = nullptr;
+        void* alias = nullptr;
+        std::int64_t physical = -1;
+        ~Release() {
+            if (alias != nullptr) sceKernelMunmap(alias, page);
+            if (mapping != nullptr) sceKernelMunmap(mapping, bytes);
+            if (physical >= 0) sceKernelReleaseDirectMemory(physical, bytes);
+        }
+    } release;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, bytes, bytes, 0, &release.physical) == 0, "allocate the second mapping test backing");
+    Require(sceKernelMapDirectMemory(&release.mapping, bytes, 0x33, 0, release.physical, bytes) == 0, "map the second mapping test backing");
+    const auto address = reinterpret_cast<std::uint64_t>(release.mapping);
+    if (HostImportFor(context, address, bytes) == nullptr) {
+        std::cout << "host import of singly mapped direct memory refused: imports after a second mapping not tested\n";
+        return;
+    }
+    const auto first = HostImportSerial(context, address, bytes, true);
+    Require(first != 0 && HostImportSerial(context, address, bytes, true) == first, "singly mapped direct memory lost its import");
+    Require(sceKernelMapDirectMemory(&release.alias, page, 0x33, 0, release.physical, page) == 0, "map the first page a second time");
+    Require(HostImportFor(context, address, bytes) != nullptr, "direct memory was not imported again after a second mapping of its first page");
+    const auto second = HostImportSerial(context, address, bytes, true);
+    Require(second != 0 && second != first, "the import of direct memory whose pages were replaced was kept");
+    HostImportFor(context, address, bytes);
+}
+#endif
 
 void movedMetadataTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
@@ -2306,6 +2341,19 @@ void drawSnapshotCapTests(const Device& device, Recorder& recorder) {
         Require(inPlace[0] == std::byte{0x33} && std::all_of(inPlace, inPlace + largeBytes, [](std::byte value) { return value == std::byte{0x33}; }), "in-place bound input did not observe CPU write");
         std::memset(block, 0x11, bytes);
         snapshotRecorder.Sync();
+#ifdef _WIN32
+        Require(_putenv_s("APS5_DRAW_SNAPSHOT_MAX_MIB", "64") == 0, "cannot raise snapshot cap");
+#else
+        Require(setenv("APS5_DRAW_SNAPSHOT_MAX_MIB", "64", 1) == 0, "cannot raise snapshot cap");
+#endif
+        const auto again = resources.PrepareDrawBindings(snapshotRecorder);
+        Require(again != nullptr && again->snapshots.size() == 1 && again->snapshots[0].address == smallAddress, "built resources read the draw snapshot cap again instead of keeping the one they were built with");
+        snapshotRecorder.Sync();
+#ifdef _WIN32
+        Require(_putenv_s("APS5_DRAW_SNAPSHOT_MAX_MIB", "1") == 0, "cannot restore snapshot cap");
+#else
+        Require(setenv("APS5_DRAW_SNAPSHOT_MAX_MIB", "1", 1) == 0, "cannot restore snapshot cap");
+#endif
     }
     const auto firstAddress = address + 4096;
     constexpr std::size_t firstBytes = 600 * 1024;
@@ -6497,6 +6545,12 @@ int main(int argc, char** argv) {
             return vertexTargetRangeTests(device, recorder, std::string_view(argv[1]) == "--vertex-target-range-imported") ? 0 : 77;
         }
 
+#ifdef _WIN32
+        if (argc == 2 && std::string_view(argv[1]) == "--host-import-second-mapping-only") {
+            secondMappingImportTests(device);
+            return 0;
+        }
+#endif
         readTrackingTests(device, recorder);
         writeSettledTests(device, recorder);
         completionCountTests(device, recorder);
@@ -6530,6 +6584,9 @@ int main(int argc, char** argv) {
         storeRunTests(device, recorder);
         queuedWriteGroupTests();
         remappedImportTests(device);
+#ifdef _WIN32
+        secondMappingImportTests(device);
+#endif
         movedMetadataTests(device, recorder);
         viewPastLastMipTests(device, recorder);
         keysFillTests(device, recorder);

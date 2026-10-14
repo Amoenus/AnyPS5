@@ -104,6 +104,13 @@ def exporting(*names):
     return build_elf([(name, 1, GLOBAL_FUNCTION) for name in names])
 
 
+def with_elf_symbol_table_range(image, offset, size):
+    image = bytearray(image)
+    section_offset = struct.unpack_from("<Q", image, 40)[0] + 64
+    struct.pack_into("<QQ", image, section_offset + 24, offset, size)
+    return bytes(image)
+
+
 def build_pe(names):
     section_rva, raw_offset = 0x1000, 0x200
     strings, rvas = b"", []
@@ -517,6 +524,57 @@ class ImportAuditTests(unittest.TestCase):
         records, _ = import_audit.audit([(nid, "libB.prx")], exports, stubs, {"libA.prx", "libB.prx"}, set())
         self.assertEqual(records[0]["class"], "implemented")
 
+    def test_cmake_shared_library_preserves_stub_names_and_implemented_exports(self):
+        work = self.work
+        owner, library = "libZOwner", "libAOwner.native"
+        pending, runtime, live = "scePending", "printf_nid_postfix", "sceLive"
+        alias_nid, alias_name = "AAAAAAAAAAA", "sceOwnerUnknown"
+        write_source(work.source, owner, STUB_SOURCE.format(name=pending) + STUB_SOURCE.format(name=runtime)
+                     + f'APS5_EXPORT("{alias_nid}", {alias_name});\n' + STUB_SOURCE.format(name=alias_name)
+                     + DONE_SOURCE.format(name=live))
+        shared = work.source / library
+        shared.mkdir()
+        (shared / "CMakeLists.txt").write_text(f'include(${{CMAKE_CURRENT_SOURCE_DIR}}/../{owner}/OwnerLibrary.cmake)\n')
+        expected = {nid_names.compute_nid(pending): pending, nid_names.compute_nid("printf"): runtime, alias_nid: alias_name}
+        live_nid = nid_names.compute_nid(live)
+        (work.libs / (library + ".prx")).write_bytes(exporting(*expected, live_nid))
+        registry, result = work.root / "game.json", work.root / "audit.json"
+        write_registry(registry, [(nid, library + ".prx") for nid in [*expected, live_nid]])
+        code, _, err = work.run(registry, "--json", str(result))
+        self.assertEqual((code, err), (0, ""))
+        records = {record["nid"]: record for record in json.loads(result.read_text())["imports"]}
+        self.assertEqual({nid: (records[nid]["class"], records[nid]["name"]) for nid in expected},
+                         {nid: ("stub", name) for nid, name in expected.items()})
+        self.assertEqual((records[live_nid]["class"], records[live_nid]["name"]), ("implemented", None))
+
+    def test_source_include_shared_library_preserves_stubs(self):
+        source = self.work.source
+        write_source(source, "libOwner", STUB_SOURCE.format(name="scePending"))
+        write_source(source, "libShared", '#include "prx/libOwner/Export.cpp"\n')
+        nid = nid_names.compute_nid("scePending")
+        self.assertEqual(import_audit.source_stubs(source), {
+            ("libOwner.prx", nid): "scePending", ("libShared.prx", nid): "scePending"})
+
+    def test_transitive_shared_library_preserves_stubs(self):
+        source = self.work.source
+        write_source(source, "libZOwner", STUB_SOURCE.format(name="scePending"))
+        for library, owner in (("libA", "libB"), ("libB", "libZOwner")):
+            shared = source / library
+            shared.mkdir()
+            (shared / "CMakeLists.txt").write_text(f'include(${{CMAKE_CURRENT_SOURCE_DIR}}/../{owner}/OwnerLibrary.cmake)\n')
+        nid = nid_names.compute_nid("scePending")
+        self.assertEqual(import_audit.source_stubs(source), {
+            (library + ".prx", nid): "scePending" for library in ("libA", "libB", "libZOwner")})
+
+    def test_shared_source_cycle_fails(self):
+        source = self.work.source
+        for library, owner in (("libA", "libB"), ("libB", "libA")):
+            shared = source / library
+            shared.mkdir()
+            (shared / "CMakeLists.txt").write_text(f'include(${{CMAKE_CURRENT_SOURCE_DIR}}/../{owner}/OwnerLibrary.cmake)\n')
+        with self.assertRaisesRegex(import_audit.AuditError, "shared source cycle.*libA.*libB"):
+            import_audit.source_stubs(source)
+
     def test_formatted_export_aliases_remain_stubs(self):
         work = self.work
         nid = "AAAAAAAAAAA"
@@ -595,6 +653,35 @@ class ImportAuditTests(unittest.TestCase):
         for cut in (10, 64, len(image) - 5):
             with self.assertRaisesRegex(import_audit.AuditError, "mod.prx"):
                 import_audit.elf_imports(path, image[:cut])
+
+    def test_elf_dynamic_symbol_table_rejects_ranges_outside_file(self):
+        image = exporting("alpha")
+        for offset, size in ((len(image) + 1, 0), (2**64 - 1, 0), (len(image) - 23, 24), (len(image), 24), (len(image) + 1, 24)):
+            with self.subTest(offset=offset, size=size):
+                with self.assertRaisesRegex(import_audit.AuditError, r"lib.prx: .*outside the file"):
+                    import_audit.elf_exports(Path("lib.prx"), with_elf_symbol_table_range(image, offset, size))
+
+    def test_elf_dynamic_symbol_table_accepts_ranges_ending_at_eof(self):
+        image = exporting("alpha")
+        self.assertEqual(import_audit.elf_exports(Path("lib.prx"), with_elf_symbol_table_range(image, len(image), 0)), set())
+        table_offset = struct.unpack_from("<Q", image, struct.unpack_from("<Q", image, 40)[0] + 64 + 24)[0]
+        table = image[table_offset:table_offset + 48]
+        relocated = with_elf_symbol_table_range(image + table, len(image), len(table))
+        self.assertEqual(import_audit.elf_exports(Path("lib.prx"), relocated), {"alpha"})
+
+    def test_invalid_elf_dynamic_symbol_table_exits_two(self):
+        work = self.work
+        library = work.libs / "libSceA.prx"
+        image = exporting("AAAAAAAAAAA")
+        library.write_bytes(with_elf_symbol_table_range(image, len(image) + 1, 0))
+        registry = work.root / "game.json"
+        write_registry(registry, [("AAAAAAAAAAA", "libSceA.prx")])
+        result = work.root / "audit.json"
+        code, out, err = work.run(registry, "--json", str(result))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn(f"FAIL: {library}: dynamic symbol table", err)
+        self.assertIn("outside the file", err)
+        self.assertFalse(result.exists())
 
     def test_pe_reader(self):
         path = Path("lib.prx")
