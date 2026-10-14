@@ -447,7 +447,7 @@ void DitheredCoverage(AgcDriver::VulkanDevice& device) {
     AgcDriver::Graphics::ClearMultisampleTargets(device.Device());
 }
 
-void DccFastClearTests(AgcDriver::VulkanDevice& device) {
+void DccFastClearTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSamples) {
     const ColorTargetLayout layout(Width, Height, ColorTileMode::RenderTarget, 8);
     std::vector<std::unique_ptr<Block>> blocks;
     struct ClearTargets {
@@ -461,6 +461,7 @@ void DccFastClearTests(AgcDriver::VulkanDevice& device) {
         }
     } clearTargets{device};
     for (const auto samples : {2u, 4u, 8u}) {
+        if (selectedSamples != 0 && samples != selectedSamples) continue;
         for (const auto code : {0x00u, 0x40u, 0x80u, 0xc0u}) {
             for (const auto alphaOnMsb : {false, true}) {
                 for (const auto cmaskMode : {0u, 0xccu, 0xffu}) {
@@ -572,6 +573,7 @@ void DccFastClearTests(AgcDriver::VulkanDevice& device) {
         }
     }
     for (const auto samples : {2u, 4u, 8u}) {
+        if (selectedSamples != 0 && samples != selectedSamples) continue;
         for (const auto mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u}) {
             blocks.push_back(std::make_unique<Block>(layout.Bytes() * samples));
             auto& source = *blocks.back();
@@ -627,8 +629,16 @@ int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
-        if (argc == 2 && std::string_view(argv[1]) == "--dcc-fast-clear") {
-            DccFastClearTests(*device);
+        if ((argc == 2 || argc == 3) && std::string_view(argv[1]) == "--dcc-fast-clear") {
+            const auto samples = argc == 2 ? 0u : std::string_view(argv[2]) == "2" ? 2u : std::string_view(argv[2]) == "4" ? 4u : std::string_view(argv[2]) == "8" ? 8u : 0u;
+            Require(argc == 2 || samples != 0, "unknown DCC test sample count");
+            try {
+                DccFastClearTests(*device, samples);
+            } catch (const std::runtime_error& error) {
+                if (std::string_view(error.what()) != "AGC graphics: the device cannot render color with the target's sample count") throw;
+                std::printf("skipped, the device lacks the requested multisample color attachments: %s\n", error.what());
+                return VulkanTestSkipped;
+            }
             std::cout << "Multisampled DCC fast clear tests passed\n";
             return 0;
         }
