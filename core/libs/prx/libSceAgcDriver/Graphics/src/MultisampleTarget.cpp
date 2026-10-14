@@ -750,6 +750,15 @@ void InstallResidentImageReadGuard_nid_no_patch() {
     UpdateResidentImageUnmapObserver_nid_no_patch();
 }
 
+bool ResidentImageRangeOverlaps_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0u || !anyGuarded().load(std::memory_order_acquire)) return false;
+    Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "resident image overlap range overflows");
+    std::shared_lock lock(guardedMutex());
+    return std::ranges::any_of(guarded(), [&](const auto& range) {
+        return range.active->load(std::memory_order_acquire) && address < range.address + range.bytes && range.address < address + bytes;
+    });
+}
+
 void UpdateResidentImageUnmapObserver_nid_no_patch() {
     static std::mutex mutex;
     std::lock_guard lock(mutex);

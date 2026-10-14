@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "ThreadOwned.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BdaResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
@@ -919,6 +920,18 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     }
     if (end != 0) run = windowRun(state, std::move(run), address, end, context.hostImportAlignment);
     if (run.ranges.empty()) return nullptr;
+    if (context.hostImportAlignment != 0u && ResidentImageRangeOverlaps_nid_no_patch(run.base, static_cast<std::size_t>(run.bytes))) {
+        Require(end > address, "a whole-allocation host import overlapping a resident image is not implemented");
+        const auto alignment = context.hostImportAlignment;
+        const auto begin = address / alignment * alignment;
+        Require(end <= std::numeric_limits<std::uint64_t>::max() - (alignment - 1u), "resident-bounded host import range overflows");
+        const auto finish = (end + alignment - 1u) / alignment * alignment;
+        Require(begin >= run.base && finish <= run.base + run.bytes, "resident-bounded host import exceeds its mapped run");
+        Require(!ResidentImageRangeOverlaps_nid_no_patch(begin, static_cast<std::size_t>(finish - begin)), "a host import of resident image memory is not implemented");
+        run.base = begin;
+        run.bytes = finish - begin;
+        std::erase_if(run.ranges, [&](const auto& range) { return range->address >= finish || range->address + range->bytes <= begin; });
+    }
     return importRunAt(context, state, std::move(run), false, address, lease, end, evict);
 }
 

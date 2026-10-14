@@ -6229,6 +6229,7 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
     source.cmaskBytes = cmaskBytes;
     source.cmaskFastClear = true;
     source.clearWords = {0x11223344u, 0};
+    Require(AgcDriver::GuestMemory::Watched(address, source.bytes) && AgcDriver::GuestMemory::Watched(cmaskAddress, cmaskBytes), "the FMASK source lost tracking before materialization");
     ColorTarget destination{};
     destination.address = destAddress;
     destination.surfaceAddress = destAddress;
@@ -6245,6 +6246,7 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
         auto recolored = source;
         recolored.clearWords = {0x55667788u, 0};
         RunColorMetadataPass(context, {ColorMetadataPass::Mode::Resolve, {destination}, recolored});
+        Require(AgcDriver::GuestMemory::Watched(address, source.bytes) && AgcDriver::GuestMemory::Watched(cmaskAddress, cmaskBytes), "a resolve destination import excluded its resident source");
         recorder.Submit();
         device.WaitQueue();
         recorder.Sync();
