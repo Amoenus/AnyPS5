@@ -6173,31 +6173,44 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
     constexpr std::size_t targetBytes = 4u * 65536u;
     constexpr std::size_t cmaskBytes = 4096u;
     constexpr std::size_t destBytes = 65536u;
-    constexpr std::size_t bytes = 8u * 65536u;
+    constexpr std::size_t bytes = 6u * 65536u;
     void* block = AllocateWatched(bytes, 65536u);
     Require(block != nullptr, "cannot allocate the FMASK decompress block");
+    void* destBlock = AllocateWatched(destBytes, 65536u);
+    void* destBlock2 = AllocateWatched(destBytes, 65536u);
+    Require(destBlock != nullptr && destBlock2 != nullptr, "cannot allocate the separate FMASK resolve destinations");
     std::memset(block, 0, bytes);
+    std::memset(destBlock, 0, destBytes);
+    std::memset(destBlock2, 0, destBytes);
     const auto address = reinterpret_cast<std::uint64_t>(block);
     const auto cmaskAddress = address + 5u * 65536u;
-    const auto destAddress = address + 6u * 65536u;
-    const auto destAddress2 = destAddress + destBytes;
+    const auto destAddress = reinterpret_cast<std::uint64_t>(destBlock);
+    const auto destAddress2 = reinterpret_cast<std::uint64_t>(destBlock2);
     {
         GuestAllocations::Mutation mutation;
         mutation.Add(block, bytes, true, true, true);
+        mutation.Add(destBlock, destBytes, true, true, true);
+        mutation.Add(destBlock2, destBytes, true, true, true);
     }
     struct Unregister {
         const Context& context;
         void* block;
+        void* destBlock;
+        void* destBlock2;
         ~Unregister() {
             ClearMultisampleTargets(context.device);
             ClearCachedTextures(context.device);
             {
                 GuestAllocations::Mutation mutation;
                 mutation.Remove(block);
+                mutation.Remove(destBlock);
+                mutation.Remove(destBlock2);
             }
             ReleaseWatched(block, bytes);
+            ReleaseWatched(destBlock, destBytes);
+            ReleaseWatched(destBlock2, destBytes);
         }
-    } unregister{base, block};
+    } unregister{base, block, destBlock, destBlock2};
     TextureDetiler detiler(base);
     auto context = base;
     context.detiler = &detiler;

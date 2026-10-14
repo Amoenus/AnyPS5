@@ -2746,6 +2746,10 @@ void multisampleTests() {
     queue.context[0x202] = 0x00cc0050;
     queue.context[0x31c] = 0x1002e028;
     queue.context[0x31d] = 0x00012000;
+    queue.context[0x318] = dccQueue.context[0x318];
+    queue.context[0x390] = dccQueue.context[0x390];
+    queue.context[0x3b8] = dccQueue.context[0x3b8];
+    queue.context[0x31e] = 0u;
     queue.context[0x325] = 0x2000;
     queue.context[0x323] = 0x3f800000;
     queue.context[0x324] = 0x3f800000;
