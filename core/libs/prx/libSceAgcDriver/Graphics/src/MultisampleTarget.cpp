@@ -49,6 +49,7 @@ class MultisampleTarget {
 public:
     MultisampleTarget(const Context& context, const ColorTarget& target) : context(context), target(target), cmask(target.cmaskAddress, target.cmaskBytes), colorFill(target) {
         this->context.bufferPool.reset();
+        if (target.dccAddress != 0) metadataValid = std::make_shared<std::atomic<bool>>(true);
         const auto initial = InitialDccClear(target);
         const auto samples = static_cast<VkSampleCountFlagBits>(target.samples);
         Require((context.limits.framebufferColorSampleCounts & samples) != 0, "the device cannot render color with the target's sample count");
@@ -156,6 +157,7 @@ public:
 
     Context context;
     std::shared_ptr<std::atomic<bool>> active = std::make_shared<std::atomic<bool>>(true);
+    std::shared_ptr<std::atomic<bool>> metadataValid;
     ColorTarget target;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -204,6 +206,7 @@ private:
             Require(use.dccAddress == 0, "adding DCC to a resident multisampled color target is not implemented");
             return;
         }
+        Require(metadataValid->load(std::memory_order_acquire), "multisampled DCC metadata was released while its color target remains resident");
         static_cast<void>(MultisampledDccBytes(use));
         Require(use.address == target.address && use.dccAddress == target.dccAddress && use.dccControl == target.dccControl && use.dccAlphaOnMsb == target.dccAlphaOnMsb && use.dccPipeAligned == target.dccPipeAligned && use.cmaskAddress == target.cmaskAddress && use.cmaskBytes == target.cmaskBytes && use.tileMode == target.tileMode && use.elementBytes == target.elementBytes && use.pipeBankXor == target.pipeBankXor, "multisampled DCC target layout or metadata changed");
         for (const auto& range : dccRanges) {
@@ -228,6 +231,7 @@ struct GuardedRange {
     std::uint64_t bytes;
     std::uint32_t samples;
     std::shared_ptr<std::atomic<bool>> active;
+    std::shared_ptr<std::atomic<bool>> metadataValid;
 };
 
 class PrimedSharedMutex : public std::shared_mutex {
@@ -260,14 +264,16 @@ void guardReads(std::uint64_t address, std::size_t bytes) {
 void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
     std::unique_lock lock(guardedMutex());
     std::erase_if(guarded(), [&](const auto& range) {
+        if (range.metadataValid && address < range.address + range.bytes && range.address < address + bytes) range.metadataValid->store(false, std::memory_order_release);
         if (range.address < address || range.address - address > bytes || range.bytes > bytes - (range.address - address)) return false;
-        range.active->store(false, std::memory_order_release);
+        if (!range.metadataValid) range.active->store(false, std::memory_order_release);
         return true;
     });
+    std::erase_if(guarded(), [](const auto& range) { return range.metadataValid && !range.active->load(std::memory_order_acquire); });
     anyGuarded().store(!guarded().empty(), std::memory_order_release);
 }
 
-void guard(const Context& context, const ColorTarget& target, const std::shared_ptr<std::atomic<bool>>& active) {
+void guard(const Context& context, const ColorTarget& target, const std::shared_ptr<std::atomic<bool>>& active, const std::shared_ptr<std::atomic<bool>>& metadataValid) {
     auto bytes = std::max<std::uint64_t>(target.bytes * target.samples, static_cast<std::uint64_t>(target.extent.width) * target.extent.height * target.elementBytes * target.samples);
     if (target.tileMode == ColorTileMode::RenderTarget && std::has_single_bit(target.elementBytes) && std::has_single_bit(target.samples)) {
         const auto log2Samples = std::countr_zero(target.samples);
@@ -281,8 +287,8 @@ void guard(const Context& context, const ColorTarget& target, const std::shared_
     std::unique_lock lock(guardedMutex());
     guarded().push_back({context.device, target.address, bytes, target.samples, active});
     if (target.dccAddress != 0) {
-        guarded().push_back({context.device, target.dccAddress, MultisampledDccBytes(target), target.samples, active});
-        if (target.cmaskAddress != 0) guarded().push_back({context.device, target.cmaskAddress, target.cmaskBytes, target.samples, active});
+        guarded().push_back({context.device, target.dccAddress, MultisampledDccBytes(target), target.samples, active, metadataValid});
+        if (target.cmaskAddress != 0) guarded().push_back({context.device, target.cmaskAddress, target.cmaskBytes, target.samples, active, metadataValid});
     }
     anyGuarded().store(true, std::memory_order_release);
     static std::once_flag installed;
@@ -312,7 +318,7 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
     }
     targets().push_back(std::make_unique<MultisampleTarget>(context, use));
     auto& created = *targets().back();
-    guard(context, use, created.active);
+    guard(context, use, created.active, created.metadataValid);
     if (use.cmaskFastClear && use.dccAddress == 0) created.cmask.SeedKeys(CurrentDccKeys(use.cmaskAddress, static_cast<std::uint64_t>(use.cmaskBytes) * 256u));
     created.ApplyFastClear(use);
     return created;
