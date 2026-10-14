@@ -2620,8 +2620,8 @@ void multisampleTests() {
 }
 
 void multisampleDccStateTests() {
-    alignas(65536) static std::array<std::byte, 65536> color{};
-    const auto address = reinterpret_cast<std::uintptr_t>(color.data());
+    static std::array<std::byte, 131072> color{};
+    const auto address = (reinterpret_cast<std::uintptr_t>(color.data()) + 65535u) & ~std::uintptr_t{65535u};
     for (const auto log2 : {1u, 2u, 3u}) {
         auto queue = makeState();
         queue.context[0x318] = static_cast<std::uint32_t>(address >> 8u);
