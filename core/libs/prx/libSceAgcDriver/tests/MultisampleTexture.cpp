@@ -1385,6 +1385,17 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
         ~Cleanup() { recorder.Sync(); ClearCachedTextures(context.device); ClearDepthSurfaces(context.device); }
     } cleanup{recorder, context};
     std::uint32_t checked = 0u;
+    const auto refuseSampling = [&](const DepthTarget& unsupported, std::string_view expected) {
+        TargetRefuses([&] {
+            DepthSurfaceView(context, unsupported);
+            recorder.Sync();
+            const auto words = DepthSampleWords(unsupported);
+            DepthSurfaceTexture(context, words, DecodeTextureResource(words), VkComponentMapping{});
+        }, expected);
+        recorder.Sync();
+        ClearCachedTextures(context.device);
+        ClearDepthSurfaces(context.device);
+    };
     for (std::uint32_t field = 0u; field < 11u; ++field) {
         auto unsupported = target;
         std::string_view expected;
@@ -1401,7 +1412,7 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
             case 9u: unsupported.htileVrsEncoding = 1u; expected = "VRS"; break;
             case 10u: unsupported.clearDepth = 0.5f; expected = "clear value"; break;
         }
-        TargetRefuses([&] { DepthSurfaceView(context, unsupported); }, expected);
+        refuseSampling(unsupported, expected);
         ++checked;
     }
     {
@@ -1409,12 +1420,12 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
         AgcDriver::GuestMemory::Unwatch(unwatched.Address(), bytes);
         auto unsupported = target;
         unsupported.address = unwatched.Address();
-        TargetRefuses([&] { DepthSurfaceView(context, unsupported); }, "watched guest memory");
+        refuseSampling(unsupported, "watched accessible guest memory");
         ++checked;
     }
     for (const std::uint32_t word : {0x1000u, 0xfffc00f0u, 0xfu}) {
         std::memcpy(metadata.Data() + metadataBytes - 4u, &word, 4u);
-        TargetRefuses([&] { DepthSurfaceView(context, target); }, word == 0x1000u ? "compression" : "clear value");
+        refuseSampling(target, "clear value");
         std::memset(metadata.Data(), 0, metadataBytes);
         ++checked;
     }
@@ -1464,7 +1475,7 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
         if (field == 1u) store(0u);
         NoteHtileDepthClear(target.htileAddress, metadataBytes, field == 2u ? metadataBytes - 1u : metadataBytes);
         if (field != 0u && field != 1u) store(field == 4u ? 0x1000u : 0u);
-        std::string_view expected = "completed HTILE store";
+        std::string_view expected = "complete tracked HTILE store";
         switch (field) {
             case 2u: expected = "incomplete"; break;
             case 3u: {
@@ -2296,7 +2307,7 @@ int main(int argc, char** argv) {
         }
         if (argc > 1 && std::string(argv[1]) == "--depth-clear-partial") {
             Require(DepthSupported(context, VK_FORMAT_D32_SFLOAT, 4u), "partial clear fixture requires sampled four-fragment D32");
-            TargetRefuses([&] { CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, true); }, "completed HTILE store");
+            TargetRefuses([&] { CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, true); }, "complete tracked HTILE store");
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--depth-clears") {
