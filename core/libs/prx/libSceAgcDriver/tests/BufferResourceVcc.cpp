@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
+#include <string_view>
 
 using namespace ShaderRecompiler;
 
@@ -26,7 +27,11 @@ int main() {
             for (std::uint32_t resource = 27u; resource < 32u; ++resource) {
                 bool refused = false;
                 try { static_cast<void>(decode(resource)); }
-                catch (const std::runtime_error&) { refused = true; }
+                catch (const std::runtime_error& error) {
+                    const auto expected = first >> 26u == 0x3au ? "MTBUF resource descriptor register range overflow" :
+                        "MUBUF resource descriptor register range overflow";
+                    refused = std::string_view(error.what()) == expected;
+                }
                 if (!refused) throw std::runtime_error("buffer descriptor extends past the VCC tuple");
             }
         }
