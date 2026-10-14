@@ -138,7 +138,7 @@ ColorTarget MultisampledTarget(const GuestBlock& color) {
     target.format = VK_FORMAT_R8G8B8A8_UNORM;
     target.tileMode = AgcDriver::Graphics::ColorTileMode::RenderTarget;
     target.elementBytes = 4;
-    target.bytes = BlockBytes / 4;
+    target.bytes = BlockBytes;
     target.samples = 4;
     return target;
 }
@@ -189,9 +189,25 @@ bool FillsTakenAsMultisampledClearsAreNotStored(AgcDriver::VulkanDevice& device)
     Require(!AgcDriver::Graphics::MultisampledColorFillAbsorbs(color.Address(), 2 * BlockBytes, 0), "a fill reaching past the color memory is taken as the target's clear");
 
     std::memset(color.Data(), static_cast<int>(Marker), BlockBytes);
-    DispatchFill(code, color.Address(), BlockBytes, 0);
+    DispatchFill(code, color.Address(), BlockBytes, 0xffffffffu);
     Settle(code, sentinel);
     Require(color.Holds(Marker, 0, BlockBytes), "a compute fill taken as the multisampled target's clear was stored into its color memory");
+    {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        const auto samples = AgcDriver::Graphics::ReadMultisampleTargetSamples(context, target);
+        Require(!samples.empty() && std::all_of(samples.begin(), samples.end(), [](std::byte sample) { return sample == std::byte{0xff}; }), "an absorbed fill did not clear every native sample");
+    }
+    DispatchFill(code, color.Address(), BlockBytes, 0);
+    Settle(code, sentinel);
+    color.Data()[0] = std::byte{0x42};
+    bool cpuWriteRefused = false;
+    try {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        static_cast<void>(AgcDriver::Graphics::ReadMultisampleTargetSamples(context, target));
+    } catch (const std::runtime_error&) {
+        cpuWriteRefused = true;
+    }
+    Require(cpuWriteRefused, "a CPU write after an absorbed fill was accepted as unchanged native contents");
     DispatchFill(code, color.Address(), BlockBytes / 2, 0);
     Settle(code, sentinel);
     Require(color.Holds(std::byte{}, 0, BlockBytes / 2) && color.Holds(Marker, BlockBytes / 2, BlockBytes / 2), "a compute fill over half of the color memory was not stored");
