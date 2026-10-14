@@ -1,5 +1,6 @@
 #include "Optimization/ResourceMaterializer.hpp"
 #include "Optimization/SrtWalker/SrtFlatSlotClasses.hpp"
+#include "Optimization/SrtWalker/SrtEvaluator.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "RdnaDecoder/RdnaImageOpDecoder.hpp"
@@ -838,6 +839,29 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
     }
 }
 
+void materializeForcedDegamma(const IrResourcePlan& plan, ResourceSnapshot& snapshot) {
+    for (std::uint32_t index = 0; index < plan.info.images.size(); ++index) {
+        auto& descriptor = snapshot.images.at(index);
+        if (((descriptor.dwords[1] >> 20u) & 0x1ffu) != static_cast<std::uint32_t>(IrBufferFormat::Format8_8_8_8UInt)) continue;
+        bool forced = false;
+        bool plain = false;
+        for (const auto& pair : plan.info.sampledPairs) {
+            if (pair.image != index) continue;
+            const auto& sampler = snapshot.samplers.at(pair.sampler);
+            if (sampler.dwordCount != 4u) throw std::runtime_error("FORCE_DEGAMMA requires four sampler descriptor words");
+            const bool enabled = (sampler.dwords[0] & (1u << 20u)) != 0u;
+            forced = forced || enabled;
+            plain = plain || !enabled;
+        }
+        if (!forced) continue;
+        const auto& image = plan.info.images.at(index);
+        if (!image.singleMipPlaneBiasCompatible || image.dimension != RdnaImageDimension::Dim2D || image.table != NoTable || image.resourceClass != ImageResourceClass::Sampled || image.depthCompare || image.packed) throw std::runtime_error("FORCE_DEGAMMA on RGBA8_UINT requires a direct plain biased pixel sample");
+        if (plain) throw std::runtime_error("FORCE_DEGAMMA on RGBA8_UINT with mixed sampler states is not implemented");
+        if ((descriptor.dwords[3] >> 28u) != 10u || (descriptor.dwords[4] & 0x1fffu) != 0u || (descriptor.dwords[3] & 0xff000u) != 0u || (descriptor.dwords[5] & 0xf0u) != 0u) throw std::runtime_error("FORCE_DEGAMMA on RGBA8_UINT requires a one-slice volume at mip zero");
+        descriptor.dwords[1] = (descriptor.dwords[1] & ~(0x1ffu << 20u)) | (static_cast<std::uint32_t>(IrBufferFormat::Format8_8_8_8Srgb) << 20u);
+    }
+}
+
 std::uint32_t colorCompareReference(IrBufferFormat format) {
     switch (format) {
     case IrBufferFormat::Format16_16UNorm:
@@ -929,7 +953,12 @@ void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot) {
             snapshot.buffers.at(i).dwords[3] = 0u;
         }
         const auto decoded = decodeBufferDescriptor(snapshot.buffers.at(i));
-        if (decoded.Type() != 0u) throw std::runtime_error("buffer descriptor uses an unsupported type");
+        if (decoded.Type() != 0u) {
+            const auto& words = snapshot.buffers.at(i).dwords;
+            char detail[64];
+            std::snprintf(detail, sizeof(detail), " (buffer %u V# %08x %08x %08x %08x)", i, words[0], words[1], words[2], words[3]);
+            throw std::runtime_error(std::string("buffer descriptor uses an unsupported type") + detail);
+        }
         if (plan.stage != IrShaderStage::Compute && decoded.AddTid()) throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
     }
     if (snapshot.flattenedSrt.size() != plan.srtReads.size()) throw std::runtime_error("runtime SRT size differs from the static interface");
@@ -1494,13 +1523,13 @@ void ownPlanValues(IrResourcePlan& plan) {
             if (argument != nullptr) pending.push_back(argument);
         }
     }
+    plan.valueStorage.Reserve(order.size());
     for (const auto* value : order) {
-        auto clone = std::make_unique<IrValue>(value->Opcode(), value->Type(), value->Id());
+        auto* clone = plan.valueStorage.Create(value->Opcode(), value->Type(), value->Id());
         clone->SetFlags(value->Flags<std::uint64_t>());
         if (value->HasImmediate()) clone->SetImmediateU64(value->ImmediateU64());
         clone->SetRegister(value->Register());
-        clones[value] = clone.get();
-        plan.valueStorage.push_back(std::move(clone));
+        clones[value] = clone;
     }
     std::unordered_map<const IrBlock*, IrBlock*> blocks;
     const auto blockFor = [&](const IrBlock* block) {
@@ -1512,16 +1541,16 @@ void ownPlanValues(IrResourcePlan& plan) {
         return clone;
     };
     for (const auto* value : order) {
-        auto* clone = clones.at(value);
+        std::vector<IrValue*> arguments;
+        std::vector<IrBlock*> phiBlocks;
+        arguments.reserve(value->ArgumentCount());
+        if (value->IsPhi()) phiBlocks.reserve(value->ArgumentCount());
         for (std::size_t index = 0; index < value->ArgumentCount(); index++) {
             const auto* argument = value->Argument(index);
-            auto* mapped = argument == nullptr ? nullptr : clones.at(argument);
-            if (value->IsPhi()) {
-                clone->AddPhiOperand(blockFor(value->PhiBlock(index)), mapped);
-            } else {
-                clone->AddArgument(mapped);
-            }
+            arguments.push_back(argument == nullptr ? nullptr : clones.at(argument));
+            if (value->IsPhi()) phiBlocks.push_back(blockFor(value->PhiBlock(index)));
         }
+        clones.at(value)->SetDetachedOperands(std::move(arguments), std::move(phiBlocks));
     }
     for (auto* root : roots) {
         if (*root != nullptr) *root = clones.at(*root);
@@ -1552,6 +1581,9 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
     plan.info = source.info;
     PrepareImageModes(plan.info);
     plan.uniformFill = source.uniformFill;
+    for (auto& block : plan.controlFlow) {
+        if (block.condition != nullptr && !Detail::Evaluator::MayEvaluate(source, block.condition)) block.condition = nullptr;
+    }
     ownPlanValues(plan);
     const auto addSource = [&plan](std::uint32_t index) {
         if (index >= plan.descriptorSources.size()) {
@@ -1601,6 +1633,7 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
         throw;
     }
     const auto started = MaterializeProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    materializeForcedDegamma(plan, nextSnapshot);
     materializeTables(plan, nextSnapshot);
     materializeSrtGuards(plan, nextSnapshot);
     if (MaterializeProfiled()) specializationNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);

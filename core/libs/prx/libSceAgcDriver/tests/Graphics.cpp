@@ -190,6 +190,48 @@ void inactiveVertexPointSizeTests() {
     rejected(queue);
 }
 
+void retainedPixelStageTests() {
+    using namespace AgcDriver::Graphics;
+    auto queue = makeState();
+    queue.context[0x8e] = queue.context[0x8f] = queue.context[0x203] = 0;
+    for (const auto format : {0u, 1u, 2u, 3u, 9u}) {
+        queue.context[0x1c4] = format;
+        Require(PixelProgramSkipped(queue), "a retained export format forced an unused pixel program to run");
+        Require(DrawRejection(queue, true).empty(), "an unused pixel program with a retained export format was rejected");
+        for (const auto control : {1u, 2u, 4u, 0x40u, 0x80u, 0x100u, 0x200u, 0x400u, 0x20000u}) {
+            queue.context[0x203] = control;
+            Require(!PixelProgramSkipped(queue), "an enabled export or execution flag was skipped");
+        }
+        queue.context[0x203] = 0;
+        queue.context[0x8e] = 0xf0000000u;
+        queue.context[0x8f] = 0x0f000000u;
+        Require(PixelProgramSkipped(queue), "disjoint color masks ran an unused pixel program");
+        queue.context[0x8f] = 0xf0000000u;
+        Require(!PixelProgramSkipped(queue), "an enabled high render target lost its pixel program");
+        queue.context[0x8e] = queue.context[0x8f] = 0;
+    }
+    queue.context[0x1b3] = queue.context[0x1b4] = 2;
+    for (const auto [format, control] : {std::pair{1u, 1u}, std::pair{2u, 2u}, std::pair{9u, 0x100u}, std::pair{9u, 0x103u}}) {
+        queue.context[0x1c4] = format;
+        queue.context[0x203] = control;
+        const auto state = DecodeState(queue);
+        Require(DrawRejection(queue, true).empty(), "a valid pixel export combination was rejected");
+        const auto pixel = DecodePixelStageInfo(queue.context, ExportMappings(state), PixelProgramSkipped(queue));
+        Require(pixel.depthExportEnable == ((control & 1u) != 0) && pixel.stencilRefExportEnable == ((control & 2u) != 0) && pixel.sampleMaskExportEnable == ((control & 0x100u) != 0), "decoding lost an enabled pixel export");
+    }
+    queue.context[0x203] = 0;
+    for (const auto alpha : {0xaa00u, 0xaa01u}) {
+        queue.context[0x2dc] = alpha;
+        Require(PixelProgramSkipped(queue) == ((alpha & 1u) == 0), "alpha-to-coverage enable was not respected");
+    }
+    queue.context[0x2dc] = 0xaa00u;
+    for (const auto offset : {0x8eu, 0x8fu, 0x203u}) {
+        auto missing = queue;
+        missing.context.erase(offset);
+        Require(!PixelProgramSkipped(missing), "incomplete execution state skipped a bound pixel program");
+    }
+}
+
 void hdrComponentSwapTests() {
     using namespace AgcDriver::Graphics;
     for (const auto number : {0u, 1u, 4u, 7u}) {
@@ -463,7 +505,18 @@ void stateTests() {
     Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program with Z_EXPORT_ENABLE was skipped");
     queue.context[0x203] = 0;
     queue.context[0x1c4] = 1;
-    Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program exporting depth was skipped");
+    Require(AgcDriver::Graphics::PixelProgramSkipped(queue), "a retained Z export format ran a pixel program with depth exports disabled");
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "a depth-only draw with a retained Z export format was rejected");
+    for (const auto control : {1u, 2u, 4u, 0x40u, 0x80u, 0x100u, 0x200u, 0x400u, 0x20000u}) {
+        queue.context[0x203] = control;
+        Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "an enabled pixel export or execution flag was ignored with a retained Z format");
+    }
+    queue.context[0x203] = 0;
+    queue.context[0x2dc] = 0xaa01;
+    Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "alpha-to-coverage skipped the pixel program");
+    queue.context[0x203] = 0x800;
+    Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "the Vulkan alpha-to-coverage state lost its pixel program with DB's override set");
+    queue.context[0x203] = queue.context[0x2dc] = 0;
     queue.context[0x1c4] = 0;
     queue.context[0x8e] = 0xf;
     Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program writing color was skipped");
@@ -683,6 +736,22 @@ void ShaderStageTests() {
                 Require(state.stages.fragmentWaveSize == (fragmentWave32 ? 32u : 64u), "incorrect fragment wave size");
             }
         }
+    }
+    {
+        auto vertex = makeState();
+        vertex.context[0x2d5] = 0x02002008u;
+        const auto state = AgcDriver::Graphics::DecodeState(vertex);
+        Require(state.stages.path == AgcDriver::Graphics::ShaderPath::Vertex
+            && state.stages.registerValue == 0x02002008u,
+            "the reported vertex-routing state did not decode as vertex");
+        vertex.context[0x2d5] |= 0x10u;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(vertex); }, "reserved LS_EN, ES_EN or VS_EN");
+        vertex.context[0x2d5] = 0x02002008u | 0x800000u;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(vertex); }, "unsupported vertex routing");
+        vertex.context[0x2d5] = 0x2008u;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(vertex); }, "unsupported vertex routing");
+        vertex.context.erase(0x2d5);
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(vertex); }, "missing register");
     }
     queue = makeState();
     queue.context[0x2d5] = 0x2020;
@@ -1467,6 +1536,25 @@ void DepthStencilTests() {
         depthOnly.context[0x011] &= ~(1u << 29u);
         const auto sharedLayout = AgcDriver::Graphics::DecodeState(depthOnly);
         Require(sharedLayout.depth && !sharedLayout.depth->htileDepthOnly && !sharedLayout.depth->htileStencil, "HTILE encoding was inferred from absence of a stencil plane");
+    }
+    for (const auto clear : {0u, 1u, 2u, 3u}) {
+        auto retained = queue;
+        retained.context[0x8e] = retained.context[0x8f] = retained.context[0x203] = 0;
+        retained.context[0x000] = clear;
+        retained.context[0x200] = 0x00700777u;
+        auto unbound = retained;
+        unbound.shader[0x008] = unbound.shader[0x009] = 0;
+        const auto expected = AgcDriver::Graphics::DecodeState(unbound);
+        for (const auto format : {1u, 2u, 3u, 9u}) {
+            retained.context[0x1c4] = format;
+            Require(AgcDriver::Graphics::PixelProgramSkipped(retained), "a retained format ran the pixel program during a depth/stencil pass");
+            const auto actual = AgcDriver::Graphics::DecodeState(retained);
+            Require(actual.depth && expected.depth && actual.depth->address == expected.depth->address && actual.depth->stencilAddress == expected.depth->stencilAddress && actual.depth->format == expected.depth->format && actual.depth->clearDepth == expected.depth->clearDepth && actual.depth->clearStencil == expected.depth->clearStencil, "null substitution changed the depth/stencil surface");
+            Require(actual.depthTest == expected.depthTest && actual.depthWrite == expected.depthWrite && actual.depthCompare == expected.depthCompare && actual.depthBoundsTest == expected.depthBoundsTest && actual.stencilTest == expected.stencilTest, "null substitution changed fixed-function depth/stencil tests");
+            Require(std::memcmp(&actual.stencilFront, &expected.stencilFront, sizeof(VkStencilOpState)) == 0 && std::memcmp(&actual.stencilBack, &expected.stencilBack, sizeof(VkStencilOpState)) == 0, "null substitution changed stencil operations");
+            Require(actual.viewport.minDepth == expected.viewport.minDepth && actual.viewport.maxDepth == expected.viewport.maxDepth && actual.renderExtent.width == expected.renderExtent.width && actual.renderExtent.height == expected.renderExtent.height, "null substitution changed depth coverage");
+            Require(AgcDriver::Graphics::DrawRejection(retained, true).empty(), "a retained-format depth/stencil pass was rejected");
+        }
     }
     {
         queue.context[0x011] &= ~(1u << 29u);
@@ -4410,6 +4498,33 @@ void sampledTextureBudgetTests() {
     Require(SampledTextureBudget(memory, &reported, 0) == 2 * GiB, "a device without a device-local heap does not keep 2 GiB of sampled textures");
 }
 
+void storageTextureBudgetTests() {
+    using AgcDriver::Graphics::StorageTextureBudget;
+    constexpr std::uint64_t GiB = 1ull << 30u;
+    constexpr std::uint64_t MiB = 1ull << 20u;
+    VkPhysicalDeviceMemoryProperties memory{};
+    memory.memoryHeapCount = 3;
+    memory.memoryHeaps[0] = {256 * MiB, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};
+    memory.memoryHeaps[1] = {32 * GiB, 0};
+    memory.memoryHeaps[2] = {16 * GiB, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    Require(StorageTextureBudget(memory, nullptr) == 4 * GiB, "without VK_EXT_memory_budget the storage image cache does not keep a quarter of the 16 GiB heap");
+    reported.heapBudget[0] = 100 * GiB;
+    reported.heapBudget[1] = 100 * GiB;
+    Require(StorageTextureBudget(memory, &reported) == 4 * GiB, "a zero budget for the largest device-local heap did not fall back to a quarter of the heap");
+    reported.heapBudget[2] = 10 * GiB;
+    Require(StorageTextureBudget(memory, &reported) == 2560 * MiB, "a 10 GiB budget on the 16 GiB heap does not limit the storage image cache to a quarter of the budget");
+    reported.heapBudget[2] = 6 * GiB;
+    Require(StorageTextureBudget(memory, &reported) == 1536 * MiB, "a 6 GiB budget on the 16 GiB heap does not limit the storage image cache to a quarter of the budget");
+    reported.heapBudget[2] = 1 * GiB;
+    Require(StorageTextureBudget(memory, &reported) == 512 * MiB, "a 1 GiB budget does not keep the 512 MiB floor");
+    reported.heapBudget[2] = 40 * GiB;
+    Require(StorageTextureBudget(memory, &reported) == 4 * GiB, "a budget above the heap size raised the storage image cache past a quarter of the heap");
+    memory.memoryHeaps[0].flags = 0;
+    memory.memoryHeaps[2].flags = 0;
+    Require(StorageTextureBudget(memory, &reported) == 2 * GiB, "a device without a device-local heap does not keep 2 GiB of storage images");
+}
+
 void sampledBudgetReportTests() {
     using AgcDriver::Graphics::SampledBudgetReportDue;
     using std::chrono::seconds;
@@ -6826,6 +6941,7 @@ int main(int argc, char** argv) {
         RunGuestLeaseWaitTests();
         ResourceContentKeyTests(false);
         stateTests();
+        retainedPixelStageTests();
         pipelineLibrarySetTests();
         hdrComponentSwapTests();
         depthMaintenanceTests();
@@ -6893,6 +7009,7 @@ int main(int argc, char** argv) {
         debugBranchTests();
         textureCacheBudgetTests();
         sampledTextureBudgetTests();
+        storageTextureBudgetTests();
         sampledBudgetReportTests();
         meshArgumentTests();
         meshIndexBufferTests();
