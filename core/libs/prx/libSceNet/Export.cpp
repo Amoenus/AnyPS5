@@ -763,6 +763,38 @@ int APS5_VABI sceNetAccept(int s, void* addr, uint32_t* addrlen) {
     return descriptor;
 }
 
+static std::uint16_t& native_port(sockaddr_storage& address) {
+    return address.ss_family == AF_INET ? reinterpret_cast<sockaddr_in&>(address).sin_port : reinterpret_cast<sockaddr_in6&>(address).sin6_port;
+}
+
+static int disconnect_datagram(const Sock& socket) {
+    const auto value = socket.native->value;
+    sockaddr_storage peer{};
+    NativeLength peer_length = sizeof(peer);
+    if (::getpeername(value, reinterpret_cast<sockaddr*>(&peer), &peer_length) != 0) return 0;
+    sockaddr_storage local{};
+    NativeLength local_length = sizeof(local);
+    if (::getsockname(value, reinterpret_cast<sockaddr*>(&local), &local_length) != 0) return fail(native_error());
+#ifdef _WIN32
+    sockaddr_storage unspecified{};
+    unspecified.ss_family = local.ss_family;
+    if (::connect(value, reinterpret_cast<const sockaddr*>(&unspecified), local_length) != 0) return fail(native_error());
+#else
+    sockaddr unspecified{};
+    unspecified.sa_family = AF_UNSPEC;
+    if (::connect(value, &unspecified, sizeof(unspecified)) != 0) return fail(native_error());
+#endif
+    sockaddr_storage current{};
+    NativeLength current_length = sizeof(current);
+    if (::getsockname(value, reinterpret_cast<sockaddr*>(&current), &current_length) != 0) return fail(native_error());
+    if (native_port(current) != 0) return 0;
+    sockaddr_storage wildcard{};
+    wildcard.ss_family = local.ss_family;
+    native_port(wildcard) = native_port(local);
+    if (::bind(value, reinterpret_cast<const sockaddr*>(&wildcard), local_length) != 0) return fail(native_error());
+    return 0;
+}
+
 int APS5_VABI sceNetConnect(int s, const void* addr, uint32_t addrlen) {
     Sock socket;
     {
@@ -771,6 +803,10 @@ int APS5_VABI sceNetConnect(int s, const void* addr, uint32_t addrlen) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         it->second.reported_error = 0;
         socket = it->second;
+    }
+    if (socket.type == NET_SOCK_DGRAM && addr && addrlen >= 2 && static_cast<const std::uint8_t*>(addr)[1] == 0) {
+        if (const int error = disconnect_datagram(socket)) return error;
+        return fail(NET_EAFNOSUPPORT);
     }
     sockaddr_storage native{};
     NativeLength native_length = 0;
@@ -1084,6 +1120,25 @@ int APS5_VABI sceNetEpollCreate(const char* name, int flags) {
     g_epolls.insert(id);
     g_epoll_socks.emplace(id, std::map<int, NetEpollEvent>{});
     return id;
+}
+
+int APS5_VABI sceNetShowNetstatWithMemory(int memid) {
+    struct SocketStatus { int id; int family; int type; bool nonblock; bool bound; bool listening; };
+    std::vector<SocketStatus> sockets;
+    std::size_t poolSize = 0;
+    {
+        std::lock_guard lk(g_mutex);
+        const auto pool = g_pools.find(memid);
+        if (pool == g_pools.end()) return fail(NET_EBADF);
+        poolSize = pool->second;
+        sockets.reserve(g_socks.size());
+        for (const auto& [id, socket] : g_socks)
+            sockets.push_back({id, socket.family, socket.type, socket.nonblock, socket.bound, socket.listening});
+    }
+    std::fprintf(stdout, "sceNet netstat: pool=%d bytes=%zu sockets=%zu\n", memid, poolSize, sockets.size());
+    for (const auto& socket : sockets)
+        std::fprintf(stdout, "socket=%d family=%d type=%d nonblock=%d bound=%d listening=%d\n", socket.id, socket.family, socket.type, int(socket.nonblock), int(socket.bound), int(socket.listening));
+    return 0;
 }
 
 int APS5_VABI sceNetGetMemoryPoolStats(int memid, NetMemoryPoolStats* stats) {

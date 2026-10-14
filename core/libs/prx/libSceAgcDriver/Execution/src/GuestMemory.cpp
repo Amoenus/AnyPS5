@@ -1186,6 +1186,12 @@ std::uint64_t CollectEpoch() {
 
 namespace {
 
+std::atomic<void (*)(std::uint64_t, std::size_t)> unwatchHook{nullptr};
+
+void beforeUnwatch(std::uint64_t address, std::size_t bytes) {
+    if (const auto hook = unwatchHook.load(std::memory_order_acquire)) hook(address, bytes);
+}
+
 void unwatchLocked(WriteTracker& tracker, std::uint64_t address, std::size_t bytes) {
     if (!tracker.watched) return;
 #ifdef _WIN32
@@ -1197,8 +1203,13 @@ void unwatchLocked(WriteTracker& tracker, std::uint64_t address, std::size_t byt
 
 }
 
+void SetUnwatchHook(void (*hook)(std::uint64_t, std::size_t)) {
+    unwatchHook.store(hook, std::memory_order_release);
+}
+
 void Unwatch(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return;
+    beforeUnwatch(address, bytes);
     auto& tracker = Tracker();
     const auto lock = lockTracker(tracker);
     tracker.initialize();
@@ -1207,6 +1218,11 @@ void Unwatch(std::uint64_t address, std::size_t bytes) {
 
 bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function<bool()>& import, bool staysWatched) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return import();
+    if (!staysWatched) {
+        constexpr std::uint64_t page = 4096;
+        const auto first = address & ~(page - 1);
+        beforeUnwatch(first, static_cast<std::size_t>(((address + bytes + page - 1) & ~(page - 1)) - first));
+    }
     auto& tracker = Tracker();
     auto lock = lockTracker(tracker);
     tracker.initialize();

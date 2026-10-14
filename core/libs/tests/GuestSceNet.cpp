@@ -1,5 +1,6 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <io.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
@@ -19,13 +20,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <future>
+#include <initializer_list>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 extern "C" {
 extern const std::uint8_t in6addr_any_nid_postfix[16];
 extern const std::uint8_t in6addr_loopback_nid_postfix[16];
 int APS5_VABI sceNetInit_nid_postfix(void);
+int APS5_VABI sceNetShowNetstatWithMemory(int);
 int APS5_VABI sceNetSocket(const char*, int, int, int);
 int APS5_VABI sceNetBind_nid_postfix(int, const void*, std::uint32_t);
 int APS5_VABI sceNetListen(int, int);
@@ -166,6 +170,60 @@ static void CheckStreamSender(int family) {
         }
     }
     for (const int descriptor : {client, accepted, listener}) Require(sceNetSocketClose(descriptor) == 0);
+}
+
+static std::string CaptureNetstat(int pool) {
+    auto* file = std::tmpfile();
+    Require(file != nullptr);
+    Require(std::fflush(stdout) == 0);
+#ifdef _WIN32
+    const int output = _fileno(stdout);
+    const int saved = _dup(output);
+    Require(saved >= 0 && _dup2(_fileno(file), output) == 0);
+#else
+    const int output = fileno(stdout);
+    const int saved = dup(output);
+    Require(saved >= 0 && dup2(fileno(file), output) == output);
+#endif
+    const int result = sceNetShowNetstatWithMemory(pool);
+    Require(std::fflush(stdout) == 0);
+#ifdef _WIN32
+    Require(_dup2(saved, output) == 0 && _close(saved) == 0);
+#else
+    Require(dup2(saved, output) == output && close(saved) == 0);
+#endif
+    Require(result == 0 && std::fseek(file, 0, SEEK_SET) == 0);
+    std::string text;
+    std::array<char, 256> bytes{};
+    for (std::size_t count; (count = std::fread(bytes.data(), 1, bytes.size(), file)) != 0;) text.append(bytes.data(), count);
+    Require(std::ferror(file) == 0 && std::fclose(file) == 0);
+    return text;
+}
+
+static void CheckNetstat() {
+    Require(Failed(sceNetShowNetstatWithMemory(-1), 9));
+    const int pool = sceNetPoolCreate("netstat", 4096, 0);
+    Require(pool > 0);
+    const auto empty = CaptureNetstat(pool);
+    Require(empty.find("bytes=4096 sockets=0") != std::string::npos);
+    const int socket = sceNetSocket("netstat", 2, 1, 0);
+    Require(socket >= 0);
+    const int nonblocking = 1;
+    Require(sceNetSetsockopt(socket, 0xffff, 0x1200, &nonblocking, sizeof(nonblocking)) == 0);
+    std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};
+    Require(sceNetBind_nid_postfix(socket, address.data(), address.size()) == 0);
+    Require(sceNetListen(socket, 1) == 0);
+    std::uint32_t size = address.size();
+    Require(sceNetGetsockname(socket, address.data(), &size) == 0 && size == address.size());
+    const auto before = address;
+    const auto snapshot = CaptureNetstat(pool);
+    Require(snapshot.find("bytes=4096 sockets=1") != std::string::npos);
+    Require(snapshot.find("socket=" + std::to_string(socket) + " family=2 type=1 nonblock=1 bound=1 listening=1") != std::string::npos);
+    Require(sceNetGetsockname(socket, address.data(), &size) == 0 && address == before);
+    Require(sceNetSocketClose(socket) == 0);
+    Require(CaptureNetstat(pool).find("sockets=0") != std::string::npos);
+    Require(sceNetPoolDestroy(pool) == 0);
+    Require(Failed(sceNetShowNetstatWithMemory(pool), 9));
 }
 
 static void CheckPoolStats() {
@@ -664,6 +722,43 @@ static void CheckSocketError() {
     Require(sceNetSocketClose(refused) == 0);
 }
 
+static void CheckDatagramDisconnect() {
+    const int peer = sceNetSocket("disconnect-peer", 2, 2, 17);
+    const int other = sceNetSocket("disconnect-other", 2, 2, 17);
+    const int dissolved = sceNetSocket("disconnect", 2, 2, 17);
+    Require(peer >= 0 && other >= 0 && dissolved >= 0);
+    std::array<std::uint8_t, 16> peerAddress{16, 2, 0, 0, 127, 0, 0, 1};
+    std::array<std::uint8_t, 16> dissolvedAddress{16, 2, 0, 0, 127, 0, 0, 1};
+    Require(sceNetBind_nid_postfix(peer, peerAddress.data(), peerAddress.size()) == 0);
+    Require(sceNetBind_nid_postfix(dissolved, dissolvedAddress.data(), dissolvedAddress.size()) == 0);
+    std::uint32_t size = peerAddress.size();
+    Require(sceNetGetsockname(peer, peerAddress.data(), &size) == 0);
+    size = dissolvedAddress.size();
+    Require(sceNetGetsockname(dissolved, dissolvedAddress.data(), &size) == 0);
+    Require(sceNetConnect(dissolved, peerAddress.data(), peerAddress.size()) == 0);
+    std::array<std::uint8_t, 16> name{};
+    size = name.size();
+    Require(sceNetGetpeername(dissolved, name.data(), &size) == 0 && name[2] == peerAddress[2] && name[3] == peerAddress[3]);
+    const std::array<std::uint8_t, 16> unspecified{16, 0};
+    Require(Failed(sceNetConnect(dissolved, unspecified.data(), unspecified.size()), 47));
+    size = name.size();
+    Require(Failed(sceNetGetpeername(dissolved, name.data(), &size), 57));
+    std::array<std::uint8_t, 16> local{};
+    size = local.size();
+    Require(sceNetGetsockname(dissolved, local.data(), &size) == 0 && local[2] == dissolvedAddress[2] && local[3] == dissolvedAddress[3]);
+#ifndef _WIN32
+    Require(local[4] == 0 && local[5] == 0 && local[6] == 0 && local[7] == 0);
+#endif
+    const int timeout = 2000000;
+    Require(sceNetSetsockopt(dissolved, 0xffff, 0x1006, &timeout, sizeof(timeout)) == 0);
+    const char unrelated[] = "unrelated sender";
+    Require(sceNetSendto(other, unrelated, sizeof(unrelated), 0, dissolvedAddress.data(), dissolvedAddress.size()) == sizeof(unrelated));
+    char buffer[32]{};
+    Require(sceNetRecvfrom(dissolved, buffer, sizeof(buffer), 0, nullptr, nullptr) == sizeof(unrelated));
+    Require(std::strcmp(buffer, unrelated) == 0);
+    for (const int descriptor : {peer, other, dissolved}) Require(sceNetSocketClose(descriptor) == 0);
+}
+
 int main() {
     const auto epoch = std::chrono::steady_clock::time_point{};
     Require(KernelSocketSelect::DeadlineAfter(epoch, 2, 250000) == epoch + std::chrono::milliseconds(2250));
@@ -679,6 +774,7 @@ int main() {
     Require(sceNetInit_nid_postfix() == 0);
     CheckEpollWritable();
     CheckPoolStats();
+    CheckNetstat();
     CheckEmptyEpoll();
     CheckAddressText(2, "127.0.0.1");
     CheckAddressText(2, "255.255.255.255");
@@ -689,6 +785,7 @@ int main() {
     CheckUnboundSocketName();
     CheckUnspecifiedIpv6();
     if (!ipv6Unavailable) CheckIpv6SocketsAreIpv6Only();
+    CheckDatagramDisconnect();
 
     const int closed = sceNetSocket("closed-by-kernel", 2, 2, 17);
     Require(closed >= 0);
