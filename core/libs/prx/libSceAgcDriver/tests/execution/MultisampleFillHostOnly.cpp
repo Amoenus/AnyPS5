@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "VulkanTestDevice.hpp"
 #ifdef _WIN32
@@ -50,7 +51,8 @@ class GuestBlock {
 public:
     GuestBlock() {
 #ifdef _WIN32
-        block = static_cast<std::byte*>(VirtualAlloc(nullptr, BlockBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        block = static_cast<std::byte*>(GuestArena::GuestArenaAllocate_nid_postfix(BlockBytes, BlockBytes));
+        GuestArena::GuestArenaCommit_nid_postfix(block, BlockBytes, PAGE_READWRITE, BlockBytes);
 #else
         block = static_cast<std::byte*>(std::aligned_alloc(BlockBytes, BlockBytes));
 #endif
