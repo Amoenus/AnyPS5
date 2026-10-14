@@ -72,6 +72,8 @@ void ResolveMultisampleTarget(const Context& context, const ColorTarget& source,
 void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
 void NoteNativeColorClear_nid_no_patch(std::uint64_t address, std::uint64_t bytes, std::uint32_t value, std::uint32_t mask);
 void ClearMultisampleTargets(VkDevice device);
+void InstallResidentImageReadGuard_nid_no_patch();
+void UpdateResidentImageUnmapObserver_nid_no_patch();
 void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const char* access);
 
 }

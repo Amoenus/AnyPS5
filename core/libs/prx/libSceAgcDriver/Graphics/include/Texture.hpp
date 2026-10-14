@@ -63,7 +63,7 @@ public:
     // compute pass writing it and the next pass sampling it share one image and copy nothing.
     // CanCopyFrom says whether the two descriptors address the same surface compatibly.
     Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components);
-    Texture(const Context& context, VkImage depthImage, VkFormat depthFormat, VkImageAspectFlags aspect, VkComponentMapping components, VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D);
+    Texture(const Context& context, VkImage depthImage, VkFormat depthFormat, VkImageAspectFlags aspect, VkComponentMapping components, VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D, std::shared_ptr<OwnedImage> owner = {});
     struct NativeSnapshotTag {};
     Texture(const Context& context, VkImage sourceImage, std::shared_ptr<void> sourceOwner, const GuestTextureResource& descriptor, VkComponentMapping components, NativeSnapshotTag);
     struct DepthCopyTag {};

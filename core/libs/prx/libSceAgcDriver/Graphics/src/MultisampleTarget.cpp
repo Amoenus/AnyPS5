@@ -1,5 +1,6 @@
 #include <shared_mutex>
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -560,6 +561,7 @@ void guardReads(std::uint64_t address, std::size_t bytes) {
 void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
     Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "resident image release range overflows");
     const auto end = address + bytes;
+    RetireUnmappedDepth_nid_no_patch(address, bytes);
     std::unique_lock lock(guardedMutex());
     for (auto& range : guarded()) {
         if (std::ranges::none_of(range.live, [&](const auto& part) { return address < part.address + part.bytes && part.address < end; })) continue;
@@ -621,28 +623,13 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
 void InstallResidentImageReadGuard_nid_no_patch() {
     static std::once_flag installed;
     std::call_once(installed, [] { GuestMemory::SetReadGuard(&guardReads); });
-    GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(&retireUnmapped);
+    UpdateResidentImageUnmapObserver_nid_no_patch();
 }
 
-void GuardResidentDepthRanges_nid_no_patch(const Context& context, std::span<const GuestMemory::UnchangedQuery> ranges, const std::shared_ptr<std::atomic<bool>>& active) {
-    std::unique_lock lock(guardedMutex());
-    for (const auto& range : ranges) guarded().push_back({context.device, range.address, range.bytes, 0u, active, true, {{range.address, range.bytes, 0u}}});
-    anyGuarded().store(true, std::memory_order_release);
-    InstallResidentImageReadGuard_nid_no_patch();
-}
-
-void ClearResidentDepthGuards_nid_no_patch(VkDevice device) {
-    std::unique_lock lock(guardedMutex());
-    std::erase_if(guarded(), [&](const auto& range) { return range.device == device && range.depth; });
-    anyGuarded().store(!guarded().empty(), std::memory_order_release);
-    if (guarded().empty()) GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(nullptr);
-}
-
-void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t bytes) {
-    if (bytes == 0u || !anyGuarded().load(std::memory_order_acquire)) return;
-    Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "native depth read range overflows");
-    std::shared_lock lock(guardedMutex());
-    for (const auto& range : guarded()) if (range.depth) Require(address >= range.address + range.bytes || range.address >= address + bytes, "sample-preserving guest publication of native multisample depth is not implemented");
+void UpdateResidentImageUnmapObserver_nid_no_patch() {
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
+    GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(anyGuarded().load(std::memory_order_acquire) || HasResidentDepthGuards_nid_no_patch() ? &retireUnmapped : nullptr);
 }
 
 void MultisampledCmask::NoteFill(std::uint64_t fillAddress, std::size_t fillBytes, std::uint32_t pattern) {
@@ -890,7 +877,7 @@ void ClearMultisampleTargets(VkDevice device) {
     std::unique_lock guardLock(guardedMutex());
     std::erase_if(guarded(), [&](const auto& range) { return range.device == device && !range.depth; });
     anyGuarded().store(!guarded().empty(), std::memory_order_release);
-    if (guarded().empty()) GuestAllocations::GuestAllocationsSetUnmapObserver_nid_postfix(nullptr);
+    UpdateResidentImageUnmapObserver_nid_no_patch();
 }
 
 void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const char* access) {

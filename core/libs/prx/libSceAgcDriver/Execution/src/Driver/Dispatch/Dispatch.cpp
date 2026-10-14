@@ -81,9 +81,10 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             if (const auto fill = MatchConstantFill(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet)) Graphics::NoteNativeColorClear_nid_no_patch(fill->address, fill->bytes, fill->value, 0u);
         }
         if (const auto htile = Graphics::HtileDepthClearAddress(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads); htile != 0) {
-            const auto bytes = Graphics::HtileDepthClearBytes_nid_no_patch(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet, indirectArguments);
-            Graphics::NoteHtileDepthClear(htile, bytes);
-            Graphics::NoteNativeColorClear_nid_no_patch(htile, bytes, userData[4], userData[5]);
+            const auto threads = (packet[4] & 0x20u) != 0 ? static_cast<std::uint64_t>(packet[1]) : static_cast<std::uint64_t>(packet[1]) * compute.numThreads[0];
+            const auto nativeBytes = Graphics::HtileDepthClearBytes_nid_no_patch(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet, indirectArguments);
+            Graphics::NoteHtileDepthClear(htile, static_cast<std::size_t>(threads * 16u), nativeBytes);
+            Graphics::NoteNativeColorClear_nid_no_patch(htile, nativeBytes, userData[4], userData[5]);
         }
         if (indirectArguments == 0 && (packet[4] & 0x20u) == 0) {
             if (const auto fill = Graphics::MatchMemoryValueFill(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads, {packet[1], packet[2], packet[3]})) Graphics::NoteMemoryValueFill(*fill);
