@@ -28,7 +28,8 @@ int main() {
                 bool refused = false;
                 try { static_cast<void>(decode(resource)); }
                 catch (const std::runtime_error& error) {
-                    const auto expected = first >> 26u == 0x3au ? "MTBUF resource descriptor register range overflow" :
+                    const auto expected = resource != 31u ? "unsupported scalar source operand" :
+                        first >> 26u == 0x3au ? "MTBUF resource descriptor register range overflow" :
                         "MUBUF resource descriptor register range overflow";
                     refused = std::string_view(error.what()) == expected;
                 }
