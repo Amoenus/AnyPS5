@@ -570,6 +570,34 @@ void CheckImportWindow() {
     Require(!UnchangedSince(base, Block, after), "a store after the import window was missed");
 }
 
+void CheckPrivateImportSameValueStore() {
+    void* memory = AllocateWatched(Block);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    auto* bytes = static_cast<volatile std::uint8_t*>(memory);
+    std::memset(memory, 0x5a, Block);
+    const auto outside = CollectWritesUncached(base, Block);
+    Require(outside != 0u, "the private same-value control is not collected");
+    bytes[0x100] = 0x5a;
+    Require(!UnchangedSince(base, Block, outside) && WrittenSince(base, Block, outside), "a same-value CPU store outside the import window was missed");
+    const auto before = CollectWritesUncached(base, Block);
+    Require(ImportWatched(base, Block, [&] {
+        bytes[0x100] = 0x5a;
+        return true;
+    }, true), "the private same-value import window failed");
+    const std::array<std::uint64_t, 1> generations{before};
+    std::array<std::uint8_t, 1> changed{};
+    std::array<std::uint8_t, 1> cpu{};
+    Require(ChangedBlocks(base, Block, generations, changed, cpu), "the private same-value import window is not tracked");
+    std::cout << "private same-value import: watched=" << Watched(base, Block)
+              << " unchanged=" << UnchangedSince(base, Block, before)
+              << " unchangedCollected=" << UnchangedSinceCollected(base, Block, before)
+              << " written=" << WrittenSince(base, Block, before)
+              << " storedOver=" << StoredOver(base, Block, before)
+              << " changed=" << static_cast<unsigned>(changed[0])
+              << " cpu=" << static_cast<unsigned>(cpu[0]) << "\n";
+    Require(!UnchangedSince(base, Block, before), "the unchanged predicate accepted a same-value CPU store inside a watched import window");
+}
+
 void CheckImportWindowZeroPages() {
     void* memory = AllocateWatched(5 * Block);
     const auto base = reinterpret_cast<std::uint64_t>(memory);
@@ -823,6 +851,7 @@ int main() {
         CheckVersionRanges();
         CheckCollectBoundaries();
         CheckImportWindow();
+        CheckPrivateImportSameValueStore();
         CheckImportWindowZeroPages();
         CheckUnwatchedImport();
         CheckCommittedRanges();
