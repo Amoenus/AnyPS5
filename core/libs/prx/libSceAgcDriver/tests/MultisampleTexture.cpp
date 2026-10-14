@@ -1304,7 +1304,7 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                     raster.Run(batch.Handle(), static_cast<float>(iteration) / 16.0f);
                     batch.SubmitAndWait();
                 }
-                NoteHtileDepthClear(target.htileAddress, metadataBytes);
+                NoteHtileDepthClear(target.htileAddress, metadataBytes, metadataBytes);
                 const auto storedBytes = partialCompletion ? 4u : metadataBytes;
                 AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, storedBytes, [&] {
                     for (std::size_t i = 0u; i < storedBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
@@ -1442,7 +1442,7 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
     reset();
     DepthSurfaceView(context, target);
     recorder.Sync();
-    NoteHtileDepthClear(target.htileAddress);
+    NoteHtileDepthClear(target.htileAddress, 0u);
     TargetRefuses([&] { CachedSampledTexture(context, words); }, "fast-clear transition");
     ++checked;
     reset();
@@ -1462,7 +1462,7 @@ void CheckDepthRefusals(Context context, std::uint32_t fragments) {
             });
         };
         if (field == 1u) store(0u);
-        NoteHtileDepthClear(target.htileAddress, field == 2u ? metadataBytes - 1u : metadataBytes);
+        NoteHtileDepthClear(target.htileAddress, metadataBytes, field == 2u ? metadataBytes - 1u : metadataBytes);
         if (field != 0u && field != 1u) store(field == 4u ? 0x1000u : 0u);
         std::string_view expected = "completed HTILE store";
         switch (field) {
