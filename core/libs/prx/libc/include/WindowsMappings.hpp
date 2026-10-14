@@ -83,7 +83,11 @@ public:
         HANDLE duplicate = nullptr;
         if (!DuplicateHandle(GetCurrentProcess(), section, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) fail("keep shared guest section");
         const auto owned = std::make_shared<Section>(duplicate);
-        const auto slotOf = [&](std::size_t done) -> Physical& { return physical[std::make_pair(reinterpret_cast<std::uintptr_t>(section), offset + done)]; };
+        const auto slotOf = [&](std::size_t done) -> const std::shared_ptr<Physical>& {
+            auto& slot = physical[std::make_pair(reinterpret_cast<std::uintptr_t>(section), offset + done)];
+            if (!slot) slot = std::make_shared<Physical>();
+            return slot;
+        };
         const auto pageOf = [](Physical& slot) {
             auto shared = slot.page.lock();
             if (!shared) {
@@ -93,7 +97,7 @@ public:
             return shared;
         };
         const auto single = [&](std::size_t done) {
-            const auto& slot = slotOf(done);
+            const auto& slot = *slotOf(done);
             const auto shared = slot.page.lock();
             return resident && !slot.stored && (!shared || shared->aliases.empty());
         };
@@ -106,14 +110,14 @@ public:
                 commitResident(base, runBytes);
                 residentRuns.emplace(base, Run{base + runBytes, {}, static_cast<std::uint32_t>(runBytes >> 12)});
                 for (std::size_t at = 0; at < runBytes; at += pageBytes) {
-                    auto& slot = slotOf(done + at);
-                    const auto shared = pageOf(slot);
-                    if (slot.saved) {
-                        std::memcpy(reinterpret_cast<void*>(base + at), slot.saved->bytes + slot.savedOffset, pageBytes);
-                        slot.saved.reset();
+                    const auto slot = slotOf(done + at);
+                    const auto shared = pageOf(*slot);
+                    if (slot->saved) {
+                        std::memcpy(reinterpret_cast<void*>(base + at), slot->saved->bytes + slot->savedOffset, pageBytes);
+                        slot->saved.reset();
                     }
                     shared->aliases.push_back(base + at);
-                    views.emplace(base + at, View{shared, protection, {}, 0, owned, offset + done + at, 0, 0, true, &slot});
+                    views.emplace(base + at, View{shared, protection, {}, 0, owned, offset + done + at, 0, 0, true, slot});
                     invalidate(*shared);
                 }
                 remember(freshRanges, base, base + runBytes);
@@ -122,17 +126,17 @@ public:
                 done += runBytes;
                 continue;
             }
-            auto& slot = slotOf(done);
-            const auto shared = pageOf(slot);
+            const auto slot = slotOf(done);
+            const auto shared = pageOf(*slot);
             const auto aliases = shared->aliases;
             for (const auto alias : aliases) {
                 if (views.at(alias).resident) demote(alias);
             }
             split(base, pageBytes);
             mapShared(base, section, offset + done, protection);
-            slot.stored = true;
+            slot->stored = true;
             shared->aliases.push_back(base);
-            views.emplace(base, View{shared, protection, {}, 0, owned, offset + done, 0, 0, false, &slot});
+            views.emplace(base, View{shared, protection, {}, 0, owned, offset + done, 0, 0, false, slot});
             remember(freshRanges, base, base + pageBytes);
             invalidate(*shared);
             done += pageBytes;
@@ -209,14 +213,7 @@ public:
     void ForgetSection(HANDLE section) {
         std::lock_guard lock(mutex);
         const auto key = reinterpret_cast<std::uintptr_t>(section);
-        for (auto slot = physical.lower_bound(std::make_pair(key, std::uint64_t{0})); slot != physical.end() && slot->first.first == key;) {
-            const auto shared = slot->second.page.lock();
-            if (shared && !shared->aliases.empty()) {
-                ++slot;
-                continue;
-            }
-            slot = physical.erase(slot);
-        }
+        physical.erase(physical.lower_bound(std::make_pair(key, std::uint64_t{0})), physical.lower_bound(std::make_pair(key + 1, std::uint64_t{0})));
     }
 
     bool BeginHostWrite(std::uintptr_t address, std::size_t bytes) {
@@ -513,7 +510,7 @@ private:
         std::uint32_t hostWrites;
         std::uint8_t collected = 0;
         bool resident = false;
-        Physical* slot = nullptr;
+        std::shared_ptr<Physical> slot;
     };
     struct Run {
         std::uintptr_t end;
@@ -857,7 +854,7 @@ private:
     Ranges cleanRanges;
     Ranges freshRanges;
     std::map<std::uintptr_t, View> views;
-    std::map<std::pair<std::uintptr_t, std::uint64_t>, Physical> physical;
+    std::map<std::pair<std::uintptr_t, std::uint64_t>, std::shared_ptr<Physical>> physical;
     std::map<std::uintptr_t, Run> residentRuns;
     std::map<std::uintptr_t, std::size_t> splitAliases;
     std::size_t granularity = 0x10000;
