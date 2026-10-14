@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -381,6 +382,47 @@ std::vector<std::uint32_t> DepthFragmentShader() {
     return module.Finalize();
 }
 
+std::vector<std::uint32_t> DepthFeedbackFragmentShader(std::uint32_t binding, bool sampling) {
+    ShaderRecompiler::SpirvModule module;
+    module.EmitCapability(spv::CapabilityShader);
+    module.AddMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+    const auto f32 = module.Type(spv::OpTypeFloat, 32u);
+    const auto i32 = module.Type(spv::OpTypeInt, 32u, 1u);
+    const auto v4 = module.Type(spv::OpTypeVector, f32, 4u);
+    const auto v2 = module.Type(spv::OpTypeVector, i32, 2u);
+    const auto voidType = module.Type(spv::OpTypeVoid);
+    const auto imageType = module.Type(spv::OpTypeImage, f32, spv::Dim2D, 0u, 0u, 1u, 1u, spv::ImageFormatUnknown);
+    const auto imageArray = module.Type(spv::OpTypeArray, imageType, module.Constant(spv::OpConstant, i32, 1u));
+    const auto image = sampling ? module.DefineGlobalVariable(module.Type(spv::OpTypePointer, spv::StorageClassUniformConstant, imageArray), spv::StorageClassUniformConstant) : 0u;
+    if (sampling) {
+        module.AddAnnotation(spv::OpDecorate, image, spv::DecorationDescriptorSet, ShaderRecompiler::RuntimeAbi::DescriptorSet);
+        module.AddAnnotation(spv::OpDecorate, image, spv::DecorationBinding, binding);
+    }
+    const auto depth = module.DefineGlobalVariable(module.Type(spv::OpTypePointer, spv::StorageClassOutput, f32), spv::StorageClassOutput);
+    module.AddAnnotation(spv::OpDecorate, depth, spv::DecorationBuiltIn, spv::BuiltInFragDepth);
+    const auto zero = module.Constant(spv::OpConstant, i32, 0u);
+    const auto coordinate = module.Constant(spv::OpConstantComposite, v2, zero, zero);
+    const auto main = module.AllocateId();
+    module.AddFunction(spv::OpFunction, voidType, main, spv::FunctionControlMaskNone, module.Type(spv::OpTypeFunction, voidType));
+    module.AddFunction(spv::OpLabel, module.AllocateId());
+    auto value = module.Constant(spv::OpConstant, f32, 0u);
+    if (sampling) {
+        const auto element = module.AllocateId(), object = module.AllocateId(), fetched = module.AllocateId();
+        value = module.AllocateId();
+        module.AddFunction(spv::OpAccessChain, module.Type(spv::OpTypePointer, spv::StorageClassUniformConstant, imageType), element, image, zero);
+        module.AddFunction(spv::OpLoad, imageType, object, element);
+        module.AddFunction(spv::OpImageFetch, v4, fetched, object, coordinate, spv::ImageOperandsSampleMask, zero);
+        module.AddFunction(spv::OpCompositeExtract, f32, value, fetched, 0u);
+    }
+    module.AddFunction(spv::OpStore, depth, value);
+    module.AddFunction(spv::OpReturn);
+    module.AddFunction(spv::OpFunctionEnd);
+    module.EmitEntryPoint(spv::ExecutionModelFragment, main, "main", {depth});
+    module.AddExecutionMode(main, spv::ExecutionModeOriginUpperLeft);
+    module.AddExecutionMode(main, spv::ExecutionModeDepthReplacing);
+    return module.Finalize();
+}
+
 class DepthRaster {
 public:
     DepthRaster(const Context& context, const DepthTarget& target, VkImageView view) : context(context), extent(target.extent), samples(target.samples) {
@@ -555,6 +597,63 @@ void CheckClearDispatch() {
         }
         Require(HtileDepthClearBytes_nid_no_patch(code, changedUserData, changedCompute, changedPacket, 0u) == 0u, "unproven HTILE mask dispatch was accepted");
     }
+}
+
+void CheckDrawFeedback() {
+    const auto device = OpenVulkanTestDevice();
+    Require(device != nullptr, "native depth draw feedback requires Vulkan");
+    constexpr VkExtent2D extent{5u, 3u};
+    constexpr std::uint32_t samples = 4u;
+    TargetMemory memory(static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, 4u, samples))), metadata(65536u);
+    std::memset(metadata.Data(), 0, 65536u);
+    DepthTarget depth{memory.Address(), 0u, extent, VK_FORMAT_D32_SFLOAT, 0.0f, 0u, metadata.Address(), false, samples};
+    depth.depthSwizzle = 24u;
+    depth.iterate256 = depth.htilePipeAligned = true;
+    struct Cleanup {
+        AgcDriver::VulkanDevice& device;
+        ~Cleanup() { device.WaitIdle(); ClearCachedTextures(device.Device()); ClearDepthSurfaces(device.Device()); }
+    } cleanup{*device};
+    State state{};
+    state.stages = {ShaderPath::Vertex, 0u, 32u, 32u, std::nullopt, std::nullopt};
+    state.depth = depth;
+    state.depthTest = state.depthWrite = true;
+    state.depthCompare = VK_COMPARE_OP_ALWAYS;
+    state.renderExtent = extent;
+    state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    state.viewport = {0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f};
+    state.negativeOneToOne = false;
+    state.scissor = {{0, 0}, extent};
+    state.cullMode = VK_CULL_MODE_NONE;
+    state.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    state.samples = samples;
+    ShaderRecompiler::RecompileResult vertex, producer, reader;
+    vertex.spirv = DepthVertexShader();
+    vertex.variantId = 1u;
+    constexpr auto binding = ShaderRecompiler::RuntimeAbi::FirstImageBinding;
+    producer.spirv = DepthFeedbackFragmentShader(binding, false);
+    producer.variantId = 2u;
+    const auto pixelOffset = PixelPushOffset(0u, device->Target());
+    const AgcDriver::Pm4::DrawParameters draw{0u, 3u, 0u, 1u, 0u, false};
+    const std::array<CompiledShader, 2> initial{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0u}, {ShaderRecompiler::ShaderStage::Fragment, &producer, pixelOffset}}};
+    device->Draw(state, draw, initial);
+    device->WaitIdle();
+    reader.spirv = DepthFeedbackFragmentShader(binding, true);
+    reader.variantId = 3u;
+    const auto words = DepthSampleWords(depth);
+    ShaderRecompiler::DescriptorBinding image{};
+    image.kind = ShaderRecompiler::DescriptorKind::SampledImage;
+    image.role = ShaderRecompiler::DescriptorRole::GuestImages;
+    image.descriptorSet = ShaderRecompiler::RuntimeAbi::DescriptorSet;
+    image.binding = binding;
+    image.count = 1u;
+    image.guestDescriptor.assign(words.begin(), words.end());
+    image.imageShape = ShaderRecompiler::DescriptorImageShape::Image2DMultisample;
+    image.imageSamplers = {0u};
+    reader.bindings.push_back(std::move(image));
+    const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0u}, {ShaderRecompiler::ShaderStage::Fragment, &reader, pixelOffset}}};
+    TargetRefuses([&] { device->Draw(state, draw, shaders); }, "sampling a native multisampled depth target the draw attaches");
+    device->WaitIdle();
+    std::puts("Native depth feedback refused through the draw resource path");
 }
 
 void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing = false, std::optional<bool> depthOnlyOverride = std::nullopt, ClearFault fault = ClearFault::None) {
@@ -746,7 +845,7 @@ void CheckEligibility(Context context) {
         decltype(clear)& action;
         ~Cleanup() { action(); }
     } cleanup{clear};
-    for (std::uint32_t field = 0u; field < 15u; ++field) {
+    for (std::uint32_t field = 0u; field < 19u; ++field) {
         auto invalid = target;
         std::string_view reason;
         switch (field) {
@@ -765,6 +864,10 @@ void CheckEligibility(Context context) {
             case 12u: invalid.htileDepthOnly = true; metadata.Data()[0] = std::byte{0x30}; reason = "clear value"; break;
             case 13u: invalid.clearDepth = 1.0f; { const std::uint32_t word = 0xfffffff0u; for (std::size_t offset = 0u; offset < HtileMetadataBytes(extent); offset += 4u) std::memcpy(metadata.Data() + offset, &word, 4u); } reason = "clear value"; break;
             case 14u: metadata.Data()[0] = std::byte{0xf}; reason = "clear value"; break;
+            case 15u: invalid.clearDepth = 1.0f; reason = "clear value"; break;
+            case 16u: invalid.clearDepth = 1.0f; invalid.htileDepthOnly = true; reason = "clear value"; break;
+            case 17u: { const std::uint32_t word = 0xfffc0000u; for (std::size_t offset = 0u; offset < HtileMetadataBytes(extent); offset += 4u) std::memcpy(metadata.Data() + offset, &word, 4u); } reason = "clear value"; break;
+            case 18u: invalid.htileDepthOnly = true; { const std::uint32_t word = 0xfffffff0u; for (std::size_t offset = 0u; offset < HtileMetadataBytes(extent); offset += 4u) std::memcpy(metadata.Data() + offset, &word, 4u); } reason = "clear value"; break;
         }
         Require(DepthSurfaceView(context, invalid) != VK_NULL_HANDLE, "sampling ineligibility must preserve attachment rendering");
         TargetRefuses([&] { lookup(invalid); }, reason);
@@ -962,6 +1065,7 @@ int main(int argc, char** argv) {
             std::printf("skipped, no usable Vulkan device: %s\n", error.what());
             return VulkanTestSkipped;
         }
+        CheckDrawFeedback();
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         Require(DepthSupported(context, VK_FORMAT_D32_SFLOAT, 4u), "the native depth regression requires sampled D32 with four samples");
