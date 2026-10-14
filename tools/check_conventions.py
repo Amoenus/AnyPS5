@@ -45,7 +45,7 @@ SYSTEM_DEPENDENCY = re.compile(r"\b(find_package\s*\((?!\s*(Python3|Threads|Git)
 TITLE = re.compile(r"\b(PPSA|CUSA)\d{5}\b")
 EXTENSION = re.compile(r"__attribute__|__declspec|#\s*pragma\s+(?!once\b)")
 LINK = re.compile(r"\]\(([^)\s]+)")
-SECTION = re.compile(r"^###\s*(.+?)\s*$", re.M)
+SECTION = re.compile(r"^###(?!#)\s*(.+?)\s*$", re.M)
 KEY = re.compile(r"^( *)([A-Za-z0-9_-]+|'[^']*'|\"[^\"]*\"):(?:\s+(.*?))?\s*$")
 
 
@@ -109,7 +109,7 @@ class Check:
                 if core and TITLE.search(text):
                     self.report("title-specific", path, number, TITLE.search(text).group(0))
                 match = EXPORT.search(bare)
-                if match and path.startswith("core/libs/prx/") and not match.group(1).endswith(("_nid_no_patch", "_nid_no_patch_cut")):
+                if match and core and path.startswith("core/libs/prx/") and not match.group(1).endswith(("_nid_no_patch", "_nid_no_patch_cut")):
                     source = source or self.show(path).splitlines()
                     body = function_body(source, number - 1)
                     if body is None:
@@ -134,7 +134,7 @@ class Check:
             _, path, number, text = line.split(":", 3)
             name = EXPORT.search(text).group(1)
             own, own_number = exports[name]
-            if library(path) != library(own) and function_body(self.show(path).splitlines(), int(number) - 1) is not None:
+            if library(path) != library(own) and "tests" not in PurePosixPath(path).parts and function_body(self.show(path).splitlines(), int(number) - 1) is not None:
                 self.report("duplicate-export", own, own_number, f"{name} is also in {library(path)}")
 
     def build(self):

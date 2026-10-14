@@ -116,8 +116,9 @@ if(BUILD_TESTING AND WIN32)
 endif()
 
 if(WIN32)
-    target_sources(relinker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/relinker.rc)
+    add_library(relinker_resources OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/relinker.rc)
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/relinker.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/relinker.manifest)
+    target_sources(relinker PRIVATE $<TARGET_OBJECTS:relinker_resources>)
     target_compile_options(relinker PRIVATE -municode)
     target_link_options(relinker PRIVATE -municode)
 endif()
@@ -389,6 +390,9 @@ if(BUILD_TESTING)
         set_tests_properties(windows_fixed_base PROPERTIES TIMEOUT 20)
         add_test(NAME elf_offsets COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_elf_offsets.py $<TARGET_FILE:relinker>)
+        add_test(NAME conversion_diagnostics COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_conversion_diagnostics.py $<TARGET_FILE:relinker>)
+        set_tests_properties(conversion_diagnostics PROPERTIES TIMEOUT 20)
         add_test(NAME dynamic_segment COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_dynamic_segment.py $<TARGET_FILE:relinker>)
         add_test(NAME rela_size COMMAND ${Python3_EXECUTABLE}
@@ -428,6 +432,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_executable_segments.py $<TARGET_FILE:relinker>)
         add_test(NAME linux_executable_exports COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_executable_exports.py $<TARGET_FILE:relinker>)
+        add_test(NAME executable_tls_relocations COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_executable_tls_relocations.py $<TARGET_FILE:relinker>)
         add_test(NAME linux_entry_argv COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_entry_argv.py $<TARGET_FILE:relinker>)
         add_test(NAME linux_program_header_order COMMAND ${Python3_EXECUTABLE}
