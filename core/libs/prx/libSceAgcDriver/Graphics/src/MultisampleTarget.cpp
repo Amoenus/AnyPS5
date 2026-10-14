@@ -49,6 +49,7 @@ class MultisampleTarget {
 public:
     MultisampleTarget(const Context& context, const ColorTarget& target) : context(context), target(target), cmask(target.cmaskAddress, target.cmaskBytes), colorFill(target) {
         this->context.bufferPool.reset();
+        const auto initial = InitialDccClear(target);
         const auto samples = static_cast<VkSampleCountFlagBits>(target.samples);
         Require((context.limits.framebufferColorSampleCounts & samples) != 0, "the device cannot render color with the target's sample count");
         VkFormatProperties properties{};
@@ -94,8 +95,7 @@ public:
                 toGeneral.image = image;
                 toGeneral.subresourceRange = viewInfo.subresourceRange;
                 context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
-                const VkClearColorValue zero{};
-                context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &toGeneral.subresourceRange);
+                context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &initial, 1, &toGeneral.subresourceRange);
                 RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
                 if (recorder != nullptr) Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
             });
@@ -109,6 +109,7 @@ public:
     MultisampleTarget& operator=(const MultisampleTarget&) = delete;
 
     void ApplyFastClear(const ColorTarget& use) {
+        CheckDccCurrent(use);
         VkClearColorValue clear{};
         if (!TakeMultisampledClear(cmask, colorFill, use, clear)) return;
         recordCommands(context, [&](VkCommandBuffer commands, Recorder* recorder) {
@@ -164,6 +165,54 @@ public:
     MultisampledColorFill colorFill;
 
 private:
+    std::vector<GuestMemory::UnchangedQuery> dccRanges;
+
+    VkClearColorValue InitialDccClear(const ColorTarget& use) {
+        if (use.dccAddress == 0) return {};
+        const auto dccBytes = MultisampledDccBytes(use);
+        Require((use.dccAddress & 4095u) == 0, "multisampled DCC metadata base alignment is not implemented");
+        Require(use.cmaskAddress == 0 ? use.cmaskBytes == 0 : use.cmaskBytes == CmaskBytes(use.extent.width, use.extent.height), "multisampled DCC CMASK footprint is invalid");
+        const auto colorBytes = MultisampledColorBytes(use);
+        Require(colorBytes != 0, "multisampled DCC color footprint is not implemented");
+        dccRanges.push_back({use.address, static_cast<std::size_t>(colorBytes), 0});
+        dccRanges.push_back({use.dccAddress, dccBytes, 0});
+        if (use.cmaskAddress != 0) dccRanges.push_back({use.cmaskAddress, use.cmaskBytes, 0});
+        for (auto& range : dccRanges) {
+            GuestMemory::CheckRange(reinterpret_cast<const void*>(range.address), range.bytes, 256);
+            Require(GuestMemory::Watched(range.address, range.bytes), "initial multisampled DCC contents require watched guest memory");
+            range.generation = GuestMemory::CollectWritesUncached(range.address, range.bytes);
+            Require(range.generation != 0, "initial multisampled DCC contents have no write generation");
+        }
+        for (std::size_t first = 0; first < dccRanges.size(); ++first) {
+            for (std::size_t second = first + 1; second < dccRanges.size(); ++second) {
+                const auto& a = dccRanges[first];
+                const auto& b = dccRanges[second];
+                Require(a.address >= b.address + b.bytes || b.address >= a.address + a.bytes, "overlapping multisampled DCC color or metadata ranges are not implemented");
+            }
+        }
+        std::vector<std::byte> dcc(dccRanges[1].bytes);
+        GuestMemory::Read(use.dccAddress, dcc);
+        std::vector<std::byte> cmask(use.cmaskBytes);
+        if (!cmask.empty()) GuestMemory::Read(use.cmaskAddress, cmask);
+        const auto clear = MultisampledDccClear(use, dcc, cmask);
+        Require(GuestMemory::UnchangedSinceAll(dccRanges), "initial multisampled DCC contents changed during import");
+        return clear;
+    }
+
+    void CheckDccCurrent(const ColorTarget& use) const {
+        if (dccRanges.empty()) {
+            Require(use.dccAddress == 0, "adding DCC to a resident multisampled color target is not implemented");
+            return;
+        }
+        Require(use.dccAddress == target.dccAddress && use.dccControl == target.dccControl && use.dccAlphaOnMsb == target.dccAlphaOnMsb && use.dccPipeAligned == target.dccPipeAligned && use.cmaskAddress == target.cmaskAddress && use.cmaskBytes == target.cmaskBytes && use.tileMode == target.tileMode && use.elementBytes == target.elementBytes && use.pipeBankXor == target.pipeBankXor, "multisampled DCC target layout or metadata changed");
+        for (const auto& range : dccRanges) {
+            Require(GuestMemory::Watched(range.address, range.bytes), "multisampled DCC target reuse requires watched guest memory");
+            GuestMemory::CollectWritesUncached(range.address, range.bytes);
+            Require(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation), "writes to a resident multisampled DCC target or its metadata are not implemented");
+            if (auto* recorder = Recorder::Active(); recorder != nullptr) Require(!recorder->PendingWriteOverlaps(range.address, range.bytes), "pending writes to a resident multisampled DCC target or its metadata are not implemented");
+        }
+    }
+
     void release() noexcept {
         if (resolvePass) context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, resolvePass, nullptr);
         if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
@@ -230,6 +279,10 @@ void guard(const Context& context, const ColorTarget& target, const std::shared_
     }
     std::unique_lock lock(guardedMutex());
     guarded().push_back({context.device, target.address, bytes, target.samples, active});
+    if (target.dccAddress != 0) {
+        guarded().push_back({context.device, target.dccAddress, MultisampledDccBytes(target), target.samples, active});
+        if (target.cmaskAddress != 0) guarded().push_back({context.device, target.cmaskAddress, target.cmaskBytes, target.samples, active});
+    }
     anyGuarded().store(true, std::memory_order_release);
     static std::once_flag installed;
     std::call_once(installed, [] {
@@ -259,7 +312,7 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
     targets().push_back(std::make_unique<MultisampleTarget>(context, use));
     auto& created = *targets().back();
     guard(context, use, created.active);
-    if (use.cmaskFastClear) created.cmask.SeedKeys(CurrentDccKeys(use.cmaskAddress, static_cast<std::uint64_t>(use.cmaskBytes) * 256u));
+    if (use.cmaskFastClear && use.dccAddress == 0) created.cmask.SeedKeys(CurrentDccKeys(use.cmaskAddress, static_cast<std::uint64_t>(use.cmaskBytes) * 256u));
     created.ApplyFastClear(use);
     return created;
 }
@@ -319,6 +372,45 @@ std::uint64_t MultisampledColorBytes(const ColorTarget& target) {
     const std::uint64_t blockWidth = std::uint64_t{1} << widthLog2;
     const std::uint64_t blockHeight = std::uint64_t{1} << (elementsLog2 - widthLog2);
     return ((target.extent.width + blockWidth - 1) / blockWidth) * ((target.extent.height + blockHeight - 1) / blockHeight) << blockLog2;
+}
+
+std::size_t MultisampledDccBytes(const ColorTarget& target) {
+    Require(target.samples == 2 || target.samples == 4 || target.samples == 8, "unsupported multisampled DCC fragment count");
+    Require(target.tileMode == ColorTileMode::RenderTarget && target.dccPipeAligned, "multisampled DCC requires pipe-aligned SW_64KB_R_X");
+    Require(std::has_single_bit(target.elementBytes) && target.elementBytes <= 16, "unsupported multisampled DCC element size");
+    Require(target.extent.width != 0 && target.extent.width <= 16384 && target.extent.height != 0 && target.extent.height <= 16384, "invalid multisampled DCC extent");
+    Require(target.mipCount == 1 && target.mip == 0 && !target.mipTail && target.depth == 1 && target.depthSlice == 0 && target.arrayLastSlice == 0 && target.arraySlice == 0 && target.layers == 1, "multisampled DCC array, volume or mip contents are not implemented");
+    const auto bits = 19u - static_cast<std::uint32_t>(std::countr_zero(target.elementBytes));
+    const std::uint64_t width = std::uint64_t{1} << ((bits + 1u) / 2u);
+    const std::uint64_t height = std::uint64_t{1} << (bits / 2u);
+    return static_cast<std::size_t>(((target.extent.width + width - 1) / width) * ((target.extent.height + height - 1) / height) * 4096u);
+}
+
+VkClearColorValue MultisampledDccClear(const ColorTarget& target, std::span<const std::byte> dcc, std::span<const std::byte> cmask) {
+    Require(target.dccAddress != 0 && (target.dccControl & 0x3ff80u) == 0 && (target.pipeBankXor & ~0xcf00u) == 0, "multisampled DCC address, color transform, lossy mode or XOR is not implemented");
+    Require(dcc.size() == MultisampledDccBytes(target), "multisampled DCC metadata snapshot size mismatch");
+    Require(std::ranges::all_of(dcc, [&](std::byte key) { return key == dcc.front(); }), "mixed multisampled DCC metadata is not implemented");
+    Require(target.cmaskAddress == 0 ? cmask.empty() && target.cmaskBytes == 0 : cmask.size() == target.cmaskBytes && target.cmaskBytes == CmaskBytes(target.extent.width, target.extent.height), "multisampled DCC CMASK snapshot size mismatch");
+    if (!cmask.empty()) {
+        const auto code = std::to_integer<std::uint32_t>(cmask.front());
+        const auto expanded = target.samples == 2 ? 0xddu : target.samples == 4 ? 0xeeu : 0xffu;
+        Require(std::ranges::all_of(cmask, [&](std::byte key) { return key == cmask.front(); }) && (code == 0xccu || code == expanded), "multisampled DCC CMASK compression or register clear is not implemented");
+    }
+    DccKeys keys;
+    switch (std::to_integer<std::uint32_t>(dcc.front())) {
+        case 0x00u: keys = DccKeys::Clear0000; break;
+        case 0x40u: keys = DccKeys::Clear0001; break;
+        case 0x80u: keys = DccKeys::Clear1110; break;
+        case 0xc0u: keys = DccKeys::Clear1111; break;
+        default: throw std::runtime_error("initial multisampled DCC contents are not a supported uniform fast clear");
+    }
+    std::array<std::byte, 16> texels{};
+    Require(FillDccClear(target.format, keys, target.dccAlphaOnMsb, texels), "multisampled DCC clear format is not implemented");
+    std::array<std::uint32_t, 4> pattern{};
+    std::memcpy(pattern.data(), texels.data(), texels.size());
+    VkClearColorValue clear{};
+    Require(ClearColorForTexel(target.format, target.elementBytes, pattern, clear), "multisampled DCC fast clear has no exact host value");
+    return clear;
 }
 
 bool MultisampledFillClearColor(const ColorTarget& target, std::uint32_t fill, VkClearColorValue& clear) {

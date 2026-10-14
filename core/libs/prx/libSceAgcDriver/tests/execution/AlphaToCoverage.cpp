@@ -447,12 +447,114 @@ void DitheredCoverage(AgcDriver::VulkanDevice& device) {
     AgcDriver::Graphics::ClearMultisampleTargets(device.Device());
 }
 
+void DccFastClearTests(AgcDriver::VulkanDevice& device) {
+    const ColorTargetLayout layout(Width, Height, ColorTileMode::RenderTarget, 8);
+    std::vector<std::unique_ptr<Block>> blocks;
+    struct ClearTargets {
+        AgcDriver::VulkanDevice& device;
+        ~ClearTargets() {
+            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+            device.SubmitRecorded(true);
+            device.WaitIdle();
+            AgcDriver::Graphics::ClearMultisampleTargets(device.Device());
+            AgcDriver::Graphics::ClearCachedTextures(device.Device());
+        }
+    } clearTargets{device};
+    for (const auto samples : {2u, 4u, 8u}) {
+        for (const auto code : {0x00u, 0x40u, 0x80u, 0xc0u}) {
+            for (const auto alphaOnMsb : {false, true}) {
+                for (const auto cmaskMode : {0u, 0xccu, 0xffu}) {
+                    blocks.push_back(std::make_unique<Block>(layout.Bytes() * samples));
+                    auto& source = *blocks.back();
+                    std::memset(source.data, 0, source.bytes);
+                    blocks.push_back(std::make_unique<Block>(BlockBytes));
+                    auto& metadata = *blocks.back();
+                    std::memset(metadata.data, code, BlockBytes);
+                    auto target = DecodeTarget(source, samples);
+                    target.dccAddress = metadata.Address();
+                    target.dccPipeAligned = true;
+                    target.dccAlphaOnMsb = alphaOnMsb;
+                    if (cmaskMode != 0) {
+                        blocks.push_back(std::make_unique<Block>(BlockBytes));
+                        auto& cmask = *blocks.back();
+                        const auto expanded = samples == 2 ? 0xddu : samples == 4 ? 0xeeu : 0xffu;
+                        std::memset(cmask.data, cmaskMode == 0xccu ? cmaskMode : expanded, BlockBytes);
+                        target.cmaskAddress = cmask.Address();
+                        target.cmaskBytes = AgcDriver::Graphics::CmaskBytes(Width, Height);
+                        target.cmaskFastClear = true;
+                    }
+                    const bool colorOne = code == 0x80u || code == 0xc0u;
+                    const bool alphaOne = code == 0x40u || code == 0xc0u;
+                    Color initial{};
+                    for (std::uint32_t channel = 0; channel < 4; ++channel) initial[channel] = channel == (alphaOnMsb ? 3u : 0u) ? static_cast<float>(alphaOne) : static_cast<float>(colorOne);
+                    const Color written{0.25f, 0.25f, 0.25f, 0.25f};
+                    Draw(device, target, false, Float32Export, Program(written, Float32Export, 1u), false, true);
+                    blocks.push_back(std::make_unique<Block>(layout.Bytes()));
+                    auto& resolved = *blocks.back();
+                    std::memset(resolved.data, 0, resolved.bytes);
+                    AgcDriver::Graphics::ColorMetadataPass pass{};
+                    pass.mode = AgcDriver::Graphics::ColorMetadataPass::Mode::Resolve;
+                    pass.source = target;
+                    pass.targets = {DecodeTarget(resolved)};
+                    device.ColorMetadataPass(pass);
+                    const auto stored = ReadBack(device, resolved);
+                    for (std::uint32_t y = 0; y < Height; ++y) {
+                        for (std::uint32_t x = 0; x < Width; ++x) {
+                            for (std::uint32_t channel = 0; channel < 4; ++channel) {
+                                const auto expected = x < ScissorWidth ? initial[channel] + (written[channel] - initial[channel]) / static_cast<float>(samples) : initial[channel];
+                                const auto actual = FromHalf(stored[layout.Offset(x, y) / 2u + channel]);
+                                Require(actual == expected, "multisampled DCC clear did not preserve undrawn samples, channels or scissor pixels");
+                            }
+                        }
+                    }
+                    if (code == 0 && alphaOnMsb && cmaskMode == 0) {
+                        static_cast<volatile std::uint8_t*>(source.data)[0] = 0;
+                        bool refused = false;
+                        try {
+                            device.ColorMetadataPass(pass);
+                        } catch (const std::runtime_error& error) {
+                            refused = std::string_view(error.what()).find("writes to a resident multisampled DCC") != std::string_view::npos;
+                        }
+                        Require(refused, "a same-value CPU color store did not invalidate multisampled DCC residency");
+                    }
+                    if (code == 0x40u && alphaOnMsb && cmaskMode == 0) {
+                        static_cast<volatile std::uint8_t*>(metadata.data)[0] = 0x40u;
+                        bool refused = false;
+                        try {
+                            device.ColorMetadataPass(pass);
+                        } catch (const std::runtime_error& error) {
+                            refused = std::string_view(error.what()).find("writes to a resident multisampled DCC") != std::string_view::npos;
+                        }
+                        Require(refused, "a same-value CPU DCC store did not invalidate multisampled DCC residency");
+                    }
+                    if (code == 0xc0u && alphaOnMsb && cmaskMode == 0) {
+                        AgcDriver::GuestMemory::Unwatch(metadata.Address(), 4096);
+                        bool refused = false;
+                        try {
+                            device.ColorMetadataPass(pass);
+                        } catch (const std::runtime_error& error) {
+                            refused = std::string_view(error.what()).find("reuse requires watched guest memory") != std::string_view::npos;
+                        }
+                        Require(refused, "an unwatched metadata range remained eligible for multisampled DCC reuse");
+                    }
+                    programCount = 0;
+                }
+            }
+        }
+    }
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--dcc-fast-clear") {
+            DccFastClearTests(*device);
+            std::cout << "Multisampled DCC fast clear tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--dithered8") {
             try {
                 DitheredCoverage(*device);
