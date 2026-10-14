@@ -337,7 +337,7 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
         }
         if (uniform) {
             Graphics::NoteDepthMetadataFill(base, bytes, pattern[0]);
-            Graphics::NoteColorMetadataFill(base, bytes, pattern[0]);
+            Graphics::NoteColorMetadataFill(base, bytes, pattern[0], absorbed);
         }
         if (profile) {
             const auto now = std::chrono::steady_clock::now();

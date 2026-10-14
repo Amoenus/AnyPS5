@@ -240,6 +240,7 @@ public:
         clearGeneration = 0u;
         fillRanges.clear();
         fillPatterns.clear();
+        fillHostOnly.clear();
         colorFill.Discard();
         this->cmask.SeedKeys(DccKeys::Uncompressed);
         return true;
@@ -259,13 +260,20 @@ public:
         clearCmaskGeneration = target.cmaskAddress != 0u ? GuestMemory::CollectWritesUncached(target.cmaskAddress, target.cmaskBytes) : 0u;
     }
 
-    void NoteFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
+    void NoteFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern, bool hostOnly) {
         Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "multisample target fill range overflows");
         for (const auto& range : initialRanges) {
             if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
             if ((range.address != target.address && range.address != target.cmaskAddress) || address > range.address || address + bytes < range.address + range.bytes || (address & 3u) != 0u || (bytes & 3u) != 0u || !GuestMemory::Watched(range.address, range.bytes)) {
                 refusal = "a partial, untracked or unsupported fill of a resident multisample target or its metadata needs an unimplemented residency transition";
                 continue;
+            }
+            if (hostOnly) {
+                VkClearColorValue clear{};
+                if (range.address != target.address || address != range.address || bytes != range.bytes || !MultisampledFillClearColor(target, pattern, clear)) {
+                    refusal = "an absorbed multisample fill requires the complete color range and an exact native clear";
+                    continue;
+                }
             }
             GuestMemory::FlushGpuWrites(range.address, range.bytes);
             if (auto* recorder = recorderFor(context); recorder != nullptr) recorder->SyncThrough(range.address, range.bytes);
@@ -278,6 +286,7 @@ public:
             if (found == fillRanges.end()) fillRanges.push_back({range.address, range.bytes, generation});
             else found->generation = generation;
             fillPatterns[range.address] = pattern;
+            fillHostOnly[range.address] = hostOnly;
         }
     }
 
@@ -399,6 +408,7 @@ private:
     std::vector<GuestMemory::UnchangedQuery> initialRanges;
     std::vector<GuestMemory::UnchangedQuery> fillRanges;
     std::map<std::uint64_t, std::uint32_t> fillPatterns;
+    std::map<std::uint64_t, bool> fillHostOnly;
     std::string refusal;
     bool dirty = true;
     std::uint64_t writeSerial = 0u;
@@ -432,7 +442,14 @@ private:
             if (fill == fillRanges.end()) {
                 if (!GuestMemory::UnchangedSince(range.address, range.bytes, range.generation)) return false;
             } else {
-                if (!GuestMemory::UnchangedSinceCollected(range.address, range.bytes, fill->generation) || !GuestMemory::StoredAllSince_nid_no_patch(range.address, range.bytes, range.generation)) return false;
+                if (!GuestMemory::UnchangedSinceCollected(range.address, range.bytes, fill->generation)) return false;
+                if (fillHostOnly.at(range.address)) {
+                    if (range.address != target.address || !GuestMemory::UnchangedSince(range.address, range.bytes, fill->generation)) return false;
+                    range.generation = fill->generation;
+                    colorChanged = true;
+                    continue;
+                }
+                if (!GuestMemory::StoredAllSince_nid_no_patch(range.address, range.bytes, range.generation)) return false;
                 range.generation = GuestMemory::CollectWritesUncached(range.address, range.bytes);
                 GuestMemory::CheckRange(reinterpret_cast<const void*>(range.address), range.bytes, sizeof(std::uint32_t));
                 const auto words = std::span(reinterpret_cast<const std::uint32_t*>(range.address), range.bytes / sizeof(std::uint32_t));
@@ -448,6 +465,7 @@ private:
         initialRanges = std::move(current);
         fillRanges.clear();
         fillPatterns.clear();
+        fillHostOnly.clear();
         return true;
     }
 
@@ -865,12 +883,12 @@ bool MultisampledColorFillAbsorbs(std::uint64_t address, std::size_t bytes, std:
     });
 }
 
-void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
+void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern, bool hostOnly) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
     std::lock_guard lock(targetsMutex());
     for (const auto& target : targets()) {
         if (!target->active->load(std::memory_order_acquire)) continue;
-        target->NoteFill(address, bytes, pattern);
+        target->NoteFill(address, bytes, pattern, hostOnly);
         target->colorFill.NoteFill(address, bytes, pattern);
         const auto before = target->cmask.Keys();
         target->cmask.NoteFill(address, bytes, pattern);

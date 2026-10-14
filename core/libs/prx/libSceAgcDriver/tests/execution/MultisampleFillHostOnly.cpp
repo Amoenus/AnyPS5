@@ -204,8 +204,8 @@ bool FillsTakenAsMultisampledClearsAreNotStored(AgcDriver::VulkanDevice& device)
     try {
         std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         static_cast<void>(AgcDriver::Graphics::ReadMultisampleTargetSamples(context, target));
-    } catch (const std::runtime_error&) {
-        cpuWriteRefused = true;
+    } catch (const std::runtime_error& error) {
+        cpuWriteRefused = std::string_view(error.what()).find("tracked multisample fill") != std::string_view::npos;
     }
     Require(cpuWriteRefused, "a CPU write after an absorbed fill was accepted as unchanged native contents");
     DispatchFill(code, color.Address(), BlockBytes / 2, 0);

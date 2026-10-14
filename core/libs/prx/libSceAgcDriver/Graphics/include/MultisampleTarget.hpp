@@ -67,7 +67,7 @@ void MarkMultisampleTargetDirty(const Context& context, const ColorTarget& targe
 void SynchronizeMultisampleTargetRead(std::uint64_t address, std::size_t bytes);
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
 bool MultisampledColorFillAbsorbs(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
-void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
+void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern, bool hostOnly = false);
 void NoteNativeColorClear_nid_no_patch(std::uint64_t address, std::uint64_t bytes, std::uint32_t value, std::uint32_t mask);
 void ClearMultisampleTargets(VkDevice device);
 void InstallResidentImageReadGuard_nid_no_patch();
