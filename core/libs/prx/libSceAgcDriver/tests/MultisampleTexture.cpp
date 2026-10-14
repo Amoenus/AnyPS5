@@ -373,6 +373,35 @@ void CheckTrackedFillProof(Context context) {
     std::puts("tracked full fills require complete driver stores and exact bytes; bare, partial, wrong-pattern and CPU-only writes refused");
 }
 
+#ifdef _WIN32
+void CheckUnwatchedTargetDiagnostic(Context context) {
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, 4u, 4u, 64u, 64u, 1u, 0u);
+    auto* memory = VirtualAlloc(nullptr, static_cast<std::size_t>(layout.Bytes()), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    Require(memory != nullptr, "cannot allocate an unwatched color fixture");
+    auto detiler = std::make_unique<TextureDetiler>(context);
+    context.detiler = detiler.get();
+    Recorder recorder(context);
+    recorder.Activate();
+    struct Cleanup {
+        Recorder& recorder;
+        VkDevice device;
+        void* memory;
+        ~Cleanup() { recorder.Sync(); ClearMultisampleTargets(device); VirtualFree(memory, 0u, MEM_RELEASE); }
+    } cleanup{recorder, context.device, memory};
+    ColorTarget target{};
+    target.address = target.surfaceAddress = reinterpret_cast<std::uintptr_t>(memory);
+    target.extent = target.surfaceExtent = {64u, 64u};
+    target.format = VK_FORMAT_R8G8B8A8_UNORM;
+    target.bytes = layout.Bytes();
+    target.tileMode = ColorTileMode::RenderTarget;
+    target.elementBytes = 4u;
+    target.samples = 4u;
+    Require(!GuestArena::GuestArenaContains_nid_postfix(memory, static_cast<std::size_t>(layout.Bytes())) && !AgcDriver::GuestMemory::Watched(target.address, target.bytes), "the diagnostic fixture unexpectedly belongs to the watched arena");
+    Require(MultisampleTargetView(context, target) != VK_NULL_HANDLE, "unwatched initial import has no native view");
+    TargetRefuses([&] { MultisampleTargetView(context, target); }, "color: outside guest arena");
+}
+#endif
+
 void CheckTargetImport(Context context, std::uint32_t bytes, std::uint32_t fragments, VkFormat format, bool metadata, bool chunks = false) {
     std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
     if (chunks) context.limits.maxStorageBufferRange = std::min(context.limits.maxStorageBufferRange, 256u);
@@ -2343,6 +2372,9 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--targets") {
+#ifdef _WIN32
+            CheckUnwatchedTargetDiagnostic(context);
+#endif
             CheckTrackedFillProof(context);
             const std::array formats{VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT};
             for (std::uint32_t index = 0; index < formats.size(); ++index) {
