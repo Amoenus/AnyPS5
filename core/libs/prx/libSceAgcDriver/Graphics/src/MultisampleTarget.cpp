@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -177,9 +178,16 @@ public:
         Require(refusal.empty(), refusal);
         bool changed = false;
         for (const auto& range : initialRanges) {
-            if (range.generation == 0u || !GuestMemory::Watched(range.address, range.bytes)) {
+            const bool watched = GuestMemory::Watched(range.address, range.bytes);
+            if (range.generation == 0u || !watched) {
                 const auto plane = range.address == target.address ? "color" : range.address == target.dccAddress ? "DCC" : range.address == target.cmaskAddress ? "CMASK" : "FMASK";
-                Require(false, std::string("multisample target reuse requires watched guest memory; untracked writes are not implemented (") + plane + ")");
+                const char* reason = watched ? "initial generation unavailable" : "range outside write-watch coverage";
+#ifdef _WIN32
+                if (!GuestMemory::WriteWatched()) reason = "write watching unavailable";
+                else if (!GuestArena::GuestArenaContains_nid_postfix(reinterpret_cast<const void*>(range.address), range.bytes)) reason = "outside guest arena";
+                else if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(static_cast<std::uintptr_t>(range.address), range.bytes)) reason = "host-mapped guest range";
+#endif
+                Require(false, std::string("multisample target reuse requires watched guest memory; untracked writes are not implemented (") + plane + ": " + reason + ")");
             }
             if (auto* recorder = recorderFor(context); recorder != nullptr) Require(!recorder->PendingWriteOverlaps(range.address, range.bytes), "external GPU writes to a resident multisample target or its metadata are not implemented");
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
