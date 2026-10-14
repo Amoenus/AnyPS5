@@ -380,7 +380,7 @@ std::uint32_t ExportVector(SpirvValueEmitContext& ctx, std::uint32_t data, const
         ConstantU32(state, uintOutput ? 1u : 0x3f800000u),
     };
     const auto mode = MrtOutputMode(state, exp);
-    const auto exported = exp.en & (mode == 1u ? 0x1u : mode == 2u ? 0x3u : mode == 3u ? 0x9u : 0xfu);
+    const auto exported = exp.en & (mode == 1u ? 0x1u : mode == 2u || mode == 3u ? 0x3u : 0xfu);
     if (exp.compr) {
         for (std::uint32_t pair = 0; pair < 2u; pair++) {
             if ((exp.en & (3u << (pair * 2u))) == 0u) {
@@ -399,7 +399,7 @@ std::uint32_t ExportVector(SpirvValueEmitContext& ctx, std::uint32_t data, const
     } else {
         for (std::uint32_t component = 0; component < 4u; component++) {
             if (((exported >> component) & 1u) != 0u) {
-                raw.at(component) = ExportRawComponent(ctx, data, component);
+                raw.at(mode == 3u && component == 1u ? 3u : component) = ExportRawComponent(ctx, data, component);
             }
         }
     }
@@ -453,16 +453,20 @@ void EmitAuxPositionExport(SpirvValueEmitContext& ctx, std::uint32_t data, const
             state.module.AddFunction(spv::OpStore, state.pointSizeVariable, f32);
             continue;
         }
-        const auto storeDistance = [&](std::uint32_t variable, std::uint32_t index) {
+        const auto storeDistance = [&](StageOutputKind kind, std::uint32_t variable, std::uint32_t index) {
             if (index == std::numeric_limits<std::uint32_t>::max()) {
+                return;
+            }
+            if (state.program.Resources().stage == IrShaderStage::Mesh) {
+                state.module.AddFunction(spv::OpStore, MeshOutputPointer(state, kind, index), f32);
                 return;
             }
             const auto pointer = state.module.AllocateId();
             state.module.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassOutput, TypeF32(state)), pointer, variable, ConstantU32(state, index));
             state.module.AddFunction(spv::OpStore, pointer, f32);
         };
-        storeDistance(state.clipDistanceVariable, output.clipDistance);
-        storeDistance(state.cullDistanceVariable, output.cullDistance);
+        storeDistance(StageOutputKind::ClipDistance, state.clipDistanceVariable, output.clipDistance);
+        storeDistance(StageOutputKind::CullDistance, state.cullDistanceVariable, output.cullDistance);
     }
 }
 
@@ -543,8 +547,21 @@ std::uint32_t MeshLoad(SpirvEmitterState& state, std::uint32_t variable, std::ui
     return value;
 }
 
+bool IsMeshDistance(StageOutputKind kind) {
+    return kind == StageOutputKind::ClipDistance || kind == StageOutputKind::CullDistance;
+}
+
 std::uint32_t MeshOutputType(SpirvEmitterState& state, StageOutputKind kind) {
-    return kind == StageOutputKind::Layer ? TypeU32(state) : TypeF32Vector(state, 4u);
+    if (kind == StageOutputKind::Layer) {
+        return TypeU32(state);
+    }
+    return IsMeshDistance(kind) ? TypeF32(state) : TypeF32Vector(state, 4u);
+}
+
+std::uint32_t MeshDistancePointer(SpirvEmitterState& state, const SpirvOutputBinding& output, std::uint32_t vertex) {
+    const auto pointer = state.module.AllocateId();
+    state.module.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassOutput, TypeF32(state)), pointer, output.variableId, vertex, ConstantU32(state, output.index));
+    return pointer;
 }
 
 }
@@ -685,7 +702,30 @@ void DefineMeshOutputs(SpirvEmitterState& state) {
         throw std::runtime_error("vertex input info is missing for mesh output definition");
     }
     const auto& mesh = state.inputInfo.vertex->mesh;
+    std::uint32_t clipDistanceCount = 0u;
+    std::uint32_t cullDistanceCount = 0u;
+    for (const auto& output : state.outputs) {
+        if (output.kind == StageOutputKind::ClipDistance) {
+            clipDistanceCount = std::max(clipDistanceCount, output.index + 1u);
+        } else if (output.kind == StageOutputKind::CullDistance) {
+            cullDistanceCount = std::max(cullDistanceCount, output.index + 1u);
+        }
+    }
     for (auto& output : state.outputs) {
+        if (IsMeshDistance(output.kind)) {
+            const bool clip = output.kind == StageOutputKind::ClipDistance;
+            auto& variable = clip ? state.clipDistanceVariable : state.cullDistanceVariable;
+            if (variable == 0u) {
+                const auto distances = state.module.Type(spv::OpTypeArray, TypeF32(state), ConstantU32(state, clip ? clipDistanceCount : cullDistanceCount));
+                variable = MeshArray(state, spv::StorageClassOutput, distances, mesh.maxVertices);
+                state.interfaceVariables.push_back(variable);
+                state.module.AddName(variable, clip ? "gl_ClipDistance" : "gl_CullDistance");
+                state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn, clip ? spv::BuiltInClipDistance : spv::BuiltInCullDistance);
+            }
+            output.variableId = variable;
+            output.meshDataVariable = MeshArray(state, spv::StorageClassPrivate, TypeF32(state), state.laneCount);
+            continue;
+        }
         if (output.kind != StageOutputKind::Position && output.kind != StageOutputKind::Parameter && output.kind != StageOutputKind::Layer) {
             throw std::runtime_error("unsupported mesh output kind");
         }
@@ -770,7 +810,7 @@ void EmitMeshEntryPoint(SpirvEmitterState& state) {
                 }
                 const auto type = MeshOutputType(state, output.kind);
                 const auto value = MeshLoad(state, output.meshDataVariable, spv::StorageClassPrivate, type, ConstantU32(state, half));
-                const auto pointer = MeshElement(state, output.variableId, spv::StorageClassOutput, type, index);
+                const auto pointer = IsMeshDistance(output.kind) ? MeshDistancePointer(state, output, index) : MeshElement(state, output.variableId, spv::StorageClassOutput, type, index);
                 state.module.AddFunction(spv::OpStore, pointer, value);
             }
         });

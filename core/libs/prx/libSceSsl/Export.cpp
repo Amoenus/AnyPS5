@@ -47,10 +47,32 @@ struct SslCaList {
 };
 static_assert(sizeof(SslCaList) == 16);
 
+using SslVerifyCallback = int (APS5_VABI *)(int, unsigned int, void**, int, void*);
+
+struct SslConnection {
+    int context;
+    int socket;
+    std::string host;
+    SslVerifyCallback verifyCallback;
+    void* verifyArgument;
+};
+
+std::map<int, SslConnection> g_connections;
+
 void RequireContext(const char* function, int sslCtxId) {
     std::lock_guard lock(g_poolsMutex);
     if (!g_pools.contains(sslCtxId)) throw std::invalid_argument(std::string(function) + ": unknown context");
 }
+
+SslConnection& RequireConnection(const char* function, int sslConnectionId) {
+    const auto connection = g_connections.find(sslConnectionId);
+    if (connection == g_connections.end()) throw std::invalid_argument(std::string(function) + ": unknown connection");
+    if (!g_pools.contains(connection->second.context)) {
+        throw std::invalid_argument(std::string(function) + ": the connection's context was terminated");
+    }
+    return connection->second;
+}
+
 
 }
 
@@ -94,6 +116,53 @@ int APS5_VABI sceSslInit_nid_postfix(uint64_t pool_size) {
 int APS5_VABI sceSslTerm_nid_postfix(int ssl_ctx_id) {
     std::lock_guard lock(g_poolsMutex);
     g_pools.erase(ssl_ctx_id);
+    return 0;
+}
+
+int APS5_VABI sceSslCreateConnection(int sslCtxId, int sockId, const char* host) {
+    if (!host) throw std::invalid_argument("sceSslCreateConnection: null host");
+    std::lock_guard lock(g_poolsMutex);
+    if (!g_pools.contains(sslCtxId)) return ERROR_INVALID_ID;
+    const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    g_connections[id] = {sslCtxId, sockId, host, nullptr, nullptr};
+    return id;
+}
+
+int APS5_VABI sceSslDeleteConnection(int sslConnectionId) {
+    std::lock_guard lock(g_poolsMutex);
+    if (!g_connections.erase(sslConnectionId)) throw std::invalid_argument("sceSslDeleteConnection: unknown connection");
+    return 0;
+}
+
+int APS5_VABI sceSslSetVerifyCallback(int sslConnectionId, SslVerifyCallback cbfunc, void* userArg) {
+    std::lock_guard lock(g_poolsMutex);
+    SslConnection& connection = RequireConnection(__func__, sslConnectionId);
+    connection.verifyCallback = cbfunc;
+    connection.verifyArgument = userArg;
+    return 0;
+}
+
+int APS5_VABI sceSslConnect(int sslConnectionId) {
+    (void)sslConnectionId;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSslRead(int sslConnectionId, void* buf, size_t len, int flags) {
+    (void)sslConnectionId;
+    (void)buf;
+    (void)len;
+    (void)flags;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSslWrite(int sslConnectionId, void* buf, size_t len, int flags) {
+    (void)sslConnectionId;
+    (void)buf;
+    (void)len;
+    (void)flags;
+    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
@@ -179,37 +248,7 @@ int APS5_VABI sceSslGetSubjectName(void) {
     return 0;
 }
 
-int APS5_VABI sceSslCreateConnection(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceSslDeleteConnection(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceSslEnableVerifyOption(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceSslSetVerifyCallback(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceSslConnect(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceSslRead(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceSslWrite(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

@@ -229,6 +229,33 @@ struct Context {
         throw std::runtime_error("AGC graphics: required Vulkan memory type is unavailable");
     }
 
+    std::uint32_t BufferMemoryType(std::uint32_t mask, VkMemoryPropertyFlags flags, VkDeviceSize bytes) const {
+        constexpr VkMemoryPropertyFlags coherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        auto type = MemoryType(mask, flags);
+        if (flags == coherent) {
+            for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+                if ((mask & (1u << i)) != 0 && (memory.memoryTypes[i].propertyFlags & (coherent | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) == (coherent | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) {
+                    type = i;
+                    break;
+                }
+            }
+        }
+        if ((flags & coherent) != coherent || memoryProperties2 == nullptr || physical == VK_NULL_HANDLE) return type;
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &reported};
+        memoryProperties2(physical, &properties);
+        const auto heap = memory.memoryTypes[type].heapIndex;
+        const auto fits = [&](std::uint32_t candidate) {
+            return reported.heapBudget[candidate] != 0 && reported.heapUsage[candidate] < reported.heapBudget[candidate] && bytes <= reported.heapBudget[candidate] - reported.heapUsage[candidate];
+        };
+        if (reported.heapBudget[heap] == 0 || fits(heap)) return type;
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+            const auto& candidate = memory.memoryTypes[i];
+            if ((mask & (1u << i)) != 0 && (candidate.propertyFlags & flags) == flags && candidate.heapIndex != heap && fits(candidate.heapIndex)) return i;
+        }
+        return type;
+    }
+
     std::uint32_t DeviceMemoryType(std::uint32_t mask, VkDeviceSize bytes, const char* what) const {
         const auto type = MemoryType(mask, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (memoryProperties2 == nullptr || physical == VK_NULL_HANDLE) return type;

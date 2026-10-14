@@ -1021,6 +1021,15 @@ void ColorPipeBankXorTests() {
         const auto color = AgcDriver::Graphics::DecodeState(queue).color;
         Require(color.tileMode == AgcDriver::Graphics::ColorTileMode::D64KBX && color.address == block && color.surfaceAddress == block && color.pipeBankXor == pipeBankXor, "a SW_64KB_D_X color base did not split its block address and XOR");
     }
+    queue.context[0x3b8] = 0x4dc60000u;
+    for (const std::uint32_t pipeBankXor : {0u, 0x4600u, 0xff00u}) {
+        const auto address = block + pipeBankXor;
+        queue.context[0x318] = static_cast<std::uint32_t>(address >> 8u);
+        queue.context[0x390] = static_cast<std::uint32_t>(address >> 40u);
+        const auto color = AgcDriver::Graphics::DecodeState(queue).color;
+        Require(color.tileMode == AgcDriver::Graphics::ColorTileMode::Z64KBX && color.address == block && color.surfaceAddress == block && color.pipeBankXor == pipeBankXor, "a SW_64KB_Z_X color base did not split its block address and XOR");
+    }
+    queue.context[0x3b8] = 0x0dc68000u;
     for (const std::uint32_t columnBits : {0x1000u, 0x2000u, 0x3000u}) {
         queue.context[0x318] = static_cast<std::uint32_t>((block + columnBits) >> 8u);
         queue.context[0x390] = static_cast<std::uint32_t>((block + columnBits) >> 40u);
@@ -1388,6 +1397,28 @@ void DepthStencilTests() {
     for (const auto offset : {0x013u, 0x015u}) queue.context[offset] = 0x200;
     queue.context[0x005] = 0x300;
     queue.context[0x01e] = 0x1;
+    {
+        AgcDriver::QueueState unwritten;
+        unwritten.shader = queue.shader;
+        unwritten.userConfig = queue.userConfig;
+        queue.context[0x200] = 0x00700791;
+        for (int reset = 0; reset < 2; ++reset) {
+            queue.context.ForEach([&](std::uint32_t offset, std::uint32_t value) { unwritten.context[offset] = value; });
+            const auto state = AgcDriver::Graphics::DecodeState(unwritten);
+            Require(state.stencilTest && state.depth, "unwritten stencil registers rejected a stencil draw");
+            for (const auto face : {state.stencilFront, state.stencilBack}) {
+                Require(face.failOp == VK_STENCIL_OP_KEEP && face.passOp == VK_STENCIL_OP_KEEP && face.depthFailOp == VK_STENCIL_OP_KEEP && face.compareOp == VK_COMPARE_OP_ALWAYS, "unwritten stencil operations changed");
+                Require(face.compareMask == 0 && face.writeMask == 0 && face.reference == 0, "unwritten stencil reference or masks changed");
+            }
+            Require(AgcDriver::Graphics::DrawRejection(unwritten, false).empty(), "precheck rejected unwritten stencil registers");
+            unwritten.context[0x10b] = 0x00070070;
+            unwritten.context[0x10c] = unwritten.context[0x10d] = 0x01ffff09;
+            const auto explicitState = AgcDriver::Graphics::DecodeState(unwritten);
+            for (const auto face : {explicitState.stencilFront, explicitState.stencilBack}) Require(face.passOp == VK_STENCIL_OP_INVERT && face.compareMask == 0xff && face.writeMask == 0xff && face.reference == 9, "explicit stencil state was replaced by defaults");
+            unwritten.ClearContext();
+            for (const auto offset : {0x10bu, 0x10cu, 0x10du}) Require(unwritten.context.at(offset) == 0, "context clear did not reset stencil state");
+        }
+    }
     queue.context[0x10b] = 0x00050050;
     queue.context[0x10c] = 0x01ffff01;
     queue.context[0x10d] = 0x01000001;
@@ -2935,7 +2966,7 @@ void AlphaToCoverageTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "custom sample locations");
     Require(AgcDriver::Graphics::DrawRejection(dithered, false).find("custom sample locations") != std::string::npos, "the precheck accepted unmeasured dithered sample locations");
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) dithered.context[0x2fe + pixel * 4u] ^= 1u;
-    for (const auto format : {5u, 6u}) {
+    for (const auto format : {3u, 5u, 6u}) {
         dithered.context[0x1c5] = format;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(dithered); }, "FP16_ABGR or 32_ABGR");
         Require(AgcDriver::Graphics::DrawRejection(dithered, false).find("FP16_ABGR or 32_ABGR") != std::string::npos, "the precheck accepted an unmeasured dithered export format");
@@ -2966,14 +2997,23 @@ void AlphaToCoverageTests() {
     }
     queue.context[0x2dc] = 0xaa01;
     const std::uint32_t exportFormat = queue.context.at(0x1c5);
-    for (const auto format : {4u, 5u, 6u, 9u}) {
+    for (const auto format : {3u, 4u, 5u, 6u, 9u}) {
         queue.context[0x1c5] = (exportFormat & ~0xfu) | format;
         Require(AgcDriver::Graphics::DecodeState(queue).alphaToCoverage, "alpha-to-coverage rejected an MRT0 export format with a floating-point alpha");
     }
-    for (const auto format : {1u, 2u, 3u}) {
+    for (const auto format : {1u, 2u}) {
         queue.context[0x1c5] = (exportFormat & ~0xfu) | format;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "floating-point alpha");
     }
+    const auto targetMask = queue.context.at(0x8e);
+    queue.context[0x8e] = 0;
+    queue.context[0x1c5] = (exportFormat & ~0xfu) | 3u;
+    const auto depthOnly = AgcDriver::Graphics::DecodeState(queue);
+    Require(depthOnly.alphaToCoverage && depthOnly.colors.empty(), "alpha-to-coverage without a written color target and a 32_AR MRT0 export was refused or kept a target");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck rejected alpha-to-coverage without a written color target");
+    queue.context[0x1c5] = exportFormat & ~0xfu;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "floating-point alpha");
+    queue.context[0x8e] = targetMask;
     queue.context[0x1c5] = exportFormat;
 }
 
@@ -3024,6 +3064,8 @@ struct MockVulkan {
     VkDeviceSize allocatedBytes = 0;
     std::optional<VkDeviceSize> memoryLimit;
     std::uint64_t allocationAttempts = 0;
+    std::uint32_t bufferMemoryTypeBits = 1;
+    std::vector<std::uint32_t> allocationTypes;
     std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
     VkDescriptorSetLayoutCreateFlags layoutFlags = 0;
     std::vector<VkDescriptorBindingFlags> layoutBindingFlags;
@@ -3076,11 +3118,12 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateBuffer(VkDevice, const VkBufferCreateIn
 }
 
 VKAPI_ATTR void VKAPI_CALL mockGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* requirements) {
-    *requirements = {mock.bufferSizes.at(buffer), 1, 1};
+    *requirements = {mock.bufferSizes.at(buffer), 1, mock.bufferMemoryTypeBits};
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockAllocateMemory(VkDevice, const VkMemoryAllocateInfo* info, const VkAllocationCallbacks*, VkDeviceMemory* memory) {
     ++mock.allocationAttempts;
+    mock.allocationTypes.push_back(info->memoryTypeIndex);
     if (mock.memoryLimit.has_value() && mock.allocatedBytes + info->allocationSize > *mock.memoryLimit) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     *memory = makeHandle<VkDeviceMemory>();
     mock.memories[*memory] = std::vector<std::byte>(info->allocationSize);
@@ -3393,6 +3436,45 @@ void addressSpaceTeardownTests() {
 }
 
 using Role = ShaderRecompiler::DescriptorRole;
+
+void bufferBudgetPlacementTests() {
+    using namespace AgcDriver::Graphics;
+    for (const std::size_t bytes : {std::size_t{512}, std::size_t{3} << 20u}) {
+        for (const bool fail : {false, true}) {
+            mock = MockVulkan{};
+            mock.bufferMemoryTypeBits = 3;
+            if (fail) mock.memoryLimit = 0;
+            {
+                auto context = mockContext();
+                constexpr auto coherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                context.memory.memoryTypeCount = 2;
+                context.memory.memoryHeapCount = 2;
+                context.memory.memoryHeaps[0] = {4u << 20u, 0};
+                context.memory.memoryHeaps[1] = {8u << 20u, 0};
+                context.memory.memoryTypes[0] = {coherent | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0};
+                context.memory.memoryTypes[1] = {coherent, 1};
+                context.physical = reinterpret_cast<VkPhysicalDevice>(std::uintptr_t{1});
+                context.memoryProperties2 = [](VkPhysicalDevice, VkPhysicalDeviceMemoryProperties2* properties) {
+                    auto* reported = static_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(properties->pNext);
+                    reported->heapBudget[0] = 1u << 20u;
+                    reported->heapUsage[0] = reported->heapBudget[0] - 1024u;
+                    reported->heapBudget[1] = 8u << 20u;
+                };
+                const auto allocate = [&] {
+                    Buffer buffer(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                    Require(buffer.Mapped() && buffer.Bytes().size() == bytes, "a budget-selected buffer lost its mapping or size");
+                    buffer.Bytes().front() = std::byte{0x5a};
+                    Require(mockBufferMemory(buffer.Handle()).front() == std::byte{0x5a}, "a budget-selected buffer bound the wrong allocation");
+                };
+                if (fail) expectFailure(allocate, "Vulkan result -2");
+                else allocate();
+                Require(mock.allocationTypes == std::vector<std::uint32_t>{1} && mock.allocationAttempts == 1, "a coherent buffer did not select the other heap before its single allocation attempt");
+                if (!fail) Require(mock.allocatedBytes == (bytes == 512 ? BufferPool::SlabBlockBytes(512) : bytes), "a coherent buffer budget check lost its full allocation extent");
+            }
+            Require(mock.live == 0, "a budget-selected buffer leaked Vulkan objects");
+        }
+    }
+}
 using Kind = ShaderRecompiler::DescriptorKind;
 
 alignas(16) std::array<std::uint32_t, 4> guestFirst{0x11111111, 0x22222222, 0x33333333, 0x44444444};
@@ -5057,7 +5139,7 @@ void aliasedBufferViewTests() {
         Require(declared == views, "the pixel shader declared the guest buffers as" + names + ", not as the expected " + std::to_string(views.size()) + " aliased variables");
         const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &pixel, 0}}};
         AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, false, false, false, false, true);
-        auto unaliased = pixel.spirv.Words();
+        auto unaliased = pixel.spirv.Copy();
         for (std::size_t at = 5; at < unaliased.size() && (unaliased[at] >> 16u) != 0; at += unaliased[at] >> 16u) {
             if (static_cast<spv::Op>(unaliased[at] & 0xffffu) == spv::OpDecorate && unaliased[at + 2] == spv::DecorationAliased) unaliased[at + 2] = spv::DecorationRestrict;
         }
@@ -5407,7 +5489,7 @@ void unorm10_11_11TargetTests() {
     const auto packed = ShaderRecompiler::Recompile(request);
     const auto unpacked = ShaderRecompiler::Recompile(plain);
     Require(packed.variantId == unpacked.variantId && packed.variantId == ShaderRecompiler::GetPreparedArtifact(*prepared).variantId, "the packed draw did not reuse the registered artifact");
-    Require(packed.PipelineVariantId() != unpacked.PipelineVariantId() && packed.spirv.Words() != unpacked.spirv.Words(), "the export packing did not specialize the module");
+    Require(packed.PipelineVariantId() != unpacked.PipelineVariantId() && !(packed.spirv == unpacked.spirv), "the export packing did not specialize the module");
     Require(ShaderRecompiler::Recompile(request).PipelineVariantId() == packed.PipelineVariantId(), "the packed specialization was not reused");
     ShaderRecompiler::RecompileResult vertex;
     vertex.spirv = makeModule({});
@@ -6120,6 +6202,10 @@ int main(int argc, char** argv) {
             std::cout << "address-space device teardown releases cached guest allocations\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--buffer-budget-placement") {
+            bufferBudgetPlacementTests();
+            return 0;
+        }
         {
             AgcDriver::Graphics::PipelineCacheSynchronization synchronization;
             auto pipelineUse = synchronization.LockForPipelineUse();
@@ -6241,6 +6327,7 @@ int main(int argc, char** argv) {
         resourceTests();
         descriptorSnapshotTests();
         descriptorCacheTests();
+        bufferBudgetPlacementTests();
         misalignedShaderDataTests();
         debugBranchTests();
         textureCacheBudgetTests();

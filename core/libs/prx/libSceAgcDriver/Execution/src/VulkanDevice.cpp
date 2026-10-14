@@ -4327,7 +4327,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
         const auto subgroupSize = state->computeWave32 && (shader.hostSubgroupSize == 32u || shader.hostSubgroupSize > state->maxComputeSubgroupSize) ? std::min(shader.hostSubgroupSize, state->maxComputeSubgroupSize) : 0u;
         if (const char* directory = std::getenv("APS5_DUMP_COMPUTE_PIPELINES"); directory != nullptr && *directory != '\0' && CaptureComputePipeline(shader.spirv.size())) {
             ComputePipelineCapture capture;
-            capture.spirv = shader.spirv;
+            capture.spirv = shader.spirv.Copy();
             ComputeDescriptorSetLayout resourcesLayout;
             resourcesLayout.flags = resources->LayoutUpdateAfterBind() ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT : 0;
             const auto layoutBindings = resources->LayoutBindings();

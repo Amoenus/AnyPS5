@@ -958,7 +958,10 @@ std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source,
             if (emissionFailure != nullptr && FailureMemo()) source.emissionFailures.push_back({request.shader.codeAddress, request.layout, emissionFailure});
             throw;
         }
-        if (disk) ShaderDiskCache::Store(std::move(diskKey), variant);
+        if (disk) {
+            if (auto persisted = ShaderDiskCache::Persist(diskKey, *variant)) variant = std::move(persisted);
+            else ShaderDiskCache::Store(std::move(diskKey), variant);
+        }
     }
     source.program.reset();
     source.variants.push_back(variant);

@@ -94,12 +94,12 @@ std::array<std::byte, 16> clearTexel(const ColorTarget& color, DccKeys keys) {
     return texel;
 }
 
-bool clearToTexel(StorageTexture& image, const std::array<std::byte, 16>& texel, std::uint32_t elementBytes, const char*& refusal) {
+bool clearToTexel(StorageTexture& image, const std::array<std::byte, 16>& texel, std::uint32_t elementBytes, const char*& refusal, bool allowRegisterClear = false) {
     std::array<std::byte, 16> repeated{};
     for (std::size_t offset = 0; offset + elementBytes <= repeated.size(); offset += elementBytes) std::memcpy(repeated.data() + offset, texel.data(), elementBytes);
     std::array<std::uint32_t, 4> pattern{};
     std::memcpy(pattern.data(), repeated.data(), repeated.size());
-    return image.FillClear(std::span<const std::uint32_t, 4>(pattern), StorageTexture::WholeImage, refusal);
+    return image.FillClear(std::span<const std::uint32_t, 4>(pattern), StorageTexture::WholeImage, refusal, allowRegisterClear);
 }
 
 void writeTexels(const ColorTarget& color, const std::array<std::byte, 16>& texel) {
@@ -2587,7 +2587,7 @@ void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass)
         const auto resident = metadataPassResident(context, color);
         if (resident != nullptr) {
             const char* refusal = nullptr;
-            const bool current = keys == DccKeys::ClearRegister ? clearToTexel(*resident, texel, color.elementBytes, refusal) : StorageTexture::FindPending(color.address, color.bytes) == resident || resident->UploadedKeys() == keys;
+            const bool current = keys == DccKeys::ClearRegister ? clearToTexel(*resident, texel, color.elementBytes, refusal, true) : StorageTexture::FindPending(color.address, color.bytes) == resident || resident->UploadedKeys() == keys;
             if (current) {
                 resident->MarkDirty();
                 MarkDccUncompressed(context, color.dccAddress, color.bytes, colorKeyCount(color, color.bytes));

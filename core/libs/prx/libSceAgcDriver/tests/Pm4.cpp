@@ -168,6 +168,9 @@ void testRegisterFile() {
 
 void testContextAndBases() {
     AgcDriver::QueueState state;
+    for (const auto offset : {0x10bu, 0x10cu, 0x10du}) execute(state, makePacket(0x69, {offset, 0xffffffffu}));
+    execute(state, makePacket(0x12, {0}));
+    for (const auto offset : {0x10bu, 0x10cu, 0x10du}) check(state.context.at(offset) == 0, "CLEAR_STATE did not restore stencil defaults");
     execute(state, makePacket(0x69, {0x10, 17}));
     execute(state, makePacket(0x76, {0x20c, 2}));
     execute(state, makePacket(0x10, {3, 0}, 0x68));
