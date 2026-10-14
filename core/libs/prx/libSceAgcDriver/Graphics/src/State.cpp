@@ -777,7 +777,6 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     result.samples = decodeSamples(cx);
     Require(coveredCentroidSupported(queue), "COVERED_CENTROID_IS_CENTER with active or unspecified centroid inputs is not implemented");
     decodeSampleLocations(cx, result);
-    Require(coveredCentroidSupported(queue), "COVERED_CENTROID_IS_CENTER with active centroid inputs is not implemented");
     {
         const auto depthControl = read(cx, 0x200);
         const auto renderControl = find(cx, 0x000);
