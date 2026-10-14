@@ -55,7 +55,7 @@ void Run(AgcDriver::VulkanDevice& device, std::uint32_t wave, std::uint32_t opco
             expected = std::bit_cast<std::uint32_t>(static_cast<float>(Input[lane] & 0xffu) / 255.0f);
         }
         if (Output[lane + 4u] != expected) {
-            std::fprintf(stderr, "wave=%u opcode=%08x store=%u bytes=%u format=%08x lane=%u actual=%08x expected=%08x\n", wave, opcode, store, bytes, format, lane, Output[lane + 4u], expected);
+            std::fprintf(stderr, "wave=%u opcode=%08x store=%d bytes=%u format=%08x lane=%u actual=%08x expected=%08x\n", wave, opcode, store, bytes, format, lane, Output[lane + 4u], expected);
         }
         Require(Output[lane + 4u] == expected, "buffer VCC descriptor data differs from its scalar words");
     }
@@ -68,7 +68,7 @@ int main() {
         if (!device) return VulkanTestSkipped;
         for (std::uint32_t lane = 0u; lane < Threads; ++lane) Input[lane] = 0x3f800000u | (lane * 0x10001u);
         for (const auto wave : {32u, 64u}) {
-            for (const auto load : {0xe0301000u, 0xe0001000u, 0xe8b01000u}) {
+            for (const auto load : {0xe8b01000u, 0xe0301000u, 0xe0001000u}) {
                 Run(*device, wave, load, Threads * 4u, 0x31016facu);
                 Run(*device, wave, load, 12u, 0x31016facu);
             }
