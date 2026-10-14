@@ -177,7 +177,10 @@ public:
         Require(refusal.empty(), refusal);
         bool changed = false;
         for (const auto& range : initialRanges) {
-            Require(range.generation != 0u && GuestMemory::Watched(range.address, range.bytes), "multisample target reuse requires watched guest memory; untracked writes are not implemented");
+            if (range.generation == 0u || !GuestMemory::Watched(range.address, range.bytes)) {
+                const auto plane = range.address == target.address ? "color" : range.address == target.dccAddress ? "DCC" : range.address == target.cmaskAddress ? "CMASK" : "FMASK";
+                Require(false, std::string("multisample target reuse requires watched guest memory; untracked writes are not implemented (") + plane + ")");
+            }
             if (auto* recorder = recorderFor(context); recorder != nullptr) Require(!recorder->PendingWriteOverlaps(range.address, range.bytes), "external GPU writes to a resident multisample target or its metadata are not implemented");
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
             changed |= !GuestMemory::UnchangedSince(range.address, range.bytes, range.generation);
