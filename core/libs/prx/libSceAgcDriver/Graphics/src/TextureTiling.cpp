@@ -390,6 +390,24 @@ SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
         geometry.layers = descriptor.dimension == TextureDimension::k2DMsaaArray ? descriptor.depthOrLastArray + 1u : 1u;
         geometry.imageLayers = geometry.layers;
         const auto elementBytes = BytesPerElement(descriptor.format);
+        if (descriptor.tileMode == TextureTileMode::kStandard4KB || descriptor.tileMode == TextureTileMode::kStandard64KB) {
+            Require(descriptor.width != 0u && descriptor.height != 0u && descriptor.width <= 16384u && descriptor.height <= 16384u, "invalid standard-tiled multisample extent");
+            Require(descriptor.dimension == TextureDimension::k2DMsaa && descriptor.baseArray == 0u && descriptor.depthOrLastArray == 0u && descriptor.minLod == 0u && descriptor.dccAddress == 0u && descriptor.pipeBankXor == 0u, "standard-tiled multisample arrays, metadata or view offsets are not implemented");
+            Require(std::has_single_bit(elementBytes) && elementBytes <= 16u && (descriptor.samples == 2u || descriptor.samples == 4u || descriptor.samples == 8u), "unsupported standard-tiled multisample element or fragment count");
+            const auto blockBits = descriptor.tileMode == TextureTileMode::kStandard4KB ? 12u : 16u;
+            const auto fragmentBits = static_cast<std::uint32_t>(std::countr_zero(descriptor.samples));
+            const auto elementBits = blockBits - static_cast<std::uint32_t>(std::countr_zero(elementBytes)) - fragmentBits;
+            const auto widthBits = (elementBits + ((fragmentBits & 1u) == 0u ? 1u : 0u)) / 2u;
+            const auto blockWidth = 1u << widthBits;
+            const auto blockHeight = 1u << (elementBits - widthBits);
+            const auto blocksPerRow = (descriptor.width + blockWidth - 1u) / blockWidth;
+            const auto blockRows = (descriptor.height + blockHeight - 1u) / blockHeight;
+            geometry.guestBytes = static_cast<std::uint64_t>(blocksPerRow) * blockRows << blockBits;
+            geometry.layerBytes = geometry.guestBytes;
+            geometry.sliceLinearBytes = static_cast<std::uint64_t>(descriptor.width) * descriptor.height * descriptor.samples * elementBytes;
+            geometry.mips.push_back({0u, geometry.guestBytes, 0u, geometry.sliceLinearBytes, descriptor.width, descriptor.height, blocksPerRow, descriptor.width * descriptor.samples * elementBytes, false, 0u, 0u});
+            return geometry;
+        }
         const MultisampleTextureLayout layout(descriptor.tileMode, elementBytes, descriptor.samples, descriptor.width, descriptor.height, geometry.layers, descriptor.pipeBankXor);
         geometry.guestBytes = layout.Bytes();
         geometry.layerBytes = layout.SliceBytes();

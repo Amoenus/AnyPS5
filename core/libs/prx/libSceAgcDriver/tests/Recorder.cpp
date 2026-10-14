@@ -6132,7 +6132,15 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
     };
     refusedAdapter(multisampledWords(side, 3u, address), "as a 64x64 texture of 8 samples", "sampling a four-sample attachment as eight samples");
     refusedAdapter(multisampledWords(side / 2u, 2u, address), "as a 32x64 texture of 4 samples", "sampling a four-sample attachment at another extent");
-    refusedAdapter(multisampledWords(side, 2u, address + 4u * 65536u), "which no draw rendered to", "native lookup without an attachment owner");
+    {
+        std::lock_guard gpu(GpuMutex());
+        const auto resource = DecodeTextureResource(multisampledWords(side, 2u, address + 4u * 65536u));
+        const auto sampled = MultisampleTargetTexture(context, resource, identity);
+        Require(sampled != nullptr && sampled->ViewFormat() == target.format, "uniform guest memory without a previous attachment did not create its sampled target");
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+    }
     const auto storage = sampledProgram(ShaderRecompiler::DescriptorKind::StorageImage, multisampledWords(side, 2u, address));
     const CompiledShader storageCompute{ShaderRecompiler::ShaderStage::Compute, &storage, 0};
     refused([&] {

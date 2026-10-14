@@ -82,15 +82,17 @@ public:
             backingExtent = {layout.Pitch(), layout.PaddedHeight()};
             Require(target.bytes == layout.Bytes(), "initial multisample target footprint mismatch");
         }
-        Require(context.storageImageMultisample && context.storageImageWriteWithoutFormat && context.storageImageReadWithoutFormat, "multisample target requires enabled formatless image transfers");
+        const bool transferred = target.tileMode == ColorTileMode::RenderTarget;
+        Require(!transferred || (context.storageImageMultisample && context.storageImageWriteWithoutFormat && context.storageImageReadWithoutFormat), "multisample target requires enabled formatless image transfers");
         this->context.bufferPool.reset();
         const auto samples = static_cast<VkSampleCountFlagBits>(target.samples);
         Require((context.limits.framebufferColorSampleCounts & samples) != 0, "the device cannot render color with the target's sample count");
         VkFormatProperties properties{};
         context.formatProperties(context.physical, target.format, &properties);
         Require((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0, "multisampled render-target format cannot be a color attachment");
-        VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
-        constexpr VkImageCreateFlags flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+        VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (transferred) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+        const VkImageCreateFlags flags = transferred ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT : 0u;
         VkImageFormatProperties supported{};
         sampleable = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0 && context.imageFormatProperties(context.physical, target.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage | VK_IMAGE_USAGE_SAMPLED_BIT, flags, &supported) == VK_SUCCESS && (supported.sampleCounts & samples) != 0;
         if (sampleable) usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -142,17 +144,19 @@ public:
             viewInfo.format = target.format;
             viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView multisampled target");
-            VkImageViewUsageCreateInfo transferUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
-            transferUsage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
-            auto transferInfo = viewInfo;
-            transferInfo.pNext = &transferUsage;
-            transferInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-            transferInfo.format = TextureDetiler::ImageElementFormat(target.elementBytes);
-            Require(transferInfo.format != VK_FORMAT_UNDEFINED, "multisample target element format is not implemented");
-            VkFormatProperties transferProperties{};
-            context.formatProperties(context.physical, transferInfo.format, &transferProperties);
-            Require((transferProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0u, "multisample target transfer view cannot be a storage image");
-            Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &transferInfo, nullptr, &transferView), "vkCreateImageView multisampled target transfer");
+            if (transferred) {
+                VkImageViewUsageCreateInfo transferUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+                transferUsage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+                auto transferInfo = viewInfo;
+                transferInfo.pNext = &transferUsage;
+                transferInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+                transferInfo.format = TextureDetiler::ImageElementFormat(target.elementBytes);
+                Require(transferInfo.format != VK_FORMAT_UNDEFINED, "multisample target element format is not implemented");
+                VkFormatProperties transferProperties{};
+                context.formatProperties(context.physical, transferInfo.format, &transferProperties);
+                Require((transferProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0u, "multisample target transfer view cannot be a storage image");
+                Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &transferInfo, nullptr, &transferView), "vkCreateImageView multisampled target transfer");
+            }
             std::shared_ptr<Buffer> upload;
             if (!initial.clear) {
                 upload = std::make_shared<Buffer>(context, (initial.samples.size() + 3u) & ~std::size_t{3u}, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -363,6 +367,7 @@ public:
     }
 
     std::vector<std::byte> ReadSamples(bool includePadding = false) {
+        Require(target.tileMode == ColorTileMode::RenderTarget, "readback of a uniform standard multisample target is not implemented");
         Require(context.storageImageReadWithoutFormat, "device does not enable multisampled image reads without format");
         if (auto* recorder = recorderFor(context); recorder != nullptr) recorder->Sync();
         const auto extent = includePadding ? backingExtent : target.extent;

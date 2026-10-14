@@ -2684,8 +2684,9 @@ void multisampleTests() {
     expectFailure([&] { DecodeState(queue); }, "without a CMASK address");
     queue = multisampled();
     queue.context[0x31c] |= 0x10000000u;
-    expectFailure([&] { DecodeState(queue); }, "DCC over a multisampled color target is unsupported");
-    expectFailure([&] { DecodeColorBuffer(queue.context, 0); }, "DCC over a multisampled color target is unsupported");
+    queue.context[0x325] = 0u;
+    expectFailure([&] { DecodeState(queue); }, "pipe-aligned R_X metadata");
+    expectFailure([&] { DecodeColorBuffer(queue.context, 0); }, "pipe-aligned R_X metadata");
     queue = multisampled();
     queue.context[0x31c] |= 0x2000;
     setCmaskAddress(queue);
@@ -2719,7 +2720,8 @@ void multisampleTests() {
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "different formats or extents");
     queue = rasterizedResolve;
     queue.context[0x31c] |= 0x10000000u;
-    expectFailure([&] { DecodeColorMetadataPass(queue); }, "DCC over a multisampled color target is unsupported");
+    queue.context[0x325] = 0u;
+    expectFailure([&] { DecodeColorMetadataPass(queue); }, "pipe-aligned R_X metadata");
     queue = multisampled();
     queue.context[0x0] = 0;
     queue.context[0x202] = 0xcc0030;
