@@ -273,6 +273,30 @@ void TestMultisampleDepthOwnership(Context context) {
     Require(imagesDestroyed == destroyed + 1u, "the last sampled view must release its native depth image exactly once");
 }
 
+void TestMultisampleStencilAliases(Context context) {
+    context.imageFormatProperties = sampledDepthProperties;
+    for (const auto format : {VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}) {
+        for (const auto samples : {2u, 4u, 8u}) {
+            DepthTarget target{0x73000000, 0x73800000, {1920, 1080}, format, 1.0f, 0};
+            target.samples = samples;
+            Require(DepthSurfaceView(context, target) != VK_NULL_HANDLE, "a multisampled stencil alias fixture must retain attachment rendering");
+            for (const auto colorFormat : {FormatR11G11B10Float, FormatR8G8B8A8Unorm, FormatR32Float}) {
+                Require(lookup(context, {target.stencilAddress, colorFormat, 1920, 1080, TileRenderTarget64KB}) == nullptr, "a non-stencil color format at a multisampled stencil address must remain reused memory");
+            }
+            for (const auto view : {View{target.stencilAddress, FormatR8Uint, 1920, 1080}, View{target.address, FormatR32Float, 1920, 1080}}) {
+                bool refused = false;
+                try {
+                    lookup(context, view);
+                } catch (const std::runtime_error& error) {
+                    refused = std::string_view(error.what()).find("only by recorded draws and dispatches") != std::string_view::npos;
+                }
+                Require(refused, "a genuine multisample stencil or depth reader must retain its recording requirement");
+            }
+            ClearDepthSurfaces(context.device);
+        }
+    }
+}
+
 }
 
 void RunDepthSurfaceReuseTests() {
@@ -288,6 +312,7 @@ void RunDepthSurfaceReuseTests() {
     context.limits.maxFramebufferLayers = 1;
     TestD16StencilFallback(context);
     TestMultisampleDepthOwnership(context);
+    TestMultisampleStencilAliases(context);
     constexpr std::uint64_t depth32 = 0x40000000;
     constexpr std::uint64_t depth16 = 0x50000000;
     constexpr std::uint64_t depthStencil = 0x60000000;
