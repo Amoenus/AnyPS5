@@ -920,8 +920,7 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     }
     if (end != 0) run = windowRun(state, std::move(run), address, end, context.hostImportAlignment);
     if (run.ranges.empty()) return nullptr;
-    if (context.hostImportAlignment != 0u && ResidentImageRangeOverlaps_nid_no_patch(run.base, static_cast<std::size_t>(run.bytes))) {
-        Require(end > address, "a whole-allocation host import overlapping a resident image is not implemented");
+    if (context.hostImportAlignment != 0u && end > address && ResidentImageRangeOverlaps_nid_no_patch(run.base, static_cast<std::size_t>(run.bytes)) && !ResidentImageRangeOverlaps_nid_no_patch(address, static_cast<std::size_t>(end - address))) {
         const auto alignment = context.hostImportAlignment;
         const auto begin = address / alignment * alignment;
         Require(end <= std::numeric_limits<std::uint64_t>::max() - (alignment - 1u), "resident-bounded host import range overflows");
