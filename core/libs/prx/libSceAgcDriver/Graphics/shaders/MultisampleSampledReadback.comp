@@ -24,7 +24,7 @@ uvec4 loadElement(uint index) {
     uint pixel = element / params.fragments;
     ivec3 coordinate = ivec3(pixel % params.width, (pixel / params.width) % params.height, pixel / (params.width * params.height));
 #if READ_DEPTH
-    return floatBitsToUint(texelFetch(sourceImage, coordinate, int(element % params.fragments)));
+    return uvec4(texelFetch(sourceImage, coordinate, int(element % params.fragments)));
 #else
     return texelFetch(sourceImage, coordinate, int(element % params.fragments));
 #endif
