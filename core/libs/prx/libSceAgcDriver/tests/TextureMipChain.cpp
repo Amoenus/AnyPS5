@@ -5,6 +5,10 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "Optimization/DescriptorBindingBuilder.hpp"
+#include "Optimization/ResourceMaterializer.hpp"
+#include "PipelineSpecialization.hpp"
+#include "RuntimeAbi.hpp"
 #include <algorithm>
 #include <bit>
 #include <cstddef>
@@ -321,6 +325,7 @@ void checkInsideImage(VkImage image, const VkImageCreateInfo& info, const std::s
     };
     const auto checkRange = [&](const VkImageSubresourceRange& range, const char* access) {
         Require(range.levelCount != VK_REMAINING_MIP_LEVELS && range.levelCount != 0 && range.baseMipLevel + range.levelCount <= info.mipLevels, what + ": " + access + " names levels " + std::to_string(range.baseMipLevel) + "+" + std::to_string(range.levelCount) + " of an image of " + levels + " levels");
+        Require(range.layerCount != 0 && (range.layerCount == VK_REMAINING_ARRAY_LAYERS ? range.baseArrayLayer < info.arrayLayers : range.baseArrayLayer + range.layerCount <= info.arrayLayers), what + ": " + access + " names layers " + std::to_string(range.baseArrayLayer) + "+" + std::to_string(range.layerCount) + " of an image of " + std::to_string(info.arrayLayers) + " layers");
     };
     for (const auto& [target, layers] : mock.copies) {
         if (target == image) checkLayers(layers, "a copy wrote");
@@ -513,6 +518,73 @@ void TestStorageFullChainIsUnchanged(const Context& context, TextureDetiler& det
     checkInsideImage(image, info, "64x32 storage upload");
 }
 
+ShaderRecompiler::DescriptorValue imageWords(std::uint32_t type, std::uint32_t width, std::uint32_t height, std::uint32_t depth, std::uint32_t base, std::uint32_t last, std::uint32_t maxMip) {
+    return {{0x00010000u, (FormatR8G8B8A8Unorm << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), 0xfacu | (base << 12u) | (last << 16u) | (type << 28u), depth - 1u, maxMip << 4u, 0u, 0u}, 8u};
+}
+
+void TestShaderLevelsPastTheView(const Context& context, TextureDetiler& detiler) {
+    struct Case {
+        const char* what;
+        ShaderRecompiler::DescriptorValue words;
+        std::uint32_t past;
+        bool base;
+    };
+    const std::array cases{
+        Case{"28x1 2D array of levels 0-9", imageWords(13, 28, 1, 4, 0, 9, 9), 5u, false},
+        Case{"28x1 2D array of levels 7-9", imageWords(13, 28, 1, 4, 7, 9, 9), 2u, true},
+        Case{"28x1 2D of levels 2-6 of 10", imageWords(9, 28, 1, 1, 2, 6, 9), 2u, false},
+        Case{"4x1 2D of levels 0-10", imageWords(9, 4, 1, 1, 0, 10, 10), 8u, false},
+        Case{"4x4x16 3D of levels 0-7", imageWords(10, 4, 4, 16, 0, 7, 7), 3u, false},
+        Case{"64x64 2D of levels 0-6", imageWords(9, 64, 64, 1, 0, 6, 6), 0u, false},
+        Case{"64x32 2D naming levels 0-9 of 7", imageWords(9, 64, 32, 1, 0, 9, 6), 0u, false},
+    };
+    for (const auto& item : cases) {
+        const auto descriptor = DecodeTextureResource(item.words.dwords);
+        static_cast<void>(upload(context, detiler, descriptor, item.what));
+        const auto& view = mock.views.front().second;
+        const auto guestLevels = descriptor.lastLevel - descriptor.baseLevel + 1u;
+        const auto past = ShaderRecompiler::ResourceMaterializer::LevelsPastChain(item.words);
+        Require(past.levels == item.past && guestLevels - view.levelCount == item.past, std::string(item.what) + ": the shader adds " + std::to_string(past.levels) + " levels to the view's " + std::to_string(view.levelCount) + ", the T# names " + std::to_string(guestLevels));
+        Require(past.base == item.base && (view.baseMipLevel != descriptor.baseLevel) == item.base, std::string(item.what) + ": the shader and the view disagree on whether the base level lies past the chain");
+    }
+
+    ShaderRecompiler::ImageResource image{};
+    image.resourceClass = ShaderRecompiler::ImageResourceClass::Sampled;
+    image.numericClass = ShaderRecompiler::IrTextureNumericClass::Float;
+    image.dimension = ShaderRecompiler::RdnaImageDimension::Dim2DArray;
+    image.read = true;
+    image.levelUses = ShaderRecompiler::ImageLevelUseQuery;
+    ShaderRecompiler::ShaderInfo info;
+    info.images = {image};
+    info.runtimeImageModes = {ShaderRecompiler::ResourceMaterializer::RuntimeImageModes(image)};
+    ShaderRecompiler::ResourceSnapshot snapshot;
+    snapshot.images = {cases[0].words};
+    ShaderRecompiler::IrBindingLayout layout;
+    layout.descriptors = {{ShaderRecompiler::DescriptorBindingForImage(image), {0u}}};
+    const auto direct = ShaderRecompiler::DescriptorBindingBuilder{}.Prepare(layout, info, ShaderRecompiler::IrShaderStage::Compute, snapshot);
+    Require(std::ranges::count(direct.specialization, ShaderRecompiler::PipelineSpecializationConstant{ShaderRecompiler::PipelineSpecialization::LevelsPastViewBase, 5u}) == 1, "image_get_resinfo of a 28x1 T# of levels 0-9: the pipeline is not specialized with the 5 levels its view lacks");
+    layout.runtimeImageCount = 1u;
+    const auto registration = ShaderRecompiler::DescriptorBindingBuilder{}.Prepare(layout, info, ShaderRecompiler::IrShaderStage::Compute, snapshot, {}, true);
+    Require(registration.imageMetadata.size() == 1u && ((registration.imageMetadata[0].metadata.flags >> ShaderRecompiler::RuntimeAbi::LevelsPastViewShift) & ShaderRecompiler::RuntimeAbi::LevelsPastViewMask) == 5u, "image_get_resinfo of a 28x1 T# of levels 0-9: the runtime image metadata does not carry the 5 levels its view lacks");
+
+    const auto accepts = [&](std::uint8_t uses, std::uint32_t table, const ShaderRecompiler::DescriptorValue& words) {
+        auto used = image;
+        used.levelUses = uses;
+        used.table = table;
+        const auto modes = ShaderRecompiler::ResourceMaterializer::RuntimeImageModes(used);
+        const auto match = ShaderRecompiler::ResourceMaterializer::TryRuntimeImageMode(used, words, modes);
+        Require(match.mode.has_value() || (match.reason == ShaderRecompiler::ImageTableAbi::PoisonReason::UnsupportedOperation && match.detail.find("past its extent's full mip chain") != std::string::npos), "a T# past its chain was refused for another reason: " + match.detail);
+        return match.mode.has_value();
+    };
+    Require(accepts(ShaderRecompiler::ImageLevelUseQuery, ShaderRecompiler::NoTable, cases[0].words), "image_get_resinfo of a T# whose levels reach past its chain must be served");
+    Require(accepts(ShaderRecompiler::ImageLevelUseLoad, ShaderRecompiler::NoTable, cases[0].words), "image_load at base level 0 of a T# whose levels reach past its chain reads a level its view holds and must be served");
+    Require(!accepts(ShaderRecompiler::ImageLevelUseLoad, ShaderRecompiler::NoTable, cases[1].words), "image_load at base level 7 of a 28x1 T# reads a level its view does not hold and must be refused");
+    Require(!accepts(ShaderRecompiler::ImageLevelUseMipLoad, ShaderRecompiler::NoTable, cases[0].words), "image_load_mip of a T# whose levels reach past its chain must be refused");
+    Require(!accepts(ShaderRecompiler::ImageLevelUseLodQuery, ShaderRecompiler::NoTable, cases[0].words), "image_get_lod of a T# whose levels reach past its chain must be refused");
+    Require(!accepts(ShaderRecompiler::ImageLevelUseQuery, 0u, cases[0].words), "image_get_resinfo through an image table of a T# whose levels reach past its chain must be refused");
+    Require(accepts(ShaderRecompiler::ImageLevelUseMipLoad | ShaderRecompiler::ImageLevelUseLodQuery | ShaderRecompiler::ImageLevelUseLoad, ShaderRecompiler::NoTable, imageWords(13, 64, 64, 4, 0, 6, 6)), "a full 64x64 chain must be served to every access");
+}
+
 }
 
 void RunTextureMipChainTests() {
@@ -525,6 +597,7 @@ void RunTextureMipChainTests() {
         TestFullChainsAreUnchanged(context, detiler);
         TestStorageLevelsPastTheFullChain(context, detiler);
         TestStorageFullChainIsUnchanged(context, detiler);
+        TestShaderLevelsPastTheView(context, detiler);
     }
     mock = MockDevice{};
 }
