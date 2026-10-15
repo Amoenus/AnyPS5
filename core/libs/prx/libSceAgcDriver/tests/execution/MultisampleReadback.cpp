@@ -233,9 +233,9 @@ struct Surface {
     }
 };
 
-void CheckReadback(TextureDetiler& reader, const Surface& surface, std::uint32_t first, std::uint32_t elements, std::uint32_t repetitions) {
+void CheckReadback(TextureDetiler& reader, const Surface& surface, std::uint32_t first, std::uint32_t elements, std::uint32_t repetitions, std::size_t extraBytes = 0u) {
     const auto expected = surface.Expected(first, elements);
-    const auto bytes = (expected.size() + 3u) & ~std::size_t{3u};
+    const auto bytes = ((expected.size() + 3u) & ~std::size_t{3u}) + extraBytes;
     const auto alignment = std::max<std::size_t>(4u, surface.context.limits.minStorageBufferOffsetAlignment);
     const auto offset = (16u + alignment - 1u) / alignment * alignment;
     Buffer output(surface.context, offset + bytes + 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -276,6 +276,9 @@ void CheckRefusals(TextureDetiler& reader, const Surface& surface) {
     for (auto range : {std::array{0u, 0u}, std::array{4u, 1u}, std::array{3u, 2u}, std::array{0xffffffffu, 2u}}) Refused([&] { call(surface.format, 0u, 4u, 1u, 1u, 1u, 4u, range[0], range[1]); }, "element range is invalid");
     for (auto range : {std::array<std::uint64_t, 2>{1u, 4u}, std::array<std::uint64_t, 2>{0u, 0u}, std::array<std::uint64_t, 2>{0u, 3u}, std::array<std::uint64_t, 2>{0u, static_cast<std::uint64_t>(surface.context.limits.maxStorageBufferRange) + 4u}, std::array<std::uint64_t, 2>{~std::uint64_t{0} - 3u, 8u}}) Refused([&] { call(surface.format, range[0], range[1], 1u, 1u, 1u, 4u, 0u, 1u); }, "buffer range is invalid");
     Refused([&] { reader.DispatchMultisampleReadback(VK_NULL_HANDLE, surface.format, output.Handle(), 0u, 4u, surface.arrayView, 1u, 1u, 1u, 4u, 0u, 1u); }, "requires commands, buffer and array view");
+    Refused([&] { reader.DispatchMultisampleReadback(batch.Handle(), surface.format, VK_NULL_HANDLE, 0u, 4u, surface.arrayView, 1u, 1u, 1u, 4u, 0u, 1u); }, "requires commands, buffer and array view");
+    Refused([&] { reader.DispatchMultisampleReadback(batch.Handle(), surface.format, output.Handle(), 0u, 4u, VK_NULL_HANDLE, 1u, 1u, 1u, 4u, 0u, 1u); }, "requires commands, buffer and array view");
+    Refused([&] { call(surface.format, 0u, 4u, 16384u, 16384u, 8192u, 8u, 0u, 1u); }, "element range is invalid");
     std::puts("multisample readback invalid-input refusals passed");
 }
 
@@ -303,6 +306,7 @@ int main(int argc, char** argv) {
             Surface surface(context, format, bytes, samples);
             surface.Render();
             const auto elements = surface.width * surface.height * surface.layers * samples;
+            CheckReadback(reader, surface, 1u, 1u, 1u, 64u * std::max(4u, bytes));
             CheckReadback(reader, surface, 0u, elements, samples == 4u ? 65u : 1u);
             CheckReadback(reader, surface, 1u, elements - 3u, 1u);
             CheckReadback(reader, surface, 0u, elements, 1u);
