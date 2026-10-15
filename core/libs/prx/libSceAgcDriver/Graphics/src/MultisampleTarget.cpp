@@ -537,7 +537,9 @@ private:
         if (StorageTexture::FlushPending(address, bytes)) {
             if (auto* recorder = recorderFor(context); recorder != nullptr) recorder->SyncThrough(address, bytes);
         }
-        RequireGuestWriteWatch(context, address, bytes);
+#ifdef _WIN32
+        if (GuestArena::GuestArenaContains_nid_postfix(reinterpret_cast<const void*>(address), bytes)) RequireGuestWriteWatch(context, address, bytes);
+#endif
         const auto generation = GuestMemory::CollectWritesUncached(address, bytes);
         std::vector<std::byte> data(bytes);
         std::memcpy(data.data(), reinterpret_cast<const void*>(address), bytes);
