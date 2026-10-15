@@ -90,7 +90,7 @@ static_assert(sizeof(RecompileResult) == 472, "RecompileResult changed: update E
 static_assert(sizeof(DescriptorBinding) == 592, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
-static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: update the parameter encoder");
+static_assert(sizeof(FragmentParameter) == 16, "FragmentParameter changed: update the parameter encoder");
 static_assert(sizeof(CompiledShaderInfo) == 352, "CompiledShaderInfo changed: update the info encoder");
 static_assert(sizeof(ShaderInfo) == 232, "ShaderInfo changed: update the info encoder");
 static_assert(sizeof(BufferResource) == 32, "BufferResource changed: update the info encoder");
@@ -494,6 +494,7 @@ void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
         out.Value(parameter.perVertex);
         out.Value(parameter.custom);
         out.Value(parameter.flatP10);
+        out.Value(parameter.vertexOrder);
     });
     writer.Value(result.barycentricEmulation.active);
     writer.Value(result.barycentricEmulation.smooth);
@@ -539,6 +540,7 @@ void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
         in.Value(parameter.perVertex);
         in.Value(parameter.custom);
         in.Value(parameter.flatP10);
+        in.Value(parameter.vertexOrder);
     });
     reader.Value(result.barycentricEmulation.active);
     reader.Value(result.barycentricEmulation.smooth);
