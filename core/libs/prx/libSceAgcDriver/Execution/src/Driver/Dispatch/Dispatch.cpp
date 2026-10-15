@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferCopy.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
@@ -78,6 +79,14 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         if (!partialLastGroup && matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
         if (!partialLastGroup && indirectArguments == 0 && (matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute) || MatchesStreamCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute))) return;
     } else {
+        if (indirectArguments == 0 && (packet[4] & 0x20u) == 0) {
+            if (const auto fill = Graphics::MatchMemoryValueFill(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads, {packet[1], packet[2], packet[3]})) Graphics::NoteMemoryValueFill(*fill);
+        }
+        if (!partialLastGroup && fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
+            pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
+            return;
+        }
+        if (DrawPipeline::Active()) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, 0x15);
         if (!partialLastGroup && indirectArguments == 0u) {
             if (const auto fill = MatchConstantFill(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet)) Graphics::NoteNativeColorClear_nid_no_patch(fill->address, fill->bytes, fill->value, 0u);
         }
@@ -86,13 +95,6 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             const auto nativeBytes = Graphics::HtileDepthClearBytes_nid_no_patch(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet, indirectArguments);
             Graphics::NoteHtileDepthClear(htile, static_cast<std::size_t>(threads * 16u), nativeBytes);
             Graphics::NoteNativeColorClear_nid_no_patch(htile, nativeBytes, userData[4], userData[5]);
-        }
-        if (indirectArguments == 0 && (packet[4] & 0x20u) == 0) {
-            if (const auto fill = Graphics::MatchMemoryValueFill(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads, {packet[1], packet[2], packet[3]})) Graphics::NoteMemoryValueFill(*fill);
-        }
-        if (!partialLastGroup && fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
-            pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
-            return;
         }
         if (!partialLastGroup && indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
             pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
