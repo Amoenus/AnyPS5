@@ -382,6 +382,26 @@ ThickLayout ComputeThickLayout(TextureTileMode tileMode, std::uint32_t format, s
 
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
     SurfaceGeometry geometry;
+    if (descriptor.samples != 1u && descriptor.tileMode != TextureTileMode::kLinear) {
+        Require(descriptor.samples == 2u || descriptor.samples == 4u || descriptor.samples == 8u, "multisampled surface fragment count is not implemented");
+        Require(descriptor.dimension == TextureDimension::k2DMsaa && descriptor.baseArray == 0u && descriptor.depthOrLastArray == 0u, "multisampled surface dimension or array range is not implemented");
+        Require(descriptor.mipCount == 1u && descriptor.allocatedMipCount == 1u && descriptor.baseLevel == 0u && descriptor.lastLevel == 0u, "multisampled surface mip levels are not implemented");
+        Require(descriptor.width != 0u && descriptor.width <= 16384u && descriptor.height != 0u && descriptor.height <= 16384u, "invalid multisampled surface extent");
+        Require(!IsBlockCompressed(descriptor.format), "multisampled block-compressed surface is not implemented");
+        const auto elementBytes = BytesPerElement(descriptor.format);
+        const auto block = GetBlockLayout(descriptor.tileMode, elementBytes);
+        Require(block.blockSize == 4096u || block.blockSize == 65536u, "multisampled surface requires 4 KiB or 64 KiB blocks");
+        const auto sampleBits = static_cast<std::uint32_t>(std::countr_zero(descriptor.samples));
+        const auto blockWidth = block.blockWidth >> ((sampleBits + 1u) / 2u);
+        const auto blockHeight = block.blockHeight >> (sampleBits / 2u);
+        const auto blocksPerRow = (descriptor.width + blockWidth - 1u) / blockWidth;
+        const auto blockRows = (descriptor.height + blockHeight - 1u) / blockHeight;
+        geometry.guestBytes = static_cast<std::uint64_t>(blocksPerRow) * blockRows * block.blockSize;
+        geometry.layerBytes = geometry.guestBytes;
+        geometry.sliceLinearBytes = static_cast<std::uint64_t>(descriptor.width) * descriptor.height * descriptor.samples * elementBytes;
+        geometry.mips.push_back({0u, geometry.guestBytes, 0u, geometry.sliceLinearBytes, descriptor.width, descriptor.height, blocksPerRow, descriptor.width * descriptor.samples * elementBytes, false, 0u, 0u});
+        return geometry;
+    }
     if (descriptor.dimension == TextureDimension::k3D && (descriptor.tileMode == TextureTileMode::kZ64KBX || descriptor.tileMode == TextureTileMode::kR64KBX)) {
         const auto depth = descriptor.depthOrLastArray + 1u;
         geometry.mips = ComputeMipLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, descriptor.mipCount);
