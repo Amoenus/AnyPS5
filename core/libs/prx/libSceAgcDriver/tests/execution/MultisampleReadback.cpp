@@ -125,7 +125,7 @@ struct Surface {
             };
             makeModule(MSAA_READBACK_VERTEX_SPV, modules[0]);
             makeModule(depth ? std::span<const std::uint32_t>(MSAA_READBACK_DEPTH_SPV) : std::span<const std::uint32_t>(MSAA_READBACK_UINT_SPV), modules[1]);
-            const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, 4u * sizeof(std::uint32_t)};
+            const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, 5u * sizeof(std::uint32_t)};
             VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             layout.pushConstantRangeCount = 1u;
             layout.pPushConstantRanges = &push;
@@ -205,7 +205,7 @@ struct Surface {
             begin.renderArea = {{0, 0}, {width, height}};
             begin.clearValueCount = 1u;
             begin.pClearValues = &clear;
-            const std::array<std::uint32_t, 4> push{layer, width, height, samples};
+            const std::array<std::uint32_t, 5> push{layer, width, height, samples, elementBytes};
             context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(batch.Handle(), &begin, VK_SUBPASS_CONTENTS_INLINE);
             context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(batch.Handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(batch.Handle(), pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), push.data());
