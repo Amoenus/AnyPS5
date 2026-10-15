@@ -2909,7 +2909,6 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
         CompletePendingCpuWrites(context, image->Descriptor().baseAddress, static_cast<std::size_t>(image->GuestBytes()));
         if (image->Descriptor().dccAddress != 0) CompletePendingCpuWrites(context, image->Descriptor().dccAddress, DccKeyBytes(image->GuestBytes()));
     }
-    if (!drawBuild) synchronizeGuestBuffers();
     // APS5_NO_FAST_REVALIDATE=1 always repeats the lookups.
     static const bool noFast = std::getenv("APS5_NO_FAST_REVALIDATE") != nullptr;
     const auto finish = [&](bool fast, bool ok, ProofFailure failure = ProofFailure::Other) {
