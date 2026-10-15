@@ -5,7 +5,10 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
@@ -491,6 +494,85 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
 }
 
 #ifdef _WIN32
+bool MovedBufferPublication() {
+    auto device = OpenVulkanTestDevice();
+    if (!device) return false;
+    Block source(4u * BlockBytes);
+    Block original(BlockBytes);
+    Block target(4u * BlockBytes);
+    struct ReleaseDevice {
+        decltype(device)& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    StoreWords(original, original.bytes, FillOnes);
+    alignas(256) static constexpr std::array<std::uint32_t, 9> code{
+        0x7e020280u, 0xe0301000u, 0x80000201u, 0xbf8c3f70u, 0x7e000280u, 0x7e0602f2u, 0xf800180fu, 0x03010002u, 0xbf810000u,
+    };
+    const std::array<std::uint32_t, 4> userData{
+        static_cast<std::uint32_t>(original.Address()), static_cast<std::uint32_t>((original.Address() >> 32u) & 0xffffu), Threads * 4u, 0x31016facu
+    };
+    const auto address = reinterpret_cast<std::uintptr_t>(code.data());
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{address, std::as_bytes(std::span(code))}}};
+    const auto destination = DecodeTarget(target);
+    const AgcDriver::Registers registers{{0x1b6, 0x8000}, {0x1b3, 0}, {0x1b4, 0}, {0x203, 0}, {0x1c5, Float32Export}};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Fragment, address, code, 0, {}},
+        {64, 0, userData, std::nullopt, AgcDriver::Graphics::DecodePixelStageInfo(registers, AgcDriver::Graphics::ExportMappings(TargetState(destination))), std::nullopt, memory},
+        device->Target(), {0, 0, 0, 128}
+    };
+    request.useCache = false;
+    auto program = ShaderRecompiler::Recompile(request);
+    const auto binding = std::find_if(program.bindings.begin(), program.bindings.end(), [](const auto& entry) { return entry.role == ShaderRecompiler::DescriptorRole::GuestBuffers; });
+    Require(binding != program.bindings.end() && binding->count == 1 && binding->guestDescriptor.size() == 4 && binding->bufferWritten.size() == 1 && !binding->bufferWritten[0], "the moved graphics shader does not have one read-only guest buffer");
+    const std::array<AgcDriver::Graphics::CompiledShader, 1> stages{{{ShaderStage::Fragment, &program, 0}}};
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    Require(context.recorder != nullptr, "the moved graphics fixture has no recorder");
+    std::unique_ptr<AgcDriver::Graphics::ShaderResources> resources;
+    {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        context.recorder->Activate();
+        resources = std::make_unique<AgcDriver::Graphics::ShaderResources>(context, stages, destination, 1, 0, 0);
+        Require(resources->Reusable(), "the moved graphics fixture did not build reusable resources");
+    }
+    CheckUniform(LoadSamples(*device, original, SampleShift, 9u), Ones, "from the original standard-tiled buffer");
+    std::string refusal;
+    try {
+        AgcDriver::Graphics::SynchronizeMultisampleTargetRead(original.Address(), Threads * 4u);
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find("uniform standard multisample target") != std::string::npos, "the original graphics range is not an unsupported publication control");
+    Draw(*device, TargetState(DecodeTarget(source)), FullTriangle, OnesPixelCode);
+    CheckUniform(LoadSamples(*device, source), Ones, "before the moved graphics snapshot");
+    const std::span guest(reinterpret_cast<const std::uint32_t*>(source.data), Threads);
+    Require(std::all_of(guest.begin(), guest.end(), [](auto word) { return word == 0; }), "the moved graphics fixture published its current range before snapshot preparation");
+    binding->guestDescriptor[0] = static_cast<std::uint32_t>(source.Address());
+    binding->guestDescriptor[1] = (binding->guestDescriptor[1] & 0xffff0000u) | static_cast<std::uint32_t>((source.Address() >> 32u) & 0xffffu);
+    std::array<std::uint32_t, Threads> actual{};
+    {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        context.recorder->Activate();
+        Require(resources->Revalidate(stages), "the moved graphics resources were not reusable");
+        const auto moved = resources->MovedReadOnlyBuffers(stages, *context.recorder);
+        Require(moved.has_value() && std::any_of(moved->begin(), moved->end(), [&](const auto& entry) { return entry.address == source.Address() && entry.size == Threads * 4u; }), "the current graphics range was not recorded as a moved buffer");
+        const auto prepared = resources->PrepareDrawBindings(*context.recorder, *moved);
+        Require(prepared != nullptr, "the moved graphics snapshot was not prepared");
+        const auto snapshot = std::find_if(prepared->snapshots.begin(), prepared->snapshots.end(), [&](const auto& entry) { return entry.address == source.Address(); });
+        Require(snapshot != prepared->snapshots.end() && snapshot->buffer->Bytes().size() == sizeof(actual), "the moved graphics snapshot has the wrong range");
+        std::memcpy(actual.data(), snapshot->buffer->Bytes().data(), sizeof(actual));
+    }
+    std::array<std::uint32_t, Threads> published{};
+    AgcDriver::GuestMemory::Read(source.Address(), std::as_writable_bytes(std::span(published)));
+    Require(std::all_of(published.begin(), published.end(), [](auto word) { return word == FillOnes; }), "the moved graphics publication control did not contain rendered half-float ones");
+    const bool matched = actual == published;
+    CheckUniform(LoadSamples(*device, source), Ones, "after the moved graphics snapshot");
+    CheckUniform(LoadSamples(*device, original, SampleShift, 9u), Ones, "after moving away from the standard-tiled buffer");
+    std::cout << "native buffer publication moved: matched=" << matched << " samples=1024 boundary=passed\n";
+    std::puts("native buffer moved controls: original-refused=1 current-range=1 revalidated=1");
+    Require(matched, "native buffer publication missed 1 logical descriptor checks");
+    return true;
+}
+
 void ResidentDrawNeighborImport(AgcDriver::VulkanDevice& device) {
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
     Block block(4u * BlockBytes, true);
@@ -534,6 +616,9 @@ void ResidentDrawNeighborImport(AgcDriver::VulkanDevice& device) {
 int main() {
     try {
         if (!BufferPublication()) return VulkanTestSkipped;
+#ifdef _WIN32
+        if (!MovedBufferPublication()) return VulkanTestSkipped;
+#endif
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         Block block(4u * BlockBytes);
