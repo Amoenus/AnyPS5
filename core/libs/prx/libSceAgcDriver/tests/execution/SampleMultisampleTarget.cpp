@@ -33,6 +33,16 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+namespace AgcDriver {
+
+struct VulkanDeviceTestAccess {
+    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+
+}
+#endif
+
 namespace {
 
 using AgcDriver::Graphics::ColorTargetLayout;
