@@ -213,10 +213,10 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
         constexpr std::uint32_t pattern = 0x12345678u;
         DispatchFill(code, base + BlockBytes, BlockBytes, pattern);
         Settle(code, sentinel);
-        std::array<std::uint32_t, 4> stored{};
+        std::vector<std::uint32_t> stored(BlockBytes / sizeof(pattern));
         AgcDriver::GuestMemory::Read(base + BlockBytes, std::as_writable_bytes(std::span(stored)), 4);
-        Require(stored == std::array<std::uint32_t, 4>{pattern, pattern, pattern, pattern}, "MSAA neighbor: the copied buffer fill did not reach guest memory");
-        std::cout << "MSAA neighbor copied-fill=" << pattern << '\n';
+        Require(std::all_of(stored.begin(), stored.end(), [](std::uint32_t value) { return value == pattern; }), "MSAA neighbor: the copied buffer fill did not reach all guest memory");
+        std::cout << "MSAA neighbor copied-fill=" << pattern << " verified-bytes=" << BlockBytes << '\n';
         lock.lock();
     } else if (transition == NeighborTransition::CpuStore) {
         label = "same-value-cpu-store";
