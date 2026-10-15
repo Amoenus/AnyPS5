@@ -1000,7 +1000,6 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     std::uintptr_t residentStart = 0;
     std::uintptr_t residentEnd = 0;
     const bool resident = GuestArena::GuestArenaResidentSpan_nid_postfix(static_cast<std::uintptr_t>(base), static_cast<std::size_t>(bytes), &residentStart, &residentEnd);
-    if (resident && ResidentImageRangeOverlaps_nid_no_patch(residentStart, residentEnd - residentStart)) return nullptr;
     bool writable = !resident;
     bool readOnly = true;
     MEMORY_BASIC_INFORMATION refused{};
