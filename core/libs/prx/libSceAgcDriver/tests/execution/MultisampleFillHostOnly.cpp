@@ -147,6 +147,80 @@ ColorTarget MultisampledTarget(const GuestBlock& color) {
 }
 
 #ifdef _WIN32
+enum class NeighborTransition { None, Alias, HostImport, CpuStore };
+
+void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTransition transition) {
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+    constexpr std::size_t bytes = 2 * BlockBytes;
+    auto* memory = static_cast<std::byte*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, BlockBytes));
+    HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, 0, bytes, nullptr);
+    Require(memory != nullptr && section != nullptr, "MSAA neighbor: cannot allocate a resident run");
+    struct Cleanup {
+        AgcDriver::VulkanDevice& device;
+        VkDevice handle;
+        std::byte* memory;
+        HANDLE section;
+        void* alias = nullptr;
+        ~Cleanup() {
+            device.SubmitRecorded(true);
+            device.WaitIdle();
+            AgcDriver::Graphics::ClearMultisampleTargets(handle);
+            AgcDriver::Graphics::ClearHostImports(handle);
+            if (alias != nullptr) GuestArena::GuestArenaUnmapAlias_nid_postfix(alias);
+            GuestAllocations::Mutation().Remove(memory);
+            GuestArena::GuestArenaReset_nid_postfix(memory, bytes);
+            GuestArena::GuestArenaRelease_nid_postfix(memory, bytes);
+            GuestArena::GuestArenaForgetSection_nid_postfix(section);
+            CloseHandle(section);
+        }
+    } cleanup{device, context.device, memory, section};
+    GuestArena::GuestArenaMapDirect_nid_postfix(memory, bytes, section, 0u, PAGE_READWRITE);
+    std::memset(memory, 0, bytes);
+    GuestAllocations::Mutation().Add(memory, bytes, true, true, true);
+    const auto base = reinterpret_cast<std::uintptr_t>(memory);
+    std::uintptr_t start = 0u, end = 0u;
+    Require(GuestArena::GuestArenaResidentSpan_nid_postfix(base, bytes, &start, &end) && start == base && end == base + bytes, "MSAA neighbor: the fixture is not one private resident run");
+    ColorTarget target{};
+    target.address = base;
+    target.surfaceAddress = base;
+    target.extent = {Side, Side};
+    target.surfaceExtent = target.extent;
+    target.format = VK_FORMAT_R8G8B8A8_UNORM;
+    target.tileMode = AgcDriver::Graphics::ColorTileMode::RenderTarget;
+    target.elementBytes = 4u;
+    target.bytes = BlockBytes;
+    target.samples = 4u;
+    Require(AgcDriver::Graphics::MultisampleTargetView(context, target) != VK_NULL_HANDLE, "MSAA neighbor: initial target has no native view");
+    device.SubmitRecorded(true);
+    device.WaitIdle();
+    Require(AgcDriver::Graphics::MultisampleTargetView(context, target) != VK_NULL_HANDLE, "MSAA neighbor: baseline target reuse failed");
+    const char* label = "none";
+    if (transition == NeighborTransition::Alias) {
+        label = "alias";
+        cleanup.alias = GuestArena::GuestArenaMapAlias_nid_postfix(base + BlockBytes, BlockBytes);
+        Require(cleanup.alias != nullptr, "MSAA neighbor: the neighboring alias was not created");
+    } else if (transition == NeighborTransition::HostImport) {
+        label = "host-import";
+        const auto* imported = AgcDriver::Graphics::HostImportFor(context, base + BlockBytes, BlockBytes);
+        Require(imported != nullptr && imported->alias != nullptr && !imported->unwatched, "MSAA neighbor: the host import did not use a tracked section alias");
+    } else if (transition == NeighborTransition::CpuStore) {
+        label = "same-value-cpu-store";
+        *reinterpret_cast<volatile std::uint8_t*>(memory) = 0u;
+    }
+    bool refused = false;
+    std::string refusal;
+    try {
+        static_cast<void>(AgcDriver::Graphics::MultisampleTargetView(context, target));
+    } catch (const std::runtime_error& error) {
+        refusal = error.what();
+        refused = std::string_view(refusal).find("guest writes to a resident multisample target or its metadata are not implemented") != std::string_view::npos;
+    }
+    std::cout << "MSAA neighbor transition=" << label << " watched=" << AgcDriver::GuestMemory::Watched(base, BlockBytes) << " refused=" << refused << " message=" << refusal << '\n';
+    Require(refused == (transition != NeighborTransition::None), "MSAA neighbor: the observed reuse result did not match the hypothesis control");
+    Require(refusal.empty() || refused, "MSAA neighbor: an unrelated exception interrupted the control");
+}
+
 void DirectImportDropsColorTracking(AgcDriver::VulkanDevice& device) {
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
     std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
@@ -288,6 +362,10 @@ int main() {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
 #ifdef _WIN32
+        ResidentColorNeighborTransition(*device, NeighborTransition::None);
+        ResidentColorNeighborTransition(*device, NeighborTransition::Alias);
+        ResidentColorNeighborTransition(*device, NeighborTransition::HostImport);
+        ResidentColorNeighborTransition(*device, NeighborTransition::CpuStore);
         DirectImportDropsColorTracking(*device);
 #endif
         const bool tested = FillsTakenAsMultisampledClearsAreNotStored(*device);
