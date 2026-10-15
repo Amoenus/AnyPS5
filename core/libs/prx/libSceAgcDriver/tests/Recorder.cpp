@@ -108,6 +108,7 @@ void ReleaseWatched(void* block, std::size_t bytes) {
 }
 
 std::optional<std::size_t> selectDevice(std::span<const VkPhysicalDeviceProperties> devices, std::string_view request) {
+    static_cast<void>(request);
     const auto rankDeviceType = [](VkPhysicalDeviceType type) {
         switch (type) {
             case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 3;
@@ -121,11 +122,7 @@ std::optional<std::size_t> selectDevice(std::span<const VkPhysicalDeviceProperti
     for (std::size_t index = 0; index < devices.size(); ++index) {
         const auto& candidate = devices[index];
         if (candidate.apiVersion < VK_API_VERSION_1_1) continue;
-        const std::string_view name(candidate.deviceName);
-        if (!request.empty() && std::search(name.begin(), name.end(), request.begin(), request.end(), [](char left, char right) {
-            return std::tolower(static_cast<unsigned char>(left)) == std::tolower(static_cast<unsigned char>(right));
-        }) == name.end()) continue;
-        const int rank = request.empty() ? rankDeviceType(candidate.deviceType) : 4;
+        const int rank = rankDeviceType(candidate.deviceType);
         if (rank <= selectedRank) continue;
         selected = index;
         selectedRank = rank;
