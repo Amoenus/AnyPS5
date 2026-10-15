@@ -997,11 +997,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     entry.ranges = std::move(run.ranges);
 #ifdef _WIN32
     // Drivers pin imported pages, so every page must be committed and accessible.
-    std::uintptr_t residentStart = 0;
-    std::uintptr_t residentEnd = 0;
-    const bool resident = GuestArena::GuestArenaResidentSpan_nid_postfix(static_cast<std::uintptr_t>(base), static_cast<std::size_t>(bytes), &residentStart, &residentEnd);
-    if (resident && ResidentImageRangeOverlaps_nid_no_patch(residentStart, residentEnd - residentStart)) return nullptr;
-    bool writable = !resident;
+    bool writable = true;
     bool readOnly = true;
     MEMORY_BASIC_INFORMATION refused{};
     for (std::uint64_t cursor = base; cursor < base + bytes;) {

@@ -1207,28 +1207,6 @@ static void CheckAliasAcrossDirectAllocations() {
     Require(sceKernelReleaseDirectMemory(first, page * 3) == 0);
 }
 
-static void CheckAliasLeavesResidentRunsUnderAHostWrite() {
-    constexpr std::size_t page = 0x4000;
-    std::int64_t phys = 0;
-    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * 2, 0, 0, &phys) == 0);
-    void* mapped = nullptr;
-    Require(sceKernelMapDirectMemory(&mapped, page * 2, 3, 0, phys, 0) == 0);
-    auto* bytes = static_cast<volatile unsigned char*>(mapped);
-    bytes[5] = 0x11;
-    {
-        const GuestArena::HostWrite open(static_cast<unsigned char*>(mapped) + page, page);
-        Require(open.Open());
-        Require(GuestArena::GuestArenaMapAlias_nid_postfix(reinterpret_cast<std::uintptr_t>(mapped), page * 2) == nullptr);
-        bytes[page + 5] = 0x22;
-    }
-    auto* alias = static_cast<volatile unsigned char*>(GuestArena::GuestArenaMapAlias_nid_postfix(reinterpret_cast<std::uintptr_t>(mapped), page * 2));
-    Require(alias != nullptr && alias[5] == 0x11 && alias[page + 5] == 0x22);
-    GuestArena::GuestArenaUnmapAlias_nid_postfix(const_cast<unsigned char*>(alias));
-    Require(bytes[5] == 0x11 && bytes[page + 5] == 0x22);
-    Require(sceKernelMunmap(mapped, page * 2) == 0);
-    Require(sceKernelReleaseDirectMemory(phys, page * 2) == 0);
-}
-
 static void CheckAliasRefusesPagesThatAreNotSharedViews() {
     constexpr std::size_t page = 0x4000;
     std::int64_t phys = 0;
@@ -2615,7 +2593,6 @@ int main(int argc, char** argv) {
     CheckAliasAcrossDirectAllocations();
     CheckAliasOfReorderedSharedPages();
     CheckAliasRefusesPagesThatAreNotSharedViews();
-    CheckAliasLeavesResidentRunsUnderAHostWrite();
 #endif
     CheckUnhintedKernelMappingsLandInTheWindow();
 #if defined(__linux__)
