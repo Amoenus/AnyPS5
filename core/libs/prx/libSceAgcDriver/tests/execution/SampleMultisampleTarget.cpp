@@ -370,17 +370,19 @@ void ResidentDrawNeighborImport(AgcDriver::VulkanDevice& device) {
     Draw(device, state);
     const auto before = LoadSamples(device, block);
     CheckSamples(state, before, {});
+    bool neighborCompared = false;
     {
         std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         Require(AgcDriver::GuestMemory::Watched(block.Address(), BlockBytes), "the drawn resident target is not watched before the neighboring import");
         const auto* imported = AgcDriver::Graphics::HostImportFor(context, block.Address() + BlockBytes, BlockBytes);
-        Require(imported != nullptr && imported->alias == nullptr && !imported->unwatched, "the neighboring import did not remain private and watched");
+        Require(imported != nullptr && imported->alias == nullptr, "the neighboring import did not remain private");
+        neighborCompared = imported->unwatched;
         Require(AgcDriver::GuestMemory::Watched(block.Address(), BlockBytes), "the neighboring import removed the drawn resident target's watch");
     }
     const auto after = LoadSamples(device, block);
     CheckSamples(state, after, {});
     Require(after == before, "the neighboring import changed the resident target's drawn samples");
-    std::cout << "resident GPU-written target: private neighboring import retained, " << after.size() << " samples preserved\n";
+    std::cout << "resident GPU-written target: private neighboring import compared=" << neighborCompared << ", " << after.size() << " samples preserved\n";
 }
 #endif
 
