@@ -251,6 +251,8 @@ void CheckReadback(TextureDetiler& reader, const Surface& surface, std::uint32_t
     batch.SubmitAndWait();
     output.Invalidate();
     const auto data = output.Bytes();
+    const auto mismatch = std::mismatch(expected.begin(), expected.end(), data.begin() + offset);
+    if (mismatch.first != expected.end()) std::printf("readback mismatch: format=%u first=%u byte=%zu expected=0x%02x actual=0x%02x\n", static_cast<std::uint32_t>(surface.format), first, static_cast<std::size_t>(mismatch.first - expected.begin()), std::to_integer<unsigned>(*mismatch.first), std::to_integer<unsigned>(*mismatch.second));
     Require(std::equal(expected.begin(), expected.end(), data.begin() + offset), "multisample readback changed a rendered sample, component, layer or pixel");
     for (std::size_t index = 0u; index < data.size(); ++index) Require((index >= offset && index < offset + expected.size()) || data[index] == std::byte{0xa5}, "multisample readback changed a buffer sentinel or packed tail");
 }
