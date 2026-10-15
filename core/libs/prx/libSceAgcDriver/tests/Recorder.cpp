@@ -7480,6 +7480,43 @@ int pipelineCacheFileTests(const Device& device) {
     }
     Require(contents(path) == stored, "an object that added no pipelines rewrote the cache file");
     {
+        PipelineCache unseeded(context, properties, false);
+        Require(!holds(unseeded.Handle(), 0), "a cache created without the file already held a pipeline of the file");
+    }
+    {
+        PipelineCache reloaded(context, properties);
+        Require(holds(reloaded.Handle(), 0) && holds(reloaded.Handle(), 1), "an unseeded cache dropped pipelines from the cache file when it saved");
+    }
+    std::filesystem::remove_all(directory);
+    {
+        PipelineCache writer(context, properties);
+        build(writer.Handle(), 0);
+    }
+    {
+        PipelineCache unseeded(context, properties, false);
+        unseeded.SaveNow();
+        build(unseeded.Handle(), 1);
+        unseeded.SaveNow();
+    }
+    {
+        PipelineCache reloaded(context, properties);
+        Require(holds(reloaded.Handle(), 0) && holds(reloaded.Handle(), 1), "an unseeded cache that saved twice over an unchanged file lost pipelines of the file");
+    }
+    std::filesystem::remove_all(directory);
+    {
+        PipelineCache writer(context, properties);
+        build(writer.Handle(), 0);
+    }
+    {
+        PipelineCache extender(context, properties);
+        Require(holds(extender.Handle(), 0), "the cache file lost a pipeline");
+        build(extender.Handle(), 1);
+    }
+    {
+        PipelineCache reloaded(context, properties);
+        Require(holds(reloaded.Handle(), 0) && holds(reloaded.Handle(), 1), "a cache that saved over an unchanged file lost pipelines");
+    }
+    {
         std::ofstream corrupt(path, std::ios::binary | std::ios::trunc);
         corrupt << "not a pipeline cache";
     }
