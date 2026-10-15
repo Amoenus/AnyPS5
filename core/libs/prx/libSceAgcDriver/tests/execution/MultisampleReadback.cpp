@@ -125,7 +125,7 @@ struct Surface {
             };
             makeModule(MSAA_READBACK_VERTEX_SPV, modules[0]);
             makeModule(depth ? std::span<const std::uint32_t>(MSAA_READBACK_DEPTH_SPV) : std::span<const std::uint32_t>(MSAA_READBACK_UINT_SPV), modules[1]);
-            const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, 3u * sizeof(std::uint32_t)};
+            const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, 4u * sizeof(std::uint32_t)};
             VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             layout.pushConstantRangeCount = 1u;
             layout.pPushConstantRanges = &push;
@@ -205,7 +205,7 @@ struct Surface {
             begin.renderArea = {{0, 0}, {width, height}};
             begin.clearValueCount = 1u;
             begin.pClearValues = &clear;
-            const std::array<std::uint32_t, 3> push{layer, width, height};
+            const std::array<std::uint32_t, 4> push{layer, width, height, samples};
             context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(batch.Handle(), &begin, VK_SUBPASS_CONTENTS_INLINE);
             context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(batch.Handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(batch.Handle(), pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), push.data());
@@ -226,7 +226,7 @@ struct Surface {
             const auto layer = pixel / (width * height);
             const auto value = x + y * width + layer * width * height + sample * 31u;
             std::array<std::uint32_t, 4> words{0x91352700u ^ value, 0x45219b00u ^ (value * 3u), 0xc7391d00u ^ (value * 5u), 0x6b43e100u ^ (value * 7u)};
-            if (format == VK_FORMAT_D32_SFLOAT) words[0] = std::bit_cast<std::uint32_t>(0.125f + static_cast<float>(sample) / 16.0f + static_cast<float>(layer) / 128.0f + static_cast<float>(x) / 1024.0f + static_cast<float>(y) / 16384.0f);
+            if (format == VK_FORMAT_D32_SFLOAT) words[0] = std::bit_cast<std::uint32_t>(0.125f + static_cast<float>(element + 1u) / 65536.0f);
             std::memcpy(result.data() + static_cast<std::size_t>(index) * elementBytes, words.data(), elementBytes);
         }
         return result;
@@ -311,7 +311,16 @@ int main(int argc, char** argv) {
             Surface surface(context, format, bytes, 4u, 128u, 64u, 1u);
             surface.Render();
             CheckReadback(reader, surface, 0u, 128u * 64u * 4u, 1u);
-            std::puts("multisample readback D32 128x64 4x: 32768 distinct-coordinate/sample results passed");
+            std::puts("multisample readback D32 128x64 4x: 32768 distinct D32 sample values passed");
+        }
+        if (mode == "uint32") {
+            Surface depth(context, VK_FORMAT_D32_SFLOAT, 4u, 4u);
+            depth.Render();
+            CheckReadback(reader, depth, 0u, depth.width * depth.height * depth.layers * depth.samples, 1u);
+            Surface color(context, VK_FORMAT_R32_UINT, 4u, 4u);
+            color.Render();
+            CheckReadback(reader, color, 0u, color.width * color.height * color.layers * color.samples, 1u);
+            std::puts("multisample readback uint/depth pipeline transitions passed");
         }
         return 0;
     } catch (const std::exception& error) {
