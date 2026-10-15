@@ -352,6 +352,11 @@ if(BUILD_TESTING)
     configure_windows_unwind(agc_driver_draw_program_trace_tests)
     add_test(NAME agc_driver_draw_program_trace COMMAND agc_driver_draw_program_trace_tests)
     set_tests_properties(agc_driver_draw_program_trace PROPERTIES TIMEOUT 20)
+    if(MINGW)
+        target_link_libraries(agc_driver_draw_program_trace_tests PRIVATE libc)
+        set_tests_properties(agc_driver_draw_program_trace PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
 
 set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
