@@ -392,7 +392,8 @@ int main() {
         const auto color = DecodeTarget(block);
         const auto state = TargetState(color);
         Draw(*device, state);
-        CheckSamples(state, LoadSamples(*device, block), {});
+        const auto drawnSamples = LoadSamples(*device, block);
+        CheckSamples(state, drawnSamples, {});
         const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
         Require(colorBytes != 0 && colorBytes <= block.bytes, "the 4x target's color memory does not fit its block");
         AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
@@ -414,7 +415,22 @@ int main() {
         const auto oneSample = [](std::uint32_t, std::uint32_t, std::uint32_t sample) { return sample == StoredSample; };
         const auto drawnBefore = LoadSamples(*device, block);
         StoreSamples(*device, TargetDescriptor(block, SampleShift), SampleWrites(oneSample));
-        CheckWritten(drawnBefore, LoadSamples(*device, block), oneSample, "into one sample of each pixel of the drawn target");
+        const auto storedSamples = LoadSamples(*device, block);
+        CheckWritten(drawnBefore, storedSamples, oneSample, "into one sample of each pixel of the drawn target");
+        Draw(*device, state);
+        const auto redrawnSamples = LoadSamples(*device, block);
+        std::uint32_t changed = 0;
+        std::uint32_t preservedStores = 0;
+        Require(redrawnSamples.size() == Side * Side * Samples, "the post-storage draw did not return every sample");
+        for (std::size_t index = 0; index < redrawnSamples.size(); ++index) {
+            const bool covered = drawnSamples[index] == Drawn;
+            const auto& expected = covered ? Drawn : storedSamples[index];
+            Require(redrawnSamples[index] == expected, "the post-storage redraw missed a covered sample or changed an uncovered sample");
+            changed += covered && storedSamples[index] != expected ? 1u : 0u;
+            preservedStores += !covered && storedSamples[index] == Written ? 1u : 0u;
+        }
+        Require(changed != 0 && preservedStores != 0, "the post-storage redraw did not check both changed samples and preserved stores");
+        std::puts("post-storage redraw: 1024 samples matched");
         const auto leftHalf = [](std::uint32_t x, std::uint32_t, std::uint32_t sample) { return x < Side / 2u && sample != 0u; };
         Block undrawn(BlockBytes);
         StoreSamples(*device, TargetDescriptor(undrawn, SampleShift), SampleWrites(leftHalf));
