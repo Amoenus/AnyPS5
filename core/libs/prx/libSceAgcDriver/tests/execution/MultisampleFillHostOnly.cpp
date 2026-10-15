@@ -194,6 +194,7 @@ void NativeMetadataClearViaDriver(AgcDriver::VulkanDevice& device, VkFormat form
     } cleanup{device, context.device, memory, section, residentBytes};
     GuestArena::GuestArenaMapDirect_nid_postfix(memory, residentBytes, section, 0u, PAGE_READWRITE);
     GuestAllocations::Mutation().Add(memory, residentBytes, true, true, true);
+    std::cout << "native metadata submit: resident base=0x" << std::hex << reinterpret_cast<std::uintptr_t>(memory) << " bytes=0x" << residentBytes << " color-bytes=0x" << colorBytes << std::dec << " color-watched=" << AgcDriver::GuestMemory::Watched(reinterpret_cast<std::uintptr_t>(memory), colorBytes) << '\n' << std::flush;
     auto& code = NewBlock();
     auto& settleCode = NewBlock();
     auto& sentinel = NewBlock();
@@ -220,6 +221,7 @@ void NativeMetadataClearViaDriver(AgcDriver::VulkanDevice& device, VkFormat form
     AgcDriver::GuestMemory::Read(control.Address(), std::as_writable_bytes(std::span(threadMode)), 4u);
     for (std::size_t index = 0u; index < threadMode.size(); ++index) Require(threadMode[index] == (index < 4u ? 0x12345678u : 0xababababu), "native metadata submit: the GPU thread-count form changed its requested bytes or untouched suffix");
     std::cout << "native metadata submit: constant-fill plain-buffer bounds verified\n" << std::flush;
+    std::cout << "native metadata submit: after plain-buffer control color-watched=" << AgcDriver::GuestMemory::Watched(reinterpret_cast<std::uintptr_t>(memory), colorBytes) << " imported=" << AgcDriver::Graphics::HostImportCovers(context, reinterpret_cast<std::uintptr_t>(memory), colorBytes) << '\n' << std::flush;
     ColorTarget target{};
     target.address = target.surfaceAddress = reinterpret_cast<std::uintptr_t>(memory);
     target.extent = target.surfaceExtent = {Side, Side};
@@ -239,6 +241,7 @@ void NativeMetadataClearViaDriver(AgcDriver::VulkanDevice& device, VkFormat form
     {
         std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         Require(AgcDriver::Graphics::MultisampleTargetView(context, target) != VK_NULL_HANDLE, "native metadata submit: no initial native view");
+        std::cout << "native metadata submit: after initial native view color-watched=" << AgcDriver::GuestMemory::Watched(target.address, colorBytes) << '\n' << std::flush;
         const auto samples = AgcDriver::Graphics::ReadMultisampleTargetSamples(context, target);
         Require(!samples.empty() && std::all_of(samples.begin(), samples.end(), [](auto value) { return value == std::byte{0x40}; }), "native metadata submit: initial native samples differ");
     }
