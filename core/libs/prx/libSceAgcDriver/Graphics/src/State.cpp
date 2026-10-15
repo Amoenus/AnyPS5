@@ -1033,7 +1033,13 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     Require(!result.depth || result.depth->samples == result.samples, "the depth target's sample count differs from the rasterizer's");
     zero(cx, 0x292, ScanModeMask & ~1u, "scan conversion mode");
-    Require(result.samples == 1 || (read(cx, 0x292) & 1u) != 0, "multisampled targets rasterized without MSAA_ENABLE are unsupported");
+    if (result.samples > 1 && (read(cx, 0x292) & 1u) == 0) {
+        const bool filled = result.topology != VK_PRIMITIVE_TOPOLOGY_POINT_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+        Require(filled && !result.depth && !result.alphaToCoverage, "multisampled targets rasterized without MSAA_ENABLE are unsupported for points, lines, a depth target or alpha-to-coverage");
+        result.customSampleLocations = true;
+        result.sampleLocations.fill(0);
+        result.sampleLocationGrid = false;
+    }
     if (result.samples == 1 && (read(cx, 0x292) & 1u) != 0) {
         for (std::uint32_t pixel = 0; pixel < 4; ++pixel) static_cast<void>(read(cx, 0x2feu + pixel * 4u));
         if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) throw std::runtime_error(reason);
