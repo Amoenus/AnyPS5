@@ -151,7 +151,6 @@ enum class NeighborTransition { None, Alias, HostImport, CpuStore };
 
 void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTransition transition) {
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
-    std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
     constexpr std::size_t bytes = 2 * BlockBytes;
     auto* memory = static_cast<std::byte*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, BlockBytes));
     HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, 0, bytes, nullptr);
@@ -163,6 +162,7 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
         HANDLE section;
         void* alias = nullptr;
         ~Cleanup() {
+            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
             device.SubmitRecorded(true);
             device.WaitIdle();
             AgcDriver::Graphics::ClearMultisampleTargets(handle);
@@ -175,6 +175,7 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
             CloseHandle(section);
         }
     } cleanup{device, context.device, memory, section};
+    std::unique_lock lock(AgcDriver::GuestMemory::GpuMutex());
     GuestArena::GuestArenaMapDirect_nid_postfix(memory, bytes, section, 0u, PAGE_READWRITE);
     std::memset(memory, 0, bytes);
     GuestAllocations::Mutation().Add(memory, bytes, true, true, true);
@@ -203,9 +204,20 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
     } else if (transition == NeighborTransition::HostImport) {
         label = "host-import";
         const auto* imported = AgcDriver::Graphics::HostImportFor(context, base + BlockBytes, BlockBytes);
-        Require(imported != nullptr && imported->alias != nullptr && !imported->unwatched, "MSAA neighbor: the host import did not use a tracked section alias");
-        std::cout << "MSAA neighbor host-import offset=" << imported->base - base << " bytes=" << imported->bytes << '\n';
-        Require(imported->base == base + BlockBytes && imported->bytes == BlockBytes, "MSAA neighbor: the host import overlaps the target block");
+        Require(imported == nullptr, "MSAA neighbor: the import would migrate a resident native target");
+        std::cout << "MSAA neighbor host-import declined=1\n";
+        lock.unlock();
+        auto& code = NewBlock();
+        std::memcpy(code.Data(), FillKernel.data(), sizeof(FillKernel));
+        auto& sentinel = NewBlock();
+        constexpr std::uint32_t pattern = 0x12345678u;
+        DispatchFill(code, base + BlockBytes, BlockBytes, pattern);
+        Settle(code, sentinel);
+        std::array<std::uint32_t, 4> stored{};
+        AgcDriver::GuestMemory::Read(base + BlockBytes, std::as_writable_bytes(std::span(stored)), 4);
+        Require(stored == std::array<std::uint32_t, 4>{pattern, pattern, pattern, pattern}, "MSAA neighbor: the copied buffer fill did not reach guest memory");
+        std::cout << "MSAA neighbor copied-fill=" << pattern << '\n';
+        lock.lock();
     } else if (transition == NeighborTransition::CpuStore) {
         label = "same-value-cpu-store";
         *reinterpret_cast<volatile std::uint8_t*>(memory) = 0u;
@@ -219,7 +231,7 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
         refused = std::string_view(refusal).find("guest writes to a resident multisample target or its metadata are not implemented") != std::string_view::npos;
     }
     std::cout << "MSAA neighbor transition=" << label << " watched=" << AgcDriver::GuestMemory::Watched(base, BlockBytes) << " refused=" << refused << " message=" << refusal << '\n';
-    Require(refused == (transition != NeighborTransition::None), "MSAA neighbor: the observed reuse result did not match the hypothesis control");
+    Require(refused == (transition == NeighborTransition::Alias || transition == NeighborTransition::CpuStore), "MSAA neighbor: the observed reuse result did not match the hypothesis control");
     Require(refusal.empty() || refused, "MSAA neighbor: an unrelated exception interrupted the control");
 }
 
