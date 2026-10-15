@@ -7,6 +7,8 @@
 #include "Optimization/ResourceProgram.hpp"
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
+#include <stdexcept>
 
 namespace AgcDriver::DriverDetail {
 
@@ -29,9 +31,27 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     auto& stageCapture = stageCaptures[i];
     stageCapture.forgetSerial = GuestMemory::ForgetSerial();
     stageCapture.pushOffset = pushOffset;
+    const auto named = [&](const std::exception& error) {
+        static const bool dumpShaders = std::getenv("APS5_DUMP_SHADERS") != nullptr;
+        std::string dump;
+        if (dumpShaders) {
+            try {
+                dump = dumpRequest(program.binary.codeAddress, request);
+            } catch (...) {}
+        }
+        std::ostringstream where;
+        where << "shader 0x" << std::hex << program.binary.codeAddress << " stage " << std::dec << static_cast<unsigned>(program.binary.stage);
+        if (!dump.empty()) where << " (" << dump << ")";
+        where << ": ";
+        return std::runtime_error(where.str() + error.what());
+    };
     const auto capture = [&] {
         const SampledReadScope sampling(evidenceReads);
-        return shaderMemory.Capture(invocation);
+        try {
+            return shaderMemory.Capture(invocation);
+        } catch (const std::exception& error) {
+            throw named(error);
+        }
     }();
 
     stageCapture.regions = shaderMemory.TakeRecentRegions();
@@ -73,7 +93,11 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     phaseTiming.Phase(DrawRowCapture);
 
     timing.Mark("capture_resources");
-    stageCapture.compiled = invocation.Materialize(*capture);
+    try {
+        stageCapture.compiled = invocation.Materialize(*capture);
+    } catch (const std::exception& error) {
+        throw named(error);
+    }
     stageCapture.capture = capture;
     timing.Mark("materialize");
     phaseTiming.Phase(DrawRowRecompile);
