@@ -37,6 +37,12 @@ public:
         return reasons & ~std::uint8_t{1};
     }
 
+    bool CanRestoreHostImport(std::uint64_t address, std::size_t bytes) const {
+        if (bytes == 0 || bytes > size || address < base || address - base > size - bytes) return false;
+        if ((address - base) % BlockBytes != 0 || bytes % BlockBytes != 0) return false;
+        return (ExclusionMask(address, bytes) & ~static_cast<std::uint8_t>(Reason::HostImport)) == 0;
+    }
+
     bool Exclude(std::uint64_t address, std::size_t bytes, std::uint64_t generation = 1, Reason reason = Reason::ExplicitUnwatch) {
         if (bytes == 0 || size == 0) return false;
         if (address < base) {

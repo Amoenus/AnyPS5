@@ -1309,6 +1309,15 @@ void Unwatch(std::uint64_t address, std::size_t bytes) {
     unwatchLocked(tracker, address, bytes);
 }
 
+void UnwatchHostImport(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return;
+    beforeUnwatch(address, bytes);
+    auto& tracker = Tracker();
+    const auto lock = lockTracker(tracker);
+    tracker.initialize();
+    unwatchLocked(tracker, address, bytes, WriteWatchCoverage::Reason::HostImport);
+}
+
 bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function<bool()>& import, bool staysWatched) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return import();
     if (!staysWatched) {
@@ -1354,13 +1363,37 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
     }
     if (!imported) return false;
     if (!staysWatched) {
-        if (!before || !walkWrites(tracker, first, stop, StampKind::ImportWindow, true)) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first), WriteWatchCoverage::Reason::IncompleteCollect);
+        if (covered && (!before || !walkWrites(tracker, first, stop, StampKind::ImportWindow, true))) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first), WriteWatchCoverage::Reason::IncompleteCollect);
         unwatchLocked(tracker, address, bytes, WriteWatchCoverage::Reason::HostImport);
         return true;
     }
     const WindowCopy window{first, saved, slots};
     if (!before || !walkWrites(tracker, first, stop, StampKind::Cpu, true, &window)) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first), WriteWatchCoverage::Reason::IncompleteCollect);
     return true;
+}
+
+bool RestoreHostImportWatch(std::uint64_t address, std::size_t bytes, const std::function<void()>& settle) {
+#ifdef _WIN32
+    auto& tracker = Tracker();
+    const auto lock = lockTracker(tracker);
+    tracker.initialize();
+    if (!tracker.watched || !tracker.coverage.CanRestoreHostImport(address, bytes)) return false;
+    if (tracker.covers(address, bytes)) return true;
+    settle();
+    if (!walkWrites(tracker, address, address + bytes, StampKind::Cpu)) return false;
+    tracker.coverage.Restore(address, bytes);
+    if (!tracker.covers(address, bytes)) return false;
+    ++tracker.generation;
+    tracker.noteCpuStore(address, address + bytes, tracker.generation);
+    for (auto block = tracker.blockOf(address); block <= tracker.blockOf(address + bytes - 1); ++block) {
+        tracker.driverPieces.erase(block);
+        tracker.stamp(block, tracker.generation, StampKind::Cpu);
+    }
+    unwatchSerial.fetch_add(1, std::memory_order_release);
+    return true;
+#else
+    return false;
+#endif
 }
 
 bool WriteWatched() {

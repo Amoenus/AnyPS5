@@ -69,6 +69,17 @@ int main() {
         require(coverage.ExclusionMask(base + block, block) == collectReason, "restoring a neighbour erased an unrelated exclusion cause");
         coverage.Initialize(base, block);
         require(coverage.ExclusionMask(base, block) == 0, "initialization kept exclusion causes");
+        require(coverage.CanRestoreHostImport(base, block), "watched blocks cannot be checked for host-import restoration");
+        coverage.Exclude(base, block, 2, Reason::HostImport);
+        require(coverage.CanRestoreHostImport(base, block), "a host-import-only exclusion cannot be restored");
+        require(!coverage.CanRestoreHostImport(base + 1, block - 1) && !coverage.CanRestoreHostImport(base, block - 1), "a partial block can restore host-import tracking");
+        require(!coverage.CanRestoreHostImport(base - block, block) && !coverage.CanRestoreHostImport(base, 0) && !coverage.CanRestoreHostImport(base, std::numeric_limits<std::size_t>::max()), "an invalid range can restore host-import tracking");
+        coverage.Exclude(base, block, 3, Reason::ExplicitUnwatch);
+        require(!coverage.CanRestoreHostImport(base, block), "host-import restoration clears an explicit exclusion");
+        coverage.Initialize(base, 2 * block);
+        coverage.Exclude(base, block, 2, Reason::HostImport);
+        coverage.Exclude(base + block, block, 2, Reason::IncompleteCollect);
+        require(!coverage.CanRestoreHostImport(base, 2 * block) && coverage.CanRestoreHostImport(base, block), "host-import restoration clears an incomplete collection or damages its neighbour");
         std::cout << "write watch coverage passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -537,6 +537,7 @@ private:
         if (StorageTexture::FlushPending(address, bytes)) {
             if (auto* recorder = recorderFor(context); recorder != nullptr) recorder->SyncThrough(address, bytes);
         }
+        RequireGuestWriteWatch(context, address, bytes);
         const auto generation = GuestMemory::CollectWritesUncached(address, bytes);
         std::vector<std::byte> data(bytes);
         std::memcpy(data.data(), reinterpret_cast<const void*>(address), bytes);

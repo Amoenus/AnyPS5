@@ -1029,6 +1029,7 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
     }
     if (end != 0) run = windowRun(state, std::move(run), address, end, context.hostImportAlignment);
     if (run.ranges.empty()) return nullptr;
+    if (end == 0 && ResidentImageRangeOverlaps_nid_no_patch(run.base, static_cast<std::size_t>(run.bytes))) return nullptr;
     if (context.hostImportAlignment != 0u && end > address && ResidentImageRangeOverlaps_nid_no_patch(run.base, static_cast<std::size_t>(run.bytes)) && !ResidentImageRangeOverlaps_nid_no_patch(address, static_cast<std::size_t>(end - address))) {
         const auto alignment = context.hostImportAlignment;
         const auto begin = address / alignment * alignment;
@@ -1154,8 +1155,9 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     VkResult result = VK_SUCCESS;
     const char* step = nullptr;
 #ifdef _WIN32
-    const bool settled = entry.alias == nullptr && state.watchPrivateImports && writable && bytes >= settleFloorBytes;
-    const bool watchedHostPointer = entry.alias != nullptr || !state.unwatchImports || settled;
+    const bool resident = ResidentImageRangeOverlaps_nid_no_patch(base, static_cast<std::size_t>(bytes));
+    const bool settled = !resident && entry.alias == nullptr && state.watchPrivateImports && writable && bytes >= settleFloorBytes;
+    const bool watchedHostPointer = !resident && (entry.alias != nullptr || !state.unwatchImports || settled);
     const bool watchedDmaBuf = watchedHostPointer;
 #else
     const bool watchedHostPointer = !state.unwatchImports;
@@ -1267,7 +1269,7 @@ void refreshImports(const Context& context, HostImports& state, const GuestAlloc
     std::erase_if(state.sparseRunJoins, [&](const auto& entry) { return !starts(entry.first); });
     for (auto it = state.imports.begin(); it != state.imports.end();) {
         if (sameRange(it->second, lease)) {
-            if (it->second.unwatched) GuestMemory::Unwatch(it->first, it->second.bytes);
+            if (it->second.unwatched) GuestMemory::UnwatchHostImport(it->first, it->second.bytes);
             ++it;
             continue;
         }
@@ -2582,6 +2584,45 @@ const HostImport* HostImportFor(const Context& context, std::uint64_t address, s
     const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
     refreshImports(context, state, lease);
     return importAccess(context, state, address, address + bytes, lease);
+}
+
+void RequireGuestWriteWatch(const Context& context, std::uint64_t address, std::size_t bytes) {
+    Require(bytes != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address, "required write-watch range is empty or overflows");
+    if (GuestMemory::Watched(address, bytes)) return;
+#ifdef _WIN32
+    GuestMemory::AssertGpuLockHeld("RequireGuestWriteWatch");
+    auto& state = Imports();
+    std::lock_guard lock(state.mutex);
+    Require(context.device != VK_NULL_HANDLE && (state.device == VK_NULL_HANDLE || state.device == context.device), "write-watch promotion requires the import-owning device");
+    decideImportWatch(context, state);
+    Require(state.watchPrivateImports && context.settleQueue != VK_NULL_HANDLE && context.settleQueueMutex != nullptr, "required private-import write watching is unavailable");
+    const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
+    refreshImports(context, state, lease);
+    auto cursor = address;
+    while (cursor < address + bytes) {
+        if (findImport(state, cursor, cursor + 1u) == nullptr) Require(importAccess(context, state, cursor, address + bytes, lease) != nullptr, "required write-watch range cannot be privately imported");
+        auto found = state.imports.upper_bound(cursor);
+        Require(found != state.imports.begin(), "required write-watch range has no private host import");
+        auto& entry = std::prev(found)->second;
+        Require(entry.base <= cursor && cursor - entry.base < entry.bytes && entry.alias == nullptr && !entry.dmaBuf, "required write-watch range is not a direct private host import");
+        if (!GuestMemory::Watched(entry.base, static_cast<std::size_t>(entry.bytes))) {
+            Require(!ResidentImageRangeOverlaps_nid_no_patch(entry.base, static_cast<std::size_t>(entry.bytes)), "write-watch promotion over a resident image is not implemented");
+            if (const auto* recorder = Recorder::Active(); recorder != nullptr) Require(!recorder->PendingWriteOverlaps(entry.base, static_cast<std::size_t>(entry.bytes)), "write-watch promotion over queued GPU writes is not implemented");
+            for (auto at = entry.base; at < entry.base + entry.bytes;) {
+                MEMORY_BASIC_INFORMATION info{};
+                Require(VirtualQuery(reinterpret_cast<const void*>(at), &info, sizeof(info)) != 0 && info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && info.Protect == PAGE_READWRITE, "write-watch promotion requires committed private read-write memory");
+                at = reinterpret_cast<std::uint64_t>(info.BaseAddress) + info.RegionSize;
+            }
+            Require(GuestMemory::RestoreHostImportWatch(entry.base, static_cast<std::size_t>(entry.bytes), [&] {
+                VkResult result = VK_SUCCESS;
+                if (const auto* step = settleImport(context, state, entry, result)) throw std::runtime_error(std::string("AGC graphics: required private-import settle failed at ") + step + " (" + std::to_string(result) + ")");
+            }), "required private-import write-watch restoration was refused");
+            entry.unwatched = false;
+        }
+        cursor = std::min<std::uint64_t>(address + bytes, entry.base + entry.bytes);
+    }
+#endif
+    Require(GuestMemory::Watched(address, bytes), "required guest memory is not write watched");
 }
 
 bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& ranges, std::uint64_t generation, bool adoptDevice) {

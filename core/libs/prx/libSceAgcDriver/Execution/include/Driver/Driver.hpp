@@ -76,6 +76,7 @@ public:
     static std::uint64_t DispatchCacheBytes();
 
 private:
+    friend struct DriverTestAccess;
     friend class SampledReadScope;
     friend struct PendingView;
     friend struct PacketTimer;
