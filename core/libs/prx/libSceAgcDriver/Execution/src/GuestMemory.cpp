@@ -1280,7 +1280,21 @@ namespace {
 std::atomic<void (*)(std::uint64_t, std::size_t)> unwatchHook{nullptr};
 
 void beforeUnwatch(std::uint64_t address, std::size_t bytes) {
-    if (const auto hook = unwatchHook.load(std::memory_order_acquire)) hook(address, bytes);
+    const auto hook = unwatchHook.load(std::memory_order_acquire);
+    if (hook == nullptr) return;
+#ifdef _WIN32
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    {
+        auto& tracker = Tracker();
+        const auto lock = lockTracker(tracker);
+        tracker.initialize();
+        if (!tracker.watched || !tracker.coverage.ExcludedSpan(address, bytes, &begin, &end)) return;
+    }
+    hook(begin, static_cast<std::size_t>(end - begin));
+#else
+    hook(address, bytes);
+#endif
 }
 
 void unwatchLocked(WriteTracker& tracker, std::uint64_t address, std::size_t bytes, WriteWatchCoverage::Reason reason = WriteWatchCoverage::Reason::ExplicitUnwatch) {
