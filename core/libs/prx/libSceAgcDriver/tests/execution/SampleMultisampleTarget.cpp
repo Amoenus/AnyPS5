@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -27,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <span>
 #include <string>
 #include <vector>
@@ -79,11 +81,18 @@ constexpr std::array<std::array<float, 4>, 3> Triangle{{
 alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
 
 struct Block {
-    explicit Block(std::size_t bytes) : bytes(bytes) {
+    explicit Block(std::size_t bytes, bool resident = false) : bytes(bytes) {
 #ifdef _WIN32
         data = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, BlockBytes));
-        GuestArena::GuestArenaCommit_nid_postfix(data, bytes, PAGE_READWRITE, bytes);
+        if (resident) {
+            section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, 0, bytes, nullptr);
+            Require(section != nullptr, "cannot create the multisampled color target's resident section");
+            GuestArena::GuestArenaMapDirect_nid_postfix(data, bytes, section, 0u, PAGE_READWRITE);
+        } else {
+            GuestArena::GuestArenaCommit_nid_postfix(data, bytes, PAGE_READWRITE, bytes);
+        }
 #else
+        Require(!resident, "private resident color target sections require Windows");
         data = static_cast<std::uint8_t*>(std::aligned_alloc(BlockBytes, bytes));
         GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(data, bytes);
 #endif
@@ -100,6 +109,10 @@ struct Block {
 #ifdef _WIN32
         GuestArena::GuestArenaReset_nid_postfix(data, bytes);
         GuestArena::GuestArenaRelease_nid_postfix(data, bytes);
+        if (section != nullptr) {
+            GuestArena::GuestArenaForgetSection_nid_postfix(section);
+            CloseHandle(section);
+        }
 #else
         GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(data, bytes);
         std::free(data);
@@ -110,6 +123,9 @@ struct Block {
     std::uint64_t Address() const { return reinterpret_cast<std::uintptr_t>(data); }
     std::size_t bytes;
     std::uint8_t* data = nullptr;
+#ifdef _WIN32
+    HANDLE section = nullptr;
+#endif
 };
 
 AgcDriver::Graphics::ColorTarget DecodeTarget(const Block& block) {
@@ -321,6 +337,42 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
     Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
 }
 
+#ifdef _WIN32
+void ResidentDrawNeighborImport(AgcDriver::VulkanDevice& device) {
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    Block block(4u * BlockBytes, true);
+    struct Cleanup {
+        AgcDriver::VulkanDevice& device;
+        VkDevice handle;
+        ~Cleanup() {
+            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+            device.SubmitRecorded(true);
+            device.WaitIdle();
+            AgcDriver::Graphics::ClearMultisampleTargets(handle);
+            AgcDriver::Graphics::ClearHostImports(handle);
+        }
+    } cleanup{device, context.device};
+    const auto color = DecodeTarget(block);
+    Require(AgcDriver::Graphics::MultisampledColorBytes(color) == BlockBytes, "the resident drawn target does not occupy exactly one block");
+    std::uintptr_t start = 0u, end = 0u;
+    Require(GuestArena::GuestArenaResidentSpan_nid_postfix(block.Address(), block.bytes, &start, &end) && start == block.Address() && end == start + block.bytes, "the drawn target and its neighbor are not one private resident run");
+    const auto state = TargetState(color);
+    Draw(device, state);
+    const auto before = LoadSamples(device, block);
+    CheckSamples(state, before, {});
+    {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        Require(AgcDriver::GuestMemory::Watched(block.Address(), BlockBytes), "the drawn resident target is not watched before the neighboring import");
+        Require(AgcDriver::Graphics::HostImportFor(context, block.Address() + BlockBytes, BlockBytes) == nullptr, "the neighboring import would migrate a GPU-written resident target");
+        Require(AgcDriver::GuestMemory::Watched(block.Address(), BlockBytes), "the neighboring import removed the drawn resident target's watch");
+    }
+    const auto after = LoadSamples(device, block);
+    CheckSamples(state, after, {});
+    Require(after == before, "the neighboring import changed the resident target's drawn samples");
+    std::cout << "resident GPU-written target: neighboring import declined, " << after.size() << " samples preserved\n";
+}
+#endif
+
 }
 
 int main() {
@@ -364,6 +416,9 @@ int main() {
             descriptor[3] = (descriptor[3] & ~(0x1fu << 20u)) | (tileMode << 20u);
             RequireRefused(*device, descriptor, "does not hold one repeated 32-bit value", "nonuniform standard-tiled multisample initial contents");
         }
+#ifdef _WIN32
+        ResidentDrawNeighborImport(*device);
+#endif
         std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it, then the fill of its color memory");
         return 0;
     } catch (const std::exception& error) {
