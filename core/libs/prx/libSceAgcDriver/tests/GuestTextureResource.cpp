@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <algorithm>
 #include <array>
 #include <string>
@@ -273,6 +274,60 @@ void RunGuestTextureResourceTests() {
     Require(sonicResource.width == 3840u && sonicResource.height == 2160u && sonicResource.samples == 8u && sonicResource.format == 71u, "the PPSA99902 multisampled color descriptor decoded incorrectly");
     Require(sonicGeometry.guestBytes == 0x1fe00000ull, "the PPSA99902 8x surface footprint omits fragments: " + std::to_string(sonicGeometry.guestBytes));
     Require(canvasGeometry.guestBytes == 0x190000u, "the 297x297 4x surface footprint does not use fragment-aware blocks");
+    auto singleSample = sonicResource;
+    singleSample.samples = 1u;
+    singleSample.dimension = TextureDimension::k2D;
+    Require(DescribeSurface(singleSample).guestBytes == 0x3fc0000u, "single-sample surface geometry changed");
+    struct FootprintCase {
+        TextureTileMode tile;
+        VkFormat format;
+        std::uint32_t elementBytes, width, height, samples, blocksPerRow;
+        std::uint64_t bytes;
+    };
+    const std::array footprints{
+        FootprintCase{TextureTileMode::kR64KBX, VK_FORMAT_R8_UINT, 1u, 129u, 65u, 2u, 2u, 0x20000u},
+        FootprintCase{TextureTileMode::kR64KBX, VK_FORMAT_R16_UINT, 2u, 65u, 129u, 4u, 1u, 0x30000u},
+        FootprintCase{TextureTileMode::kR64KBX, VK_FORMAT_R32_UINT, 4u, 129u, 65u, 2u, 3u, 0x30000u},
+        FootprintCase{TextureTileMode::kR64KBX, VK_FORMAT_R32_UINT, 4u, 65u, 129u, 2u, 2u, 0x40000u},
+        FootprintCase{TextureTileMode::kR64KBX, VK_FORMAT_R32_UINT, 4u, 297u, 297u, 4u, 5u, 0x190000u},
+        FootprintCase{TextureTileMode::kR64KBX, VK_FORMAT_R32_UINT, 4u, 65u, 129u, 8u, 3u, 0x90000u},
+        FootprintCase{TextureTileMode::kR64KBX, VK_FORMAT_R32G32_SFLOAT, 8u, 3840u, 2160u, 8u, 120u, 0x1fe00000u},
+        FootprintCase{TextureTileMode::kR64KBX, VK_FORMAT_R32G32B32A32_UINT, 16u, 16384u, 16384u, 8u, 1024u, 0x800000000ull},
+        FootprintCase{TextureTileMode::kZ64KBX, VK_FORMAT_R16_UNORM, 2u, 129u, 65u, 2u, 2u, 0x20000u},
+        FootprintCase{TextureTileMode::kZ64KBX, VK_FORMAT_R32_SFLOAT, 4u, 65u, 129u, 8u, 3u, 0x90000u},
+        FootprintCase{TextureTileMode::kStandard4KB, VK_FORMAT_R32_UINT, 4u, 17u, 33u, 4u, 2u, 0x6000u},
+        FootprintCase{TextureTileMode::kStandard64KB, VK_FORMAT_R32_UINT, 4u, 129u, 65u, 2u, 3u, 0x30000u}
+    };
+    for (const auto& test : footprints) {
+        auto resource = sonicResource;
+        const auto format = FindGuestTextureFormat(test.format, test.elementBytes);
+        Require(format.has_value(), "the multisample footprint test format has no guest encoding");
+        resource.format = format.value();
+        resource.width = test.width;
+        resource.height = test.height;
+        resource.samples = test.samples;
+        resource.tileMode = test.tile;
+        const auto geometry = DescribeSurface(resource);
+        const auto linearBytes = static_cast<std::uint64_t>(test.width) * test.height * test.samples * test.elementBytes;
+        Require(geometry.guestBytes == test.bytes && geometry.layerBytes == test.bytes && geometry.sliceLinearBytes == linearBytes, "multisampled surface footprint or linear size disagrees with the reference");
+        Require(geometry.layers == 1u && geometry.imageLayers == 1u && geometry.imageDepth == 1u && !geometry.thick && geometry.blockDepth == 1u && geometry.mips.size() == 1u, "multisampled surface geometry is not one thin 2D level");
+        const auto& mip = geometry.mips.front();
+        Require(mip.tiledOffset == 0u && mip.tiledSize == test.bytes && mip.linearOffset == 0u && mip.linearSize == linearBytes && mip.width == test.width && mip.height == test.height && mip.blocksPerRow == test.blocksPerRow && mip.pitchBytes == test.width * test.samples * test.elementBytes && !mip.tail && mip.tailX == 0u && mip.tailY == 0u, "multisampled mip geometry lost its sample pitch or block layout");
+    }
+    auto unsupportedSurface = sonicResource;
+    for (const auto samples : {0u, 3u, 16u}) {
+        unsupportedSurface.samples = samples;
+        reject([&] { DescribeSurface(unsupportedSurface); }, "fragment count");
+    }
+    unsupportedSurface = sonicResource;
+    unsupportedSurface.mipCount = 2u;
+    reject([&] { DescribeSurface(unsupportedSurface); }, "mip levels");
+    unsupportedSurface = sonicResource;
+    unsupportedSurface.dimension = TextureDimension::k2DArray;
+    reject([&] { DescribeSurface(unsupportedSurface); }, "dimension or array");
+    unsupportedSurface = sonicResource;
+    unsupportedSurface.tileMode = TextureTileMode::kStandard256B;
+    reject([&] { DescribeSurface(unsupportedSurface); }, "4 KiB or 64 KiB");
     Fields fewerFragments = multisampled;
     fewerFragments.maxMip = 1;
     rejectFields(fewerFragments, "same sample count");
