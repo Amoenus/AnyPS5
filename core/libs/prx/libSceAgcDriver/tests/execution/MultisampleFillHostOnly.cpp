@@ -1,8 +1,11 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferFill.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleDcc.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleInitialContents.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
@@ -148,6 +151,118 @@ ColorTarget MultisampledTarget(const GuestBlock& color) {
 
 #ifdef _WIN32
 enum class NeighborTransition { None, Alias, HostImport, CpuStore };
+
+void DispatchConstantFill(const GuestBlock& code, std::uint64_t address, std::uint32_t bytes, std::uint32_t value, std::uint32_t groups, std::uint32_t flags = 0x41u) {
+    Submit({
+        Pm4Packet(0x76, {0x20c, Low(code.Address() >> 8u)}),
+        Pm4Packet(0x76, {0x20d, High(code.Address() >> 8u) & 0xffu}),
+        Pm4Packet(0x76, {0x207, 64u, 1u, 1u}),
+        Pm4Packet(0x76, {0x213, (6u << 1u) | 0x80u}),
+        Pm4Packet(0x76, {0x240, 0u, 0u, Low(address), High(address), bytes - 16u, value}),
+        Pm4Packet(0x15, {groups, 1u, 1u, flags}),
+    });
+}
+
+void NativeMetadataClearViaDriver(AgcDriver::VulkanDevice& device) {
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    constexpr std::size_t residentBytes = 4u * BlockBytes;
+    auto* memory = static_cast<std::byte*>(GuestArena::GuestArenaAllocate_nid_postfix(residentBytes, BlockBytes));
+    HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, 0, residentBytes, nullptr);
+    Require(memory != nullptr && section != nullptr, "native metadata submit: cannot allocate a private resident run");
+    struct Cleanup {
+        AgcDriver::VulkanDevice& device;
+        VkDevice handle;
+        std::byte* memory;
+        HANDLE section;
+        ~Cleanup() {
+            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+            device.SubmitRecorded(true);
+            device.WaitIdle();
+            AgcDriver::Graphics::ClearMultisampleTargets(handle);
+            AgcDriver::Graphics::ClearHostImports(handle);
+            GuestAllocations::Mutation().Remove(memory);
+            GuestArena::GuestArenaReset_nid_postfix(memory, residentBytes);
+            GuestArena::GuestArenaRelease_nid_postfix(memory, residentBytes);
+            GuestArena::GuestArenaForgetSection_nid_postfix(section);
+            CloseHandle(section);
+        }
+    } cleanup{device, context.device, memory, section};
+    GuestArena::GuestArenaMapDirect_nid_postfix(memory, residentBytes, section, 0u, PAGE_READWRITE);
+    GuestAllocations::Mutation().Add(memory, residentBytes, true, true, true);
+    auto& code = NewBlock();
+    auto& settleCode = NewBlock();
+    auto& sentinel = NewBlock();
+    auto& control = NewBlock();
+    std::memset(memory, 0x40, BlockBytes);
+    std::memset(memory + BlockBytes, 0xff, BlockBytes);
+    std::memset(memory + 2u * BlockBytes, 0xee, BlockBytes);
+    std::fill_n(reinterpret_cast<std::uint32_t*>(memory + 3u * BlockBytes), BlockBytes / 4u, AgcDriver::Graphics::MultisampleExpandedFmask(4u));
+    std::memcpy(code.Data(), AgcDriver::DriverDetail::ConstantFillKernel.data(), sizeof(AgcDriver::DriverDetail::ConstantFillKernel));
+    std::memcpy(settleCode.Data(), FillKernel.data(), sizeof(FillKernel));
+    for (const auto count : {16u, 1024u, 1040u, static_cast<std::uint32_t>(BlockBytes)}) {
+        constexpr std::uint32_t pattern = 0x12345678u;
+        std::memset(control.Data(), static_cast<int>(Marker), BlockBytes);
+        DispatchConstantFill(code, control.Address(), count, pattern, (count + 1023u) / 1024u + 1u);
+        Settle(settleCode, sentinel);
+        std::vector<std::uint32_t> stored(BlockBytes / 4u);
+        AgcDriver::GuestMemory::Read(control.Address(), std::as_writable_bytes(std::span(stored)), 4u);
+        for (std::size_t index = 0u; index < stored.size(); ++index) Require(stored[index] == (index < count / 4u ? pattern : 0xababababu), "native metadata submit: constant fill changed its requested bytes or the untouched suffix");
+    }
+    std::memset(control.Data(), static_cast<int>(Marker), BlockBytes);
+    DispatchConstantFill(code, control.Address(), 16u, 0x12345678u, 17u, 0x61u);
+    Settle(settleCode, sentinel);
+    std::vector<std::uint32_t> threadMode(BlockBytes / 4u);
+    AgcDriver::GuestMemory::Read(control.Address(), std::as_writable_bytes(std::span(threadMode)), 4u);
+    for (std::size_t index = 0u; index < threadMode.size(); ++index) Require(threadMode[index] == (index < 4u ? 0x12345678u : 0xababababu), "native metadata submit: the GPU thread-count form changed its requested bytes or untouched suffix");
+    std::cout << "native metadata submit: constant-fill plain-buffer bounds verified\n" << std::flush;
+    ColorTarget target{};
+    target.address = target.surfaceAddress = reinterpret_cast<std::uintptr_t>(memory);
+    target.extent = target.surfaceExtent = {Side, Side};
+    target.format = VK_FORMAT_R8G8B8A8_UNORM;
+    target.tileMode = AgcDriver::Graphics::ColorTileMode::RenderTarget;
+    target.elementBytes = 4u;
+    target.bytes = BlockBytes;
+    target.samples = 4u;
+    target.dccAddress = target.address + BlockBytes;
+    target.cmaskAddress = target.address + 2u * BlockBytes;
+    target.fmaskAddress = target.address + 3u * BlockBytes;
+    target.dccPipeAligned = target.dccAlphaOnMsb = true;
+    target.dccControl = 0x100038u;
+    target.cmaskBytes = AgcDriver::Graphics::CmaskBytes(Side, Side);
+    target.fmaskSwizzle = 0x18u;
+    const auto bytes = AgcDriver::Graphics::MultisampleDccBytes_nid_no_patch(4u, 4u, Side, Side, 1u);
+    {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        Require(AgcDriver::Graphics::MultisampleTargetView(context, target) != VK_NULL_HANDLE, "native metadata submit: no initial native view");
+        const auto samples = AgcDriver::Graphics::ReadMultisampleTargetSamples(context, target);
+        Require(!samples.empty() && std::all_of(samples.begin(), samples.end(), [](auto value) { return value == std::byte{0x40}; }), "native metadata submit: initial native samples differ");
+    }
+    Require(AgcDriver::GuestMemory::Watched(target.address, BlockBytes), "native metadata submit: color untracked before driver submission");
+    std::cout << "native metadata submit: initial samples and watch verified\n" << std::flush;
+    for (const auto value : {0xc0u, 0u, 0x40u, 0x80u}) {
+        DispatchConstantFill(code, target.dccAddress, static_cast<std::uint32_t>(bytes), value * 0x01010101u, static_cast<std::uint32_t>((bytes + 1023u) / 1024u));
+        Require(AgcDriver::GuestMemory::Watched(target.address, BlockBytes), "native metadata submit: driver clear removed the color watch");
+        Settle(settleCode, sentinel);
+        Require(AgcDriver::GuestMemory::Watched(target.address, BlockBytes), "native metadata submit: settling removed the color watch");
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        const auto samples = AgcDriver::Graphics::ReadMultisampleTargetSamples(context, target);
+        Require(samples.size() == Side * Side * 4u * 4u, "native metadata submit: native sample count changed");
+        for (std::size_t index = 0u; index < samples.size(); ++index) {
+            const auto mask = index % 4u == 3u ? 0x40u : 0x80u;
+            Require(samples[index] == ((value & mask) != 0u ? std::byte{0xff} : std::byte{}), "native metadata submit: known clear did not reach every native sample");
+        }
+    }
+    *reinterpret_cast<volatile std::byte*>(memory + BlockBytes) = std::byte{0x80};
+    std::string refusal;
+    try {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        static_cast<void>(AgcDriver::Graphics::ReadMultisampleTargetSamples(context, target));
+    } catch (const std::runtime_error& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find("guest writes to a resident multisample target") != std::string::npos, "native metadata submit: same-value CPU metadata store was accepted");
+    std::puts("native metadata submit: four known DCC clears reached every RGBA8 sample; same-value CPU store refused");
+}
 
 void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTransition transition) {
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
@@ -376,6 +491,7 @@ int main() {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
 #ifdef _WIN32
+        NativeMetadataClearViaDriver(*device);
         ResidentColorNeighborTransition(*device, NeighborTransition::None);
         ResidentColorNeighborTransition(*device, NeighborTransition::Alias);
         ResidentColorNeighborTransition(*device, NeighborTransition::HostImport);
