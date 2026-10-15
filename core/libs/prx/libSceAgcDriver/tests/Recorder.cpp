@@ -6314,6 +6314,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
     refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side, 3u, address), "as a 64x64 texture of 8 samples", "sampling a 4x target as an 8x texture");
     refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side / 2u, 2u, address), "as a 32x64 texture of 4 samples", "sampling a 4x target as a narrower texture");
     refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side, 2u, address + 4u * 65536u), "which no draw rendered to and whose tile mode 0 has no modeled multisampled color footprint", "sampling a linear multisampled texture no draw rendered to");
+    std::cout << "multisample storage fixture feature-enabled=" << context.storageImageMultisample << '\n';
     if (context.storageImageMultisample) {
         const auto stored = sampledProgram(ShaderRecompiler::DescriptorKind::StorageImage, multisampledWords(side, 2u, address));
         const CompiledShader storedCompute{ShaderRecompiler::ShaderStage::Compute, &stored, 0};
