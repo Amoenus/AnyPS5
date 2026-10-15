@@ -252,11 +252,13 @@ function(add_shader_recompiler target runtimeTarget)
             SampledTextureNumericClass
             SetDebugProbeActive
             ShaderCacheDirectory
+            ShaderStage
             SrgbDecodeBit
             SrgbUnormFormat
             FindUserDataTail
             LinkUserDataTail
             ThreadOwned
+            ProgramRole
             UnresolvableSwappcTarget
             ValidateAndOptimizeSpirv
             FindUserDataCalls
