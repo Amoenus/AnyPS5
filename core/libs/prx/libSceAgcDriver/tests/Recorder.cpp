@@ -43,7 +43,9 @@
 #endif
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 #include <functional>
 #include <algorithm>
@@ -3930,7 +3932,11 @@ void importWatchTests(const Device& device) {
     Require(probe.failure == nullptr, std::string("(u) the import probe failed at ") + (probe.failure != nullptr ? probe.failure : "") + " (" + std::to_string(static_cast<int>(probe.result)) + ")");
     std::cout << "import probe: " << probe.writtenAfterSubmit << " of " << probe.pages << " scratch pages written after a GPU read, " << probe.writtenAfterFill << " after a GPU write, " << probe.writtenAtImport << " after the import\n";
     Require(probe.writtenByCpu != 0, "(u) a CPU store after the import probe's GPU read was not collected");
-    if (context.dmaBufImport) {
+    const int udmabuf = context.dmaBufImport ? open("/dev/udmabuf", O_RDWR | O_CLOEXEC) : -1;
+    if (udmabuf >= 0) close(udmabuf);
+    if (context.dmaBufImport && udmabuf < 0) {
+        std::cout << "/dev/udmabuf is not accessible: the dma-buf import probe not tested\n";
+    } else if (context.dmaBufImport) {
         const auto dmaBuf = ProbeDmaBufImportWriteProtection(context);
         Require(dmaBuf.failure == nullptr, std::string("(u) the dma-buf import probe failed at ") + (dmaBuf.failure != nullptr ? dmaBuf.failure : "") + " (" + std::to_string(static_cast<int>(dmaBuf.result)) + ")");
         Require(dmaBuf.writtenByCpu != 0, "(u) a CPU store into a dma-buf imported scratch range was not collected");

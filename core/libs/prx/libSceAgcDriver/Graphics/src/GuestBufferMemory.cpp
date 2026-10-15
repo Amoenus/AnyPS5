@@ -652,6 +652,8 @@ ImportWatchRequest importWatchRequest() {
 #endif
 
 #ifdef _WIN32
+constexpr std::uint64_t settleFloorBytes = 0x100000;
+
 const char* settleImport(const Context& context, HostImports& state, const HostImport& entry, VkResult& result) {
     std::unique_lock queueLock(*context.settleQueueMutex);
     if (state.settleDevice != context.device) {
@@ -1152,7 +1154,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     VkResult result = VK_SUCCESS;
     const char* step = nullptr;
 #ifdef _WIN32
-    const bool settled = entry.alias == nullptr && state.watchPrivateImports && writable;
+    const bool settled = entry.alias == nullptr && state.watchPrivateImports && writable && bytes >= settleFloorBytes;
     const bool watchedHostPointer = entry.alias != nullptr || !state.unwatchImports || settled;
     const bool watchedDmaBuf = watchedHostPointer;
 #else
@@ -2375,6 +2377,7 @@ void runImportProbe(const Context& context, std::uint64_t base, std::uint64_t by
         const VkBufferCopy region{0, 0, bytes};
         context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands[0], import.buffer, destination, 1, &region);
         if ((probe.result = context.Function<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(commands[0])) != VK_SUCCESS) return "vkEndCommandBuffer";
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if ((probe.result = context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands[1], &begin)) != VK_SUCCESS) return "vkBeginCommandBuffer";
         context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(commands[1], import.buffer, 0, bytes, 0x02020202u);
         if ((probe.result = context.Function<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(commands[1])) != VK_SUCCESS) return "vkEndCommandBuffer";
