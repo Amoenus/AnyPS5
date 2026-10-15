@@ -369,6 +369,7 @@ private:
     void build(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::size_t indexBytes);
     void buildPrepare(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::size_t indexBytes);
     void buildComplete();
+    void synchronizeGuestBuffers(std::span<const MovedBuffer> moved = {}) const;
     // APS5_PROFILE_DRAW: closes the current sub-phase of the build into the [resources] totals.
     double phase(BuildPhase which);
     // `written` is the element's DescriptorBinding::bufferWritten: a read-only element binds the
