@@ -384,12 +384,16 @@ ThickLayout ComputeThickLayout(TextureTileMode tileMode, std::uint32_t format, s
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
     SurfaceGeometry geometry;
     if (descriptor.samples != 1u) {
-        Require(descriptor.mipCount == 1u && descriptor.baseLevel == 0u && descriptor.lastLevel == 0u, "multisampled texture has mip levels");
+        Require(descriptor.samples == 2u || descriptor.samples == 4u || descriptor.samples == 8u, "multisampled surface fragment count is not implemented");
+        Require(descriptor.mipCount == 1u && descriptor.allocatedMipCount == 1u && descriptor.baseLevel == 0u && descriptor.lastLevel == 0u, "multisampled surface mip levels are not implemented");
+        Require(descriptor.width != 0u && descriptor.width <= 16384u && descriptor.height != 0u && descriptor.height <= 16384u, "invalid multisampled surface extent");
         Require(!IsBlockCompressed(descriptor.format), "multisampled block-compressed texture is unsupported");
-        Require(descriptor.dimension == TextureDimension::k2DMsaa || descriptor.dimension == TextureDimension::k2DMsaaArray, "multisampled texture dimension is not 2D or array");
+        Require(descriptor.dimension == TextureDimension::k2DMsaa || descriptor.dimension == TextureDimension::k2DMsaaArray, "multisampled surface dimension or array range is not implemented");
         geometry.layers = descriptor.dimension == TextureDimension::k2DMsaaArray ? descriptor.depthOrLastArray + 1u : 1u;
         geometry.imageLayers = geometry.layers;
         const auto elementBytes = BytesPerElement(descriptor.format);
+        const auto block = GetBlockLayout(descriptor.tileMode, elementBytes);
+        Require(block.blockSize == 4096u || block.blockSize == 65536u, "multisampled surface requires 4 KiB or 64 KiB blocks");
         if (descriptor.tileMode == TextureTileMode::kStandard4KB || descriptor.tileMode == TextureTileMode::kStandard64KB) {
             Require(descriptor.width != 0u && descriptor.height != 0u && descriptor.width <= 16384u && descriptor.height <= 16384u, "invalid standard-tiled multisample extent");
             Require(descriptor.dimension == TextureDimension::k2DMsaa && descriptor.baseArray == 0u && descriptor.depthOrLastArray == 0u && descriptor.minLod == 0u && descriptor.dccAddress == 0u && descriptor.pipeBankXor == 0u, "standard-tiled multisample arrays, metadata or view offsets are not implemented");
