@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -87,6 +88,22 @@ alignas(256) constexpr std::array<std::uint32_t, 26> LoadCode{
 constexpr std::array<std::array<float, 4>, 3> Triangle{{
     {-1.0f, -1.0f, 0.5f, 1.0f}, {0.83f, -1.0f, 0.5f, 1.0f}, {-1.0f, 0.71f, 0.5f, 1.0f}
 }};
+
+constexpr std::array<std::array<float, 4>, 3> FullTriangle{{
+    {-1.0f, -1.0f, 0.5f, 1.0f}, {3.0f, -1.0f, 0.5f, 1.0f}, {-1.0f, 3.0f, 0.5f, 1.0f}
+}};
+
+alignas(256) constexpr std::array<std::uint32_t, 11> OnesPixelCode{
+    0x7e0802ff, 0x3f800000, 0x7e0a02ff, 0x3f800000, 0x7e0c02ff, 0x3f800000, 0x7e0e02ff, 0x3f800000, 0xf800180f, 0x07060504, 0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 11> HalvesPixelCode{
+    0x7e0802ff, 0x3f000000, 0x7e0a02ff, 0x3f000000, 0x7e0c02ff, 0x3f000000, 0x7e0e02ff, 0x3f000000, 0xf800180f, 0x07060504, 0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 7> BufferLoadCode{
+    0x34020082, 0xe8001000u | (20u << 19u), 0x80000201, 0xbf8c0000, 0xe0701000, 0x80010201, 0xbf810000,
+};
 
 alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
 
@@ -175,12 +192,12 @@ AgcDriver::Graphics::State TargetState(const AgcDriver::Graphics::ColorTarget& c
     return state;
 }
 
-void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state) {
+void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state, std::span<const std::array<float, 4>> vertices = Triangle, std::span<const std::uint32_t> pixelCode = PixelCode) {
     const auto target = device.Target();
     constexpr std::uint32_t waveSize = 64;
     std::vector<std::uint32_t> vertexUserData(4, 0u);
-    const auto address = reinterpret_cast<std::uintptr_t>(Triangle.data());
-    const std::array<std::uint32_t, 4> vertexBuffer{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (16u << 16u), static_cast<std::uint32_t>(Triangle.size()), 0x01016facu};
+    const auto address = reinterpret_cast<std::uintptr_t>(vertices.data());
+    const std::array<std::uint32_t, 4> vertexBuffer{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (16u << 16u), static_cast<std::uint32_t>(vertices.size()), 0x01016facu};
     std::copy(vertexBuffer.begin(), vertexBuffer.end(), vertexUserData.begin());
     const std::array<ShaderRecompiler::MemoryRegion, 1> vertexMemory{{{reinterpret_cast<std::uintptr_t>(VertexCode.data()), std::as_bytes(std::span(VertexCode))}}};
     ShaderRecompiler::RecompileRequest vertex{
@@ -192,8 +209,7 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& sta
     vertex.useCache = false;
     const auto vertexResult = ShaderRecompiler::Recompile(vertex);
     const auto vertexPush = static_cast<std::uint32_t>(vertexResult.pushConstants.size());
-    const auto codeAddress = reinterpret_cast<std::uintptr_t>(PixelCode.data());
-    const std::span<const std::uint32_t> pixelCode(PixelCode);
+    const auto codeAddress = reinterpret_cast<std::uintptr_t>(pixelCode.data());
     const AgcDriver::Registers context{{0x1b6, 0x8000}, {0x1b3, 0}, {0x1b4, 0}, {0x203, 0}, {0x1c5, Float32Export}};
     const std::array<ShaderRecompiler::MemoryRegion, 1> pixelMemory{{{codeAddress, std::as_bytes(pixelCode)}}};
     ShaderRecompiler::RecompileRequest fragment{
@@ -202,6 +218,7 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& sta
         target,
         PixelPushLayout(vertexPush, target)
     };
+    fragment.useCache = false;
     const auto handle = ShaderRecompiler::PrepareShader(fragment);
     AgcDriver::DriverDetail::ShaderSnapshot snapshot{codeAddress, 0, 1, {pixelCode.begin(), pixelCode.end()}, {}};
     snapshot.prepared->entries.push_back({0, handle});
@@ -214,7 +231,7 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& sta
         {ShaderStage::Vertex, &vertexResult, 0},
         {ShaderStage::Fragment, pixelResult.get(), PixelPushOffset(vertexPush, target)}
     }};
-    const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
+    const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(vertices.size()), 0, 1, 0, false};
     device.Draw(state, draw, shaders);
 }
 
@@ -329,6 +346,101 @@ void CheckUniform(const std::vector<std::array<float, 4>>& loaded, const std::ar
     }
 }
 
+ShaderRecompiler::RecompileResult CompileBufferLoad(AgcDriver::VulkanDevice& device, std::uint64_t source, std::uint64_t destination) {
+    const std::array<std::uint32_t, 8> userData{
+        static_cast<std::uint32_t>(source), static_cast<std::uint32_t>((source >> 32u) & 0xffffu), Threads * 4u, 0x31016facu,
+        static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>((destination >> 32u) & 0xffffu), Threads * 4u, 0x31016facu
+    };
+    const std::span<const std::uint32_t> code(BufferLoadCode);
+    const auto address = reinterpret_cast<std::uintptr_t>(code.data());
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{address, std::as_bytes(code)}}};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0u, {false, false, false}, false, 1};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Compute, address, code, 0, {}},
+        {32, 0, userData, compute, std::nullopt, std::nullopt, memory}, device.Target(), {0, 0, 0, 128}
+    };
+    request.useCache = false;
+    return ShaderRecompiler::Recompile(request);
+}
+
+bool BufferPublication() {
+    auto device = OpenVulkanTestDevice();
+    if (!device) return false;
+    Block block(4u * BlockBytes);
+    Block output(2u * 1024u * 1024u);
+    struct ReleaseDevice {
+        decltype(device)& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const std::span words(reinterpret_cast<std::uint32_t*>(output.data), Threads * 2u);
+    const auto reset = [&] { std::fill(words.begin(), words.end(), 0xdeadbeefu); };
+    const auto checkBoundary = [&] { Require(std::all_of(words.begin() + Threads, words.end(), [](auto word) { return word == 0xdeadbeefu; }), "native buffer publication overwrote its output boundary"); };
+    const auto programAddress = reinterpret_cast<std::uintptr_t>(BufferLoadCode.data());
+    const auto warm = CompileBufferLoad(*device, block.Address(), output.Address());
+    std::shared_ptr<const AgcDriver::Recipe> recipe;
+    reset();
+    device->Dispatch(warm, 1, 1, 1, {}, programAddress, nullptr, &recipe);
+    device->WaitIdle();
+    checkBoundary();
+    Require(recipe != nullptr, "the native buffer publication control did not capture a recipe");
+    Require(std::all_of(words.begin(), words.begin() + Threads, [](auto word) { return word == 0; }), "the native buffer publication control did not load zeros");
+    const auto deferred = CompileBufferLoad(*device, block.Address() + 128u, output.Address());
+    const auto prepared = device->PrepareDispatch(deferred, {}, Threads, programAddress);
+    Require(prepared != nullptr, "the native buffer publication control did not prepare its deferred resources");
+    const auto color = DecodeTarget(block);
+    const auto state = TargetState(color);
+    std::uint32_t missing = 0;
+    const auto check = [&](const char* name, std::uint64_t source, std::uint32_t expected, const auto& dispatch) {
+        const bool ones = expected == FillOnes;
+        const std::array<float, 4> value = ones ? Ones : std::array<float, 4>{0.5f, 0.5f, 0.5f, 0.5f};
+        Draw(*device, state, FullTriangle, ones ? std::span<const std::uint32_t>(OnesPixelCode) : std::span<const std::uint32_t>(HalvesPixelCode));
+        CheckUniform(LoadSamples(*device, block), value, "before the native buffer read");
+        reset();
+        dispatch();
+        device->WaitIdle();
+        checkBoundary();
+        std::array<std::uint32_t, Threads> actual{};
+        std::copy_n(words.begin(), Threads, actual.begin());
+        std::array<std::uint32_t, Threads> published{};
+        AgcDriver::GuestMemory::Read(source, std::as_writable_bytes(std::span(published)));
+        Require(std::any_of(published.begin(), published.end(), [&](auto word) { return word == expected; }) && std::all_of(published.begin(), published.end(), [&](auto word) { return word == 0 || word == expected; }), "the explicit native publication control did not match the rendered color and clear padding");
+        const bool matched = actual == published;
+        missing += !matched;
+        CheckUniform(LoadSamples(*device, block), value, "after the native buffer read");
+        std::cout << "native buffer publication " << name << ": matched=" << matched << " samples=1024 boundary=passed\n";
+    };
+    check("warmed", block.Address(), FillOnes, [&] { device->Dispatch(warm, 1, 1, 1, {}, programAddress); });
+    check("deferred", block.Address() + 128u, 0x38003800u, [&] { device->Dispatch(deferred, 1, 1, 1, {}, programAddress, prepared); });
+    const auto fresh = CompileBufferLoad(*device, block.Address() + 256u, output.Address());
+    check("fresh", block.Address() + 256u, FillOnes, [&] { device->Dispatch(fresh, 1, 1, 1, {}, programAddress); });
+    check("recipe", block.Address(), 0x38003800u, [&] {
+        const auto hit = device->PrepareRecipe(recipe, false);
+        Require(hit != nullptr, "the native buffer publication recipe was not reusable");
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        AgcDriver::VulkanDevice::IndirectOutcome outcome{};
+        device->DispatchRecipe(warm, 1, 1, 1, 0, programAddress, hit, outcome);
+    });
+    const auto neighbor = CompileBufferLoad(*device, block.Address() + AgcDriver::Graphics::MultisampledColorBytes(color), output.Address());
+    reset();
+    device->Dispatch(neighbor, 1, 1, 1, {}, programAddress);
+    device->WaitIdle();
+    checkBoundary();
+    Require(std::all_of(words.begin(), words.begin() + Threads, [](auto word) { return word == 0; }), "the neighboring buffer did not retain its zeros");
+    const auto writer = CompileBufferLoad(*device, output.Address(), block.Address() + 256u);
+    std::string refusal;
+    try {
+        device->Dispatch(writer, 1, 1, 1, {}, programAddress);
+        device->WaitIdle();
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
+    missing += !refused;
+    std::cout << "native buffer publication controls: neighbor=passed recipe=1 deferred=1 write-refused=" << refused << '\n';
+    Require(missing == 0, "native buffer publication missed " + std::to_string(missing) + " logical descriptor checks");
+    return true;
+}
+
 void StoreWords(const Block& block, std::uint64_t bytes, std::uint32_t word) {
     for (std::uint64_t offset = 0; offset < bytes; offset += sizeof(word)) std::memcpy(block.data + offset, &word, sizeof(word));
 }
@@ -390,6 +502,7 @@ void ResidentDrawNeighborImport(AgcDriver::VulkanDevice& device) {
 
 int main() {
     try {
+        if (!BufferPublication()) return VulkanTestSkipped;
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         Block block(4u * BlockBytes);
