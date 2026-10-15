@@ -47,7 +47,6 @@ void main() {
         if (mask != 0xffffffffu) value |= destinationBuffer.data[index] & ~mask;
         destinationBuffer.data[index] = value;
     } else {
-        if (index >= params.elements) return;
         uvec4 value = loadElement(index);
         for (uint component = 0u; component < ELEMENT_BYTES / 4u; ++component) destinationBuffer.data[index * (ELEMENT_BYTES / 4u) + component] = value[component];
     }
