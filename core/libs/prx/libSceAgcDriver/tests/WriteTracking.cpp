@@ -336,6 +336,7 @@ void CheckDeferredSharedImports() {
     Require(!WrittenSince(edge, 4, edgeGpu), "edge block collection overwrote GPU results");
     GuestArena::GuestArenaReset_nid_postfix(memory, bytes);
     GuestArena::GuestArenaRelease_nid_postfix(memory, bytes);
+    GuestArena::GuestArenaForgetSection_nid_postfix(section);
     CloseHandle(section);
 }
 
