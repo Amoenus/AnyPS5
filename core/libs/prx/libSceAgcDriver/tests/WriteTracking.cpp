@@ -340,6 +340,45 @@ void CheckDeferredSharedImports() {
 }
 
 
+void CheckNeighborAliasGeneration() {
+    constexpr std::size_t bytes = 2 * Block;
+    void* memory = GuestArena::GuestArenaAllocate_nid_postfix(bytes, Block);
+    HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, 0, bytes, nullptr);
+    Require(memory != nullptr && section != nullptr, "cannot allocate the neighbor-alias fixture");
+    struct Cleanup {
+        void* memory;
+        HANDLE section;
+        void* alias = nullptr;
+        ~Cleanup() {
+            if (alias != nullptr) GuestArena::GuestArenaUnmapAlias_nid_postfix(alias);
+            GuestArena::GuestArenaReset_nid_postfix(memory, bytes);
+            GuestArena::GuestArenaRelease_nid_postfix(memory, bytes);
+            GuestArena::GuestArenaForgetSection_nid_postfix(section);
+            CloseHandle(section);
+        }
+    } cleanup{memory, section};
+    GuestArena::GuestArenaMapDirect_nid_postfix(memory, bytes, section, 0u, PAGE_READWRITE);
+    const auto base = reinterpret_cast<std::uintptr_t>(memory);
+    std::uintptr_t start = 0u, end = 0u;
+    Require(GuestArena::GuestArenaResidentSpan_nid_postfix(base, bytes, &start, &end) && start == base && end == base + bytes, "the fixture is not one private resident run");
+    std::memset(memory, 0x5a, bytes);
+    CollectWritesUncached(base, bytes);
+    const auto before = CollectWritesUncached(base, Block);
+    Require(before != 0u && Watched(base, Block) && UnchangedSince(base, Block, before), "the first block is not initially tracked and unchanged");
+    cleanup.alias = GuestArena::GuestArenaMapAlias_nid_postfix(base + Block, Block);
+    Require(cleanup.alias != nullptr, "the neighbor alias was not created");
+    const auto after = CollectWritesUncached(base, Block);
+    const auto unchanged = UnchangedSince(base, Block, before);
+    std::cout << "neighbor-alias watched=" << Watched(base, Block) << " unchanged=" << unchanged
+              << " written=" << WrittenSince(base, Block, before) << " stored=" << StoredOver(base, Block, before)
+              << " before=" << before << " after=" << after << '\n';
+    static_cast<volatile std::uint8_t*>(memory)[0] = 0x5a;
+    CollectWritesUncached(base, Block);
+    Require(!UnchangedSince(base, Block, after) && WrittenSince(base, Block, after), "same-value CPU store after alias creation was missed");
+    std::cout << "neighbor-alias same-value CPU store detected\n";
+    Require(unchanged, "an alias of the second block invalidated the untouched first block generation");
+}
+
 void CheckPrivateMappingReuse() {
     void* memory = AllocateWatched(3 * Block);
     const auto base = reinterpret_cast<std::uint64_t>(memory);
@@ -914,6 +953,7 @@ int main() {
         CheckNewestStamp();
 #ifdef _WIN32
         CheckDeferredSharedImports();
+        CheckNeighborAliasGeneration();
         CheckPrivateMappingReuse();
         CheckUntrackedHint();
         CheckHostHoleInChild();
