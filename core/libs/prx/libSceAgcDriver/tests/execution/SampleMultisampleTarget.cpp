@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -25,9 +26,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
+#include <mutex>
+
+namespace AgcDriver {
+
+struct VulkanDeviceTestAccess {
+    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+
+}
 
 namespace {
 
@@ -142,7 +153,7 @@ AgcDriver::Graphics::State TargetState(const AgcDriver::Graphics::ColorTarget& c
     return state;
 }
 
-void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state) {
+void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state, std::uint64_t indexAddress = 0, std::uint32_t indexSize = 2u) {
     const auto target = device.Target();
     constexpr std::uint32_t waveSize = 64;
     std::vector<std::uint32_t> vertexUserData(4, 0u);
@@ -181,7 +192,7 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& sta
         {ShaderStage::Vertex, &vertexResult, 0},
         {ShaderStage::Fragment, pixelResult.get(), PixelPushOffset(vertexPush, target)}
     }};
-    const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
+    const AgcDriver::Pm4::DrawParameters draw{indexAddress, static_cast<std::uint32_t>(Triangle.size()), indexAddress != 0 ? indexSize : 0u, 1, 0, indexAddress != 0};
     device.Draw(state, draw, shaders);
 }
 
@@ -293,6 +304,62 @@ void CheckUniform(const std::vector<std::array<float, 4>>& loaded, const std::ar
     }
 }
 
+void CheckNativeIndices(AgcDriver::VulkanDevice& device, const Block& source, const Block& destination) {
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    if (context.hostImportAlignment == 0) {
+        std::puts("native index alias checks not run: host imports unavailable");
+        return;
+    }
+    const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(DecodeTarget(source));
+    Require(colorBytes <= source.bytes && source.bytes - colorBytes >= BlockBytes, "the native-index fixture has no neighboring block");
+    const auto neighbor = source.Address() + colorBytes;
+    AgcDriver::Graphics::RequireNoMultisampleTarget(neighbor, 12u, "an index neighbor control");
+    std::string guarded;
+    try {
+        AgcDriver::Graphics::RequireNoMultisampleTarget(source.Address(), 48u, "a draw-input control");
+    } catch (const std::exception& error) {
+        guarded = error.what();
+    }
+    Require(guarded.find("whose samples are only on the host") != std::string::npos, "the draw-input source is not guarded as a native target");
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        const auto* native = AgcDriver::Graphics::HostImportFor(context, source.Address(), 12u);
+        const auto* adjacent = AgcDriver::Graphics::HostImportFor(context, neighbor, 12u);
+        Require(native != nullptr && native == adjacent, "the native indices and their neighbor do not share a host import");
+    }
+    const auto state = TargetState(DecodeTarget(destination));
+    std::uint32_t missed = 0;
+    for (const std::uint32_t indexSize : {2u, 4u}) {
+        if (indexSize == 2u) {
+            const std::array<std::uint16_t, 3> indices{0u, 1u, 2u};
+            std::memcpy(source.data + colorBytes, indices.data(), sizeof(indices));
+        } else {
+            const std::array<std::uint32_t, 3> indices{0u, 1u, 2u};
+            std::memcpy(source.data + colorBytes, indices.data(), sizeof(indices));
+        }
+        Draw(device, state, neighbor, indexSize);
+        device.WaitIdle();
+        CheckSamples(state, LoadSamples(device, destination), {});
+        for (const bool edge : {false, true}) {
+            const auto address = edge ? neighbor - indexSize : source.Address();
+            std::string refusal;
+            try {
+                Draw(device, state, address, indexSize);
+                device.WaitIdle();
+            } catch (const std::exception& error) {
+                refusal = error.what();
+            }
+            const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
+            std::printf("native index %u %s: refused=%u neighbor=passed detail=%s\n", indexSize * 8u, edge ? "edge" : "base", refused ? 1u : 0u, refusal.c_str());
+            Require(refusal.empty() || refused, "the native index input failed for another reason: " + refusal);
+            missed += refused ? 0u : 1u;
+        }
+    }
+    CheckUniform(LoadSamples(device, source), Ones, "after native draw-input alias attempts");
+    std::puts("native index controls: shared-import=1 source-samples=1024 neighbor-triangle=passed");
+    Require(missed == 0, "native indices missed " + std::to_string(missed) + " resident-image refusals");
+}
+
 void StoreWords(const Block& block, std::uint64_t bytes, std::uint32_t word) {
     for (std::uint64_t offset = 0; offset < bytes; offset += sizeof(word)) std::memcpy(block.data + offset, &word, sizeof(word));
 }
@@ -315,7 +382,7 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
 
 int main() {
     try {
-        const auto device = OpenVulkanTestDevice();
+        auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         Block block(4u * BlockBytes);
         Block other(BlockBytes);
@@ -342,6 +409,12 @@ int main() {
         std::memcpy(mixed.data + colorBytes - sizeof(odd), &odd, sizeof(odd));
         RequireRefused(*device, TargetDescriptor(mixed, SampleShift), "does not hold one repeated 32-bit value", "loading a multisampled texture no draw rendered to whose color memory is not uniform");
         std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it, then the fill of its color memory; a surface no draw rendered to loads the value its color memory repeats and keeps it under a later draw");
+        Block destination(BlockBytes);
+        struct ReleaseIndexDevice {
+            std::unique_ptr<AgcDriver::VulkanDevice>& device;
+            ~ReleaseIndexDevice() { device.reset(); }
+        } releaseIndexDevice{device};
+        CheckNativeIndices(*device, block, destination);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
