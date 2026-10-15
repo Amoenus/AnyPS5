@@ -204,6 +204,8 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
         label = "host-import";
         const auto* imported = AgcDriver::Graphics::HostImportFor(context, base + BlockBytes, BlockBytes);
         Require(imported != nullptr && imported->alias != nullptr && !imported->unwatched, "MSAA neighbor: the host import did not use a tracked section alias");
+        std::cout << "MSAA neighbor host-import offset=" << imported->base - base << " bytes=" << imported->bytes << '\n';
+        Require(imported->base == base + BlockBytes && imported->bytes == BlockBytes, "MSAA neighbor: the host import overlaps the target block");
     } else if (transition == NeighborTransition::CpuStore) {
         label = "same-value-cpu-store";
         *reinterpret_cast<volatile std::uint8_t*>(memory) = 0u;
