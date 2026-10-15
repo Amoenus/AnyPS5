@@ -1,5 +1,9 @@
 # libSceAgcDriver technical debt
 
+### Silent stubs
+
+- [sceAgcDriverRegisterDefaultOwner](../../../core/libs/prx/libSceAgcDriver/Unimplemented.cpp) (libSceAgcDriver) - takes one uint32 owner by value (OpenAGC `include/agcdriver.h`, SharpEmu `AgcExports.DriverResources.cs`) and returns 0 without recording it. PPSA21480 treats the code 0x8A6C9018 it returned before as fatal. Console behaviour is unverified: OpenAGC describes the function as a firmware 5.50 stub that returns 0x8A6C9018, SharpEmu returns 0
+
 ### Unknown function info
 
 - [Sampled MSAA surface footprints](../../../core/libs/prx/libSceAgcDriver/Graphics/src/TextureTiling.cpp) use fragment-aware 4 KiB or 64 KiB thin blocks at two, four or eight fragments. The block orientation follows [AMD Addrlib ComputeThinBlockDimension](https://github.com/GPUOpen-Drivers/pal/blob/c5e800072a32f68b6ccc4422936d96167c6e0728/src/core/imported/addrlib/src/core/addrlib2.cpp#L1680-L1708); single-layer R_X/Z_X allocation sizes are checked against that pinned reference. Legacy swizzles retain the existing thin-block model. Console layout equivalence remains unmeasured; mip chains and other fragment counts throw. Array geometry and sample upload/readback retain the experimental MultisampleTextureLayout implementation and its restrictions below.
