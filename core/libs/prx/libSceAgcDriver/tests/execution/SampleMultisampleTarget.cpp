@@ -337,6 +337,12 @@ void CheckNativeIndices(AgcDriver::VulkanDevice& device, const Block& source, co
             const std::array<std::uint32_t, 3> indices{0u, 1u, 2u};
             std::memcpy(source.data + colorBytes, indices.data(), sizeof(indices));
         }
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            AgcDriver::Graphics::NoteColorMetadataFill(destination.Address(), static_cast<std::size_t>(AgcDriver::Graphics::MultisampledColorBytes(state.color)), 0u);
+            AgcDriver::Graphics::MaterializeMultisampleTargetClear(context, state.color);
+        }
+        CheckUniform(LoadSamples(device, destination), {}, "before the neighboring indexed draw");
         Draw(device, state, neighbor, indexSize);
         device.WaitIdle();
         CheckSamples(state, LoadSamples(device, destination), {});
