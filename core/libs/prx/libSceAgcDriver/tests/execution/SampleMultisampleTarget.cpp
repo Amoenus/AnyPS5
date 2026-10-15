@@ -353,6 +353,85 @@ void CheckBufferRefused(TAction&& action, const char* name, std::vector<std::str
     if (!refused) missing.emplace_back(std::string(name) + ": " + refusal);
 }
 
+constexpr std::uint32_t BdaThreads = 64u;
+constexpr std::uint32_t BdaInput = 0x100u;
+constexpr std::uint32_t BdaOutput = 0x8000u;
+alignas(256) std::array<std::array<std::uint32_t, 64>, 4> BdaPrograms{};
+
+void SeedBdaOutputs(const Block& block) {
+    for (const auto base : {0u, static_cast<std::uint32_t>(BlockBytes)}) {
+        for (std::uint32_t mode = 0u; mode < 4u; ++mode) std::memset(block.data + base + BdaOutput + mode * 1024u, 0xcdu, BdaThreads * 8u);
+    }
+}
+
+ShaderRecompiler::RecompileResult CompileBdaSpan(AgcDriver::VulkanDevice& device, std::uint64_t address, std::uint32_t mode) {
+    const bool coherent = (mode & 2u) != 0u;
+    const bool barrier = (mode & 1u) != 0u;
+    auto& storage = BdaPrograms[mode];
+    std::vector<std::uint32_t> words{0x34040084u, 0x4a0404ffu, BdaInput, 0x34080081u, 0x36080882u, 0x4a040504u, 0x34060083u, 0x4a0606ffu, BdaOutput + mode * 1024u, 0xdc388ff8u | (coherent ? 0x10000u : 0u), 0x04000002u, 0xbf8c3f70u};
+    if (barrier) words.push_back(0xbf8a0000u);
+    words.insert(words.end(), {0xdc708000u, 0x00000503u, 0xdc708004u, 0x00000703u, 0xbf810000u});
+    std::copy(words.begin(), words.end(), storage.begin());
+    const std::span<const std::uint32_t> code(storage.data(), words.size());
+    const std::vector<std::uint32_t> userData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u)};
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{BdaThreads, 1u, 1u}, 0u, {false, false, false}, false, 1};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
+        {32u, 0u, userData, compute, std::nullopt, std::nullopt, memory},
+        device.Target(),
+        {0, 0, 0, 128}
+    };
+    request.useCache = false;
+    auto result = ShaderRecompiler::Recompile(request);
+    Require(std::ranges::any_of(result.bindings, [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable; }), "native BDA fixture did not compile an address-table binding");
+    return result;
+}
+
+bool RunBdaSpan(AgcDriver::VulkanDevice& device, std::uint8_t* bytes, std::uint32_t mode, bool resident) {
+    const auto before = std::vector<std::uint8_t>(bytes, bytes + BlockBytes);
+    auto expected = before;
+    for (std::uint32_t tid = 0u; tid < BdaThreads; ++tid) {
+        const auto load = BdaInput + tid * 16u + (tid & 1u) * 2u - 8u;
+        const auto output = BdaOutput + mode * 1024u + tid * 8u;
+        std::memcpy(expected.data() + output, before.data() + load + 4u, 4u);
+        std::memcpy(expected.data() + output + 4u, before.data() + load + 12u, 4u);
+    }
+    Require(expected != before, "native BDA output sentinel did not distinguish execution");
+    const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(bytes));
+    const auto program = CompileBdaSpan(device, address, mode);
+    std::string refusal;
+    try {
+        device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BdaPrograms[mode].data()));
+        device.WaitIdle();
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
+    Require(refusal.empty() || (resident && refused), "native BDA span failed for another reason: " + refusal);
+    if (refused) Require(std::equal(before.begin(), before.end(), bytes), "refused native BDA span changed guest memory");
+    else Require(std::equal(expected.begin(), expected.end(), bytes), "native BDA span lost a load, store, boundary or output sentinel");
+    std::printf("native BDA mode=%u resident=%u refused=%u exact-guest-results=%u\n", mode, resident ? 1u : 0u, refused ? 1u : 0u, refused ? 0u : 1u);
+    return refused;
+}
+
+void CheckNativeBda(AgcDriver::VulkanDevice& device, const Block& block) {
+    const auto color = DecodeTarget(block);
+    Require(AgcDriver::Graphics::MultisampledColorBytes(color) == BlockBytes, "native BDA fixture requires a one-block resident");
+    std::string guard;
+    try { AgcDriver::Graphics::RequireNoMultisampleTarget(block.Address() + BdaInput, 16u, "a native BDA fixture control"); }
+    catch (const std::exception& error) { guard = error.what(); }
+    Require(guard.find("whose samples are only on the host") != std::string::npos, "native BDA input was not a guarded resident");
+    std::uint32_t missed = 0u;
+    for (std::uint32_t mode = 0u; mode < 4u; ++mode) {
+        Require(!RunBdaSpan(device, block.data + BlockBytes, mode, false), "native BDA neighbor was refused");
+        if (!RunBdaSpan(device, block.data, mode, true)) ++missed;
+        CheckUniform(LoadSamples(device, block), Ones, "after the native BDA alias attempt");
+    }
+    std::printf("native BDA controls: neighbor=passed source-samples=1024 missing=%u\n", missed);
+    Require(missed == 0u, "native BDA spans missed " + std::to_string(missed) + " resident-image refusals");
+}
+
 }
 
 int main() {
@@ -366,6 +445,7 @@ int main() {
             decltype(device)& value;
             ~ReleaseDevice() { value.reset(); }
         } releaseDevice{device};
+        SeedBdaOutputs(block);
         const auto warm = CompileBufferLoad(*device, block.Address(), output.Address());
         std::shared_ptr<const AgcDriver::Recipe> recipe;
         CheckBufferLoad(*device, warm, output, &recipe);
@@ -411,6 +491,7 @@ int main() {
         std::string failures;
         for (const auto& item : missing) failures += " " + item;
         Require(missing.empty(), "buffer aliases of live native MSAA color memory bypassed the guard:" + failures);
+        CheckNativeBda(*device, block);
         RequireRefused(*device, TargetDescriptor(block, 3u), "texture of 8 samples", "loading a 4x target as an 8x texture");
         Require(colorBytes <= other.bytes, "the 4x target's color memory does not fit one block");
         CheckUniform(LoadSamples(*device, other), {}, "from zeroed color memory no draw rendered to");
