@@ -521,7 +521,7 @@ void verifySignedMinimum() {
         SrtRuntime runtime{data};
         Detail::Evaluator evaluator(plan, runtime);
         std::uint32_t result = 0;
-        require(evaluator.Evaluate(&minimum, result) && result == expected, "SRT signed minimum used unsigned ordering or failed evaluation");
+        require(evaluator.Evaluate(Detail::IrNode(&minimum), result) && result == expected, "SRT signed minimum used unsigned ordering or failed evaluation");
     }
 }
 
@@ -579,7 +579,7 @@ void verifyMayEvaluate() {
         require(Detail::Evaluator::MayEvaluate(plan, value) == expected, (std::string("MayEvaluate misjudged ") + name).c_str());
         Detail::Evaluator evaluator(plan, runtime);
         std::uint32_t result = 0;
-        require(evaluator.Evaluate(value, result) == expected, (std::string("MayEvaluate disagreed with the evaluator on ") + name).c_str());
+        require(evaluator.Evaluate(Detail::IrNode(value), result) == expected, (std::string("MayEvaluate disagreed with the evaluator on ") + name).c_str());
     }
     const std::array<IrOpcode, 9> takenAsEvaluable{IrOpcode::Identity, IrOpcode::Phi, IrOpcode::Void, IrOpcode::GetUserData, IrOpcode::GetShaderBase, IrOpcode::ReadFirstLane, IrOpcode::ReadConst, IrOpcode::LoadAddressU32, IrOpcode::ReadConstBuffer};
     for (std::uint16_t raw = 0; raw < static_cast<std::uint16_t>(IrOpcode::Count); ++raw) {
@@ -588,7 +588,7 @@ void verifyMayEvaluate() {
         auto& value = make(opcode, IrType::U32, {&constant(0), &constant(0), &constant(0), &constant(0)});
         Detail::Evaluator evaluator(plan, runtime);
         std::uint32_t result = 0;
-        require(Detail::Evaluator::MayEvaluate(plan, &value) == evaluator.Evaluate(&value, result), (std::string("MayEvaluate disagreed with the evaluator on ") + std::string(IrOpcodeName(opcode)) + " over constants").c_str());
+        require(Detail::Evaluator::MayEvaluate(plan, &value) == evaluator.Evaluate(Detail::IrNode(&value), result), (std::string("MayEvaluate disagreed with the evaluator on ") + std::string(IrOpcodeName(opcode)) + " over constants").c_str());
     }
 }
 

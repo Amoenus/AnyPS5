@@ -104,7 +104,7 @@ static_assert(sizeof(IrDescriptorBinding) == 32, "IrDescriptorBinding changed: u
 static_assert(sizeof(BindingAllocationResult) == 160, "BindingAllocationResult changed: update the allocation encoder");
 static_assert(sizeof(CompiledBindingLayout) == 88, "CompiledBindingLayout changed: update the allocation encoder");
 static_assert(sizeof(BindingLayout) == 16, "BindingLayout changed: update BuildKey");
-static_assert(sizeof(IrResourcePlan) == 584, "IrResourcePlan changed: update EncodePlan and DecodePlan");
+static_assert(sizeof(IrResourcePlan) == 712, "IrResourcePlan changed: update EncodePlan and DecodePlan");
 static_assert(sizeof(IrValue) == 152, "IrValue changed: update the plan value encoder");
 static_assert(sizeof(GuestRegister) == 8, "GuestRegister changed: update the plan value encoder");
 static_assert(sizeof(MemoryInfo) == 80, "MemoryInfo changed: update the plan encoder");
@@ -145,7 +145,7 @@ static_assert(fieldCount<SamplerResource>() == 8, "SamplerResource changed: upda
 static_assert(fieldCount<SampledResourcePair>() == 3, "SampledResourcePair changed: update the info encoder");
 static_assert(fieldCount<StageInput>() == 5, "StageInput changed: update the info encoder");
 static_assert(fieldCount<StageOutput>() == 4, "StageOutput changed: update the info encoder");
-static_assert(fieldCount<IrResourcePlan>() == 21, "IrResourcePlan changed: update EncodePlan and DecodePlan");
+static_assert(fieldCount<IrResourcePlan>() == 23, "IrResourcePlan changed: update EncodePlan and DecodePlan");
 static_assert(fieldCount<GuestRegister>() == 2, "GuestRegister changed: update the plan value encoder");
 static_assert(fieldCount<MemoryInfo>() == 31, "MemoryInfo changed: update the plan encoder");
 static_assert(fieldCount<DescriptorSource>() == 3, "DescriptorSource changed: update the plan encoder");
@@ -1057,6 +1057,7 @@ bool encodePlan(Writer& writer, const IrResourcePlan& plan) {
     writer.Value(plan.srtGuardOffset);
     writer.Values(std::span<const std::uint8_t>(plan.cleanFlatSlots));
     writer.Values(std::span<const std::uint8_t>(plan.pureFlatSlots));
+    writer.Value(plan.denseValueIds);
     writer.Value(plan.requiresSpecializationMemory);
     writer.Value(plan.srtPlanComplete);
     writer.Value(plan.resourceTrackingComplete);
@@ -1212,6 +1213,7 @@ bool decodePlan(Reader& reader, IrResourcePlan& plan) {
     reader.Value(plan.srtGuardOffset);
     reader.Values(plan.cleanFlatSlots);
     reader.Values(plan.pureFlatSlots);
+    reader.Value(plan.denseValueIds);
     reader.Value(plan.requiresSpecializationMemory);
     reader.Value(plan.srtPlanComplete);
     reader.Value(plan.resourceTrackingComplete);
@@ -1230,12 +1232,15 @@ bool decodePlan(Reader& reader, IrResourcePlan& plan) {
     if (!std::ranges::all_of(plan.info.buffers, [&](const BufferResource& buffer) { return knownSource(buffer.source); })) return false;
     if (!std::ranges::all_of(plan.info.images, [&](const ImageResource& image) { return knownSource(image.source); })) return false;
     if (!std::ranges::all_of(plan.info.samplers, [&](const SamplerResource& sampler) { return knownSource(sampler.source); })) return false;
-    return std::ranges::all_of(plan.controlFlow, [&](const ResourceBlock& block) {
+    const bool blocksValid = std::ranges::all_of(plan.controlFlow, [&](const ResourceBlock& block) {
         return (block.condition == nullptr || block.successors.size() == 2u) &&
                std::ranges::all_of(block.successors, [&](std::uint32_t successor) { return successor < plan.controlFlow.size(); }) &&
                std::ranges::all_of(block.sources, knownSource) &&
                std::ranges::all_of(block.images, [&](std::uint32_t image) { return image < plan.info.images.size(); });
     });
+    if (!blocksValid) return false;
+    ResourceMaterializer::CompactPlan(plan);
+    return true;
 }
 
 constexpr std::string_view NeutralSwitches[] = {
