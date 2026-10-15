@@ -21,7 +21,7 @@ RAMP = "._:-=+*#%@"
 
 
 def is_wait(name):
-    return "wait" in name.rsplit(".", 1)[-1].lower()
+    return name.startswith("GpuMutex.wait.") or "wait" in name.rsplit(".", 1)[-1].lower()
 
 
 class Trace:
@@ -315,4 +315,6 @@ def main(arguments=None):
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())
