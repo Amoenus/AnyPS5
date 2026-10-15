@@ -211,10 +211,12 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
         std::memcpy(code.Data(), FillKernel.data(), sizeof(FillKernel));
         auto& sentinel = NewBlock();
         constexpr std::uint32_t pattern = 0x12345678u;
-        DispatchFill(code, base + BlockBytes, BlockBytes, pattern);
+        DispatchFill(code, base + BlockBytes, BlockBytes / 2, pattern);
         Settle(code, sentinel);
         std::vector<std::uint32_t> stored(BlockBytes / sizeof(pattern));
         AgcDriver::GuestMemory::Read(base + BlockBytes, std::as_writable_bytes(std::span(stored)), 4);
+        Require(std::all_of(stored.begin(), stored.begin() + 4, [](std::uint32_t value) { return value == pattern; }), "MSAA neighbor: the control did not fill its first sixteen bytes");
+        std::cout << "control copied-prefix=16\n";
         Require(std::all_of(stored.begin(), stored.end(), [](std::uint32_t value) { return value == pattern; }), "MSAA neighbor: the copied buffer fill did not reach all guest memory");
         std::cout << "MSAA neighbor copied-fill=" << pattern << " verified-bytes=" << BlockBytes << '\n';
         lock.lock();
