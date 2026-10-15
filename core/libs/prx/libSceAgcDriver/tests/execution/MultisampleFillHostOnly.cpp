@@ -323,13 +323,14 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
     const char* label = "none";
     if (transition == NeighborTransition::Alias) {
         label = "alias";
-        cleanup.alias = GuestArena::GuestArenaMapAlias_nid_postfix(base + BlockBytes, BlockBytes);
-        Require(cleanup.alias != nullptr, "MSAA neighbor: the neighboring alias was not created");
+        cleanup.alias = GuestArena::GuestArenaMapAlias_nid_postfix(base, bytes);
+        Require(cleanup.alias != nullptr, "MSAA neighbor: the explicit whole-run alias was not created");
     } else if (transition == NeighborTransition::HostImport) {
         label = "host-import";
         const auto* imported = AgcDriver::Graphics::HostImportFor(context, base + BlockBytes, BlockBytes);
-        Require(imported == nullptr, "MSAA neighbor: the import would migrate a resident native target");
-        std::cout << "MSAA neighbor host-import declined=1\n";
+        Require(imported != nullptr && imported->alias == nullptr && !imported->unwatched, "MSAA neighbor: the private import did not stay watched");
+        Require(AgcDriver::GuestMemory::Watched(base, bytes), "MSAA neighbor: the private import removed the resident run's watch");
+        std::cout << "MSAA neighbor host-import private=1 watched=1\n";
         lock.unlock();
         auto& code = NewBlock();
         std::memcpy(code.Data(), FillKernel.data(), sizeof(FillKernel));
@@ -339,8 +340,8 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
         Settle(code, sentinel);
         std::vector<std::uint32_t> stored(BlockBytes / sizeof(pattern));
         AgcDriver::GuestMemory::Read(base + BlockBytes, std::as_writable_bytes(std::span(stored)), 4);
-        Require(std::all_of(stored.begin(), stored.end(), [](std::uint32_t value) { return value == pattern; }), "MSAA neighbor: the copied buffer fill did not reach all guest memory");
-        std::cout << "MSAA neighbor copied-fill=" << pattern << " verified-bytes=" << BlockBytes << '\n';
+        Require(std::all_of(stored.begin(), stored.end(), [](std::uint32_t value) { return value == pattern; }), "MSAA neighbor: the imported buffer fill did not reach all guest memory");
+        std::cout << "MSAA neighbor imported-fill=" << pattern << " verified-bytes=" << BlockBytes << '\n';
         lock.lock();
     } else if (transition == NeighborTransition::CpuStore) {
         label = "same-value-cpu-store";
@@ -359,7 +360,7 @@ void ResidentColorNeighborTransition(AgcDriver::VulkanDevice& device, NeighborTr
     Require(refusal.empty() || refused, "MSAA neighbor: an unrelated exception interrupted the control");
 }
 
-void DirectImportDropsColorTracking(AgcDriver::VulkanDevice& device) {
+void DirectImportColorTracking(AgcDriver::VulkanDevice& device) {
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
     std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
     struct Cleanup {
@@ -376,7 +377,14 @@ void DirectImportDropsColorTracking(AgcDriver::VulkanDevice& device) {
     const auto target = MultisampledTarget(color);
     Require(AgcDriver::GuestMemory::Watched(target.address, target.bytes), "the color allocation is not watched before import");
     const auto* imported = AgcDriver::Graphics::HostImportFor(context, target.address, target.bytes);
-    Require(imported != nullptr && imported->alias == nullptr && imported->unwatched, "the color fixture did not select a direct unwatched host import");
+    Require(imported != nullptr && imported->alias == nullptr, "the color fixture did not select a direct private host import");
+    if (!imported->unwatched) {
+        Require(AgcDriver::GuestMemory::Watched(target.address, target.bytes), "a settled private host import removed the color allocation's watch");
+        Require(AgcDriver::Graphics::MultisampleTargetView(context, target) != VK_NULL_HANDLE, "initial settled private color contents have no native view");
+        Require(AgcDriver::Graphics::MultisampleTargetView(context, target) != VK_NULL_HANDLE, "settled private color contents cannot be reused");
+        std::cout << "direct private color import: watched=1 native reuse preserved\n";
+        return;
+    }
     Require(!AgcDriver::GuestMemory::Watched(target.address, target.bytes), "a direct host import left the color allocation watched");
     const auto* exclusion = AgcDriver::GuestMemory::ExclusionReason_nid_no_patch(target.address, target.bytes);
     Require(exclusion != nullptr && std::string_view(exclusion).find("host import") != std::string_view::npos, "a direct host import lost its exclusion cause");
@@ -507,7 +515,7 @@ int main() {
         ResidentColorNeighborTransition(*device, NeighborTransition::Alias);
         ResidentColorNeighborTransition(*device, NeighborTransition::HostImport);
         ResidentColorNeighborTransition(*device, NeighborTransition::CpuStore);
-        DirectImportDropsColorTracking(*device);
+        DirectImportColorTracking(*device);
 #endif
         const bool tested = FillsTakenAsMultisampledClearsAreNotStored(*device);
         LibcRunShutdown_nid_postfix();
