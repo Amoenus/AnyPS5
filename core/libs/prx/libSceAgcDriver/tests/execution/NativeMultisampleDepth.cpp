@@ -825,7 +825,7 @@ void CheckEligibility(Context context) {
     constexpr VkExtent2D extent{129u, 67u};
     constexpr std::uint32_t samples = 4u;
     const auto bytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, 4u, samples));
-    TargetMemory memory(bytes), metadata(65536u);
+    TargetMemory memory(bytes), metadata(65536u), stencil(bytes);
     std::memset(metadata.Data(), 0, 65536u);
     DepthTarget target{memory.Address(), 0u, extent, VK_FORMAT_D32_SFLOAT, 0.0f, 0u, metadata.Address(), false, samples};
     target.depthSwizzle = 24u;
@@ -860,7 +860,7 @@ void CheckEligibility(Context context) {
             case 8u: invalid.clearDepth = 0.5f; reason = "clear value"; break;
             case 9u: invalid.htileAddress = invalid.address; reason = "overlap"; break;
             case 10u: metadata.Data()[HtileMetadataBytes(extent) - 1u] = std::byte{0x40}; reason = "clear value"; break;
-            case 11u: invalid.format = VK_FORMAT_D32_SFLOAT_S8_UINT; reason = "stencil"; break;
+            case 11u: invalid.format = VK_FORMAT_D32_SFLOAT_S8_UINT; invalid.stencilAddress = stencil.Address(); reason = "stencil"; break;
             case 12u: invalid.htileDepthOnly = true; metadata.Data()[0] = std::byte{0x30}; reason = "clear value"; break;
             case 13u: invalid.clearDepth = 1.0f; { const std::uint32_t word = 0xfffffff0u; for (std::size_t offset = 0u; offset < HtileMetadataBytes(extent); offset += 4u) std::memcpy(metadata.Data() + offset, &word, 4u); } reason = "clear value"; break;
             case 14u: metadata.Data()[0] = std::byte{0xf}; reason = "clear value"; break;
@@ -871,6 +871,18 @@ void CheckEligibility(Context context) {
         }
         Require(DepthSurfaceView(context, invalid) != VK_NULL_HANDLE, "sampling ineligibility must preserve attachment rendering");
         TargetRefuses([&] { lookup(invalid); }, reason);
+        if (field == 11u) {
+            GuestTextureResource alias{};
+            alias.baseAddress = invalid.stencilAddress;
+            alias.width = extent.width;
+            alias.height = extent.height;
+            alias.dimension = TextureDimension::k2D;
+            alias.samples = 1u;
+            alias.format = 36u;
+            Require(DepthSurfaceTexture(context, {}, alias, VkComponentMapping{}) == nullptr, "single-sample color at a native stencil address must not be claimed as a depth reader");
+            alias.format = 5u;
+            TargetRefuses([&] { DepthSurfaceTexture(context, {}, alias, VkComponentMapping{}); }, "stencil");
+        }
         if (field == 10u) {
             std::memset(metadata.Data(), 0, 65536u);
             TargetRefuses([&] { lookup(invalid); }, reason);
