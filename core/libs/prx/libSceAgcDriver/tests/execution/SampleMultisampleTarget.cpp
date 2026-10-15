@@ -354,7 +354,7 @@ void CheckBufferRefused(TAction&& action, const char* name, std::vector<std::str
 }
 
 constexpr std::uint32_t BdaThreads = 64u;
-constexpr std::uint32_t BdaInput = 0x100u;
+constexpr std::uint32_t BdaInput = 8u;
 constexpr std::uint32_t BdaOutput = 0x8000u;
 alignas(256) std::array<std::array<std::uint32_t, 64>, 4> BdaPrograms{};
 
@@ -418,6 +418,10 @@ bool RunBdaSpan(AgcDriver::VulkanDevice& device, std::uint8_t* bytes, std::uint3
 void CheckNativeBda(AgcDriver::VulkanDevice& device, const Block& block) {
     const auto color = DecodeTarget(block);
     Require(AgcDriver::Graphics::MultisampledColorBytes(color) == BlockBytes, "native BDA fixture requires a one-block resident");
+    Require(color.pipeBankXor == 0u, "native BDA fixture requires an untagged surface base");
+    std::uint32_t guestFirst = 0u;
+    std::memcpy(&guestFirst, block.data + 4u, sizeof(guestFirst));
+    Require(guestFirst == 0u, "native BDA fixture requires stale zero bytes in its first color element");
     std::string guard;
     try { AgcDriver::Graphics::RequireNoMultisampleTarget(block.Address() + BdaInput, 16u, "a native BDA fixture control"); }
     catch (const std::exception& error) { guard = error.what(); }
