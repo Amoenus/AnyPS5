@@ -6489,7 +6489,8 @@ void tiledResolveTests(const Device& device, Recorder& recorder) {
     source.extent = {side, side};
     source.surfaceExtent = source.extent;
     source.format = VK_FORMAT_R8G8B8A8_UNORM;
-    source.bytes = targetBytes;
+    source.elementBytes = 4u;
+    source.bytes = sourceBytes;
     source.componentMapping = 0xe4u;
     source.tileMode = ColorTileMode::RenderTarget;
     source.samples = 4;
