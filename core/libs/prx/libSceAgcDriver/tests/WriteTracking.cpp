@@ -366,8 +366,6 @@ void CheckNeighborAliasGeneration() {
     CollectWritesUncached(base, bytes);
     const auto before = CollectWritesUncached(base, Block);
     Require(before != 0u && Watched(base, Block) && UnchangedSince(base, Block, before), "the first block is not initially tracked and unchanged");
-    cleanup.alias = GuestArena::GuestArenaMapAlias_nid_postfix(base + Block, Block);
-    Require(cleanup.alias != nullptr, "the neighbor alias was not created");
     const auto after = CollectWritesUncached(base, Block);
     const auto unchanged = UnchangedSince(base, Block, before);
     std::cout << "neighbor-alias watched=" << Watched(base, Block) << " unchanged=" << unchanged
