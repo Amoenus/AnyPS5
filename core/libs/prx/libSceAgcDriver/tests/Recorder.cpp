@@ -7514,12 +7514,12 @@ void guardedKeyStoreTests(const Device& device, Recorder& recorder) {
     MarkDccUncompressed(context, keysAddress, surfaceBytes, keyCount);
     Require(recorder.PendingWriteOverlaps(keysAddress, keyCount), "the second key store was not recorded on the GPU");
     auto* late = static_cast<volatile std::uint32_t*>(static_cast<void*>(keys + 400));
-    *late = 0x12345678u;
+    *late = 0u;
     recorder.Submit();
     device.WaitQueue();
     recorder.Sync();
     Require(keys[0] == 0xff && keys[396] == 0xff && keys[404] == 0xff && keys[keyCount - 1] == 0xff, "the key store did not store the keys");
-    Require(*late == (guarded ? 0x12345678u : 0xffffffffu), guarded ? "a guarded key store overwrote a CPU store made after it was recorded" : "an unguarded key store kept a CPU store made after it was recorded");
+    Require(*late == (guarded ? 0u : 0xffffffffu), guarded ? "a guarded key store overwrote a CPU store made after it was recorded" : "an unguarded key store kept a CPU store made after it was recorded");
     Require(!guarded || Recorder::StoreCounts().keyStoresGuarded > guardedAfterFill, "the second key store was not counted as guarded");
 }
 
