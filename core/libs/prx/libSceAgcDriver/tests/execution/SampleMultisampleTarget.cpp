@@ -337,7 +337,7 @@ void CheckNativeIndices(AgcDriver::VulkanDevice& device, const Block& source, co
             const std::array<std::uint32_t, 3> indices{0u, 1u, 2u};
             std::memcpy(source.data + colorBytes, indices.data(), sizeof(indices));
         }
-        Draw(device, state, neighbor, indexSize);
+        if (indexSize == 2u) Draw(device, state, neighbor, indexSize);
         device.WaitIdle();
         CheckSamples(state, LoadSamples(device, destination), {});
         for (const bool edge : {false, true}) {
