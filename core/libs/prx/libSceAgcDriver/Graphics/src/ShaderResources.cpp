@@ -1791,7 +1791,6 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
         // collects cost the same wherever they run.
         if (precollectImages()) phase(BuildPhase::Precollect);
         if (drawBuild && !usesBda && std::all_of(allocations.begin(), allocations.end(), [&](const Allocation& allocation) { return !allocation.guest || allocation.pushByte >= 0 || (allocation.dataAllocation >= 0 && allocation.dataByte < allocations[static_cast<std::size_t>(allocation.dataAllocation)].size); })) guestMemory.AllowAdjustedRegions();
-        synchronizeGuestBuffers();
         guestMemory.UploadPrepare(usesBda);
         timing.uploadMs = phase(BuildPhase::Upload);
         splitSets = SplitsSets(context, shaders);
@@ -2001,7 +2000,6 @@ void ShaderResources::buildComplete() {
         Require(textures.size() == plannedSampledImages && storageTextures.size() == plannedStorageImages, "image lookups disagree with the descriptor plan");
         resolveImageTables();
         timing.bindingsMs += phase(BuildPhase::Images);
-        synchronizeGuestBuffers();
         guestMemory.UploadFinish(usesBda);
         timing.uploadMs += phase(BuildPhase::Upload);
         if (usesBda) bda = std::make_unique<BdaResources>(context, guestMemory);
@@ -4602,7 +4600,6 @@ void ShaderResources::synchronizeGuestBuffers(std::span<const MovedBuffer> moved
 }
 
 std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved) const {
-    synchronizeGuestBuffers(moved);
     if ((_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) || usesBda) return {};
     const auto reads = guestMemory.InPlaceReads();
     const auto maxSnapshotBytes = maxDrawSnapshotBytes;
