@@ -20,7 +20,7 @@ layout(push_constant) uniform Push {
 } params;
 
 uvec4 loadElement(uint index) {
-    uint element = params.firstElement + index;
+    uint element = index;
     uint pixel = element / params.fragments;
     ivec3 coordinate = ivec3(pixel % params.width, (pixel / params.width) % params.height, pixel / (params.width * params.height));
 #if READ_DEPTH
