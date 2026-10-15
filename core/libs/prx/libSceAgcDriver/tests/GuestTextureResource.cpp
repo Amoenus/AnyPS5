@@ -266,6 +266,13 @@ void RunGuestTextureResourceTests() {
     const std::array<std::uint32_t, 8> canvas{0x021f2000u, 0x03800000u, 0x804a004au, 0xe1b20facu, 0x00000000u, 0x00400020u, 0x00000000u, 0x00000000u};
     result = DecodeTextureResource(canvas);
     Require(result.dimension == TextureDimension::k2DMsaa && result.samples == 4 && result.baseAddress == 0x21f200000ull && result.width == 297 && result.height == 297 && result.format == 56 && result.tileMode == TextureTileMode::kR64KBX, "the 4x canvas descriptor of PPSA99006 decoded incorrectly");
+    const auto canvasGeometry = DescribeSurface(result);
+    const std::array<std::uint32_t, 8> sonic{0x405fc080u, 0xc4700000u, 0x821bc3bfu, 0xe1b30facu, 0x00000000u, 0x00400030u, 0x406b0000u, 0x0040819fu};
+    const auto sonicResource = DecodeTextureResource(sonic);
+    const auto sonicGeometry = DescribeSurface(sonicResource);
+    Require(sonicResource.width == 3840u && sonicResource.height == 2160u && sonicResource.samples == 8u && sonicResource.format == 71u, "the PPSA99902 multisampled color descriptor decoded incorrectly");
+    Require(sonicGeometry.guestBytes == 0x1fe00000ull, "the PPSA99902 8x surface footprint omits fragments: " + std::to_string(sonicGeometry.guestBytes));
+    Require(canvasGeometry.guestBytes == 0x190000u, "the 297x297 4x surface footprint does not use fragment-aware blocks");
     Fields fewerFragments = multisampled;
     fewerFragments.maxMip = 1;
     rejectFields(fewerFragments, "same sample count");
