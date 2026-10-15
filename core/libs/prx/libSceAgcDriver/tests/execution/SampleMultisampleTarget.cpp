@@ -346,9 +346,9 @@ void CheckUniform(const std::vector<std::array<float, 4>>& loaded, const std::ar
     }
 }
 
-ShaderRecompiler::RecompileResult CompileBufferLoad(AgcDriver::VulkanDevice& device, std::uint64_t source, std::uint64_t destination) {
+ShaderRecompiler::RecompileResult CompileBufferLoad(AgcDriver::VulkanDevice& device, std::uint64_t source, std::uint64_t destination, std::uint32_t sourceBytes = Threads * 4u) {
     const std::array<std::uint32_t, 8> userData{
-        static_cast<std::uint32_t>(source), static_cast<std::uint32_t>((source >> 32u) & 0xffffu), Threads * 4u, 0x31016facu,
+        static_cast<std::uint32_t>(source), static_cast<std::uint32_t>((source >> 32u) & 0xffffu), sourceBytes, 0x31016facu,
         static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>((destination >> 32u) & 0xffffu), Threads * 4u, 0x31016facu
     };
     const std::span<const std::uint32_t> code(BufferLoadCode);
@@ -373,34 +373,50 @@ bool BufferPublication() {
         ~ReleaseDevice() { value.reset(); }
     } releaseDevice{device};
     const std::span words(reinterpret_cast<std::uint32_t*>(output.data), Threads * 2u);
-    const auto reset = [&] { std::fill(words.begin(), words.end(), 0xdeadbeefu); };
-    const auto checkBoundary = [&] { Require(std::all_of(words.begin() + Threads, words.end(), [](auto word) { return word == 0xdeadbeefu; }), "native buffer publication overwrote its output boundary"); };
+    const auto reset = [](std::span<std::uint32_t> destination) { std::fill(destination.begin(), destination.end(), 0xdeadbeefu); };
+    const auto checkBoundary = [](std::span<std::uint32_t> destination) { Require(std::all_of(destination.begin() + Threads, destination.end(), [](auto word) { return word == 0xdeadbeefu; }), "native buffer publication overwrote its output boundary"); };
     const auto programAddress = reinterpret_cast<std::uintptr_t>(BufferLoadCode.data());
     const auto warm = CompileBufferLoad(*device, block.Address(), output.Address());
     std::shared_ptr<const AgcDriver::Recipe> recipe;
-    reset();
+    reset(words);
     device->Dispatch(warm, 1, 1, 1, {}, programAddress, nullptr, &recipe);
     device->WaitIdle();
-    checkBoundary();
+    checkBoundary(words);
     Require(recipe != nullptr, "the native buffer publication control did not capture a recipe");
     Require(std::all_of(words.begin(), words.begin() + Threads, [](auto word) { return word == 0; }), "the native buffer publication control did not load zeros");
+    constexpr std::uint32_t stagedBytes = 2u * BlockBytes;
+    const auto stagedOutput = block.Address() + BlockBytes;
+    const std::span stagedWords(reinterpret_cast<std::uint32_t*>(block.data + BlockBytes), Threads * 2u);
+    const auto stagedWarm = CompileBufferLoad(*device, block.Address(), stagedOutput, stagedBytes);
+    std::shared_ptr<const AgcDriver::Recipe> stagedRecipe;
+    reset(stagedWords);
+    device->Dispatch(stagedWarm, 1, 1, 1, {}, programAddress, nullptr, &stagedRecipe);
+    device->WaitIdle();
+    checkBoundary(stagedWords);
+    Require(stagedRecipe != nullptr, "the staged native buffer control did not capture a recipe");
+    Require(std::all_of(stagedWords.begin(), stagedWords.begin() + Threads, [](auto word) { return word == 0; }), "the staged native buffer control did not load zeros");
+    const auto stagedDeferred = CompileBufferLoad(*device, block.Address() + 4u, stagedOutput, stagedBytes);
+    const auto stagedPrepared = device->PrepareDispatch(stagedDeferred, {}, Threads, programAddress);
+    Require(stagedPrepared != nullptr, "the staged native buffer control did not prepare its deferred resources");
+    std::cout << "native buffer staging: source=0x" << std::hex << block.Address() << " bytes=0x" << stagedBytes << std::dec << '\n';
     const auto deferred = CompileBufferLoad(*device, block.Address() + 128u, output.Address());
     const auto prepared = device->PrepareDispatch(deferred, {}, Threads, programAddress);
     Require(prepared != nullptr, "the native buffer publication control did not prepare its deferred resources");
     const auto color = DecodeTarget(block);
+    Require(AgcDriver::Graphics::MultisampledColorBytes(color) == BlockBytes, "the staged native buffer output overlaps the target");
     const auto state = TargetState(color);
     std::uint32_t missing = 0;
-    const auto check = [&](const char* name, std::uint64_t source, std::uint32_t expected, const auto& dispatch) {
+    const auto check = [&](const char* name, std::uint64_t source, std::uint32_t expected, std::span<std::uint32_t> destination, const auto& dispatch) {
         const bool ones = expected == FillOnes;
         const std::array<float, 4> value = ones ? Ones : std::array<float, 4>{0.5f, 0.5f, 0.5f, 0.5f};
         Draw(*device, state, FullTriangle, ones ? std::span<const std::uint32_t>(OnesPixelCode) : std::span<const std::uint32_t>(HalvesPixelCode));
         CheckUniform(LoadSamples(*device, block), value, "before the native buffer read");
-        reset();
+        reset(destination);
         dispatch();
         device->WaitIdle();
-        checkBoundary();
+        checkBoundary(destination);
         std::array<std::uint32_t, Threads> actual{};
-        std::copy_n(words.begin(), Threads, actual.begin());
+        std::copy_n(destination.begin(), Threads, actual.begin());
         std::array<std::uint32_t, Threads> published{};
         AgcDriver::GuestMemory::Read(source, std::as_writable_bytes(std::span(published)));
         Require(std::any_of(published.begin(), published.end(), [&](auto word) { return word == expected; }) && std::all_of(published.begin(), published.end(), [&](auto word) { return word == 0 || word == expected; }), "the explicit native publication control did not match the rendered color and clear padding");
@@ -409,23 +425,38 @@ bool BufferPublication() {
         CheckUniform(LoadSamples(*device, block), value, "after the native buffer read");
         std::cout << "native buffer publication " << name << ": matched=" << matched << " samples=1024 boundary=passed\n";
     };
-    check("warmed", block.Address(), FillOnes, [&] { device->Dispatch(warm, 1, 1, 1, {}, programAddress); });
-    check("deferred", block.Address() + 128u, 0x38003800u, [&] { device->Dispatch(deferred, 1, 1, 1, {}, programAddress, prepared); });
+    check("warmed", block.Address(), FillOnes, words, [&] { device->Dispatch(warm, 1, 1, 1, {}, programAddress); });
+    check("deferred", block.Address() + 128u, 0x38003800u, words, [&] { device->Dispatch(deferred, 1, 1, 1, {}, programAddress, prepared); });
     const auto fresh = CompileBufferLoad(*device, block.Address() + 256u, output.Address());
-    check("fresh", block.Address() + 256u, FillOnes, [&] { device->Dispatch(fresh, 1, 1, 1, {}, programAddress); });
-    check("recipe", block.Address(), 0x38003800u, [&] {
+    check("fresh", block.Address() + 256u, FillOnes, words, [&] { device->Dispatch(fresh, 1, 1, 1, {}, programAddress); });
+    check("recipe", block.Address(), 0x38003800u, words, [&] {
         const auto hit = device->PrepareRecipe(recipe, false);
         Require(hit != nullptr, "the native buffer publication recipe was not reusable");
         std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         AgcDriver::VulkanDevice::IndirectOutcome outcome{};
         device->DispatchRecipe(warm, 1, 1, 1, 0, programAddress, hit, outcome);
     });
+    check("staged-warmed", block.Address(), FillOnes, stagedWords, [&] { device->Dispatch(stagedWarm, 1, 1, 1, {}, programAddress); });
+    check("staged-deferred", block.Address() + 4u, 0x38003800u, stagedWords, [&] { device->Dispatch(stagedDeferred, 1, 1, 1, {}, programAddress, stagedPrepared); });
+    const auto stagedFresh = CompileBufferLoad(*device, block.Address() + 8u, stagedOutput, stagedBytes);
+    check("staged-fresh", block.Address() + 8u, FillOnes, stagedWords, [&] { device->Dispatch(stagedFresh, 1, 1, 1, {}, programAddress); });
+    check("staged-recipe", block.Address(), 0x38003800u, stagedWords, [&] {
+        const auto hit = device->PrepareRecipe(stagedRecipe, false);
+        Require(hit != nullptr, "the staged native buffer recipe was not reusable");
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        AgcDriver::VulkanDevice::IndirectOutcome outcome{};
+        device->DispatchRecipe(stagedWarm, 1, 1, 1, 0, programAddress, hit, outcome);
+    });
+    std::array<std::uint32_t, Threads> neighborValues{};
+    for (std::uint32_t lane = 0; lane < Threads; ++lane) neighborValues[lane] = 0x12340000u + lane;
+    std::copy(neighborValues.begin(), neighborValues.end(), stagedWords.begin());
     const auto neighbor = CompileBufferLoad(*device, block.Address() + AgcDriver::Graphics::MultisampledColorBytes(color), output.Address());
-    reset();
+    reset(words);
     device->Dispatch(neighbor, 1, 1, 1, {}, programAddress);
     device->WaitIdle();
-    checkBoundary();
-    Require(std::all_of(words.begin(), words.begin() + Threads, [](auto word) { return word == 0; }), "the neighboring buffer did not retain its zeros");
+    checkBoundary(words);
+    Require(std::equal(words.begin(), words.begin() + Threads, neighborValues.begin()), "the neighboring buffer did not retain its distinct input pattern");
+    CheckUniform(LoadSamples(*device, block), {0.5f, 0.5f, 0.5f, 0.5f}, "after the distinct neighboring buffer input");
     const auto writer = CompileBufferLoad(*device, output.Address(), block.Address() + 256u);
     std::string refusal;
     try {
