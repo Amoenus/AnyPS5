@@ -43,7 +43,7 @@ using namespace AgcDriver::Graphics;
 
 class Device {
 public:
-    Device() {
+    explicit Device(bool storageReads = true) {
 #ifdef _WIN32
         library = SDL_LoadObject("vulkan-1.dll");
 #else
@@ -89,7 +89,7 @@ public:
             VkPhysicalDeviceFeatures enabled{};
             enabled.shaderStorageImageMultisample = VK_TRUE;
             enabled.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-            enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
+            enabled.shaderStorageImageReadWithoutFormat = storageReads ? available.shaderStorageImageReadWithoutFormat : VK_FALSE;
             const float priority = 1.0f;
             VkDeviceQueueCreateInfo queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
             queue.queueFamilyIndex = family;
@@ -2265,8 +2265,9 @@ void CheckShapes() {
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--shapes") { CheckShapes(); return 0; }
+        const bool sampledPublication = argc > 1 && std::string(argv[1]) == "--targets-sampled-readback";
         std::unique_ptr<Device> device;
-        try { device = std::make_unique<Device>(); }
+        try { device = std::make_unique<Device>(!sampledPublication); }
         catch (const std::exception& error) {
             if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr) throw;
             std::printf("skipped, no usable Vulkan MS upload device: %s\n", error.what());
@@ -2371,7 +2372,9 @@ int main(int argc, char** argv) {
             std::printf("Native depth checked=%u unavailable=%u\n", checked, unavailable);
             return 0;
         }
-        if (argc > 1 && std::string(argv[1]) == "--targets") {
+        if (sampledPublication || (argc > 1 && std::string(argv[1]) == "--targets")) {
+            device->PrintDevice();
+            if (sampledPublication) Require(!context.storageImageReadWithoutFormat, "sampled publication fixture enabled formatless storage reads");
 #ifdef _WIN32
             CheckUnwatchedTargetDiagnostic(context);
 #endif
@@ -2396,6 +2399,7 @@ int main(int argc, char** argv) {
             Require(checked != 0u, "device advertises no supported multisample target imports");
             Require(unavailable == 0u || std::getenv("ANYPS5_REQUIRE_MSAA_ALL") == nullptr, "all multisample target cases were required but some are unsupported");
             std::printf("MS target import checked=%u unavailable=%u\n", checked, unavailable);
+            if (sampledPublication) std::puts("MS sampled publication with formatless storage reads disabled passed");
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--tile-transfer") {
