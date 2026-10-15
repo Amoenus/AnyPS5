@@ -741,8 +741,8 @@ void decideImportWatch(const Context& context, HostImports& state) {
     state.unwatchDmaBufImports = false;
     state.watchPrivateImports = false;
     if (context.hostImportAlignment == 0 || !GuestMemory::WriteWatched()) return;
-    if (context.settleQueue == VK_NULL_HANDLE || context.settleQueueMutex == nullptr || std::getenv("APS5_NO_WATCHED_PRIVATE_IMPORTS") != nullptr) {
-        std::fprintf(stderr, "[write-watch] Windows direct host imports use comparisons (%s); separate shared aliases retain guest write tracking\n", std::getenv("APS5_NO_WATCHED_PRIVATE_IMPORTS") != nullptr ? "APS5_NO_WATCHED_PRIVATE_IMPORTS" : "no second queue to settle imports on");
+    if (context.settleQueue == VK_NULL_HANDLE || context.settleQueueMutex == nullptr) {
+        std::fprintf(stderr, "[write-watch] Windows direct host imports use comparisons (no second queue to settle imports on); separate shared aliases retain guest write tracking\n");
         return;
     }
     const auto probe = ProbeImportWriteProtection(context);

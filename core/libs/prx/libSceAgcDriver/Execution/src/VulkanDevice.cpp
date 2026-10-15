@@ -1406,24 +1406,22 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     const float priorities[2]{1.0f, 1.0f};
     bool settleQueue = false;
     std::uint32_t settleFamily = family;
-    if (std::getenv("APS5_NO_WATCHED_PRIVATE_IMPORTS") == nullptr) {
-        std::uint32_t families = 0;
-        auto getFamilies = state->InstanceFunction<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
-        getFamilies(selected, &families, nullptr);
-        std::vector<VkQueueFamilyProperties> queues(families);
-        getFamilies(selected, &families, queues.data());
-        if (family < families && queues[family].queueCount >= 2 && std::getenv("APS5_SETTLE_OTHER_FAMILY") == nullptr) {
-            queueInfo.queueCount = 2;
-            queueInfo.pQueuePriorities = priorities;
-            settleQueue = true;
-        } else {
-            const auto copies = [&](std::uint32_t index) { return index != family && queues[index].queueCount != 0 && (queues[index].queueFlags & (VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) != 0; };
-            for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
-                if (copies(i) && (queues[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) == 0) settleFamily = i, settleQueue = true;
-            }
-            for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
-                if (copies(i)) settleFamily = i, settleQueue = true;
-            }
+    std::uint32_t families = 0;
+    auto getFamilies = state->InstanceFunction<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
+    getFamilies(selected, &families, nullptr);
+    std::vector<VkQueueFamilyProperties> queues(families);
+    getFamilies(selected, &families, queues.data());
+    if (family < families && queues[family].queueCount >= 2) {
+        queueInfo.queueCount = 2;
+        queueInfo.pQueuePriorities = priorities;
+        settleQueue = true;
+    } else {
+        const auto copies = [&](std::uint32_t index) { return index != family && queues[index].queueCount != 0 && (queues[index].queueFlags & (VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) != 0; };
+        for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
+            if (copies(i) && (queues[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) == 0) settleFamily = i, settleQueue = true;
+        }
+        for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
+            if (copies(i)) settleFamily = i, settleQueue = true;
         }
     }
 #endif

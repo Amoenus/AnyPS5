@@ -847,7 +847,7 @@ int main() {
         CheckCollectBoundaries();
         CheckImportWindow();
         CheckImportWindowZeroPages();
-    CheckImportWindowOtherThread();
+        CheckImportWindowOtherThread();
         CheckUnwatchedImport();
         CheckCommittedRanges();
     } catch (const std::exception& error) {

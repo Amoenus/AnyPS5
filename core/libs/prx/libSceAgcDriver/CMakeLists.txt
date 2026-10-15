@@ -1025,9 +1025,10 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_import_watch COMMAND agc_driver_recorder_tests --import-watch-only)
-    set_tests_properties(agc_import_watch PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME agc_import_watch_other_family COMMAND agc_driver_recorder_tests --import-watch-other-family-only)
+    set_tests_properties(agc_import_watch agc_import_watch_other_family PROPERTIES SKIP_RETURN_CODE 77)
     if(WIN32)
-        set_tests_properties(agc_import_watch PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_import_watch agc_import_watch_other_family PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_unchanged_cpu_stamps COMMAND agc_driver_recorder_tests --unchanged-cpu-stamps-only)
@@ -1636,13 +1637,6 @@ if(BUILD_TESTING)
     set_tests_properties(agc_driver_draw_cache_reuse agc_driver_draw_cache_reuse_off agc_driver_draw_cache_reuse_verify PROPERTIES FAIL_REGULAR_EXPRESSION "FATAL:")
     if(WIN32)
         set_tests_properties(agc_driver_draw_cache_reuse_off agc_driver_draw_cache_reuse_verify PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-    endif()
-
-    add_test(NAME agc_driver_layered_volume_submit_other_family COMMAND agc_driver_layered_volume_submit_tests)
-    set_tests_properties(agc_driver_layered_volume_submit_other_family PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_SETTLE_OTHER_FAMILY=1" SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "FATAL:")
-    if(WIN32)
-        set_tests_properties(agc_driver_layered_volume_submit_other_family PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 
