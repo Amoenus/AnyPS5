@@ -170,7 +170,8 @@ extern "C" Uint32 SDLCALL SDL_GetQueuedAudioSize(SDL_AudioDeviceID device) { Req
 extern "C" int SDLCALL SDL_QueueAudio(SDL_AudioDeviceID device, const void* data, Uint32 bytes) {
     Require(device == 42 && bytes % sizeof(float) == 0, "wrong vibration queue");
     const auto* samples = static_cast<const float*>(data);
-    played.assign(samples, samples + bytes / sizeof(float));
+    const std::size_t sampleCount = bytes / sizeof(float);
+    played.assign(samples, samples + sampleCount);
     ++queued;
     return 0;
 }
