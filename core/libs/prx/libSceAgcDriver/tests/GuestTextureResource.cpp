@@ -267,6 +267,14 @@ void RunGuestTextureResourceTests() {
     result = DecodeTextureResource(canvas);
     Require(result.dimension == TextureDimension::k2DMsaa && result.samples == 4 && result.baseAddress == 0x21f200000ull && result.width == 297 && result.height == 297 && result.format == 56 && result.tileMode == TextureTileMode::kR64KBX, "the 4x canvas descriptor of PPSA99006 decoded incorrectly");
     Require(DescribeSurface(result).guestBytes == 0x190000, "4x render-target geometry must include fragment-aware padding for the PPSA99006 canvas");
+    for (const auto shape : {std::array{65u, 1u, 0x20000u}, std::array{1u, 65u, 0x10000u}}) {
+        auto asymmetric = multisampled;
+        asymmetric.width = shape[0];
+        asymmetric.height = shape[1];
+        asymmetric.lastLevel = asymmetric.maxMip = 1u;
+        const auto geometry = DescribeSurface(DecodeTextureResource(pack(asymmetric)));
+        Require(geometry.guestBytes == shape[2], "2x R64KB_X asymmetric surface footprint is incorrect: " + std::to_string(geometry.guestBytes));
+    }
     Fields fewerFragments = multisampled;
     fewerFragments.maxMip = 1;
     rejectFields(fewerFragments, "same sample count");
