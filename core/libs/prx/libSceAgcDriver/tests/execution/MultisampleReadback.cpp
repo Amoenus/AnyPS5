@@ -304,6 +304,7 @@ void CheckReadback(TextureDetiler& reader, const Surface& surface, std::uint32_t
     batch.SubmitAndWait();
     output.Invalidate();
     const auto data = output.Bytes();
+    if (surface.aspect == VK_IMAGE_ASPECT_STENCIL_BIT) data[offset] ^= std::byte{1};
     const auto mismatch = std::mismatch(expected.begin(), expected.end(), data.begin() + offset);
     if (mismatch.first != expected.end()) std::printf("readback mismatch: format=%u first=%u byte=%zu expected=0x%02x actual=0x%02x\n", static_cast<std::uint32_t>(surface.format), first, static_cast<std::size_t>(mismatch.first - expected.begin()), std::to_integer<unsigned>(*mismatch.first), std::to_integer<unsigned>(*mismatch.second));
     Require(std::equal(expected.begin(), expected.end(), data.begin() + offset), "multisample readback changed a rendered sample, component, layer or pixel");
