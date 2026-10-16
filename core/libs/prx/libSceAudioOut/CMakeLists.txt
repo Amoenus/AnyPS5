@@ -19,6 +19,20 @@ target_link_libraries(libSceAudioOut PRIVATE libc libkernel libScePad SDL2-stati
 configure_windows_unwind(libSceAudioOut)
 
 if(BUILD_TESTING)
+    add_test_executable(audio_out_vibration_tests tests/AudioOutVibration.cpp)
+    target_include_directories(audio_out_vibration_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(audio_out_vibration_tests PRIVATE libSceAudioOut libScePad libc)
+    configure_windows_unwind(audio_out_vibration_tests)
+    foreach(vibrationMode IN ITEMS s16 f32 batch_s16 batch_f32 pad_control)
+        set(vibrationTest "audio_out_vibration_${vibrationMode}")
+        add_test(NAME ${vibrationTest} COMMAND audio_out_vibration_tests --${vibrationMode})
+        set_tests_properties(${vibrationTest} PROPERTIES TIMEOUT 5)
+        if(WIN32)
+            set_tests_properties(${vibrationTest} PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAudioOut>")
+        endif()
+    endforeach()
+
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_test_executable(audio_out_resampling_tests tests/AudioOutResampling.cpp)
         target_include_directories(audio_out_resampling_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_SDL2_INCLUDE_DIR})
