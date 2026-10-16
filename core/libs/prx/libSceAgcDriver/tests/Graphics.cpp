@@ -7728,6 +7728,10 @@ void pipelineJournalTests() {
         color.format = VK_FORMAT_R8G8B8A8_UNORM;
         color.bytes = 64 * 32 * 4;
         color.componentMapping = 0xec;
+        color.dccControl = 0x100038u;
+        color.fmaskAddress = 0x3000u;
+        color.fmaskSwizzle = 0x18u;
+        color.arrayLayers = 3u;
         state.colors = {color, color};
         state.colors[1].format = VK_FORMAT_B8G8R8A8_UNORM;
         state.colors[1].exportIndex = 1;
@@ -7764,6 +7768,7 @@ void pipelineJournalTests() {
         const auto recipe = MakeGraphicsPipelineRecipe(state, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
         Require(recipe.stages.size() == 2 && recipe.stages[0].identity == vertex.Identity() && recipe.stages[1].identity == fragment.Identity() && !recipe.stages[0].generated && recipe.stages[1].pushConstantOffset == PipelinePushSlotBytes && recipe.splitSets, "the recipe does not name its stages");
         Require(recipe.state.colors.size() == 2 && recipe.state.colors[0].address == 0 && recipe.state.colors[0].componentMapping == 0xec && recipe.state.depth && recipe.state.depth->address == 0 && recipe.state.viewport.width == 0 && recipe.state.stages.registerValue == 0 && recipe.state.stages.tessellation && recipe.state.stages.tessellation->breakAtInstance, "the canonical state kept or dropped the wrong fields");
+        Require(std::all_of(recipe.state.colors.begin(), recipe.state.colors.end(), [](const auto& canonicalColor) { return canonicalColor.dccControl == 0u && canonicalColor.fmaskAddress == 0u && canonicalColor.fmaskSwizzle == 0u && canonicalColor.arrayLayers == 1u; }), "the canonical pipeline state retained resident color metadata");
         const auto bytes = EncodeGraphicsPipelineRecipe(recipe);
         GraphicsPipelineRecipe decoded;
         Require(DecodeGraphicsPipelineRecipe(bytes, decoded), "the recipe does not decode");
