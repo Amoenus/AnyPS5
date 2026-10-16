@@ -414,7 +414,7 @@ std::optional<DccKeys> MultisampledCmaskKeys(std::uint8_t code) {
     const auto tile = code & 0xfu;
     if ((code >> 4u) != tile) return std::nullopt;
     if (tile == 0u) return DccKeys::Clear0000;
-    if ((tile >> 2u) == 3u) return DccKeys::Uncompressed;
+    if (code == 0xffu) return DccKeys::Uncompressed;
     return std::nullopt;
 }
 
