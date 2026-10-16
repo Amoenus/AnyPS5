@@ -28,5 +28,5 @@ void main() {
     } else {
         for (uint component = 0u; component < ELEMENT_BYTES / 4u; ++component) value[component] = sourceBuffer.data[(address >> 2u) + component];
     }
-    imageStore(destinationImage, coordinate, int(element % params.fragments), value);
+    imageStore(destinationImage, coordinate, 0, value);
 }
