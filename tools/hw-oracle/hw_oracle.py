@@ -65,12 +65,18 @@ def oracle():
 
 
 @cache
-def detected_target(binary):
-    return subprocess.run([binary, "--target"], capture_output=True, text=True, check=True).stdout.strip()
+def detected_target(binary, visible_devices):
+    environment = dict(os.environ)
+    if visible_devices is None:
+        environment.pop("ROCR_VISIBLE_DEVICES", None)
+    else:
+        environment["ROCR_VISIBLE_DEVICES"] = visible_devices
+    return subprocess.run([binary, "--target"], capture_output=True, text=True, check=True,
+                          env=environment).stdout.strip()
 
 
 def target():
-    return os.environ.get("HW_ORACLE_TARGET") or detected_target(oracle())
+    return os.environ.get("HW_ORACLE_TARGET") or detected_target(oracle(), os.environ.get("ROCR_VISIBLE_DEVICES"))
 
 
 def assemble(body, work, wave64, *, ieee, denorm32, denorm16, dx10_clamp, round32, round16, fp16_overflow, lds=DEFAULT_LDS):

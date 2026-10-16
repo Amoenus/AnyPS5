@@ -301,6 +301,39 @@ class TargetOverrideTests(unittest.TestCase):
             with patch.dict(os.environ, {"HW_ORACLE_TARGET": "gfx1100"}):
                 self.assertEqual(hw_oracle.target(), "gfx1100")
 
+    def test_device_selection_uses_its_own_cached_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = root / "probe.py"
+            runner.write_text(
+                "import os\nfrom pathlib import Path\n"
+                "visible = os.environ.get('ROCR_VISIBLE_DEVICES', 'unset')\n"
+                "with Path(__file__).with_name('probes.txt').open('a', encoding='utf-8') as log:\n"
+                "    log.write(visible + '\\n')\n"
+                "print({'0': 'gfx1030', '1': 'gfx1100', 'unset': 'gfx900'}[visible])\n",
+                encoding="utf-8")
+            binary = root / ("oracle.cmd" if os.name == "nt" else "oracle")
+            if os.name == "nt":
+                binary.write_text(f'@"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                binary.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(runner))} "$@"\n',
+                                  encoding="utf-8")
+                binary.chmod(0o755)
+            with patch.object(hw_oracle, "oracle", return_value=binary), \
+                    patch.dict(os.environ, {"HW_ORACLE_TARGET": ""}):
+                os.environ["ROCR_VISIBLE_DEVICES"] = "0"
+                self.assertEqual(hw_oracle.detected_target(binary, "1"), "gfx1100")
+                for visible, expected in (("0", "gfx1030"), ("0", "gfx1030"),
+                                          ("1", "gfx1100"), ("1", "gfx1100"),
+                                          ("0", "gfx1030"), (None, "gfx900"), (None, "gfx900")):
+                    if visible is None:
+                        os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+                    else:
+                        os.environ["ROCR_VISIBLE_DEVICES"] = visible
+                    self.assertEqual(hw_oracle.target(), expected)
+            self.assertEqual((root / "probes.txt").read_text(encoding="utf-8").splitlines(),
+                             ["1", "0", "unset"])
+
     def test_removing_override_restores_cached_detection_for_that_binary(self):
         reply = subprocess.CompletedProcess([], 0, "gfx1030\n", "")
         with patch.object(hw_oracle, "oracle", return_value=Path("oracle-a")), \
