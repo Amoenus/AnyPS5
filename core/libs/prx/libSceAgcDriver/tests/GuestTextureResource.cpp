@@ -263,10 +263,6 @@ void RunGuestTextureResourceTests() {
     Require(result.dimension == TextureDimension::k2DMsaa && result.samples == 4 && result.width == 297 && result.height == 297, "4x multisampled descriptor decoded incorrectly");
     Require(result.mipCount == 1 && result.allocatedMipCount == 1 && result.baseLevel == 0 && result.lastLevel == 0, "a multisampled descriptor's sample count was decoded as mip levels");
     Require(DecodeTextureResource(pack(base)).samples == 1, "a single-sample descriptor decoded with several samples");
-    const std::array<std::uint32_t, 8> canvas{0x021f2000u, 0x03800000u, 0x804a004au, 0xe1b20facu, 0x00000000u, 0x00400020u, 0x00000000u, 0x00000000u};
-    result = DecodeTextureResource(canvas);
-    Require(result.dimension == TextureDimension::k2DMsaa && result.samples == 4 && result.baseAddress == 0x21f200000ull && result.width == 297 && result.height == 297 && result.format == 56 && result.tileMode == TextureTileMode::kR64KBX, "the 4x canvas descriptor of PPSA99006 decoded incorrectly");
-    Require(DescribeSurface(result).guestBytes == 0x190000, "4x render-target geometry must include fragment-aware padding for the PPSA99006 canvas");
     for (const auto shape : {std::array{65u, 1u, 0x20000u}, std::array{1u, 65u, 0x10000u}}) {
         auto asymmetric = multisampled;
         asymmetric.width = shape[0];
@@ -275,6 +271,10 @@ void RunGuestTextureResourceTests() {
         const auto geometry = DescribeSurface(DecodeTextureResource(pack(asymmetric)));
         Require(geometry.guestBytes == shape[2], "2x R64KB_X asymmetric surface footprint is incorrect: " + std::to_string(geometry.guestBytes));
     }
+    const std::array<std::uint32_t, 8> canvas{0x021f2000u, 0x03800000u, 0x804a004au, 0xe1b20facu, 0x00000000u, 0x00400020u, 0x00000000u, 0x00000000u};
+    result = DecodeTextureResource(canvas);
+    Require(result.dimension == TextureDimension::k2DMsaa && result.samples == 4 && result.baseAddress == 0x21f200000ull && result.width == 297 && result.height == 297 && result.format == 56 && result.tileMode == TextureTileMode::kR64KBX, "the 4x canvas descriptor of PPSA99006 decoded incorrectly");
+    Require(DescribeSurface(result).guestBytes == 0x190000, "4x render-target geometry must include fragment-aware padding for the PPSA99006 canvas");
     Fields fewerFragments = multisampled;
     fewerFragments.maxMip = 1;
     rejectFields(fewerFragments, "same sample count");
