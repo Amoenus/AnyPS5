@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
@@ -173,6 +174,7 @@ bool FillsTakenAsMultisampledClearsAreNotStored(AgcDriver::VulkanDevice& device)
         return false;
     }
     Require(control.Holds(std::byte{}, 0, BlockBytes), "a compute fill of 0 over plain guest memory did not store 0");
+    Require(AgcDriver::Graphics::Recorder::Active() == context.recorder && context.recorder != nullptr && context.recorder->Device() == context.device, "multisampled fill: native targets and packet submissions use different Vulkan recorders");
 
     auto& color = NewBlock();
     const auto target = MultisampledTarget(color);
