@@ -62,7 +62,10 @@ VkPipeline TextureDetiler::multisampleReadbackPipeline(std::uint32_t elementByte
     info.layout = readbackPipelineLayout;
     readbackPipelines.reserve(readbackPipelines.size() + 1u);
     VkPipeline result = VK_NULL_HANDLE;
-    Check(context.Function<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(context.device, context.pipelineCache, 1u, &info, nullptr, &result), "vkCreateComputePipelines multisample readback");
+    {
+        auto pipelineCacheLock = context.LockPipelineCacheForUse();
+        Check(context.Function<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(context.device, context.pipelineCache, 1u, &info, nullptr, &result), "vkCreateComputePipelines multisample readback");
+    }
     readbackPipelines.emplace_back(key, result);
     return result;
 }
