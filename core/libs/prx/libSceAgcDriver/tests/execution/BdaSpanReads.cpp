@@ -157,10 +157,24 @@ private:
     int saved = -1;
 };
 
-bool RunFault(AgcDriver::VulkanDevice& device, GuestBlock& guest, bool coherent, bool barrier, std::uint32_t waveSize, const ShaderRecompiler::SpirvTarget& target, const std::string& name) {
-    const auto code = Code(coherent, barrier, BlockBytes + LoadBase);
+bool RunFault(AgcDriver::VulkanDevice& device, GuestBlock& guest, bool coherent, bool barrier, std::uint32_t waveSize, const ShaderRecompiler::SpirvTarget& target, const std::string& name, bool mixed = false) {
+    const auto loadBase = static_cast<std::uint32_t>(mixed ? BlockBytes - 512u : BlockBytes + LoadBase);
+    const auto code = Code(coherent, barrier, loadBase);
     auto memory = Initial();
+    if (mixed) {
+        for (std::size_t dword = memory.size() - 128u; dword < memory.size(); ++dword) memory[dword] = 0x51000000u + static_cast<std::uint32_t>(dword) * 0x00010203u;
+    }
     std::memcpy(guest.Data(), memory.data(), BlockBytes);
+    auto expected = memory;
+    if (mixed) {
+        for (std::uint32_t tid = 0u; tid < Threads; ++tid) {
+            const auto load = loadBase + tid * 16u + (tid & 1u) * 2u - 8u;
+            if (load + 16u > BlockBytes) continue;
+            expected[OutputBase / 4u + tid * 2u] = Bytes(memory, load + 4u);
+            expected[OutputBase / 4u + tid * 2u + 1u] = Bytes(memory, load + 12u);
+        }
+        Require(expected != memory, "BDA span reads: the mixed control has no distinguishable valid lane writes");
+    }
     const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(guest.Data()));
     Require(!GuestAllocations::Mutation().Overlaps(reinterpret_cast<const void*>(address + BlockBytes), Threads * 16u + LoadBase + 16u), "BDA span reads: the fault input overlaps a registered allocation");
     const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u)};
@@ -181,9 +195,9 @@ bool RunFault(AgcDriver::VulkanDevice& device, GuestBlock& guest, bool coherent,
     for (std::size_t dword = 0; dword < memory.size(); ++dword) {
         std::uint32_t actual = 0u;
         std::memcpy(&actual, guest.Data() + dword * 4u, sizeof(actual));
-        if (actual != memory[dword]) ++changed;
+        if (actual != expected[dword]) ++changed;
     }
-    std::printf("BDA fault span %s coherent=%u barrier=%u changed=%u refused=1\n", name.c_str(), coherent ? 1u : 0u, barrier ? 1u : 0u, changed);
+    std::printf("BDA fault span %s%s coherent=%u barrier=%u changed=%u refused=1\n", name.c_str(), mixed ? "-mixed" : "", coherent ? 1u : 0u, barrier ? 1u : 0u, changed);
     return changed != 0u;
 }
 
@@ -221,6 +235,11 @@ int main() {
                 faultingWrites += RunFault(*device, guest, coherent, barrier, 32, native, "wave32") ? 1u : 0u;
                 faultingWrites += RunFault(*device, guest, coherent, barrier, 64, native, "wave64") ? 1u : 0u;
                 if (split.subgroupSize != native.subgroupSize) faultingWrites += RunFault(*device, guest, coherent, barrier, 64, split, "wave64-split") ? 1u : 0u;
+                if (barrier) {
+                    faultingWrites += RunFault(*device, guest, coherent, barrier, 32, native, "wave32", true) ? 1u : 0u;
+                    faultingWrites += RunFault(*device, guest, coherent, barrier, 64, native, "wave64", true) ? 1u : 0u;
+                    if (split.subgroupSize != native.subgroupSize) faultingWrites += RunFault(*device, guest, coherent, barrier, 64, split, "wave64-split", true) ? 1u : 0u;
+                }
             }
         }
         Require(faultingWrites == 0u, "BDA span reads: " + std::to_string(faultingWrites) + " faulting programs still wrote guest memory");
