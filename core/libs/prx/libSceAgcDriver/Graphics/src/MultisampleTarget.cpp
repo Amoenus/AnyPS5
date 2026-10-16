@@ -178,13 +178,15 @@ public:
         context.Function<PFN_vkCmdCopyImage>("vkCmdCopyImage")(recorder.Commands(), source, VK_IMAGE_LAYOUT_GENERAL, storable.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
         RecordMemoryBarrier(context, recorder.Commands(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
         Recorder::CountBarriers(Recorder::CommandClass::Draw, 3);
-        for (const auto& [key, texture] : textures) recorder.Keep(texture);
+        for (auto& [key, texture] : textures) retiredTextures.push_back(std::move(texture));
         textures.clear();
         retired.push_back({image, memory, view});
         image = storable.image;
         memory = storable.memory;
         view = storable.view;
         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        allocationBytes += storable.bytes;
+        recorder.Keep(shared_from_this(), static_cast<std::size_t>(storable.bytes));
     }
 
     void Keep() {
@@ -318,6 +320,7 @@ private:
     VkImageView storageView = VK_NULL_HANDLE;
     bool storageWritten = false;
     std::map<std::array<std::uint32_t, 4>, std::unique_ptr<Texture>> textures;
+    std::vector<std::unique_ptr<Texture>> retiredTextures;
     VkDeviceSize allocationBytes = 0;
     std::vector<GuestMemory::UnchangedQuery> dccRanges;
 
@@ -371,6 +374,7 @@ private:
 
     void release() noexcept {
         textures.clear();
+        retiredTextures.clear();
         if (resolvePass) context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, resolvePass, nullptr);
         if (storageView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, storageView, nullptr);
         destroy({image, memory, view});
