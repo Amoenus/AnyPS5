@@ -30,6 +30,31 @@ namespace {
 
 using namespace AgcDriver::Graphics;
 
+constexpr bool SurfaceFits(const VkImageFormatProperties& supported, std::uint32_t samples, std::uint32_t width = 17u, std::uint32_t height = 5u, std::uint32_t layers = 2u) {
+    return (supported.sampleCounts & samples) != 0u && width <= supported.maxExtent.width && height <= supported.maxExtent.height && layers <= supported.maxArrayLayers;
+}
+
+void CheckSupportSelection() {
+    constexpr VkImageFormatProperties supported{{128u, 64u, 1u}, 1u, 2u, VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT, 0u};
+    static_assert(!SurfaceFits(supported, 2u));
+    static_assert(SurfaceFits(supported, 4u) && SurfaceFits(supported, 8u));
+    static_assert(SurfaceFits(supported, 4u, 128u, 64u, 1u));
+    static_assert(!SurfaceFits(supported, 4u, 129u, 64u, 1u));
+    static_assert(!SurfaceFits(supported, 4u, 128u, 65u, 1u));
+    static_assert(!SurfaceFits(supported, 4u, 17u, 5u, 3u));
+    static_assert(!SurfaceFits(VkImageFormatProperties{}, 4u));
+}
+
+bool SurfaceSupported(const Context& context, VkFormat format, std::uint32_t samples, std::uint32_t width = 17u, std::uint32_t height = 5u, std::uint32_t layers = 2u) {
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | (format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    VkImageFormatProperties supported{};
+    const auto result = context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0u, &supported);
+    if (result != VK_ERROR_FORMAT_NOT_SUPPORTED) Check(result, "readback fixture format query");
+    if (result == VK_SUCCESS && SurfaceFits(supported, samples, width, height, layers)) return true;
+    std::printf("skipped, the device does not support readback fixture format=%u samples=%u extent=%ux%u layers=%u\n", static_cast<std::uint32_t>(format), samples, width, height, layers);
+    return false;
+}
+
 struct Surface {
     Context context;
     VkFormat format;
@@ -55,7 +80,7 @@ struct Surface {
             const VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
             VkImageFormatProperties supported{};
             Check(context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0u, &supported), "readback fixture format query");
-            Require((supported.sampleCounts & samples) != 0u && width <= supported.maxExtent.width && height <= supported.maxExtent.height && layers <= supported.maxArrayLayers, "readback fixture format does not support its sample count or extent");
+            Require(SurfaceFits(supported, samples, width, height, layers), "readback fixture format does not support its sample count or extent");
             Require(context.sampleRateShading, "readback fixture needs per-sample shading");
             VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
             info.imageType = VK_IMAGE_TYPE_2D;
@@ -286,6 +311,7 @@ void CheckRefusals(TextureDetiler& reader, const Surface& surface) {
 
 int main(int argc, char** argv) {
     try {
+        CheckSupportSelection();
         const std::string mode = argc == 1 ? "uint32" : argv[1];
         VkFormat format = VK_FORMAT_R32_UINT;
         std::uint32_t bytes = 4u;
@@ -299,10 +325,16 @@ int main(int argc, char** argv) {
         if (!device) return VulkanTestSkipped;
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+        if (!context.sampleRateShading) {
+            std::puts("skipped, the device does not support per-sample shading");
+            return VulkanTestSkipped;
+        }
         auto limited = context;
         limited.limits.maxComputeWorkGroupCount[0] = 1u;
         TextureDetiler reader(limited);
+        std::uint32_t checked = 0u;
         for (const auto samples : {2u, 4u, 8u}) {
+            if (!SurfaceSupported(context, format, samples)) continue;
             Surface surface(context, format, bytes, samples);
             surface.Render();
             const auto elements = surface.width * surface.height * surface.layers * samples;
@@ -312,14 +344,16 @@ int main(int argc, char** argv) {
             CheckReadback(reader, surface, 0u, elements, 1u);
             if (samples == 4u && bytes == 4u) CheckRefusals(reader, surface);
             std::printf("multisample readback %s: samples=%u elements=%u layers=%u full/partial/sentinels/reuse/2d=passed storage-usage=0\n", mode.c_str(), samples, elements, surface.layers);
+            ++checked;
         }
-        if (mode == "depth") {
+        if (checked == 0u) return VulkanTestSkipped;
+        if (mode == "depth" && SurfaceSupported(context, format, 4u, 128u, 64u, 1u)) {
             Surface surface(context, format, bytes, 4u, 128u, 64u, 1u);
             surface.Render();
             CheckReadback(reader, surface, 0u, 128u * 64u * 4u, 1u);
             std::puts("multisample readback D32 128x64 4x: 32768 distinct D32 sample values passed");
         }
-        if (mode == "uint32") {
+        if (mode == "uint32" && SurfaceSupported(context, VK_FORMAT_D32_SFLOAT, 4u) && SurfaceSupported(context, VK_FORMAT_R32_UINT, 4u)) {
             Surface depth(context, VK_FORMAT_D32_SFLOAT, 4u, 4u);
             depth.Render();
             CheckReadback(reader, depth, 0u, depth.width * depth.height * depth.layers * depth.samples, 1u);
