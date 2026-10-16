@@ -8,7 +8,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
-#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
@@ -58,7 +57,7 @@ public:
     MultisampleTarget(const Context& context, const ColorTarget& target) : context(context), target(target), cmask(target.cmaskAddress, target.cmaskBytes), colorFill(target) {
         this->context.bufferPool.reset();
         if (target.dccAddress != 0) metadataValid = std::make_shared<std::atomic<bool>>(true);
-        const auto initial = target.dccAddress != 0 || target.cmaskFastClear ? std::optional{initialDccClear(target)} : initialColorContents(target);
+        const auto initial = initialDccClear(target);
         const auto samples = static_cast<VkSampleCountFlagBits>(target.samples);
         Require((context.limits.framebufferColorSampleCounts & samples) != 0, "the device cannot render color with the target's sample count");
         VkFormatProperties properties{};
@@ -74,56 +73,21 @@ public:
         storageFlags = storageFormat != target.format ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT : 0u;
         const auto storageSupports = [&](VkFormat format, VkImageUsageFlags formatUsage, VkImageCreateFlags flags) {
             VkImageFormatProperties properties{};
-            return context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, formatUsage, flags, &properties) == VK_SUCCESS && (properties.sampleCounts & samples) != 0 && target.extent.width <= properties.maxExtent.width && target.extent.height <= properties.maxExtent.height && properties.maxArrayLayers != 0;
+            return context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, formatUsage, flags, &properties) == VK_SUCCESS && (properties.sampleCounts & samples) != 0;
         };
         if (storageFormat != VK_FORMAT_UNDEFINED && (!context.storageImageMultisample || !storageSupports(storageFormat, VK_IMAGE_USAGE_STORAGE_BIT, 0u) || !storageSupports(target.format, usage | VK_IMAGE_USAGE_STORAGE_BIT, storageFlags))) storageFormat = VK_FORMAT_UNDEFINED;
-        VkImageCreateFlags flags = 0;
-        const auto alignment = std::max<VkDeviceSize>({4u, target.elementBytes, context.limits.minStorageBufferOffsetAlignment});
-        const auto stride = context.limits.maxStorageBufferRange / alignment * alignment;
-        if (!initial.has_value()) {
-            Require(stride != 0, "initial multisample storage range cannot hold an aligned element");
-            Require(context.detiler != nullptr && context.storageImageMultisample && context.storageImageWriteWithoutFormat, "initial multisample samples require enabled formatless multisampled storage image writes");
-            const auto format = TextureDetiler::ImageElementFormat(target.elementBytes);
-            flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
-            Require(storageSupports(format, VK_IMAGE_USAGE_STORAGE_BIT, 0u) && storageSupports(target.format, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags), "the device cannot initialize the multisampled color target through its unsigned storage view");
-            usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-        }
         try {
-            const auto created = allocate(usage, flags);
+            const auto created = allocate(usage, 0u);
             image = created.image;
             memory = created.memory;
             view = created.view;
             allocationBytes = created.bytes;
-            if (!initial.has_value()) {
-                VkImageViewUsageCreateInfo storageUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
-                storageUsage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
-                VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-                info.pNext = &storageUsage;
-                info.image = image;
-                info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-                info.format = TextureDetiler::ImageElementFormat(target.elementBytes);
-                info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &info, nullptr, &initialView), "vkCreateImageView initial multisample samples");
-            }
             recordCommands(context, [&](VkCommandBuffer commands, Recorder* recorder) {
-                if (initial.has_value()) {
-                    recordToGeneral(commands, image);
-                    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                    context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &*initial, 1, &range);
-                    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-                    if (recorder != nullptr) Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
-                } else {
-                    recordToGeneral(commands, image, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-                    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-                    const auto elements = static_cast<std::uint64_t>(target.extent.width) * target.extent.height * target.samples;
-                    const auto bytes = elements * target.elementBytes;
-                    for (std::uint64_t offset = 0; offset < bytes; offset += stride) {
-                        const auto count = std::min(stride, bytes - offset);
-                        context.detiler->DispatchMultisampleImage(commands, target.elementBytes, initialUpload->Handle(), offset, (count + 3u) & ~VkDeviceSize{3}, initialView, target.extent.width, target.extent.height, 1u, target.samples, static_cast<std::uint32_t>(offset / target.elementBytes), static_cast<std::uint32_t>(count / target.elementBytes));
-                    }
-                    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
-                    if (recorder != nullptr) Recorder::CountBarriers(Recorder::CommandClass::Draw, 3);
-                }
+                recordToGeneral(commands, image);
+                const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &initial, 1, &range);
+                RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+                if (recorder != nullptr) Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
             });
         } catch (...) {
             release();
@@ -167,8 +131,8 @@ public:
             Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, created.image, created.memory, 0), "vkBindImageMemory multisampled target");
             VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
             VkImageViewUsageCreateInfo sampledUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
-            sampledUsage.usage = sampleFormat == VK_FORMAT_UNDEFINED ? imageUsage & ~VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
-            if (sampleFormat != VK_FORMAT_UNDEFINED || (flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT) != 0) viewInfo.pNext = &sampledUsage;
+            sampledUsage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+            if (sampleFormat != VK_FORMAT_UNDEFINED) viewInfo.pNext = &sampledUsage;
             viewInfo.image = created.image;
             viewInfo.viewType = sampleFormat == VK_FORMAT_UNDEFINED ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
             viewInfo.format = sampleFormat == VK_FORMAT_UNDEFINED ? target.format : sampleFormat;
@@ -187,16 +151,16 @@ public:
         if (allocation.memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, allocation.memory, nullptr);
     }
 
-    void recordToGeneral(VkCommandBuffer commands, VkImage destination, VkPipelineStageFlags destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT, VkAccessFlags destinationAccess = VK_ACCESS_TRANSFER_WRITE_BIT) {
+    void recordToGeneral(VkCommandBuffer commands, VkImage destination) {
         VkImageMemoryBarrier toGeneral{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        toGeneral.dstAccessMask = destinationAccess;
+        toGeneral.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         toGeneral.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toGeneral.image = destination;
         toGeneral.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+        context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
     }
 
     void makeStorable(Recorder& recorder) {
@@ -226,7 +190,7 @@ public:
     void Keep() {
         if (auto* recorder = Recorder::Active(); recorder != nullptr) {
             recorder->Keep(shared_from_this());
-            recorder->KeepBytes(this, allocationBytes + initialColor.size() + (initialUpload ? initialUpload->Bytes().size() : 0u));
+            recorder->KeepBytes(this, allocationBytes);
         }
     }
 
@@ -264,10 +228,7 @@ public:
         makeStorable(*recording);
         ApplyFastClear(target);
         if (storageView == VK_NULL_HANDLE) {
-            VkImageViewUsageCreateInfo storageUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
-            storageUsage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
             VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-            viewInfo.pNext = &storageUsage;
             viewInfo.image = image;
             viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
             viewInfo.format = storageFormat;
@@ -426,37 +387,6 @@ private:
     VkDeviceSize allocationBytes = 0;
     std::map<std::array<std::uint32_t, 4>, std::unique_ptr<Texture>> textures;
     std::vector<GuestMemory::UnchangedQuery> dccRanges;
-    std::vector<std::byte> initialColor;
-    std::unique_ptr<Buffer> initialUpload;
-    VkImageView initialView = VK_NULL_HANDLE;
-
-    std::optional<VkClearColorValue> initialColorContents(const ColorTarget& use) {
-        Require(use.cmaskAddress == 0, "initial multisample color samples with CMASK require a modeled metadata import");
-        Require(use.layers == 1u && use.arraySlice == 0u && use.arrayLastSlice == 0u && use.depth == 1u && use.depthSlice == 0u && use.mipCount == 1u && use.mip == 0u && !use.mipTail, "initial multisample array, volume or mip contents are not implemented");
-        Require(FindGuestColorTargetFormat(use.format, use.elementBytes).has_value(), "initial multisample color format or element size is unsupported");
-        const auto bytes = MultisampledColorBytes(use);
-        Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "initial multisample color footprint is not implemented");
-        initialColor.resize(static_cast<std::size_t>(bytes));
-        GuestMemory::Read(use.address, initialColor);
-        const auto repeated = std::equal(initialColor.begin() + use.elementBytes, initialColor.end(), initialColor.begin());
-        if (repeated) {
-            std::array<std::uint32_t, 4> pattern{};
-            auto texels = std::as_writable_bytes(std::span(pattern));
-            for (std::size_t offset = 0; offset < texels.size(); offset += use.elementBytes) std::memcpy(texels.data() + offset, initialColor.data(), use.elementBytes);
-            VkClearColorValue clear{};
-            if (ClearColorForTexel(use.format, use.elementBytes, pattern, clear)) return clear;
-        }
-        Require(use.tileMode == ColorTileMode::RenderTarget, "nonuniform initial multisample color tiling is not implemented");
-        const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, use.elementBytes, use.samples, use.extent.width, use.extent.height, 1u, use.pipeBankXor);
-        Require(layout.Bytes() == initialColor.size(), "initial multisample color layout and footprint differ");
-        const auto elements = static_cast<std::uint64_t>(use.extent.width) * use.extent.height * use.samples;
-        Require(elements != 0 && elements <= std::numeric_limits<std::uint32_t>::max(), "initial multisample color element count is unsupported");
-        const auto alignedBytes = (layout.LinearBytes() + 3u) & ~std::uint64_t{3};
-        Require(alignedBytes <= std::numeric_limits<std::size_t>::max(), "initial multisample color exceeds host address space");
-        initialUpload = std::make_unique<Buffer>(context, static_cast<std::size_t>(alignedBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        layout.Detile(initialColor, initialUpload->Bytes().first(static_cast<std::size_t>(layout.LinearBytes())));
-        return std::nullopt;
-    }
 
     VkClearColorValue initialDccClear(const ColorTarget& use) {
         if (use.dccAddress == 0) return {};
@@ -509,7 +439,6 @@ private:
     void release() noexcept {
         textures.clear();
         retiredTextures.clear();
-        if (initialView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, initialView, nullptr);
         if (resolvePass) context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, resolvePass, nullptr);
         if (storageView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, storageView, nullptr);
         destroy({image, memory, view});
