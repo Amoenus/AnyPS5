@@ -230,6 +230,11 @@ std::atomic<bool>& anyGuarded() {
     return any;
 }
 
+std::atomic<std::uint64_t>& guardedGeneration() {
+    static std::atomic<std::uint64_t> generation{0};
+    return generation;
+}
+
 void guardReads(std::uint64_t address, std::size_t bytes) {
     RequireNoMultisampleTarget(address, bytes, "a CPU read");
 }
@@ -237,11 +242,12 @@ void guardReads(std::uint64_t address, std::size_t bytes) {
 void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
     RetireUnmappedDepth_nid_no_patch(address, bytes);
     std::unique_lock lock(guardedMutex());
-    std::erase_if(guarded(), [&](const auto& range) {
+    const auto removed = std::erase_if(guarded(), [&](const auto& range) {
         if (range.address < address || range.address - address > bytes || range.bytes > bytes - (range.address - address)) return false;
         range.active->store(false, std::memory_order_release);
         return true;
     });
+    if (removed != 0) guardedGeneration().fetch_add(1, std::memory_order_release);
     anyGuarded().store(!guarded().empty(), std::memory_order_release);
 }
 
@@ -258,6 +264,7 @@ void guard(const Context& context, const ColorTarget& target, const std::shared_
     }
     std::unique_lock lock(guardedMutex());
     guarded().push_back({context.device, target.address, bytes, target.samples, active});
+    guardedGeneration().fetch_add(1, std::memory_order_release);
     anyGuarded().store(true, std::memory_order_release);
     InstallResidentImageReadGuard_nid_no_patch();
 }
@@ -538,16 +545,31 @@ void ClearMultisampleTargets(VkDevice device) {
     std::lock_guard lock(targetsMutex());
     std::erase_if(targets(), [&](const auto& target) { return target->context.device == device; });
     std::unique_lock guardLock(guardedMutex());
-    std::erase_if(guarded(), [&](const auto& range) { return range.device == device; });
+    const auto removed = std::erase_if(guarded(), [&](const auto& range) { return range.device == device; });
+    if (removed != 0) guardedGeneration().fetch_add(1, std::memory_order_release);
     anyGuarded().store(!guarded().empty(), std::memory_order_release);
     UpdateResidentImageUnmapObserver_nid_no_patch();
 }
 
-std::optional<std::vector<ShaderRecompiler::BdaAbi::Range>> ExcludeMultisampleTargetRanges(VkDevice device, std::span<const ShaderRecompiler::BdaAbi::Range> ranges) {
-    if (ranges.empty() || !anyGuarded().load(std::memory_order_acquire)) return std::nullopt;
+std::uint64_t MultisampleTargetRangeGeneration() {
+    std::shared_lock lock(guardedMutex());
+    return guardedGeneration().load(std::memory_order_acquire);
+}
+
+std::optional<std::vector<ShaderRecompiler::BdaAbi::Range>> ExcludeMultisampleTargetRanges(
+    VkDevice device, std::span<const ShaderRecompiler::BdaAbi::Range> ranges, std::uint64_t& generation) {
+    if (ranges.empty()) {
+        generation = MultisampleTargetRangeGeneration();
+        return std::nullopt;
+    }
+    if (!anyGuarded().load(std::memory_order_acquire)) {
+        generation = MultisampleTargetRangeGeneration();
+        return std::nullopt;
+    }
     std::vector<std::pair<std::uint64_t, std::uint64_t>> excluded;
     {
         std::shared_lock lock(guardedMutex());
+        generation = guardedGeneration().load(std::memory_order_relaxed);
         for (const auto& range : guarded()) {
             if (range.device != device || !range.active->load(std::memory_order_acquire)) continue;
             excluded.emplace_back(range.address, range.address + range.bytes);
