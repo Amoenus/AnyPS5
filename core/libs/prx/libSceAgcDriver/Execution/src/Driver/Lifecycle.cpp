@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/AsyncLog.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineJournal.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
@@ -119,6 +120,7 @@ void Driver::stop() {
     std::lock_guard gpuLock(GuestMemory::GpuMutex());
     device.Reset();
     replacedDevices.clear();
+    Graphics::FlushPipelineJournal();
     Graphics::ShutdownGuestBufferWorkers();
     PerformanceTrace::StopOutput();
     FlushAsyncLog_nid_no_patch();

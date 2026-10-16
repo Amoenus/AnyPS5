@@ -84,9 +84,9 @@ std::filesystem::path ShaderCacheDirectory() {
 namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
-static_assert(sizeof(CompiledShaderArtifact) == 264, "CompiledShaderArtifact changed: update the artifact encoder");
+static_assert(sizeof(CompiledShaderArtifact) == 232, "CompiledShaderArtifact changed: update the artifact encoder");
 static_assert(sizeof(ShaderInvocation) == 200, "ShaderInvocation changed: update the invocation encoder");
-static_assert(sizeof(RecompileResult) == 496, "RecompileResult changed: update EncodeResult and DecodeResult");
+static_assert(sizeof(RecompileResult) == 464, "RecompileResult changed: update EncodeResult and DecodeResult");
 static_assert(sizeof(DescriptorBinding) == 592, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
@@ -1697,8 +1697,8 @@ void EncodeResult(const RecompileResult& result, std::vector<std::byte>& out) {
     writer.Values(std::span<const std::uint32_t>(result.shaderDataUserWords));
 }
 
-bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result) {
-    Reader reader(bytes);
+bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result, std::shared_ptr<const void> owner) {
+    Reader reader(bytes, std::move(owner));
     decodeArtifact(reader, result);
     decodeInvocation(reader, result);
     reader.Value(result.workgroupMemoryDwords);

@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineJournal.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
@@ -34,6 +35,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <random>
 #include <initializer_list>
 #include <iostream>
 #include <map>
@@ -3626,7 +3629,15 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreatePipelineLayout(VkDevice, const VkPipeli
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockCreateGraphicsPipelines(VkDevice, VkPipelineCache, std::uint32_t count, const VkGraphicsPipelineCreateInfo* infos, const VkAllocationCallbacks*, VkPipeline* pipelines) {
-    Require(count == 1 && (infos[0].flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) != 0, "mock expects a graphics pipeline library");
+    Require(count == 1, "mock expects exactly one graphics pipeline per call");
+    if ((infos[0].flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) == 0) {
+        const auto* linked = static_cast<const VkPipelineLibraryCreateInfoKHR*>(infos[0].pNext);
+        Require(linked != nullptr && linked->sType == VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR && linked->libraryCount != 0, "mock expects a graphics pipeline library or a pipeline linked from libraries");
+        *pipelines = makeHandle<VkPipeline>();
+        ++mock.pipelineCreateCount;
+        ++mock.live;
+        return VK_SUCCESS;
+    }
     const auto* library = static_cast<const VkGraphicsPipelineLibraryCreateInfoEXT*>(infos[0].pNext);
     Require(library != nullptr && library->sType == VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, "missing graphics pipeline library description");
     mock.libraryLayouts[library->flags] = infos[0].layout;
@@ -7251,6 +7262,272 @@ void ResourceContentKeyTests(bool benchmark) {
     }
 }
 
+// The pipeline journal without a GPU: the recipe codec and the store key agree with each other and
+// with the canonical state, identities follow the module and the specialization, the journal
+// records each pipeline once, and a replay into the recording context (the lavapipe test replays
+// into a second device) rebuilds the recorded graphics pipeline so the same configuration hits the
+// store, hands the compute result to its hook, recovers a tail torn inside a record's padding and
+// stops when cancelled.
+void pipelineJournalTests() {
+    using namespace AgcDriver::Graphics;
+    using Stage = ShaderRecompiler::ShaderStage;
+    const auto directory = std::filesystem::temp_directory_path() / ("aps5-pipeline-journal-mock-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(directory);
+    struct Cleanup {
+        std::filesystem::path directory;
+        ~Cleanup() {
+            std::error_code error;
+            std::filesystem::remove_all(directory, error);
+        }
+    } cleanup{directory};
+#ifdef _WIN32
+    _putenv_s("ANYPS5_NO_SHADER_CACHE", "0");
+    _putenv_s("ANYPS5_SHADER_CACHE_DIR", directory.string().c_str());
+    _putenv_s("APS5_PIPELINE_JOURNAL_THREADS", "2");
+#else
+    setenv("ANYPS5_NO_SHADER_CACHE", "0", 1);
+    setenv("ANYPS5_SHADER_CACHE_DIR", directory.string().c_str(), 1);
+    setenv("APS5_PIPELINE_JOURNAL_THREADS", "2", 1);
+#endif
+    Require(PipelineJournalEnabled(), "the journal is disabled with a shader cache directory set");
+    const auto module = [](std::uint32_t salt) {
+        ShaderRecompiler::RecompileResult result;
+        result.spirv = std::vector<std::uint32_t>{0x07230203u, 0x00010000u, 0u, 8u, 0u, 0x00020011u, 1u, 0x00020011u, 2u + salt};
+        result.runtimeAbiVersion = ShaderRecompiler::RuntimeAbi::Version;
+        return result;
+    };
+    {
+        auto first = module(1);
+        const auto& constFirst = first;
+        auto copy = first;
+        const auto& constCopy = copy;
+        Require(!constFirst.Identity().Empty() && constFirst.Identity() == constCopy.Identity() && constFirst.spirv.data() == constCopy.spirv.data(), "a copied result did not share its module and identity");
+        copy.spirv[8] = 99;
+        Require(!(constCopy.Identity() == constFirst.Identity()) && constCopy.spirv.data() != constFirst.spirv.data() && constFirst.Identity() == module(1).Identity(), "writing a copied module did not give it an identity of its own");
+        auto specialized = module(1);
+        specialized.specialization.push_back({3, 4});
+        Require(!(specialized.Identity() == constFirst.Identity()), "specialization constants did not enter the identity");
+        auto subgroup = module(1);
+        subgroup.hostSubgroupSize = 64;
+        Require(!(subgroup.Identity() == constFirst.Identity()), "the host subgroup size did not enter the identity");
+        Require(ShaderRecompiler::RecompileResult{}.Identity().Empty(), "a result without a module has an identity");
+    }
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.device = makeHandle<VkDevice>();
+    context.graphicsPipelineLibrary = true;
+    context.tessellationShader = true;
+    context.limits.maxTessellationPatchSize = 32;
+    context.limits.maxColorAttachments = 8;
+    context.limits.maxPushConstantsSize = 256;
+    context.limits.maxVertexInputBindings = 16;
+    context.limits.maxVertexInputAttributes = 16;
+    context.limits.maxFramebufferWidth = 4096;
+    context.limits.maxFramebufferHeight = 4096;
+    context.limits.maxFramebufferLayers = 1;
+    std::uint64_t replayedComputeIdentityLow = 0;
+    {
+        DescriptorCache cache(context);
+        context.descriptorCache = &cache;
+        auto vertex = module(1);
+        vertex.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 1, std::vector<std::uint32_t>(4)));
+        auto fragment = module(2);
+        fragment.pushConstants.resize(8);
+        fragment.bindings.push_back(makeBinding(Role::ShaderData, 0, 1, std::vector<std::uint32_t>(4)));
+        fragment.bindings.back().descriptorSet = ShaderRecompiler::RuntimeAbi::FragmentDescriptorSet;
+        const std::array<CompiledShader, 2> shaders{{{Stage::Vertex, &vertex, 0}, {Stage::Fragment, &fragment, PipelinePushSlotBytes}}};
+        State state{};
+        state.stages = {ShaderPath::Vertex, 7u, 64u, 32u, std::nullopt, std::nullopt};
+        state.stages.tessellation = ShaderRecompiler::TessellationConfiguration{3, 3, 2, 1, 4, 128, 16, true};
+        ColorTarget color{};
+        color.address = 0x1000;
+        color.extent = {64, 32};
+        color.format = VK_FORMAT_R8G8B8A8_UNORM;
+        color.bytes = 64 * 32 * 4;
+        color.componentMapping = 0xec;
+        state.colors = {color, color};
+        state.colors[1].format = VK_FORMAT_B8G8R8A8_UNORM;
+        state.colors[1].exportIndex = 1;
+        state.color = color;
+        state.hasColorTarget = true;
+        VkPipelineColorBlendAttachmentState blend{};
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blend.colorWriteMask = 0xf;
+        state.blends = {blend, blend};
+        state.blend = blend;
+        state.blendConstants = {0.25f, 0.5f, 0.75f, 1.0f};
+        DepthTarget depth{};
+        depth.address = 0x2000;
+        depth.format = VK_FORMAT_D32_SFLOAT;
+        depth.samples = 1;
+        state.depth = depth;
+        state.depthTest = true;
+        state.depthWrite = true;
+        state.depthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;
+        state.stencilTest = true;
+        state.stencilFront = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 0xff, 0xff, 1};
+        state.stencilBack = state.stencilFront;
+        state.renderExtent = {64, 32};
+        state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        state.viewport = {0, 32, 64, -32, 0, 1};
+        state.scissor = {{0, 0}, {64, 32}};
+        state.cullMode = VK_CULL_MODE_BACK_BIT;
+        state.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        state.samples = 1;
+        const VertexInputLayout input{{{0, 16, VK_VERTEX_INPUT_RATE_VERTEX}}, {{0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0}}};
+        const auto layouts = DescribeSetLayouts(context, shaders);
+        Require(layouts.layouts.split, "a fragment stage with the fragment set did not split the set layouts");
+        const auto recipe = MakeGraphicsPipelineRecipe(state, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        Require(recipe.stages.size() == 2 && recipe.stages[0].identity == vertex.Identity() && recipe.stages[1].identity == fragment.Identity() && !recipe.stages[0].generated && recipe.stages[1].pushConstantOffset == PipelinePushSlotBytes && recipe.splitSets, "the recipe does not name its stages");
+        Require(recipe.state.colors.size() == 2 && recipe.state.colors[0].address == 0 && recipe.state.colors[0].componentMapping == 0xec && recipe.state.depth && recipe.state.depth->address == 0 && recipe.state.viewport.width == 0 && recipe.state.stages.registerValue == 0 && recipe.state.stages.tessellation && recipe.state.stages.tessellation->breakAtInstance, "the canonical state kept or dropped the wrong fields");
+        const auto bytes = EncodeGraphicsPipelineRecipe(recipe);
+        GraphicsPipelineRecipe decoded;
+        Require(DecodeGraphicsPipelineRecipe(bytes, decoded), "the recipe does not decode");
+        Require(EncodeGraphicsPipelineRecipe(decoded) == bytes, "the recipe does not round-trip byte for byte");
+        for (std::size_t length = 0; length < bytes.size(); length += 7) {
+            GraphicsPipelineRecipe scratch;
+            Require(!DecodeGraphicsPipelineRecipe(std::span(bytes).first(length), scratch), "a truncated recipe decoded");
+        }
+        std::vector<std::byte> original, canonical, replayed, moved, mapped;
+        BuildPipelineStoreKey(original, context, state, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        BuildPipelineStoreKey(canonical, context, recipe.state, recipe.vertexInput, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        const PipelineSetLayouts decodedLayouts{layouts.layouts.main, layouts.layouts.fragment, decoded.splitSets, decoded.mainLayoutKey, decoded.fragmentLayoutKey};
+        BuildPipelineStoreKey(replayed, context, decoded.state, decoded.vertexInput, decodedLayouts, shaders, decoded.attachmentLayout);
+        Require(!original.empty() && original == canonical && original == replayed, "the canonical or the decoded state keys another pipeline");
+        auto gridState = state;
+        gridState.samples = 2;
+        gridState.customSampleLocations = true;
+        gridState.sampleLocationGrid = true;
+        gridState.perSampleShading = true;
+        gridState.sampleLocations[31] = 0x5a;
+        GraphicsPipelineRecipe gridDecoded;
+        Require(DecodeGraphicsPipelineRecipe(EncodeGraphicsPipelineRecipe(MakeGraphicsPipelineRecipe(gridState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL)), gridDecoded), "the sample grid recipe does not decode");
+        Require(gridDecoded.state.sampleLocationGrid && gridDecoded.state.perSampleShading && gridDecoded.state.sampleLocations[31] == 0x5a, "the recipe dropped the sample grid, per-sample shading or the last sample location");
+        std::vector<std::byte> grid, gridReplayed;
+        BuildPipelineStoreKey(grid, context, gridState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        BuildPipelineStoreKey(gridReplayed, context, gridDecoded.state, gridDecoded.vertexInput, layouts.View(), shaders, gridDecoded.attachmentLayout);
+        Require(grid != original && grid == gridReplayed, "the decoded sample grid state keys another pipeline");
+        auto fourSampleState = state;
+        fourSampleState.samples = 4;
+        auto maskState = fourSampleState;
+        maskState.quadSampleMask = {0x3u, 0x3u, 0x3u, 0x3u};
+        maskState.stencilReplayReference = 7u;
+        maskState.reversedBlend = 1u;
+        GraphicsPipelineRecipe maskDecoded;
+        Require(DecodeGraphicsPipelineRecipe(EncodeGraphicsPipelineRecipe(MakeGraphicsPipelineRecipe(maskState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL)), maskDecoded), "the sample mask recipe does not decode");
+        Require(maskDecoded.state.quadSampleMask == maskState.quadSampleMask && maskDecoded.state.stencilReplayReference.has_value() && maskDecoded.state.reversedBlend == 1u, "the recipe dropped the quad sample masks, the replayed stencil reference or the reversed blend");
+        std::vector<std::byte> fourSamples, masked, maskReplayed;
+        BuildPipelineStoreKey(fourSamples, context, fourSampleState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        BuildPipelineStoreKey(masked, context, maskState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        BuildPipelineStoreKey(maskReplayed, context, maskDecoded.state, maskDecoded.vertexInput, layouts.View(), shaders, maskDecoded.attachmentLayout);
+        Require(masked != fourSamples && masked == maskReplayed, "the decoded sample mask state keys another pipeline");
+        auto movedState = state;
+        movedState.viewport.x = 5;
+        movedState.colors[0].address = 0x9000;
+        movedState.renderLayers = 4;
+        BuildPipelineStoreKey(moved, context, movedState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        Require(moved == original, "a field the pipeline does not read changed the key");
+        auto mappedState = state;
+        mappedState.colors[0].componentMapping = 0x24;
+        BuildPipelineStoreKey(mapped, context, mappedState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        Require(mapped != original, "the component mapping did not enter the key");
+        std::vector<std::byte> unclamped, clamped, biased;
+        auto clampedState = state;
+        clampedState.depthBiasClamp = 1.0f;
+        BuildPipelineStoreKey(clamped, context, clampedState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        Require(clamped == original, "a depth bias clamp without depth bias changed the key");
+        clampedState.depthBias = true;
+        BuildPipelineStoreKey(clamped, context, clampedState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        clampedState.depthBiasClamp = 0.0f;
+        BuildPipelineStoreKey(unclamped, context, clampedState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        Require(unclamped != original && clamped != unclamped && CanonicalPipelineState(clampedState).depthBias && CanonicalPipelineState(mappedState).depthBiasClamp == 0.0f, "the depth bias clamp did not enter the key");
+        clampedState.depthBiasClamp = 2.0f;
+        BuildPipelineStoreKey(biased, context, clampedState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        Require(biased == clamped, "the depth bias clamp's value entered the key");
+        auto compute = module(3);
+        compute.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 2, std::vector<std::uint32_t>(8)));
+        compute.pushConstants.resize(16);
+        compute.hostSubgroupSize = 32;
+        constexpr std::uint64_t fingerprint = 0x5eed'0000'0000'0001ull;
+        {
+            auto bound = StartPipelineJournalReplay(context, fingerprint, {});
+            Require(bound != nullptr, "the first replay did not start");
+            bound->Wait();
+            Require(bound->Done() && PipelineJournalTotals().loadedRecipes == 0, "an absent journal loaded pipelines");
+        }
+        const auto before = PipelineJournalTotals();
+        RecordGraphicsPipeline(recipe, shaders);
+        RecordComputePipeline(compute, true);
+        FlushPipelineJournal();
+        const auto recorded = PipelineJournalTotals();
+        Require(recorded.recordedGraphics == before.recordedGraphics + 1 && recorded.recordedCompute == before.recordedCompute + 1 && recorded.recordedModules == before.recordedModules + 3 && recorded.writeFailures == 0, "the journal did not record one graphics and one compute pipeline with three modules");
+        RecordGraphicsPipeline(recipe, shaders);
+        RecordComputePipeline(compute, true);
+        FlushPipelineJournal();
+        const auto repeated = PipelineJournalTotals();
+        Require(repeated.recordedGraphics == recorded.recordedGraphics && repeated.recordedCompute == recorded.recordedCompute && repeated.recordedModules == recorded.recordedModules, "a repeated pipeline was recorded again");
+        Require(std::filesystem::file_size(PipelineJournalPath()) > 0, "the journal file is empty");
+        const auto storeBefore = PipelineStoreTotals();
+        std::vector<std::byte> receivedWords;
+        ShaderRecompiler::RecompileResult received;
+        bool receivedPush = false;
+        std::uint32_t computeCalls = 0;
+        PipelineJournalHooks hooks{[&](const ShaderRecompiler::RecompileResult& shader, bool pushConstants) {
+            ++computeCalls;
+            received = shader;
+            receivedPush = pushConstants;
+            return true;
+        }};
+        auto replay = StartPipelineJournalReplay(context, fingerprint, hooks);
+        Require(replay != nullptr, "the replay did not start");
+        replay->Wait();
+        Require(replay->Done(), "the replay did not finish");
+        const auto totals = PipelineJournalTotals();
+        Require(totals.loadedRecipes == 2 && totals.loadedModules == 3 && totals.droppedRecords == 0, "the replay did not load the two recorded pipelines and three modules");
+        Require(totals.replayedGraphics == 1 && totals.replayedCompute == 1 && totals.replayRejected == 0 && totals.replayFailed == 0, "the replay did not build one graphics and one compute pipeline");
+        Require(computeCalls == 1 && receivedPush && received.Identity() == compute.Identity() && received.spirv == compute.spirv && received.bindings.size() == 1 && received.bindings[0].count == 2 && received.pushConstants.size() == 16 && received.hostSubgroupSize == 32, "the compute hook did not receive the recorded result");
+        replayedComputeIdentityLow = received.Identity().low;
+        const auto storeReplayed = PipelineStoreTotals();
+        Require(storeReplayed.misses == storeBefore.misses + 1 && storeReplayed.cached == storeBefore.cached + 1, "the replayed graphics pipeline did not enter the store");
+        const auto created = mock.pipelineCreateCount;
+        bool built = true;
+        const auto pipeline = CachedPipeline(context, state, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL, &built);
+        const auto storeHit = PipelineStoreTotals();
+        Require(pipeline != nullptr && !built && mock.pipelineCreateCount == created && storeHit.hits == storeReplayed.hits + 1 && storeHit.misses == storeReplayed.misses, "the draw's configuration did not find the replayed pipeline");
+        {
+            const auto journalPath = PipelineJournalPath();
+            const auto whole = std::filesystem::file_size(journalPath);
+            Require(whole % 8 == 0 && whole > 3, "the journal file is not record aligned");
+            std::filesystem::resize_file(journalPath, whole - 3);
+            auto later = module(4);
+            later.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 1, std::vector<std::uint32_t>(4)));
+            RecordComputePipeline(later, false);
+            FlushPipelineJournal();
+            Require(std::filesystem::file_size(journalPath) % 8 == 0 && PipelineJournalTotals().writeFailures == 0, "an append after a tail torn inside a record's padding left the file unaligned");
+            auto torn = StartPipelineJournalReplay(context, fingerprint, hooks);
+            Require(torn != nullptr, "the replay after the torn tail did not start");
+            torn->Wait();
+            const auto reloaded = PipelineJournalTotals();
+            Require(reloaded.droppedRecords == 0 && reloaded.loadedModules == 4 && reloaded.loadedRecipes == 2 && reloaded.replayFailed == 0, "the journal did not recover from a tail torn inside a record's padding");
+            RecordComputePipeline(compute, true);
+            FlushPipelineJournal();
+            Require(PipelineJournalTotals().recordedCompute == reloaded.recordedCompute + 1 && PipelineJournalTotals().recordedModules == reloaded.recordedModules, "the pipeline whose record was torn was not recorded again, or its module was");
+        }
+        {
+            auto cancelled = StartPipelineJournalReplay(context, fingerprint, hooks);
+            Require(cancelled != nullptr, "the third replay did not start");
+            cancelled->Cancel();
+            cancelled->Wait();
+            const auto after = PipelineJournalTotals();
+            Require(cancelled->Done() && after.replayFailed == 0 && after.replayRejected == 0 && after.replayedGraphics + after.replayPresent <= totals.replayedGraphics + totals.replayPresent + 1, "a cancelled replay did not stop cleanly");
+        }
+        ClearCachedPipelines(context.device);
+    }
+    Require(replayedComputeIdentityLow != 0, "the replayed compute identity is empty");
+    Require(mock.live == 0, "the pipeline journal test leaked Vulkan objects");
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     _putenv_s("APS5_PIN_WAIT_MS", "200");
@@ -7262,6 +7539,11 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--unused-stencil-reference") {
             stencilReferenceUnusedTests();
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--pipeline-journal") {
+            pipelineJournalTests();
+            std::cout << "pipeline journal recipe, record and replay tests passed\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--sparse-buffer-holes") {
