@@ -16,6 +16,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace AgcDriver {
@@ -29,6 +30,29 @@ struct VulkanDeviceTestAccess {
 namespace {
 
 using namespace AgcDriver::Graphics;
+
+PFN_vkGetDeviceProcAddr originalDeviceProc = nullptr;
+PipelineCacheSynchronization* pipelineCacheSynchronization = nullptr;
+std::uint32_t checkedPipelineCacheUses = 0u;
+
+VKAPI_ATTR VkResult VKAPI_CALL CheckedCreateComputePipelines(VkDevice device, VkPipelineCache cache, std::uint32_t count, const VkComputePipelineCreateInfo* infos, const VkAllocationCallbacks* allocator, VkPipeline* pipelines) {
+    bool snapshotAvailable = false;
+    std::thread probe([&] {
+        const auto snapshot = pipelineCacheSynchronization->TryLockForSnapshot();
+        snapshotAvailable = snapshot.owns_lock();
+    });
+    probe.join();
+    Require(!snapshotAvailable, "sample reader pipeline creation did not hold the cache use lock");
+    ++checkedPipelineCacheUses;
+    const auto create = reinterpret_cast<PFN_vkCreateComputePipelines>(originalDeviceProc(device, "vkCreateComputePipelines"));
+    Require(create != nullptr, "readback fixture cannot resolve compute pipeline creation");
+    return create(device, cache, count, infos, allocator, pipelines);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL CheckedDeviceProc(VkDevice device, const char* name) {
+    if (std::strcmp(name, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(CheckedCreateComputePipelines);
+    return originalDeviceProc(device, name);
+}
 
 constexpr bool SurfaceFits(const VkImageFormatProperties& supported, std::uint32_t samples, std::uint32_t width = 17u, std::uint32_t height = 5u, std::uint32_t layers = 2u) {
     return (supported.sampleCounts & samples) != 0u && width <= supported.maxExtent.width && height <= supported.maxExtent.height && layers <= supported.maxArrayLayers;
@@ -324,7 +348,11 @@ int main(int argc, char** argv) {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-        const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+        auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+        originalDeviceProc = context.deviceProc;
+        pipelineCacheSynchronization = context.pipelineCacheSynchronization;
+        Require(originalDeviceProc != nullptr && pipelineCacheSynchronization != nullptr, "readback fixture requires device functions and pipeline cache synchronization");
+        context.deviceProc = CheckedDeviceProc;
         if (!context.sampleRateShading) {
             std::puts("skipped, the device does not support per-sample shading");
             return VulkanTestSkipped;
@@ -362,6 +390,8 @@ int main(int argc, char** argv) {
             CheckReadback(reader, color, 0u, color.width * color.height * color.layers * color.samples, 1u);
             std::puts("multisample readback uint/depth pipeline transitions passed");
         }
+        Require(checkedPipelineCacheUses != 0u, "readback fixture did not check pipeline cache use");
+        std::printf("multisample reader guarded pipeline creation checks=%u passed\n", checkedPipelineCacheUses);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
