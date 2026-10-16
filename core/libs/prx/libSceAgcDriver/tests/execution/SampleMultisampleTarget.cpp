@@ -510,6 +510,15 @@ void Readback(AgcDriver::VulkanDevice& device) {
         RequireReadbackRefused(unsupported, color, "multisample color readback");
         CheckSamples(TargetState(color), LoadSamples(device, block), {});
         std::puts("native color readback: unsupported snapshot format refuses readback and retains rendering");
+        Block invalidBlock(BlockBytes);
+        auto invalid = DecodeTarget(invalidBlock);
+        invalid.elementBytes = 4u;
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            MultisampleTargetView(context, invalid);
+        }
+        RequireReadbackRefused(context, invalid, "source format or element size is unsupported");
+        std::puts("native color readback: mismatched source format and element size is refused before view creation");
     }
     Require(exercised != 0, "no supported native color readback sample count was exercised");
 }

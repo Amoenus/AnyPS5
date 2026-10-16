@@ -253,6 +253,7 @@ public:
         Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires its device's active recorder");
         Require(cmask.Refusal().empty(), cmask.Refusal());
         Require(cmask.Keys() != DccKeys::Clear0000, "reading a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
+        Require(FindGuestColorTargetFormat(target.format, target.elementBytes).has_value(), "multisample color readback source format or element size is unsupported");
         const auto format = TextureDetiler::ImageElementFormat(target.elementBytes);
         constexpr auto readUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         constexpr auto readFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
