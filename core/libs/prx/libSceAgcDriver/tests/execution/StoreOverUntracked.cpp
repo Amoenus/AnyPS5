@@ -220,7 +220,8 @@ bool HoldPending(THold& hold, const Surface& surface, std::uint32_t result) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (true) {
         hold.lock();
-        if (StorageTexture::AnyPending()) return true;
+        const auto live = StorageTexture::FindLive(surface.Address(), SurfaceBytes);
+        if (live != nullptr && StorageTexture::FindPending(surface.Address(), SurfaceBytes) == live) return true;
         hold.unlock();
         if (Holds(surface.Texels(), result)) return false;
         Require(std::chrono::steady_clock::now() < deadline, "store over untracked: the result neither became pending nor reached guest memory");
