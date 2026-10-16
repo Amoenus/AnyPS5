@@ -1471,6 +1471,28 @@ target_link_libraries(agc_driver_graphics_tests PRIVATE
 set_target_properties(agc_driver_graphics_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_graphics_tests)
 
+add_test_executable(agc_driver_msaa_layout_tests EXCLUDE_FROM_ALL
+        tests/MultisampleTextureLayout.cpp
+        Graphics/src/MultisampleTextureLayout.cpp
+)
+target_include_directories(agc_driver_msaa_layout_tests PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
+)
+target_link_libraries(agc_driver_msaa_layout_tests PRIVATE libc)
+set_target_properties(agc_driver_msaa_layout_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_msaa_layout_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_driver_msaa_layout_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_driver_msaa_layout COMMAND agc_driver_msaa_layout_tests)
+    set_tests_properties(agc_driver_msaa_layout PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_driver_msaa_layout PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 foreach(agcVertexRangeShader IN ITEMS VertexRange.vert VertexRangeProducer.frag)
     string(REPLACE "." "_" agcVertexRangeName "${agcVertexRangeShader}")
     string(TOUPPER "${agcVertexRangeName}_SPV" agcVertexRangeSymbol)
@@ -1731,7 +1753,7 @@ if(BUILD_TESTING)
     endforeach()
     add_test(NAME agc_driver_partially_resident_pending_stores COMMAND agc_driver_partially_resident_snapshot_tests --pending-stores)
     set_tests_properties(agc_driver_multisample_readback PROPERTIES TIMEOUT 20)
-    foreach(agcReadbackCase IN ITEMS uint8 uint16 uint64 uint128 depth)
+    foreach(agcReadbackCase IN ITEMS uint8 uint16 uint64 uint128 depth retile)
         add_test(NAME agc_driver_multisample_readback_${agcReadbackCase} COMMAND agc_driver_multisample_readback_tests ${agcReadbackCase})
         set_tests_properties(agc_driver_multisample_readback_${agcReadbackCase} PROPERTIES TIMEOUT 20 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
         if(WIN32)
