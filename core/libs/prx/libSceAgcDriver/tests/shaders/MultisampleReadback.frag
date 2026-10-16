@@ -1,6 +1,6 @@
 #version 450
 
-layout(push_constant) uniform Push { uint layer; uint width; uint height; uint samples; uint elementBytes; } params;
+layout(push_constant) uniform Push { uint layer; uint width; uint height; uint samples; uint elementBytes; uint selectedSample; } params;
 #if !READ_DEPTH
 layout(location = 0) out uvec4 color;
 #endif
@@ -9,6 +9,9 @@ void main() {
     uint x = uint(gl_FragCoord.x);
     uint y = uint(gl_FragCoord.y);
 #if READ_DEPTH
+#if READ_STENCIL
+    if (uint(gl_SampleID) != params.selectedSample) discard;
+#endif
     uint element = (x + y * params.width + params.layer * params.width * params.height) * params.samples + uint(gl_SampleID);
     gl_FragDepth = 0.125 + float(element + 1u) / 65536.0;
 #else
