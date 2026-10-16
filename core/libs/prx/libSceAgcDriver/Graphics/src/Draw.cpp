@@ -142,7 +142,8 @@ void materializeRegisterClear(const Context& context, const ColorTarget& color, 
     if (ProvedCurrentDccKeys(color.dccAddress, color.bytes, resident.TargetKeyProof()) != DccKeys::ClearRegister) return;
     const auto texel = clearTexel(color, DccKeys::ClearRegister);
     const char* refusal = nullptr;
-    bool cleared = clearToTexel(resident, texel, color.elementBytes, refusal);
+    const bool pendingKeysKnown = KnownPendingDccKeys(color.dccAddress, color.bytes) == DccKeys::ClearRegister;
+    bool cleared = clearToTexel(resident, texel, color.elementBytes, refusal, pendingKeysKnown);
     const auto keyBytes = static_cast<std::size_t>(color.bytes / 256);
     if (!cleared && keyBytes != 0) {
         if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->PendingWriteOverlaps(color.dccAddress, keyBytes)) {
