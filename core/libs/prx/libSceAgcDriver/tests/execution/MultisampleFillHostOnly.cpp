@@ -34,6 +34,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace AgcDriver {
@@ -565,8 +566,10 @@ bool FillsTakenAsMultisampledClearsAreNotStored(AgcDriver::VulkanDevice& device)
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        const bool nativeClearsOnly = argc == 2 && std::string_view(argv[1]) == "--native-clears-only";
+        Require(argc == 1 || nativeClearsOnly, "invalid multisampled fill fixture arguments");
         auto available = OpenVulkanTestDevice();
         if (!available) return VulkanTestSkipped;
 #ifdef _WIN32
@@ -580,6 +583,11 @@ int main() {
         for (const auto format : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT}) {
             for (const auto fragments : {2u, 4u, 8u}) NativeMetadataClearViaDriver(*device, format, fragments);
         }
+        if (nativeClearsOnly) {
+            LibcRunShutdown_nid_postfix();
+            std::cout << "submitted native color clears passed\n";
+            return 0;
+        }
         ResidentColorNeighborTransition(*device, NeighborTransition::None);
         ResidentColorNeighborTransition(*device, NeighborTransition::Alias);
         ResidentColorNeighborTransition(*device, NeighborTransition::HostImport);
@@ -587,6 +595,7 @@ int main() {
         ResidentColorNeighborTransition(*device, NeighborTransition::CpuStore);
         DirectImportColorTracking(*device);
 #else
+        Require(!nativeClearsOnly, "submitted native color clears require the Windows fixture");
         const auto device = std::move(available);
 #endif
         const bool tested = FillsTakenAsMultisampledClearsAreNotStored(*device);
