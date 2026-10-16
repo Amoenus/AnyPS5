@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -25,9 +26,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
+
+namespace AgcDriver {
+
+struct VulkanDeviceTestAccess {
+    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+
+}
 
 namespace {
 
@@ -85,7 +96,7 @@ struct SampleWrite {
 };
 
 constexpr std::array<std::array<float, 4>, 3> Triangle{{
-    {-1.0f, -1.0f, 0.5f, 1.0f}, {0.83f, -1.0f, 0.5f, 1.0f}, {-1.0f, 0.71f, 0.5f, 1.0f}
+    {-1.0f, -1.0f, 0.5f, 1.0f}, {0.83f, -1.0f, 0.5f, 1.0f}, {-1.0f, 0.31f, 0.5f, 1.0f}
 }};
 
 alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
@@ -152,7 +163,7 @@ AgcDriver::Graphics::State TargetState(const AgcDriver::Graphics::ColorTarget& c
     state.blends = {blend};
     state.blend = blend;
     state.blendConstants = {};
-    state.samples = Samples;
+    state.samples = color.samples;
     return state;
 }
 
@@ -323,14 +334,15 @@ double EdgeDistance(double x, double y, std::size_t from) {
 
 void CheckSamples(const AgcDriver::Graphics::State& state, const std::vector<std::array<float, 4>>& loaded, const std::array<float, 4>& background) {
     const auto locations = AgcDriver::Graphics::SampleLocations(state);
-    std::array<std::uint32_t, Samples + 1u> pixelsByCoverage{};
-    std::array<std::uint32_t, Samples> coveredBySample{};
+    Require(loaded.size() == Side * Side * state.samples, "the multisample result has the wrong element count");
+    std::vector<std::uint32_t> pixelsByCoverage(state.samples + 1u);
+    std::vector<std::uint32_t> coveredBySample(state.samples);
     std::uint32_t checked = 0;
     for (std::uint32_t y = 0; y < Side; ++y) {
         for (std::uint32_t x = 0; x < Side; ++x) {
             std::uint32_t covered = 0;
-            for (std::uint32_t sample = 0; sample < Samples; ++sample) {
-                const auto& texel = loaded[(y * Side + x) * Samples + sample];
+            for (std::uint32_t sample = 0; sample < state.samples; ++sample) {
+                const auto& texel = loaded[(y * Side + x) * state.samples + sample];
                 const bool drawn = texel == Drawn;
                 const bool empty = texel == background;
                 char where[160];
@@ -348,9 +360,9 @@ void CheckSamples(const AgcDriver::Graphics::State& state, const std::vector<std
             ++pixelsByCoverage[covered];
         }
     }
-    Require(checked >= Side * Side * Samples * 9u / 10u, "fewer than nine in ten samples are clear of the triangle's edges");
-    Require(pixelsByCoverage[0] != 0 && pixelsByCoverage[Samples] != 0, "the triangle covers every pixel or none");
-    Require(pixelsByCoverage[1] + pixelsByCoverage[2] + pixelsByCoverage[3] != 0, "no pixel is partly covered, so the samples of a pixel were not told apart");
+    Require(checked >= Side * Side * state.samples * 9u / 10u, "fewer than nine in ten samples are clear of the triangle's edges");
+    Require(pixelsByCoverage[0] != 0 && pixelsByCoverage[state.samples] != 0, "the triangle covers every pixel or none");
+    Require(std::any_of(pixelsByCoverage.begin() + 1, pixelsByCoverage.end() - 1, [](auto count) { return count != 0; }), "no pixel is partly covered, so the samples of a pixel were not told apart");
     Require(std::adjacent_find(coveredBySample.begin(), coveredBySample.end(), std::not_equal_to<>()) != coveredBySample.end(), "every sample index has the same coverage, so the sample index was not told apart");
 }
 
@@ -381,12 +393,137 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
     Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
 }
 
+std::vector<std::array<float, 4>> ReadHalfSamples(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::ColorTarget& color) {
+    const auto bytes = AgcDriver::Graphics::ReadMultisampleTargetSamples(context, color);
+    Require(bytes.size() == Side * Side * color.samples * 8u, "native color readback has the wrong byte count");
+    std::vector<std::array<float, 4>> result(Side * Side * color.samples);
+    constexpr std::array<std::array<std::uint16_t, 4>, 4> bits{{{}, {0x3400u, 0x3800u, 0x3000u, 0x3c00u}, {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u}, {0x3a00u, 0x3400u, 0x3800u, 0x3c00u}}};
+    constexpr std::array<std::array<float, 4>, 4> values{{{}, Drawn, Ones, Written}};
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        std::array<std::uint16_t, 4> sample{};
+        std::memcpy(sample.data(), bytes.data() + index * sizeof(sample), sizeof(sample));
+        const auto found = std::find(bits.begin(), bits.end(), sample);
+        Require(found != bits.end(), "native color readback changed a half-float sample at element " + std::to_string(index));
+        result[index] = values[static_cast<std::size_t>(found - bits.begin())];
+    }
+    return result;
 }
 
-int main() {
+void RequireReadbackRefused(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::ColorTarget& color, const std::string& expected) {
+    std::string refusal;
+    try {
+        static_cast<void>(AgcDriver::Graphics::ReadMultisampleTargetSamples(context, color));
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find(expected) != std::string::npos, "native color readback was not refused: " + refusal);
+}
+
+bool ReadbackCountSupported(const AgcDriver::Graphics::Context& context, VkFormat format, std::uint32_t samples) {
+    VkImageFormatProperties supported{};
+    const auto result = context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0u, &supported);
+    if (result != VK_ERROR_FORMAT_NOT_SUPPORTED) AgcDriver::Graphics::Check(result, "native color readback fixture format query");
+    if (result == VK_SUCCESS && (supported.sampleCounts & samples) != 0 && (context.limits.framebufferColorSampleCounts & samples) != 0) return true;
+    std::printf("skipped native color readback subcase: format=%d samples=%u is unavailable\n", static_cast<int>(format), samples);
+    return false;
+}
+
+PFN_vkGetPhysicalDeviceImageFormatProperties imageFormatProperties = nullptr;
+
+VKAPI_ATTR VkResult VKAPI_CALL NoReadbackImage(VkPhysicalDevice physical, VkFormat format, VkImageType type, VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* properties) {
+    if ((flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT) != 0 && usage == (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    return imageFormatProperties(physical, format, type, tiling, usage, flags, properties);
+}
+
+void Readback(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    context.limits.maxStorageBufferRange = 256u;
+    std::uint32_t exercised = 0;
+    for (const auto fragments : {2u, 4u, 8u}) {
+        if (!ReadbackCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments)) continue;
+        Block block(BlockBytes);
+        auto color = DecodeTarget(block);
+        color.samples = fragments;
+        RequireReadbackRefused(context, color, "requires an existing resident target");
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            MultisampleTargetView(context, color);
+        }
+        const auto state = TargetState(color);
+        Draw(device, state);
+        CheckSamples(state, ReadHalfSamples(context, color), {});
+        auto otherDevice = context;
+        otherDevice.device = VK_NULL_HANDLE;
+        RequireReadbackRefused(otherDevice, color, "requires an existing resident target");
+        auto otherMip = color;
+        otherMip.mip = 1;
+        RequireReadbackRefused(context, otherMip, "subresource does not match");
+        NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(MultisampledColorBytes(color)), FillOnes);
+        CheckUniform(ReadHalfSamples(context, color), Ones, "after a native color fill");
+        if (fragments == Samples) {
+            CheckUniform(LoadSamples(device, block), Ones, "before storage migration");
+            const auto selected = [](std::uint32_t x, std::uint32_t, std::uint32_t sample) { return x < Side / 2u && sample == StoredSample; };
+            StoreSamples(device, TargetDescriptor(block, SampleShift), SampleWrites(selected));
+            CheckWritten(std::vector<std::array<float, 4>>(Side * Side * Samples, Ones), ReadHalfSamples(context, color), selected, "after storage migration and per-sample writes");
+        }
+        std::printf("native color readback: RGBA16F samples=%u coverage/fill/refusals/chunks passed\n", fragments);
+        ++exercised;
+    }
+    constexpr std::array<VkFormat, 5> formats{VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT};
+    constexpr std::array<std::uint32_t, 4> pattern{0x5au, 0x89abcdefu, 0x01234567u, 0xfedcba98u};
+    for (std::size_t index = 0; index < formats.size(); ++index) {
+        if (!ReadbackCountSupported(context, formats[index], Samples)) continue;
+        Block block(BlockBytes);
+        auto color = DecodeTarget(block);
+        color.format = formats[index];
+        color.elementBytes = 1u << index;
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            VkImage image = VK_NULL_HANDLE;
+            MultisampleTargetView(context, color, &image);
+            Recorder::Active()->Sync();
+            CommandBatch batch(context);
+            RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            VkClearColorValue clear{};
+            std::copy(pattern.begin(), pattern.end(), clear.uint32);
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+            context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(batch.Handle(), image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1u, &range);
+            batch.SubmitAndWait();
+        }
+        const auto bytes = ReadMultisampleTargetSamples(context, color);
+        Require(bytes.size() == Side * Side * Samples * color.elementBytes, "native integer sample count is wrong");
+        for (std::size_t offset = 0; offset < bytes.size(); offset += color.elementBytes) Require(std::memcmp(bytes.data() + offset, pattern.data(), color.elementBytes) == 0, "native integer sample bytes changed at " + std::to_string(offset));
+        std::printf("native color readback: elementBytes=%u integer bits/chunks passed\n", color.elementBytes);
+    }
+    if (ReadbackCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, Samples)) {
+        Block block(BlockBytes);
+        const auto color = DecodeTarget(block);
+        auto unsupported = context;
+        imageFormatProperties = context.imageFormatProperties;
+        unsupported.imageFormatProperties = NoReadbackImage;
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            MultisampleTargetView(unsupported, color);
+        }
+        Draw(device, TargetState(color));
+        RequireReadbackRefused(unsupported, color, "multisample color readback");
+        CheckSamples(TargetState(color), LoadSamples(device, block), {});
+        std::puts("native color readback: unsupported snapshot format refuses readback and retains rendering");
+    }
+    Require(exercised != 0, "no supported native color readback sample count was exercised");
+}
+
+}
+
+int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--readback") {
+            Readback(*device);
+            return 0;
+        }
         Block block(4u * BlockBytes);
         Block other(BlockBytes);
         const auto color = DecodeTarget(block);

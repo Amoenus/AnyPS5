@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -102,7 +104,7 @@ public:
         VkDeviceSize bytes = 0;
     };
 
-    Allocation allocate(VkImageUsageFlags imageUsage, VkImageCreateFlags flags) {
+    Allocation allocate(VkImageUsageFlags imageUsage, VkImageCreateFlags flags, VkFormat sampleFormat = VK_FORMAT_UNDEFINED) {
         Allocation created;
         try {
             VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -127,9 +129,12 @@ public:
             Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &created.memory), "vkAllocateMemory multisampled target");
             Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, created.image, created.memory, 0), "vkBindImageMemory multisampled target");
             VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            VkImageViewUsageCreateInfo sampledUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+            sampledUsage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+            if (sampleFormat != VK_FORMAT_UNDEFINED) viewInfo.pNext = &sampledUsage;
             viewInfo.image = created.image;
-            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            viewInfo.format = target.format;
+            viewInfo.viewType = sampleFormat == VK_FORMAT_UNDEFINED ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+            viewInfo.format = sampleFormat == VK_FORMAT_UNDEFINED ? target.format : sampleFormat;
             viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &created.view), "vkCreateImageView multisampled target");
         } catch (...) {
@@ -239,6 +244,70 @@ public:
 
     bool Storable() const {
         return (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
+    }
+
+    std::vector<std::byte> ReadSamples() {
+        Require(context.detiler != nullptr, "multisample color sample readback requires a texture detiler");
+        Require(target.samples == 2u || target.samples == 4u || target.samples == 8u, "unsupported multisample color readback fragment count");
+        auto* recorder = Recorder::Active();
+        Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires its device's active recorder");
+        Require(cmask.Refusal().empty(), cmask.Refusal());
+        Require(cmask.Keys() != DccKeys::Clear0000, "reading a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
+        const auto format = TextureDetiler::ImageElementFormat(target.elementBytes);
+        constexpr auto readUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        constexpr auto readFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+        const auto checkSupport = [&](VkFormat imageFormat, VkImageUsageFlags imageUsage, VkImageCreateFlags flags) {
+            VkImageFormatProperties supported{};
+            Check(context.imageFormatProperties(context.physical, imageFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, imageUsage, flags, &supported), "vkGetPhysicalDeviceImageFormatProperties multisample color readback");
+            Require((supported.sampleCounts & target.samples) != 0 && target.extent.width <= supported.maxExtent.width && target.extent.height <= supported.maxExtent.height && supported.maxArrayLayers != 0, "multisample color readback exceeds device image limits");
+        };
+        checkSupport(format, VK_IMAGE_USAGE_SAMPLED_BIT, 0u);
+        checkSupport(target.format, readUsage, readFlags);
+        const auto elements = static_cast<std::uint64_t>(target.extent.width) * target.extent.height * target.samples;
+        Require(elements != 0 && elements <= std::numeric_limits<std::uint32_t>::max(), "multisample color readback element count is unsupported");
+        const auto bytes = elements * target.elementBytes;
+        const auto alignedBytes = (bytes + 3u) & ~std::uint64_t{3};
+        Require(alignedBytes <= std::numeric_limits<std::size_t>::max(), "multisample color readback exceeds host address space");
+        const auto alignment = std::max<VkDeviceSize>({4u, target.elementBytes, context.limits.minStorageBufferOffsetAlignment});
+        const auto stride = context.limits.maxStorageBufferRange / alignment * alignment;
+        Require(stride != 0, "multisample color readback storage range cannot hold an aligned element");
+        SettleStorageWrites();
+        ApplyFastClear(target);
+        recorder->Sync();
+        Require(active->load(std::memory_order_acquire), "multisampled color target was retired during sample readback");
+        checkDccCurrent(target);
+        const auto snapshot = allocate(readUsage, readFlags, format);
+        try {
+            DeviceBuffer samples(context, static_cast<std::size_t>(alignedBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            Buffer staging(context, static_cast<std::size_t>(alignedBytes), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            context.detiler->BeginBatch();
+            CommandBatch batch(context);
+            const auto commands = batch.Handle();
+            recordToGeneral(commands, snapshot.image);
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            VkImageCopy region{};
+            region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.dstSubresource = region.srcSubresource;
+            region.extent = {target.extent.width, target.extent.height, 1};
+            context.Function<PFN_vkCmdCopyImage>("vkCmdCopyImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, snapshot.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+            for (VkDeviceSize offset = 0; offset < bytes; offset += stride) {
+                const auto count = std::min<VkDeviceSize>(stride, bytes - offset);
+                context.detiler->DispatchMultisampleReadback(commands, format, samples.Handle(), offset, (count + 3u) & ~VkDeviceSize{3}, snapshot.view, target.extent.width, target.extent.height, 1u, target.samples, static_cast<std::uint32_t>(offset / target.elementBytes), static_cast<std::uint32_t>(count / target.elementBytes));
+            }
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            CopyBuffer(context, commands, samples.Handle(), 0u, staging.Handle(), 0u, alignedBytes);
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+            batch.SubmitAndWait();
+            staging.Invalidate();
+            std::vector<std::byte> result(static_cast<std::size_t>(bytes));
+            std::memcpy(result.data(), staging.Bytes().data(), result.size());
+            destroy(snapshot);
+            return result;
+        } catch (...) {
+            destroy(snapshot);
+            throw;
+        }
     }
 
     std::shared_ptr<Texture> Sampled(VkComponentMapping components) {
@@ -742,6 +811,22 @@ std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const 
 void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget& target) {
     std::lock_guard lock(targetsMutex());
     acquire(context, target);
+}
+
+std::vector<std::byte> ReadMultisampleTargetSamples(const Context& context, const ColorTarget& target) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::shared_ptr<MultisampleTarget> resident;
+    {
+        std::lock_guard lock(targetsMutex());
+        for (const auto& candidate : targets()) {
+            if (!candidate->active->load(std::memory_order_acquire) || candidate->context.device != context.device || !sameTarget(candidate->target, target)) continue;
+            Require(candidate->target.mip == target.mip && candidate->target.arraySlice == target.arraySlice && candidate->target.depthSlice == target.depthSlice && candidate->target.elementBytes == target.elementBytes, "multisample color readback subresource does not match the resident target");
+            resident = candidate;
+            break;
+        }
+    }
+    Require(resident != nullptr, "multisample color sample readback requires an existing resident target");
+    return resident->ReadSamples();
 }
 
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource) {

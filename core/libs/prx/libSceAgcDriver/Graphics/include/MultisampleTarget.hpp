@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -59,6 +60,7 @@ VkImageView MultisampleTargetView(const Context& context, const ColorTarget& tar
 void KeepMultisampleTarget_nid_no_patch(const std::shared_ptr<void>& owner);
 std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const GuestTextureResource& resource, VkComponentMapping components);
 void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget& target);
+std::vector<std::byte> ReadMultisampleTargetSamples(const Context& context, const ColorTarget& target);
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource);
 bool MultisampleTargetStorable(const Context& context, const ColorTarget& target);
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
