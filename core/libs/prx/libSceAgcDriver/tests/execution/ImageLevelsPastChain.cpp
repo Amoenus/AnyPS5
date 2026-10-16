@@ -150,12 +150,12 @@ std::uint32_t ResultWord(std::uint32_t tid, std::uint32_t component) {
     return Buffer[tid * Words + Result + component];
 }
 
-void CheckResinfo(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t type, std::uint32_t layers, std::uint32_t base) {
+void CheckResinfoAt(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t type, std::uint32_t layers, std::uint32_t base, const std::function<std::uint32_t(std::uint32_t)>& lodOf) {
     const auto levels = GuestLevels - base;
-    Run(device, code, SampledDescriptor(type, layers, base), [&](std::uint32_t tid) { return std::array<std::uint32_t, 4>{tid % levels, 0u, 0u, 0u}; });
+    Run(device, code, SampledDescriptor(type, layers, base), [&](std::uint32_t tid) { return std::array<std::uint32_t, 4>{lodOf(tid), 0u, 0u, 0u}; });
     const std::string name = std::string("image_get_resinfo of a 28x1 ") + (type == Type2DArray ? "2D-array" : "2D") + " T# of levels " + std::to_string(base) + "-9";
     for (std::uint32_t tid = 0; tid < Threads; ++tid) {
-        const auto lod = tid % levels;
+        const auto lod = lodOf(tid);
         const auto check = [&](std::uint32_t component, std::uint32_t expected, const char* what) {
             const auto value = ResultWord(tid, component);
             Require(value == expected, name + " at LOD " + std::to_string(lod) + ": " + what + " is " + std::to_string(value) + ", expected " + std::to_string(expected));
@@ -165,6 +165,16 @@ void CheckResinfo(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t
         if (type == Type2DArray) check(2u, layers, "the layer count");
         check(3u, levels, "the level count");
     }
+}
+
+void CheckResinfo(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t type, std::uint32_t layers, std::uint32_t base) {
+    const auto levels = GuestLevels - base;
+    for (std::uint32_t lod = 0; lod < levels; ++lod) CheckResinfoAt(device, code, type, layers, base, [lod](std::uint32_t) { return lod; });
+    if (device.DeviceName().starts_with("llvmpipe")) {
+        std::puts("skipped the image_get_resinfo dispatches whose LOD differs between invocations: llvmpipe before Mesa 25.3 answers a size query of a vector of invocations at the LOD of its first");
+        return;
+    }
+    CheckResinfoAt(device, code, type, layers, base, [levels](std::uint32_t tid) { return tid % levels; });
 }
 
 void CheckSampledLevels(AgcDriver::VulkanDevice& device) {
