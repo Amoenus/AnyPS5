@@ -801,6 +801,10 @@ Texture::Texture(const Context& context, VkImage depthImage, VkFormat depthForma
     firstLayerRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
 }
 
+Texture::Texture(const Context& context, VkImage image, VkFormat format, VkImageAspectFlags aspect, VkComponentMapping components, VkImageLayout imageLayout, VkImageViewType viewType) : Texture(context, image, format, aspect, components, viewType) {
+    layout = imageLayout;
+}
+
 Texture::~Texture() {
     release();
 }

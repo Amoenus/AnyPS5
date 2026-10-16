@@ -6312,7 +6312,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         ShaderResources first(context, sampledCompute);
         ShaderResources second(context, sampledCompute);
         Require(first.SampledTextures().size() == 1 && first.SampledTextures().front() != nullptr, "the multisampled target was not bound as a sampled texture");
-        Require(first.SampledTextures().front()->Layout() == VK_IMAGE_LAYOUT_GENERAL && first.SampledTextures().front()->ViewFormat() == target.format, "the sampled multisampled target is not a view of the target's image in its layout");
+        Require(first.SampledTextures().front()->Layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && first.SampledTextures().front()->ViewFormat() == target.format, "the sampled multisampled target is not a read-only view of the target's image");
         Require(second.SampledTextures().front() == first.SampledTextures().front(), "a second lookup of the multisampled target made another texture");
         Require(first.MultisampleSources() == std::vector<std::uint64_t>{address} && !first.Reusable(), "resources sampling a multisampled target are kept for reuse without the barrier their lookup records");
         recorder.Submit();
