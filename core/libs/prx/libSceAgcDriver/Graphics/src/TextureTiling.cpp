@@ -405,7 +405,7 @@ SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
         geometry.layerBytes = thick.slabBytes;
         return geometry;
     }
-    if (descriptor.dimension == TextureDimension::k2DMsaa) {
+    if (descriptor.dimension == TextureDimension::k2DMsaa && descriptor.tileMode != TextureTileMode::kLinear) {
         Require(descriptor.samples > 1u && std::has_single_bit(descriptor.samples), "multisampled texture has an invalid sample count");
         const auto bytesPerElement = BytesPerElement(descriptor.format);
         Require(std::has_single_bit(bytesPerElement), "multisampled texture format has an unsupported element size");

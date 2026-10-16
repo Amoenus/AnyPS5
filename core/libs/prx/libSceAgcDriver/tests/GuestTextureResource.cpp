@@ -271,6 +271,15 @@ void RunGuestTextureResourceTests() {
     result = DecodeTextureResource(canvas);
     Require(result.dimension == TextureDimension::k2DMsaa && result.samples == 4 && result.baseAddress == 0x21f200000ull && result.width == 297 && result.height == 297 && result.format == 56 && result.tileMode == TextureTileMode::kR64KBX, "the 4x canvas descriptor of PPSA99006 decoded incorrectly");
     Require(DescribeSurface(result).guestBytes == 0x190000, "4x render-target geometry must include fragment-aware padding for the PPSA99006 canvas");
+    auto linearMultisampled = result;
+    linearMultisampled.tileMode = TextureTileMode::kLinear;
+    const auto linearMips = ComputeMipLayout(TextureTileMode::kLinear, result.format, result.width, result.height, 1);
+    for (const auto samples : {2u, 4u, 8u}) {
+        linearMultisampled.samples = samples;
+        const auto geometry = DescribeSurface(linearMultisampled);
+        Require(geometry.guestBytes == ComputeSurfaceSize(linearMips, 1) && geometry.layerBytes == geometry.guestBytes && geometry.sliceLinearBytes == linearMips.front().linearSize, "linear MSAA descriptors must retain the existing geometry before access is refused");
+        Require(geometry.mips.size() == 1 && geometry.mips.front().tiledSize == linearMips.front().tiledSize && geometry.mips.front().pitchBytes == linearMips.front().pitchBytes, "linear MSAA descriptors must retain the existing mip layout");
+    }
     Fields fewerFragments = multisampled;
     fewerFragments.maxMip = 1;
     rejectFields(fewerFragments, "same sample count");
