@@ -3,6 +3,7 @@
 #include <tlhelp32.h>
 #include "prx/libc/include/CallTrace.hpp"
 #include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/Shutdown.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -304,6 +305,7 @@ LONG WINAPI ReportCrash(EXCEPTION_POINTERS* info) {
         // Another thread is already reporting; let it finish before this fault ends the process.
         Sleep(INFINITE);
     }
+    LibcRunEndFlush_nid_no_patch();
     const auto* context = info->ContextRecord;
     char line[MAX_PATH + 64];
     char threadName[128] = "";
