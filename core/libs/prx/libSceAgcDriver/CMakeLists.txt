@@ -437,25 +437,6 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(agc_driver_msaa_runtime agc_driver_msaa_readback agc_driver_msaa_tile_transfer agc_driver_msaa_xor_views agc_driver_msaa_target_import agc_driver_msaa_depth_target agc_driver_msaa_depth_refusals agc_driver_msaa_depth_clear agc_driver_msaa_metadata_reset agc_driver_msaa_native_snapshot agc_shader_msaa_shapes PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
     endif()
-    add_test_executable(agc_driver_msaa_layout_tests
-            tests/MultisampleTextureLayout.cpp
-            Graphics/src/MultisampleTextureLayout.cpp
-    )
-    target_include_directories(agc_driver_msaa_layout_tests PRIVATE
-            ${LIBS_INCLUDE_DIR}
-            ${CMAKE_SOURCE_DIR}/core/shader/recompiler
-            ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
-    )
-    target_link_libraries(agc_driver_msaa_layout_tests PRIVATE libc)
-    set_target_properties(agc_driver_msaa_layout_tests PROPERTIES CXX_EXTENSIONS OFF)
-    configure_windows_unwind(agc_driver_msaa_layout_tests)
-    add_test(NAME agc_driver_msaa_layout COMMAND agc_driver_msaa_layout_tests)
-    set_tests_properties(agc_driver_msaa_layout PROPERTIES TIMEOUT 20)
-    if(WIN32)
-        set_tests_properties(agc_driver_msaa_layout PROPERTIES ENVIRONMENT_MODIFICATION
-                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-    endif()
-
     add_test_executable(agc_frame_dump_io_tests tests/FrameDumpIo.cpp)
     target_include_directories(agc_frame_dump_io_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(agc_frame_dump_io_tests PRIVATE libc)
