@@ -1477,10 +1477,11 @@ target_include_directories(agc_driver_sample_multisample_target_tests PRIVATE $<
 
 if(BUILD_TESTING)
     add_test(NAME agc_driver_native_color_readback COMMAND agc_driver_sample_multisample_target_tests --readback)
-    set_tests_properties(agc_driver_native_color_readback PROPERTIES
+    add_test(NAME agc_driver_native_color_initial COMMAND agc_driver_sample_multisample_target_tests --initial)
+    set_tests_properties(agc_driver_native_color_readback agc_driver_native_color_initial PROPERTIES
             ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     if(WIN32)
-        set_tests_properties(agc_driver_native_color_readback PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_driver_native_color_readback agc_driver_native_color_initial PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_driver_undithered_alpha_to_coverage_state COMMAND agc_driver_graphics_tests --undithered-alpha-to-coverage-state)

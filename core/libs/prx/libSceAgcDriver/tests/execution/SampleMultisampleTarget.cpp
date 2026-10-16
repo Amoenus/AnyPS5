@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -299,16 +300,16 @@ void RequireStoreRefused(AgcDriver::VulkanDevice& device, const std::array<std::
     Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
 }
 
-std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block) {
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t fragments = Samples) {
     std::vector<std::uint32_t> userData;
-    const auto program = CompileLoad(device, TargetDescriptor(block, SampleShift), userData);
-    std::vector<std::array<float, 4>> loaded(Side * Side * Samples);
+    const auto program = CompileLoad(device, TargetDescriptor(block, static_cast<std::uint32_t>(std::countr_zero(fragments))), userData);
+    std::vector<std::array<float, 4>> loaded(Side * Side * fragments);
     for (std::uint32_t first = 0; first < loaded.size(); first += Threads) {
         Buffer.fill(0xdeadbeefu);
         for (std::uint32_t tid = 0; tid < Threads; ++tid) {
             const auto index = first + tid;
-            const auto pixel = index / Samples;
-            const std::array<std::uint32_t, 6> words{0u, 0u, 0u, pixel % Side, pixel / Side, index % Samples};
+            const auto pixel = index / fragments;
+            const std::array<std::uint32_t, 6> words{0u, 0u, 0u, pixel % Side, pixel / Side, index % fragments};
             std::copy(words.begin(), words.end(), &Buffer[tid * Words]);
         }
         device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(LoadCode.data()));
@@ -332,9 +333,10 @@ double EdgeDistance(double x, double y, std::size_t from) {
     return side(c[0], c[1]) < 0 ? -side(x, y) : side(x, y);
 }
 
-void CheckSamples(const AgcDriver::Graphics::State& state, const std::vector<std::array<float, 4>>& loaded, const std::array<float, 4>& background) {
+void CheckSamples(const AgcDriver::Graphics::State& state, const std::vector<std::array<float, 4>>& loaded, const std::array<float, 4>& background, std::span<const std::array<float, 4>> supplied = {}) {
     const auto locations = AgcDriver::Graphics::SampleLocations(state);
     Require(loaded.size() == Side * Side * state.samples, "the multisample result has the wrong element count");
+    Require(supplied.empty() || supplied.size() == loaded.size(), "the initial sample count does not match the rendered target");
     std::vector<std::uint32_t> pixelsByCoverage(state.samples + 1u);
     std::vector<std::uint32_t> coveredBySample(state.samples);
     std::uint32_t checked = 0;
@@ -342,12 +344,13 @@ void CheckSamples(const AgcDriver::Graphics::State& state, const std::vector<std
         for (std::uint32_t x = 0; x < Side; ++x) {
             std::uint32_t covered = 0;
             for (std::uint32_t sample = 0; sample < state.samples; ++sample) {
-                const auto& texel = loaded[(y * Side + x) * state.samples + sample];
+                const auto index = (y * Side + x) * state.samples + sample;
+                const auto& texel = loaded[index];
                 const bool drawn = texel == Drawn;
-                const bool empty = texel == background;
+                const bool empty = texel == (supplied.empty() ? background : supplied[index]);
                 char where[160];
                 std::snprintf(where, sizeof(where), "sample %u of pixel (%u, %u) loaded (%g, %g, %g, %g)", sample, x, y, texel[0], texel[1], texel[2], texel[3]);
-                Require(drawn || empty, std::string(where) + ", neither the drawn color nor the cleared target");
+                Require(drawn || empty, std::string(where) + ", neither the drawn color nor the initial target sample");
                 covered += drawn ? 1u : 0u;
                 coveredBySample[sample] += drawn ? 1u : 0u;
                 const auto px = x + static_cast<double>(locations[sample].x);
@@ -523,6 +526,40 @@ void Readback(AgcDriver::VulkanDevice& device) {
     Require(exercised != 0, "no supported native color readback sample count was exercised");
 }
 
+void InitialContents(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    std::uint32_t exercised = 0;
+    for (const auto fragments : {2u, 4u, 8u}) {
+        if (!ReadbackCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments)) continue;
+        for (const bool uniform : {false, true}) {
+            Block block(BlockBytes);
+            auto color = DecodeTarget(block);
+            color.samples = fragments;
+            const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, 8u, fragments, Side, Side, 1u);
+            Require(layout.Bytes() == block.bytes, "the initial fixture does not cover one complete color block");
+            StoreWords(block, block.bytes, 0x38003800u);
+            std::vector<std::byte> linear(static_cast<std::size_t>(layout.LinearBytes()));
+            std::vector<std::array<float, 4>> expected(Side * Side * fragments);
+            for (std::uint32_t index = 0; index < expected.size(); ++index) {
+                const auto sample = index % fragments;
+                const auto pixel = index / fragments;
+                const bool ones = uniform || ((pixel % Side) * 3u + (pixel / Side) * 5u + sample * 7u) % 2u == 0u;
+                const std::array<std::uint16_t, 4> bits = ones ? std::array<std::uint16_t, 4>{0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u} : std::array<std::uint16_t, 4>{0x3a00u, 0x3400u, 0x3800u, 0x3c00u};
+                std::memcpy(linear.data() + index * sizeof(bits), bits.data(), sizeof(bits));
+                expected[index] = ones ? Ones : Written;
+            }
+            layout.Tile(linear, std::as_writable_bytes(std::span(block.data, block.bytes)));
+            const auto state = TargetState(color);
+            Draw(device, state);
+            CheckSamples(state, LoadSamples(device, block, fragments), {}, expected);
+            std::printf("native color initial samples: fragments=%u %s background survives first partial draw\n", fragments, uniform ? "uniform" : "varying pixel/fragment");
+            ++exercised;
+        }
+    }
+    Require(exercised != 0, "no supported native color initial-content case was exercised");
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -531,6 +568,10 @@ int main(int argc, char** argv) {
         if (!device) return VulkanTestSkipped;
         if (argc == 2 && std::string_view(argv[1]) == "--readback") {
             Readback(*device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--initial") {
+            InitialContents(*device);
             return 0;
         }
         Block block(4u * BlockBytes);
