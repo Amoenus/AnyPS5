@@ -18,7 +18,7 @@ layout(push_constant) uniform Push {
 void main() {
     uint index = gl_GlobalInvocationID.y * params.rowThreads + gl_GlobalInvocationID.x;
     if (index >= params.elements) return;
-    uint element = params.firstElement + index;
+    uint element = index;
     uint pixel = element / params.fragments;
     ivec3 coordinate = ivec3(pixel % params.width, (pixel / params.width) % params.height, pixel / (params.width * params.height));
     uint address = index * ELEMENT_BYTES;
