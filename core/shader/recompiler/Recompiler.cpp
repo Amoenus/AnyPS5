@@ -494,6 +494,12 @@ void prepareInterface(const RecompileRequest& request, IrProgram& program) {
     const bool nativeSampleOffsets = request.target.nonConstantImageOffsets && std::find(request.target.supportedCapabilities.begin(), request.target.supportedCapabilities.end(), spv::CapabilityImageGatherExtended) != request.target.supportedCapabilities.end();
     resourceMaterializer.ApplyStaticInterface(program, nativeSampleOffsets);
 
+    constexpr ConstantFolder constantFolder;
+    if (request.shader.stage == ShaderStage::Vertex && constantFolder.FoldVertexLaneBounds(program, HostSubgroupSize(request), request.target.spirvVersion)) {
+        constantFolder.Fold(program);
+        ResolveControlFlowIdentities(program);
+    }
+
     deadCodeEliminator.RemoveIdentities(program);
     constexpr RedundantValueEliminator redundantValueEliminator;
     static_cast<void>(redundantValueEliminator.Eliminate(program));
@@ -992,6 +998,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             std::copy_n(runtimeSelectors.begin(), layout.runtimeStateDwords, data->guestDescriptor.begin() + first);
         }
     }
+    result.shaderDataUserWords = std::move(bindings.shaderDataUserWords);
     result.poisonedSrtReads = static_cast<std::uint32_t>(snapshot.srtPoison.size()) + snapshot.nullRootReads;
     if (!tables.map.empty()) {
         result.imageTablePoison.reserve(tables.poison.size());
@@ -1326,11 +1333,12 @@ namespace {
 // traced into the capture (ResourceCapture::readTrace).
 void materializeCapture(ResourceCapture& capture, const SrtRuntime& runtime) {
     const auto& plan = *capture.plan;
+    SrtRuntime traced = runtime;
+    traced.userDataUse = &capture.userDataUse;
     if (std::none_of(plan.pureFlatSlots.begin(), plan.pureFlatSlots.end(), [](std::uint8_t pure) { return pure != 0u; })) {
-        ResourceMaterializer{}.Materialize(plan, runtime, capture.snapshot);
+        ResourceMaterializer{}.Materialize(plan, traced, capture.snapshot);
         return;
     }
-    SrtRuntime traced = runtime;
     traced.readTrace = &capture.readTrace;
     ResourceMaterializer{}.Materialize(plan, traced, capture.snapshot);
     auto& other = capture.readTrace.otherReads;
