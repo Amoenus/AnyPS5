@@ -308,7 +308,7 @@ public:
         ensureSampledLayout();
         const std::array<std::uint32_t, 5> key{static_cast<std::uint32_t>(components.r), static_cast<std::uint32_t>(components.g), static_cast<std::uint32_t>(components.b), static_cast<std::uint32_t>(components.a), static_cast<std::uint32_t>(viewType)};
         auto& texture = textures[key];
-        if (texture == nullptr) texture = std::make_unique<Texture>(context, image, target.format, VK_IMAGE_ASPECT_COLOR_BIT, components, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, viewType);
+        if (texture == nullptr) texture = std::make_unique<Texture>(context, image, target.format, VK_IMAGE_ASPECT_COLOR_BIT, components, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, viewType, VK_IMAGE_USAGE_SAMPLED_BIT);
         return {shared_from_this(), texture.get()};
     }
 
