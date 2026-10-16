@@ -278,7 +278,8 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     state.bdaStopsInvocations = state.waveLdsScope == 0 && BdaInvocationsMayStop(program) && program.Resources().stage != IrShaderStage::Mesh;
     const bool waveOperations = state.laneCount != 1u || state.requirements.subgroupBallot || state.requirements.subgroupShuffle;
     const bool faults = program.Info().usesDma || program.Info().usesFaultBuffer;
-    state.bdaFaultMasksWrites = state.bdaStopsInvocations && faults && waveOperations && program.Resources().stage != IrShaderStage::Pixel;
+    const bool barrierCompute = !state.bdaStopsInvocations && program.Resources().stage == IrShaderStage::Compute;
+    state.bdaFaultMasksWrites = faults && (barrierCompute || (state.bdaStopsInvocations && waveOperations && program.Resources().stage != IrShaderStage::Pixel));
     EmitModuleHeader(state, bindings);
     EmitProgram(state);
     state.module.EmitEntryPoint(ExecutionModelForStage(state.program.Resources().stage), state.mainFunc, "main", state.interfaceVariables);
