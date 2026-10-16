@@ -383,7 +383,7 @@ ThickLayout ComputeThickLayout(TextureTileMode tileMode, std::uint32_t format, s
 
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
     SurfaceGeometry geometry;
-    if (descriptor.samples != 1u) {
+    if (descriptor.samples != 1u && descriptor.tileMode != TextureTileMode::kLinear) {
         Require(descriptor.samples == 2u || descriptor.samples == 4u || descriptor.samples == 8u, "multisampled surface fragment count is not implemented");
         Require(descriptor.mipCount == 1u && descriptor.allocatedMipCount == 1u && descriptor.baseLevel == 0u && descriptor.lastLevel == 0u, "multisampled surface mip levels are not implemented");
         Require(descriptor.width != 0u && descriptor.width <= 16384u && descriptor.height != 0u && descriptor.height <= 16384u, "invalid multisampled surface extent");
