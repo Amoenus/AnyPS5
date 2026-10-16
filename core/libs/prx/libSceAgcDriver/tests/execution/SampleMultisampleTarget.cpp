@@ -132,17 +132,19 @@ struct Block {
     std::uint8_t* data = nullptr;
 };
 
-AgcDriver::Graphics::ColorTarget DecodeTarget(const Block& block) {
+AgcDriver::Graphics::ColorTarget DecodeTarget(const Block& block, std::uint32_t pipeBankXor = 0) {
     AgcDriver::Registers cx;
-    cx[0x318] = static_cast<std::uint32_t>(block.Address() >> 8u);
+    const auto address = block.Address() | pipeBankXor;
+    cx[0x318] = static_cast<std::uint32_t>(address >> 8u);
     cx[0x31b] = 0;
     cx[0x31c] = Float16x4Info;
     cx[0x31d] = MultisampledAttrib;
     cx[0x3b0] = ((Side - 1u) << 14u) | (Side - 1u);
     cx[0x3b8] = TiledAttrib3;
-    cx[0x390] = static_cast<std::uint32_t>(block.Address() >> 40u);
+    cx[0x390] = static_cast<std::uint32_t>(address >> 40u);
     const auto color = AgcDriver::Graphics::DecodeColorBuffer(cx, 0);
     Require(color.format == VK_FORMAT_R16G16B16A16_SFLOAT && color.samples == Samples && color.extent.width == Side && color.extent.height == Side, "the target did not decode as a 16x16 RGBA16F surface of 4 samples");
+    Require(color.address == block.Address() && color.pipeBankXor == pipeBankXor, "the color target lost its base address or pipe/bank XOR");
     return color;
 }
 
@@ -211,8 +213,8 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& sta
     device.Draw(state, draw, shaders);
 }
 
-std::array<std::uint32_t, 8> TargetDescriptor(const Block& block, std::uint32_t sampleShift) {
-    const auto address = block.Address();
+std::array<std::uint32_t, 8> TargetDescriptor(const Block& block, std::uint32_t sampleShift, std::uint32_t pipeBankXor = 0) {
+    const auto address = block.Address() | pipeBankXor;
     return {
         static_cast<std::uint32_t>(address >> 8u),
         static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (Format16161616Float << 20u) | (((Side - 1u) & 3u) << 30u),
@@ -300,9 +302,9 @@ void RequireStoreRefused(AgcDriver::VulkanDevice& device, const std::array<std::
     Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
 }
 
-std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t fragments = Samples) {
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t fragments = Samples, std::uint32_t pipeBankXor = 0) {
     std::vector<std::uint32_t> userData;
-    const auto program = CompileLoad(device, TargetDescriptor(block, static_cast<std::uint32_t>(std::countr_zero(fragments))), userData);
+    const auto program = CompileLoad(device, TargetDescriptor(block, static_cast<std::uint32_t>(std::countr_zero(fragments)), pipeBankXor), userData);
     std::vector<std::array<float, 4>> loaded(Side * Side * fragments);
     for (std::uint32_t first = 0; first < loaded.size(); first += Threads) {
         Buffer.fill(0xdeadbeefu);
@@ -422,6 +424,17 @@ void RequireReadbackRefused(const AgcDriver::Graphics::Context& context, const A
     Require(refusal.find(expected) != std::string::npos, "native color readback was not refused: " + refusal);
 }
 
+void RequireInitialRefused(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::ColorTarget& color, const std::string& expected) {
+    std::string refusal;
+    try {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        AgcDriver::Graphics::MultisampleTargetView(context, color);
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find(expected) != std::string::npos, "native color initialization was not refused: " + refusal);
+}
+
 bool ReadbackCountSupported(const AgcDriver::Graphics::Context& context, VkFormat format, std::uint32_t samples) {
     VkImageFormatProperties supported{};
     const auto result = context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0u, &supported);
@@ -516,14 +529,34 @@ void Readback(AgcDriver::VulkanDevice& device) {
         Block invalidBlock(BlockBytes);
         auto invalid = DecodeTarget(invalidBlock);
         invalid.elementBytes = 4u;
-        {
-            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-            MultisampleTargetView(context, invalid);
-        }
-        RequireReadbackRefused(context, invalid, "source format or element size is unsupported");
+        RequireInitialRefused(context, invalid, "color format or element size is unsupported");
         std::puts("native color readback: mismatched source format and element size is refused before view creation");
     }
     Require(exercised != 0, "no supported native color readback sample count was exercised");
+}
+
+std::vector<std::array<float, 4>> StoreInitial(const Block& block, std::uint32_t fragments, std::uint32_t pipeBankXor, bool uniform) {
+    using namespace AgcDriver::Graphics;
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, 8u, fragments, Side, Side, 1u, pipeBankXor);
+    Require(layout.Bytes() == block.bytes, "the initial fixture does not cover one complete color block");
+    StoreWords(block, block.bytes, 0x38003800u);
+    std::vector<std::byte> linear(static_cast<std::size_t>(layout.LinearBytes()));
+    std::vector<std::array<float, 4>> expected(Side * Side * fragments);
+    for (std::uint32_t index = 0; index < expected.size(); ++index) {
+        const auto sample = index % fragments;
+        const auto pixel = index / fragments;
+        const bool ones = uniform || ((pixel % Side) * 3u + (pixel / Side) * 5u + sample * 7u) % 2u == 0u;
+        const std::array<std::uint16_t, 4> bits = ones ? std::array<std::uint16_t, 4>{0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u} : std::array<std::uint16_t, 4>{0x3a00u, 0x3400u, 0x3800u, 0x3c00u};
+        std::memcpy(linear.data() + index * sizeof(bits), bits.data(), sizeof(bits));
+        expected[index] = ones ? Ones : Written;
+    }
+    layout.Tile(linear, std::as_writable_bytes(std::span(block.data, block.bytes)));
+    return expected;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL NoInitialStorageImage(VkPhysicalDevice physical, VkFormat format, VkImageType type, VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* properties) {
+    if ((flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT) != 0 && (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0) return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    return imageFormatProperties(physical, format, type, tiling, usage, flags, properties);
 }
 
 void InitialContents(AgcDriver::VulkanDevice& device) {
@@ -532,28 +565,68 @@ void InitialContents(AgcDriver::VulkanDevice& device) {
     std::uint32_t exercised = 0;
     for (const auto fragments : {2u, 4u, 8u}) {
         if (!ReadbackCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments)) continue;
-        for (const bool uniform : {false, true}) {
+        for (const auto pipeBankXor : {0u, 0x8100u}) {
+            for (const bool uniform : {false, true}) {
+                Block block(BlockBytes);
+                auto color = DecodeTarget(block, pipeBankXor);
+                color.samples = fragments;
+                const auto expected = StoreInitial(block, fragments, pipeBankXor, uniform);
+                const std::vector<std::uint8_t> before(block.data, block.data + block.bytes);
+                const auto state = TargetState(color);
+                Draw(device, state);
+                CheckSamples(state, LoadSamples(device, block, fragments, pipeBankXor), {}, expected);
+                Require(std::equal(before.begin(), before.end(), block.data), "initialization or the draw changed guest color bytes or padding");
+                std::printf("native color initial samples: fragments=%u xor=0x%x %s background survives first partial draw\n", fragments, pipeBankXor, uniform ? "uniform" : "varying pixel/fragment");
+                ++exercised;
+            }
+        }
+        {
             Block block(BlockBytes);
+            StoreWords(block, block.bytes, FillOnes);
             auto color = DecodeTarget(block);
             color.samples = fragments;
-            const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, 8u, fragments, Side, Side, 1u);
-            Require(layout.Bytes() == block.bytes, "the initial fixture does not cover one complete color block");
-            StoreWords(block, block.bytes, 0x38003800u);
-            std::vector<std::byte> linear(static_cast<std::size_t>(layout.LinearBytes()));
-            std::vector<std::array<float, 4>> expected(Side * Side * fragments);
-            for (std::uint32_t index = 0; index < expected.size(); ++index) {
-                const auto sample = index % fragments;
-                const auto pixel = index / fragments;
-                const bool ones = uniform || ((pixel % Side) * 3u + (pixel / Side) * 5u + sample * 7u) % 2u == 0u;
-                const std::array<std::uint16_t, 4> bits = ones ? std::array<std::uint16_t, 4>{0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u} : std::array<std::uint16_t, 4>{0x3a00u, 0x3400u, 0x3800u, 0x3c00u};
-                std::memcpy(linear.data() + index * sizeof(bits), bits.data(), sizeof(bits));
-                expected[index] = ones ? Ones : Written;
+            auto noStorage = context;
+            noStorage.storageImageMultisample = false;
+            noStorage.storageImageWriteWithoutFormat = false;
+            {
+                std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+                MultisampleTargetView(noStorage, color);
             }
-            layout.Tile(linear, std::as_writable_bytes(std::span(block.data, block.bytes)));
             const auto state = TargetState(color);
             Draw(device, state);
-            CheckSamples(state, LoadSamples(device, block, fragments), {}, expected);
-            std::printf("native color initial samples: fragments=%u %s background survives first partial draw\n", fragments, uniform ? "uniform" : "varying pixel/fragment");
+            CheckSamples(state, LoadSamples(device, block, fragments), Ones);
+            std::printf("native color initial samples: fragments=%u exact uniform clear without storage writes passed\n", fragments);
+            ++exercised;
+        }
+        {
+            Block block(BlockBytes);
+            auto color = DecodeTarget(block, 0x8100u);
+            color.samples = fragments;
+            const auto expected = StoreInitial(block, fragments, 0x8100u, false);
+            for (const auto profile : {0u, 1u, 2u}) {
+                auto unsupported = context;
+                if (profile == 0) unsupported.storageImageMultisample = false;
+                if (profile == 1) unsupported.storageImageWriteWithoutFormat = false;
+                if (profile == 2) unsupported.detiler = nullptr;
+                RequireInitialRefused(unsupported, color, "require enabled formatless multisampled storage image writes");
+            }
+            auto noRange = context;
+            noRange.limits.maxStorageBufferRange = 0u;
+            RequireInitialRefused(noRange, color, "storage range cannot hold an aligned element");
+            auto noImage = context;
+            imageFormatProperties = context.imageFormatProperties;
+            noImage.imageFormatProperties = NoInitialStorageImage;
+            RequireInitialRefused(noImage, color, "cannot initialize the multisampled color target through its unsigned storage view");
+            auto chunked = context;
+            chunked.limits.maxStorageBufferRange = 256u;
+            {
+                std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+                MultisampleTargetView(chunked, color);
+            }
+            const auto state = TargetState(color);
+            Draw(device, state);
+            CheckSamples(state, LoadSamples(device, block, fragments, 0x8100u), {}, expected);
+            std::printf("native color initial samples: fragments=%u five unsupported profiles refused, restored 256-byte chunks passed\n", fragments);
             ++exercised;
         }
     }
