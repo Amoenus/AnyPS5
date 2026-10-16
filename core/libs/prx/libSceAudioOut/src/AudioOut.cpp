@@ -107,9 +107,9 @@ struct Port {
     int mixLevel = DEFAULT_VOLUME;
     std::uint64_t lastDataOutputTime = 0;
     std::uint64_t virtualQueueEnd = 0;
+    AudioOut2PadLayout padLayout;
     SDL_AudioDeviceID device = 0;
     SDL_AudioSpec spec = {};
-    AudioOut2PadLayout padLayout;
 };
 
 static std::mutex g_mutex;
@@ -149,8 +149,9 @@ static bool openDevice(Port& port) {
 }
 
 static bool openVibrationDevice(Port& port) {
-    if (!ensureSdlAudio()) return false;
+    if (!ensureSdlAudio()) throw std::runtime_error(std::string("AudioOut: could not initialize controller audio: ") + SDL_GetError());
     const int count = SDL_GetNumAudioDevices(0);
+    if (count < 0) throw std::runtime_error(std::string("AudioOut: could not enumerate controller sound cards: ") + SDL_GetError());
     for (int index = 0; index < count; ++index) {
         const char* name = SDL_GetAudioDeviceName(index, 0);
         if (!AudioOut2IsPadAudioDevice(name)) continue;
@@ -367,9 +368,6 @@ static int allocatePort(int type, std::uint32_t len, std::uint32_t freq, Format 
             port.lastDataOutputTime = 0;
             port.virtualQueueEnd = sceKernelGetProcessTime();
             port.mixLevel = type == PORT_TYPE_PADSPK ? DEFAULT_PADSPK_MIX_LEVEL : DEFAULT_VOLUME;
-            for (int c = 0; c < port.channels; c++) {
-                port.volume[c] = DEFAULT_VOLUME;
-            }
             if (type == PORT_TYPE_VIBRATION) {
                 try {
                     openVibrationDevice(port);
@@ -377,6 +375,9 @@ static int allocatePort(int type, std::uint32_t len, std::uint32_t freq, Format 
                     port = Port{};
                     throw;
                 }
+            }
+            for (int c = 0; c < port.channels; c++) {
+                port.volume[c] = DEFAULT_VOLUME;
             }
             if (type != PORT_TYPE_VIBRATION && type != PORT_TYPE_EX) {
                 openDevice(port);

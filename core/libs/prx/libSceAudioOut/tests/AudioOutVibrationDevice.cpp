@@ -26,6 +26,8 @@ namespace {
 constexpr std::uint32_t frames = 256;
 bool available = true;
 bool failOpen = false;
+bool failInitialize = false;
+bool failEnumeration = false;
 bool pulse = false;
 std::uint32_t frequency = 48000;
 int opened = 0;
@@ -140,7 +142,7 @@ void RunTiming() {
 }
 }
 
-int InitializeSdlAudio_nid_no_patch() { return 0; }
+int InitializeSdlAudio_nid_no_patch() { return failInitialize ? -1 : 0; }
 extern "C" void PadQueueLegacyAudioHaptics_nid_postfix(int source, std::uint64_t begin, std::uint64_t end, std::uint8_t large, std::uint8_t small) {
     blocks.push_back({source, begin, end, {large, small}});
     timeline.Queue(source, begin, end, large, small);
@@ -150,7 +152,7 @@ extern "C" void PadClearLegacyAudioHaptics_nid_postfix(int source) {
     timeline.Clear(source);
 }
 extern "C" Uint32 SDLCALL SDL_WasInit(Uint32) { return SDL_INIT_AUDIO; }
-extern "C" int SDLCALL SDL_GetNumAudioDevices(int) { return available ? 2 : 1; }
+extern "C" int SDLCALL SDL_GetNumAudioDevices(int) { return failEnumeration ? -1 : available ? 2 : 1; }
 extern "C" const char* SDLCALL SDL_GetAudioDeviceName(int index, int) { return index == 0 ? "Main speakers" : "DualSense Wireless Controller"; }
 extern "C" int SDLCALL SDL_GetAudioDeviceSpec(int index, int, SDL_AudioSpec* spec) { *spec = {}; spec->channels = index == 0 ? 2 : 4; return 0; }
 extern "C" const char* SDLCALL SDL_GetCurrentAudioDriver() { return pulse ? "pulseaudio" : "dummy"; }
@@ -179,7 +181,7 @@ int main(int argc, char** argv) {
     try {
         Require(argc == 2, "invalid test arguments");
         const std::string_view mode = argv[1];
-        Require(mode == "quad" || mode == "pulse" || mode == "open_failure" || mode == "timing", "invalid device mode");
+        Require(mode == "quad" || mode == "pulse" || mode == "open_failure" || mode == "timing" || mode == "discovery_failure", "invalid device mode");
         pulse = mode == "pulse";
         Pad::Initialize();
         Pad::SetVibrationMode(1);
@@ -198,6 +200,16 @@ int main(int argc, char** argv) {
             catch (const std::runtime_error&) { threw = true; }
             Require(threw && opened == 0 && queued == 0, "a failed native open silently changed routes");
             failOpen = false;
+        }
+        if (mode == "discovery_failure") {
+            for (bool* failure : {&failInitialize, &failEnumeration}) {
+                *failure = true;
+                bool threw = false;
+                try { static_cast<void>(sceAudioOutOpen(0x10000000, 10, 0, frames, frequency, 1)); }
+                catch (const std::runtime_error&) { threw = true; }
+                Require(threw && opened == 0 && queued == 0, "a discovery failure silently changed routes");
+                *failure = false;
+            }
         }
         for (auto rate : {24000u, 48000u}) {
             frequency = rate;
