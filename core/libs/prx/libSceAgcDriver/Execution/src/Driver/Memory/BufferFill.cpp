@@ -221,7 +221,6 @@ void drainPendingInputWrites(std::uint32_t queueId, std::initializer_list<std::p
 bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, const std::shared_ptr<VulkanDevice>& localDevice) {
     auto dwordFill = MatchDwordPatternFill(packet, code, userData, compute);
     if (!dwordFill) dwordFill = MatchConstantDwordFill(packet, code, userData, compute);
-    if (!dwordFill) dwordFill = MatchClampedGlobalFill(packet, code, userData, compute);
     std::optional<Graphics::MemoryValueFill> memoryFill;
     if (!dwordFill) memoryFill = MatchMemoryValueBufferFill(packet, code, userData, compute);
     if (!dwordFill && !memoryFill && !matchesFillKernel(code, userData, compute)) return false;
