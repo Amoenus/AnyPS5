@@ -7908,12 +7908,13 @@ void pipelineJournalTests() {
             Require(PipelineJournalTotals().recordedCompute == reloaded.recordedCompute + 1 && PipelineJournalTotals().recordedModules == reloaded.recordedModules, "the pipeline whose record was torn was not recorded again, or its module was");
         }
         {
+            const auto before = PipelineJournalTotals();
             auto cancelled = StartPipelineJournalReplay(context, fingerprint, hooks);
             Require(cancelled != nullptr, "the third replay did not start");
             cancelled->Cancel();
             cancelled->Wait();
             const auto after = PipelineJournalTotals();
-            Require(cancelled->Done() && after.replayFailed == 0 && after.replayRejected == 0 && after.replayedGraphics + after.replayPresent <= totals.replayedGraphics + totals.replayPresent + 1, "a cancelled replay did not stop cleanly");
+            Require(cancelled->Done() && after.replayFailed == 0 && after.replayRejected == 0 && after.replayedGraphics + after.replayPresent <= before.replayedGraphics + before.replayPresent + 1, "a cancelled replay did not stop cleanly");
         }
         {
             const std::uint32_t meshWithoutOutputSize = 2u;
