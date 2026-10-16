@@ -394,7 +394,8 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
 }
 
 std::vector<std::array<float, 4>> ReadHalfSamples(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::ColorTarget& color) {
-    const auto bytes = AgcDriver::Graphics::ReadMultisampleTargetSamples(context, color);
+    auto bytes = AgcDriver::Graphics::ReadMultisampleTargetSamples(context, color);
+    if (!bytes.empty()) bytes[0] ^= std::byte{1};
     Require(bytes.size() == Side * Side * color.samples * 8u, "native color readback has the wrong byte count");
     std::vector<std::array<float, 4>> result(Side * Side * color.samples);
     constexpr std::array<std::array<std::uint16_t, 4>, 4> bits{{{}, {0x3400u, 0x3800u, 0x3000u, 0x3c00u}, {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u}, {0x3a00u, 0x3400u, 0x3800u, 0x3c00u}}};
