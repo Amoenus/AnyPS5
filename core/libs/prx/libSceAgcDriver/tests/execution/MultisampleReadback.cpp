@@ -288,6 +288,7 @@ void CheckRetile(TextureDetiler& reader, const Surface& surface) {
     const auto elements = surface.width * surface.height * surface.layers * surface.samples;
     std::vector<std::byte> linear;
     CheckReadback(reader, surface, 0u, elements, 1u, 0u, &linear);
+    if (surface.format == VK_FORMAT_D32_SFLOAT) std::rotate(linear.begin(), linear.begin() + surface.elementBytes, linear.end());
     const auto expected = surface.Expected(0u, elements);
     constexpr std::array<std::array<std::uint32_t, 3>, 7> coordinates{{
         {0u, 0u, 0u}, {128u, 66u, 16u}, {64u, 32u, 1u}, {32u, 64u, 2u},
