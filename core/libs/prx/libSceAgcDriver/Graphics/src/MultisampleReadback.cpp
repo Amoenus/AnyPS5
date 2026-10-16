@@ -20,6 +20,15 @@ std::uint32_t readbackElementBytes(VkFormat format) {
     }
 }
 
+std::uint32_t readbackElementBytes(VkFormat format, VkImageAspectFlagBits aspect) {
+    if (format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+        Require(aspect == VK_IMAGE_ASPECT_DEPTH_BIT || aspect == VK_IMAGE_ASPECT_STENCIL_BIT, "multisample readback format and aspect are incompatible");
+        return aspect == VK_IMAGE_ASPECT_DEPTH_BIT ? 4u : 1u;
+    }
+    Require(aspect == (format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), "multisample readback format and aspect are incompatible");
+    return readbackElementBytes(format);
+}
+
 }
 
 VkPipeline TextureDetiler::multisampleReadbackPipeline(std::uint32_t elementBytes, bool depth) {
@@ -69,7 +78,13 @@ VkPipeline TextureDetiler::multisampleReadbackPipeline(std::uint32_t elementByte
 
 void TextureDetiler::DispatchMultisampleReadback(VkCommandBuffer commands, VkFormat format, VkBuffer destination, std::uint64_t offset, std::uint64_t bytes, VkImageView arrayView, std::uint32_t width, std::uint32_t height, std::uint32_t layers, std::uint32_t fragments, std::uint32_t firstElement, std::uint32_t elements) {
     GuestMemory::AssertGpuLockHeld("TextureDetiler::DispatchMultisampleReadback");
-    const auto elementBytes = readbackElementBytes(format);
+    static_cast<void>(readbackElementBytes(format));
+    DispatchMultisampleReadback(commands, format, format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, destination, offset, bytes, arrayView, width, height, layers, fragments, firstElement, elements);
+}
+
+void TextureDetiler::DispatchMultisampleReadback(VkCommandBuffer commands, VkFormat format, VkImageAspectFlagBits aspect, VkBuffer destination, std::uint64_t offset, std::uint64_t bytes, VkImageView arrayView, std::uint32_t width, std::uint32_t height, std::uint32_t layers, std::uint32_t fragments, std::uint32_t firstElement, std::uint32_t elements) {
+    GuestMemory::AssertGpuLockHeld("TextureDetiler::DispatchMultisampleReadback");
+    const auto elementBytes = readbackElementBytes(format, aspect);
     Require(commands != VK_NULL_HANDLE && destination != VK_NULL_HANDLE && arrayView != VK_NULL_HANDLE, "multisample readback requires commands, buffer and array view");
     Require(width != 0u && width <= 16384u && height != 0u && height <= 16384u && layers != 0u && layers <= 8192u, "multisample readback extent is unsupported");
     Require(fragments == 2u || fragments == 4u || fragments == 8u, "multisample readback fragment count is unsupported");
@@ -86,7 +101,7 @@ void TextureDetiler::DispatchMultisampleReadback(VkCommandBuffer commands, VkFor
     Require(groupsX != 0u, "device has no multisample readback workgroups");
     const auto groupsY = (groups + groupsX - 1u) / groupsX;
     Require(groupsY <= context.limits.maxComputeWorkGroupCount[1] && groupsX * groupsY * 64u <= std::numeric_limits<std::uint32_t>::max(), "multisample readback dispatch exceeds device limits");
-    const auto pipeline = multisampleReadbackPipeline(elementBytes, format == VK_FORMAT_D32_SFLOAT);
+    const auto pipeline = multisampleReadbackPipeline(elementBytes, aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
     const auto set = allocateFrom(readbackDescriptorSets, readbackDescriptorLayout, {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64u}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 64u}}, "vkCreateDescriptorPool multisample readback", "vkAllocateDescriptorSets multisample readback", "vkResetDescriptorPool multisample readback");
     const VkDescriptorBufferInfo buffer{destination, offset, bytes};
     const VkDescriptorImageInfo image{VK_NULL_HANDLE, arrayView, VK_IMAGE_LAYOUT_GENERAL};

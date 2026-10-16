@@ -1457,24 +1457,29 @@ if(BUILD_TESTING)
 endif()
 target_include_directories(agc_driver_native_multisample_depth_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 
-foreach(agcReadbackTestKind IN ITEMS Vertex Uint Depth)
+foreach(agcReadbackTestKind IN ITEMS Vertex Uint Depth Stencil)
     string(TOUPPER ${agcReadbackTestKind} agcReadbackTestSymbol)
     if(agcReadbackTestKind STREQUAL "Vertex")
         set(agcReadbackTestStage vert)
     else()
         set(agcReadbackTestStage frag)
     endif()
-    if(agcReadbackTestKind STREQUAL "Depth")
+    if(agcReadbackTestKind STREQUAL "Depth" OR agcReadbackTestKind STREQUAL "Stencil")
         set(agcReadbackTestDepth 1)
     else()
         set(agcReadbackTestDepth 0)
+    endif()
+    if(agcReadbackTestKind STREQUAL "Stencil")
+        set(agcReadbackTestStencil 1)
+    else()
+        set(agcReadbackTestStencil 0)
     endif()
     set(agcReadbackTestHeader ${agcTestShaderGeneratedRoot}/MsaaReadback${agcReadbackTestKind}_spv.h)
     set(agcReadbackTestSpv ${agcTestShaderGeneratedRoot}/MsaaReadback${agcReadbackTestKind}.spv)
     add_custom_command(
             OUTPUT "${agcReadbackTestHeader}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTestShaderGeneratedRoot}"
-            COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -DREAD_DEPTH=${agcReadbackTestDepth} -o "${agcReadbackTestSpv}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/MultisampleReadback.${agcReadbackTestStage}"
+            COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -DREAD_DEPTH=${agcReadbackTestDepth} -DREAD_STENCIL=${agcReadbackTestStencil} -o "${agcReadbackTestSpv}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/MultisampleReadback.${agcReadbackTestStage}"
             COMMAND ${CMAKE_COMMAND} -DINPUT=${agcReadbackTestSpv} -DOUTPUT=${agcReadbackTestHeader}
             -DSYMBOL=MSAA_READBACK_${agcReadbackTestSymbol}_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/MultisampleReadback.${agcReadbackTestStage}" glslang-standalone
@@ -1594,7 +1599,7 @@ if(BUILD_TESTING)
     endforeach()
     add_test(NAME agc_driver_partially_resident_pending_stores COMMAND agc_driver_partially_resident_snapshot_tests --pending-stores)
     set_tests_properties(agc_driver_multisample_readback PROPERTIES TIMEOUT 20)
-    foreach(agcReadbackCase IN ITEMS uint8 uint16 uint64 uint128 depth)
+    foreach(agcReadbackCase IN ITEMS uint8 uint16 uint64 uint128 depth stencil)
         add_test(NAME agc_driver_multisample_readback_${agcReadbackCase} COMMAND agc_driver_multisample_readback_tests ${agcReadbackCase})
         set_tests_properties(agc_driver_multisample_readback_${agcReadbackCase} PROPERTIES TIMEOUT 20 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
         if(WIN32)

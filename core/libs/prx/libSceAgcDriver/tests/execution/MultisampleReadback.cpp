@@ -5,6 +5,7 @@
 #include "MsaaReadbackVertex_spv.h"
 #include "MsaaReadbackUint_spv.h"
 #include "MsaaReadbackDepth_spv.h"
+#include "MsaaReadbackStencil_spv.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -46,7 +47,7 @@ void CheckSupportSelection() {
 }
 
 bool SurfaceSupported(const Context& context, VkFormat format, std::uint32_t samples, std::uint32_t width = 17u, std::uint32_t height = 5u, std::uint32_t layers = 2u) {
-    const VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | (format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | (format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     VkImageFormatProperties supported{};
     const auto result = context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0u, &supported);
     if (result != VK_ERROR_FORMAT_NOT_SUPPORTED) Check(result, "readback fixture format query");
@@ -63,6 +64,7 @@ struct Surface {
     std::uint32_t width;
     std::uint32_t height;
     std::uint32_t layers;
+    VkImageAspectFlagBits aspect = VK_IMAGE_ASPECT_COLOR_BIT;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView arrayView = VK_NULL_HANDLE;
@@ -75,8 +77,9 @@ struct Surface {
 
     Surface(const Context& context, VkFormat format, std::uint32_t elementBytes, std::uint32_t samples, std::uint32_t width = 17u, std::uint32_t height = 5u, std::uint32_t layers = 2u) : context(context), format(format), elementBytes(elementBytes), samples(samples), width(width), height(height), layers(layers) {
         try {
-            const bool depth = format == VK_FORMAT_D32_SFLOAT;
-            const auto aspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+            const bool stencil = format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+            const bool depth = format == VK_FORMAT_D32_SFLOAT || stencil;
+            aspect = stencil && elementBytes == 1u ? VK_IMAGE_ASPECT_STENCIL_BIT : depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
             const VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
             VkImageFormatProperties supported{};
             Check(context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0u, &supported), "readback fixture format query");
@@ -111,8 +114,8 @@ struct Surface {
             attachment.samples = info.samples;
             attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-            attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            attachment.stencilLoadOp = stencil ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            attachment.stencilStoreOp = stencil ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
             attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
             const VkAttachmentReference reference{0u, VK_IMAGE_LAYOUT_GENERAL};
@@ -128,6 +131,7 @@ struct Surface {
             Check(context.Function<PFN_vkCreateRenderPass>("vkCreateRenderPass")(context.device, &renderPass, nullptr, &pass), "readback fixture render pass");
             views.resize(layers);
             framebuffers.resize(layers);
+            if (stencil) view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
             for (std::uint32_t layer = 0u; layer < layers; ++layer) {
                 view.viewType = VK_IMAGE_VIEW_TYPE_2D;
                 view.subresourceRange.baseArrayLayer = layer;
@@ -149,8 +153,8 @@ struct Surface {
                 Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &shader, nullptr, &module), "readback fixture shader");
             };
             makeModule(MSAA_READBACK_VERTEX_SPV, modules[0]);
-            makeModule(depth ? std::span<const std::uint32_t>(MSAA_READBACK_DEPTH_SPV) : std::span<const std::uint32_t>(MSAA_READBACK_UINT_SPV), modules[1]);
-            const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, 5u * sizeof(std::uint32_t)};
+            makeModule(stencil ? std::span<const std::uint32_t>(MSAA_READBACK_STENCIL_SPV) : depth ? std::span<const std::uint32_t>(MSAA_READBACK_DEPTH_SPV) : std::span<const std::uint32_t>(MSAA_READBACK_UINT_SPV), modules[1]);
+            const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0u, 6u * sizeof(std::uint32_t)};
             VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             layout.pushConstantRangeCount = 1u;
             layout.pPushConstantRanges = &push;
@@ -183,11 +187,17 @@ struct Surface {
             VkPipelineDepthStencilStateCreateInfo depthState{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
             depthState.depthTestEnable = depthState.depthWriteEnable = depth ? VK_TRUE : VK_FALSE;
             depthState.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+            depthState.stencilTestEnable = stencil ? VK_TRUE : VK_FALSE;
+            depthState.front = depthState.back = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 255u, 255u, 0u};
             VkPipelineColorBlendAttachmentState blend{};
             blend.colorWriteMask = 15u;
             VkPipelineColorBlendStateCreateInfo color{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
             color.attachmentCount = depth ? 0u : 1u;
             color.pAttachments = &blend;
+            const std::array dynamicStates{VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_REFERENCE};
+            VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+            dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamicStates.size());
+            dynamic.pDynamicStates = dynamicStates.data();
             VkGraphicsPipelineCreateInfo graphics{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
             graphics.stageCount = static_cast<std::uint32_t>(stages.size());
             graphics.pStages = stages.data();
@@ -198,6 +208,7 @@ struct Surface {
             graphics.pMultisampleState = &multisample;
             graphics.pDepthStencilState = &depthState;
             graphics.pColorBlendState = &color;
+            if (stencil) graphics.pDynamicState = &dynamic;
             graphics.layout = pipelineLayout;
             graphics.renderPass = pass;
             Check(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1u, &graphics, nullptr, &pipeline), "readback fixture graphics pipeline");
@@ -230,11 +241,26 @@ struct Surface {
             begin.renderArea = {{0, 0}, {width, height}};
             begin.clearValueCount = 1u;
             begin.pClearValues = &clear;
-            const std::array<std::uint32_t, 5> push{layer, width, height, samples, elementBytes};
+            std::array<std::uint32_t, 6> push{layer, width, height, samples, elementBytes, 0u};
             context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(batch.Handle(), &begin, VK_SUBPASS_CONTENTS_INLINE);
             context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(batch.Handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(batch.Handle(), pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), push.data());
-            context.Function<PFN_vkCmdDraw>("vkCmdDraw")(batch.Handle(), 3u, 1u, 0u, 0u);
+            if (format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+                for (std::uint32_t sample = 0u; sample < samples; ++sample) {
+                    push[5] = sample;
+                    context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(batch.Handle(), pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), push.data());
+                    for (std::uint32_t region = 0u; region < 4u; ++region) {
+                        const auto x = (region & 1u) ? (width + 1u) / 2u : 0u;
+                        const auto y = (region & 2u) ? (height + 1u) / 2u : 0u;
+                        const VkRect2D scissor{{static_cast<std::int32_t>(x), static_cast<std::int32_t>(y)}, {(region & 1u) ? width - x : (width + 1u) / 2u, (region & 2u) ? height - y : (height + 1u) / 2u}};
+                        context.Function<PFN_vkCmdSetScissor>("vkCmdSetScissor")(batch.Handle(), 0u, 1u, &scissor);
+                        context.Function<PFN_vkCmdSetStencilReference>("vkCmdSetStencilReference")(batch.Handle(), VK_STENCIL_FACE_FRONT_AND_BACK, (1u + region + layer * 4u + sample * 31u) & 255u);
+                        context.Function<PFN_vkCmdDraw>("vkCmdDraw")(batch.Handle(), 3u, 1u, 0u, 0u);
+                    }
+                }
+            } else {
+                context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(batch.Handle(), pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), push.data());
+                context.Function<PFN_vkCmdDraw>("vkCmdDraw")(batch.Handle(), 3u, 1u, 0u, 0u);
+            }
             context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(batch.Handle());
         }
         batch.SubmitAndWait();
@@ -251,7 +277,8 @@ struct Surface {
             const auto layer = pixel / (width * height);
             const auto value = x + y * width + layer * width * height + sample * 31u;
             std::array<std::uint32_t, 4> words{0x91352700u ^ value, 0x45219b00u ^ (value * 3u), 0xc7391d00u ^ (value * 5u), 0x6b43e100u ^ (value * 7u)};
-            if (format == VK_FORMAT_D32_SFLOAT) words[0] = std::bit_cast<std::uint32_t>(0.125f + static_cast<float>(element + 1u) / 65536.0f);
+            if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) words[0] = std::bit_cast<std::uint32_t>(0.125f + static_cast<float>(element + 1u) / 65536.0f);
+            if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT) words[0] = (1u + (x >= (width + 1u) / 2u ? 1u : 0u) + (y >= (height + 1u) / 2u ? 2u : 0u) + layer * 4u + sample * 31u) & 255u;
             std::memcpy(result.data() + static_cast<std::size_t>(index) * elementBytes, words.data(), elementBytes);
         }
         return result;
@@ -269,7 +296,8 @@ void CheckReadback(TextureDetiler& reader, const Surface& surface, std::uint32_t
     CommandBatch batch(surface.context);
     RecordMemoryBarrier(surface.context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     for (std::uint32_t repeat = 0u; repeat < repetitions; ++repeat) {
-        reader.DispatchMultisampleReadback(batch.Handle(), surface.format, output.Handle(), offset, bytes, surface.arrayView, surface.width, surface.height, surface.layers, surface.samples, first, elements);
+        if (surface.format == VK_FORMAT_D32_SFLOAT_S8_UINT) reader.DispatchMultisampleReadback(batch.Handle(), surface.format, surface.aspect, output.Handle(), offset, bytes, surface.arrayView, surface.width, surface.height, surface.layers, surface.samples, first, elements);
+        else reader.DispatchMultisampleReadback(batch.Handle(), surface.format, output.Handle(), offset, bytes, surface.arrayView, surface.width, surface.height, surface.layers, surface.samples, first, elements);
         if (repeat + 1u < repetitions) RecordMemoryBarrier(surface.context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     }
     RecordMemoryBarrier(surface.context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
@@ -307,6 +335,19 @@ void CheckRefusals(TextureDetiler& reader, const Surface& surface) {
     std::puts("multisample readback invalid-input refusals passed");
 }
 
+void CheckAspectRefusals(TextureDetiler& reader, const Surface& surface) {
+    Buffer output(surface.context, 64u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    CommandBatch batch(surface.context);
+    const auto call = [&](VkFormat format, VkImageAspectFlagBits aspect) {
+        reader.DispatchMultisampleReadback(batch.Handle(), format, aspect, output.Handle(), 0u, 4u, surface.arrayView, 1u, 1u, 1u, 4u, 0u, 1u);
+    };
+    for (const auto aspect : {static_cast<VkImageAspectFlagBits>(0u), VK_IMAGE_ASPECT_COLOR_BIT, static_cast<VkImageAspectFlagBits>(VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)}) Refused([&] { call(surface.format, aspect); }, "format and aspect are incompatible");
+    Refused([&] { call(VK_FORMAT_R8_UINT, VK_IMAGE_ASPECT_STENCIL_BIT); }, "format and aspect are incompatible");
+    Refused([&] { call(VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_STENCIL_BIT); }, "format and aspect are incompatible");
+    Refused([&] { reader.DispatchMultisampleReadback(batch.Handle(), surface.format, output.Handle(), 0u, 4u, surface.arrayView, 1u, 1u, 1u, 4u, 0u, 1u); }, "requires an unsigned element view or D32 depth");
+    std::puts("multisample readback explicit-aspect refusals passed");
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -319,6 +360,7 @@ int main(int argc, char** argv) {
         else if (mode == "uint16") { format = VK_FORMAT_R16_UINT; bytes = 2u; }
         else if (mode == "uint64") { format = VK_FORMAT_R32G32_UINT; bytes = 8u; }
         else if (mode == "uint128") { format = VK_FORMAT_R32G32B32A32_UINT; bytes = 16u; }
+        else if (mode == "stencil") { format = VK_FORMAT_D32_SFLOAT_S8_UINT; bytes = 1u; }
         else Require(mode == "uint32" || mode == "depth", "unknown multisample readback test mode");
         if (mode == "depth") format = VK_FORMAT_D32_SFLOAT;
         const auto device = OpenVulkanTestDevice();
@@ -342,6 +384,14 @@ int main(int argc, char** argv) {
             CheckReadback(reader, surface, 0u, elements, samples == 4u ? 65u : 1u);
             CheckReadback(reader, surface, 1u, elements - 3u, 1u);
             CheckReadback(reader, surface, 0u, elements, 1u);
+            if (mode == "stencil") {
+                Surface depth(context, format, 4u, samples);
+                depth.Render();
+                CheckReadback(reader, depth, 1u, elements - 3u, 1u);
+                CheckReadback(reader, surface, 0u, elements, 1u);
+                if (samples == 4u) CheckAspectRefusals(reader, surface);
+                std::printf("multisample readback D32S8: samples=%u stencil/depth/stencil pipeline transitions passed\n", samples);
+            }
             if (samples == 4u && bytes == 4u) CheckRefusals(reader, surface);
             std::printf("multisample readback %s: samples=%u elements=%u layers=%u full/partial/sentinels/reuse/2d=passed storage-usage=0\n", mode.c_str(), samples, elements, surface.layers);
             ++checked;
