@@ -249,9 +249,9 @@ struct Surface {
                     push[5] = sample;
                     context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(batch.Handle(), pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), push.data());
                     for (std::uint32_t region = 0u; region < 4u; ++region) {
-                        const auto x = (region & 1u) ? (width + 1u) / 2u : 0u;
-                        const auto y = (region & 2u) ? (height + 1u) / 2u : 0u;
-                        const VkRect2D scissor{{static_cast<std::int32_t>(x), static_cast<std::int32_t>(y)}, {(region & 1u) ? width - x : (width + 1u) / 2u, (region & 2u) ? height - y : (height + 1u) / 2u}};
+                        const auto x = (region & 1u) ? width / 2u : 0u;
+                        const auto y = (region & 2u) ? height / 2u : 0u;
+                        const VkRect2D scissor{{static_cast<std::int32_t>(x), static_cast<std::int32_t>(y)}, {(region & 1u) ? width - x : width / 2u, (region & 2u) ? height - y : height / 2u}};
                         context.Function<PFN_vkCmdSetScissor>("vkCmdSetScissor")(batch.Handle(), 0u, 1u, &scissor);
                         context.Function<PFN_vkCmdSetStencilReference>("vkCmdSetStencilReference")(batch.Handle(), VK_STENCIL_FACE_FRONT_AND_BACK, (1u + region + layer * 4u + sample * 31u) & 255u);
                         context.Function<PFN_vkCmdDraw>("vkCmdDraw")(batch.Handle(), 3u, 1u, 0u, 0u);
@@ -278,7 +278,7 @@ struct Surface {
             const auto value = x + y * width + layer * width * height + sample * 31u;
             std::array<std::uint32_t, 4> words{0x91352700u ^ value, 0x45219b00u ^ (value * 3u), 0xc7391d00u ^ (value * 5u), 0x6b43e100u ^ (value * 7u)};
             if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) words[0] = std::bit_cast<std::uint32_t>(0.125f + static_cast<float>(element + 1u) / 65536.0f);
-            if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT) words[0] = (1u + (x >= (width + 1u) / 2u ? 1u : 0u) + (y >= (height + 1u) / 2u ? 2u : 0u) + layer * 4u + sample * 31u) & 255u;
+            if (aspect == VK_IMAGE_ASPECT_STENCIL_BIT) words[0] = (1u + (x >= width / 2u ? 1u : 0u) + (y >= height / 2u ? 2u : 0u) + layer * 4u + sample * 31u) & 255u;
             std::memcpy(result.data() + static_cast<std::size_t>(index) * elementBytes, words.data(), elementBytes);
         }
         return result;
