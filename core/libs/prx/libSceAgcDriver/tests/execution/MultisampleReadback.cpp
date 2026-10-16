@@ -285,6 +285,35 @@ struct Surface {
     }
 };
 
+std::vector<std::byte> unpackedStencil;
+
+void CheckUnpackedStencil(TextureDetiler& reader, const Surface& surface) {
+    const auto elements = surface.width * surface.height * surface.layers * surface.samples;
+    const auto expected = surface.Expected(0u, elements);
+    Buffer output(surface.context, static_cast<std::size_t>(elements) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    std::fill(output.Bytes().begin(), output.Bytes().end(), std::byte{0xa5});
+    reader.BeginBatch();
+    CommandBatch batch(surface.context);
+    RecordMemoryBarrier(surface.context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    reader.DispatchMultisampleReadback(batch.Handle(), VK_FORMAT_R32_UINT, output.Handle(), 0u, static_cast<std::uint64_t>(elements) * 4u, surface.arrayView, surface.width, surface.height, surface.layers, surface.samples, 0u, elements);
+    RecordMemoryBarrier(surface.context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    batch.SubmitAndWait();
+    output.Invalidate();
+    unpackedStencil.resize(elements);
+    std::size_t differences = 0u;
+    for (std::uint32_t index = 0u; index < elements; ++index) {
+        std::uint32_t value = 0u;
+        std::memcpy(&value, output.Bytes().data() + index * 4u, 4u);
+        Require(value <= 255u, "unpacked stencil was not an unsigned byte");
+        unpackedStencil[index] = static_cast<std::byte>(value);
+        if (unpackedStencil[index] != expected[index]) {
+            if (differences < 16u) std::printf("unpacked-stencil mismatch index=%u pixel=%u sample=%u expected=%u actual=%u\n", index, index / surface.samples, index % surface.samples, std::to_integer<unsigned>(expected[index]), value);
+            ++differences;
+        }
+    }
+    std::printf("unpacked-stencil elements=%u expected-mismatches=%zu standardSampleLocations=%u\n", elements, differences, surface.context.limits.standardSampleLocations);
+}
+
 void CheckReadback(TextureDetiler& reader, const Surface& surface, std::uint32_t first, std::uint32_t elements, std::uint32_t repetitions, std::size_t extraBytes = 0u) {
     const auto expected = surface.Expected(first, elements);
     const auto bytes = ((expected.size() + 3u) & ~std::size_t{3u}) + extraBytes;
@@ -304,6 +333,7 @@ void CheckReadback(TextureDetiler& reader, const Surface& surface, std::uint32_t
     batch.SubmitAndWait();
     output.Invalidate();
     const auto data = output.Bytes();
+    if (surface.aspect == VK_IMAGE_ASPECT_STENCIL_BIT && first == 0u && elements == unpackedStencil.size()) std::printf("packed-stencil matches-unpacked=%u elements=%u\n", std::equal(unpackedStencil.begin(), unpackedStencil.end(), data.begin() + offset) ? 1u : 0u, elements);
     const auto mismatch = std::mismatch(expected.begin(), expected.end(), data.begin() + offset);
     if (mismatch.first != expected.end()) std::printf("readback mismatch: format=%u first=%u byte=%zu expected=0x%02x actual=0x%02x\n", static_cast<std::uint32_t>(surface.format), first, static_cast<std::size_t>(mismatch.first - expected.begin()), std::to_integer<unsigned>(*mismatch.first), std::to_integer<unsigned>(*mismatch.second));
     Require(std::equal(expected.begin(), expected.end(), data.begin() + offset), "multisample readback changed a rendered sample, component, layer or pixel");
@@ -379,6 +409,7 @@ int main(int argc, char** argv) {
             if (!SurfaceSupported(context, format, samples)) continue;
             Surface surface(context, format, bytes, samples);
             surface.Render();
+            if (mode == "stencil") CheckUnpackedStencil(reader, surface);
             const auto elements = surface.width * surface.height * surface.layers * samples;
             CheckReadback(reader, surface, 1u, 1u, 1u, 64u * std::max(4u, bytes));
             CheckReadback(reader, surface, 0u, elements, samples == 4u ? 65u : 1u);
