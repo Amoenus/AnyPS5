@@ -2274,10 +2274,10 @@ int main(int argc, char** argv) {
             return 77;
         }
         const auto context = device->GetContext();
+        device->PrintDevice();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         std::uint32_t checked = 0u, unavailable = 0u;
         if (argc > 1 && std::string(argv[1]) == "--xor-views") {
-            device->PrintDevice();
             for (const auto format : {VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT}) {
                 for (const auto fragments : {2u, 4u, 8u}) {
                     if (!TargetSupported(context, format, fragments)) { unavailable += 2u; continue; }
@@ -2308,7 +2308,6 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--depth-retirement") {
-            device->PrintDevice();
             for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
                 for (const auto fragments : {2u, 4u, 8u}) {
                     Require(DepthSupported(context, format, fragments), "native depth retirement fixture requires every depth configuration");
@@ -2318,7 +2317,6 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--retirement") {
-            device->PrintDevice();
             Require(context.storageImageReadWithoutFormat && TargetSupported(context, VK_FORMAT_R8G8B8A8_UNORM, 4u), "native retirement fixture requires four-sample formatless transfers");
             for (const bool remove : {false, true}) {
                 for (const bool metadata : {false, true}) CheckTargetRetirement(context, remove, metadata);
@@ -2373,7 +2371,6 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (sampledPublication || (argc > 1 && std::string(argv[1]) == "--targets")) {
-            device->PrintDevice();
             if (sampledPublication) Require(!context.storageImageReadWithoutFormat, "sampled publication fixture enabled formatless storage reads");
 #ifdef _WIN32
             CheckUnwatchedTargetDiagnostic(context);
@@ -2403,7 +2400,6 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc > 1 && std::string(argv[1]) == "--tile-transfer") {
-            device->PrintDevice();
             for (const auto bytes : {1u, 2u, 4u, 8u, 16u}) {
                 for (const auto fragments : {2u, 4u, 8u}) {
                     for (const bool chunks : {false, true}) {
