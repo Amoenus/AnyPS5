@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 
 namespace AgcDriver::Graphics {
@@ -49,9 +50,13 @@ private:
 };
 
 std::uint64_t MultisampledColorBytes(const ColorTarget& target);
+std::size_t MultisampledDccBytes(const ColorTarget& target);
+VkClearColorValue MultisampledDccClear(const ColorTarget& target, std::span<const std::byte> dcc, std::span<const std::byte> cmask);
 bool MultisampledFillClearColor(const ColorTarget& target, std::uint32_t fill, VkClearColorValue& clear);
 bool TakeMultisampledClear(MultisampledCmask& cmask, MultisampledColorFill& colorFill, const ColorTarget& use, VkClearColorValue& clear);
-VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target);
+VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target, VkImage* image = nullptr);
+VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target, std::shared_ptr<void>& owner, VkImage* image = nullptr);
+void KeepMultisampleTarget_nid_no_patch(const std::shared_ptr<void>& owner);
 std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const GuestTextureResource& resource, VkComponentMapping components);
 void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget& target);
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource);
