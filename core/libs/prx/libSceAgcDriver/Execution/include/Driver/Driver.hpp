@@ -79,6 +79,7 @@ public:
 
 private:
     friend class SampledReadScope;
+    friend struct DriverTestAccess;
     friend struct PendingView;
     friend struct PacketTimer;
     void stop();

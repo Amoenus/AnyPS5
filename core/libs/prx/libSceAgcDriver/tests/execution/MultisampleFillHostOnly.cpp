@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
@@ -24,6 +25,7 @@
 #include <deque>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <stdexcept>
@@ -34,6 +36,14 @@ namespace AgcDriver {
 
 struct VulkanDeviceTestAccess {
     static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+
+}
+
+namespace AgcDriver::DriverDetail {
+
+struct DriverTestAccess {
+    static std::shared_ptr<VulkanDevice> Device() { return Driver::Get().device.Load(); }
 };
 
 }
@@ -144,8 +154,25 @@ ColorTarget MultisampledTarget(const GuestBlock& color) {
     return target;
 }
 
-bool FillsTakenAsMultisampledClearsAreNotStored(AgcDriver::VulkanDevice& device) {
+bool FillsTakenAsMultisampledClearsAreNotStored() {
+    auto& code = NewBlock();
+    std::memcpy(code.Data(), FillKernel.data(), sizeof(FillKernel));
+
+    auto& sentinel = NewBlock();
+    auto& control = NewBlock();
+    std::memset(control.Data(), static_cast<int>(Marker), BlockBytes);
+    DispatchFill(code, control.Address(), BlockBytes, 0);
+    Settle(code, sentinel);
+    if (control.Holds(Marker, 0, BlockBytes)) {
+        std::cout << "skipped, the device does not store compute fills into guest memory\n";
+        return false;
+    }
+    Require(control.Holds(std::byte{}, 0, BlockBytes), "a compute fill of 0 over plain guest memory did not store 0");
+    const auto driverDevice = AgcDriver::DriverDetail::DriverTestAccess::Device();
+    Require(driverDevice != nullptr, "multisampled fill: the control dispatch did not create the driver device");
+    auto& device = *driverDevice;
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    Require(AgcDriver::Graphics::Recorder::Active() == context.recorder && context.recorder != nullptr && context.recorder->Device() == context.device, "multisampled fill: native targets and packet submissions use different Vulkan recorders");
     if ((context.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0) {
         std::cout << "skipped, the device has no 4x color targets\n";
         return false;
@@ -161,20 +188,6 @@ bool FillsTakenAsMultisampledClearsAreNotStored(AgcDriver::VulkanDevice& device)
             AgcDriver::Graphics::ClearCachedTextures(handle);
         }
     } clearTargets{device, context.device};
-    auto& code = NewBlock();
-    std::memcpy(code.Data(), FillKernel.data(), sizeof(FillKernel));
-
-    auto& sentinel = NewBlock();
-    auto& control = NewBlock();
-    std::memset(control.Data(), static_cast<int>(Marker), BlockBytes);
-    DispatchFill(code, control.Address(), BlockBytes, 0);
-    Settle(code, sentinel);
-    if (control.Holds(Marker, 0, BlockBytes)) {
-        std::cout << "skipped, the device does not store compute fills into guest memory\n";
-        return false;
-    }
-    Require(control.Holds(std::byte{}, 0, BlockBytes), "a compute fill of 0 over plain guest memory did not store 0");
-    Require(AgcDriver::Graphics::Recorder::Active() == context.recorder && context.recorder != nullptr && context.recorder->Device() == context.device, "multisampled fill: native targets and packet submissions use different Vulkan recorders");
 
     auto& color = NewBlock();
     const auto target = MultisampledTarget(color);
@@ -235,9 +248,11 @@ bool FillsTakenAsMultisampledClearsAreNotStored(AgcDriver::VulkanDevice& device)
 
 int main() {
     try {
-        const auto device = OpenVulkanTestDevice();
-        if (!device) return VulkanTestSkipped;
-        const bool tested = FillsTakenAsMultisampledClearsAreNotStored(*device);
+        {
+            const auto probe = OpenVulkanTestDevice();
+            if (!probe) return VulkanTestSkipped;
+        }
+        const bool tested = FillsTakenAsMultisampledClearsAreNotStored();
         LibcRunShutdown_nid_postfix();
         if (!tested) return VulkanTestSkipped;
         std::cout << "multisampled fill tests passed\n";
