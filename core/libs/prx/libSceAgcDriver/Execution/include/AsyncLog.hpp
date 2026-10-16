@@ -192,7 +192,7 @@ private:
         lastStats = Clock::now();
         if (!asynchronous) return;
         LogSink().store(&AsyncLog::Sink, std::memory_order_release);
-        std::atexit([] { Get().Flush(); });
+        std::atexit(&AsyncLog::FlushAtEnd);
         std::thread([this] { Run(); }).detach();
         LibcSetEndFlush_nid_no_patch(&AsyncLog::FlushAtEnd);
     }
