@@ -126,7 +126,7 @@ public:
         });
     }
 
-    std::shared_ptr<Texture> Sampled(VkComponentMapping components) {
+    std::shared_ptr<Texture> Sampled(VkComponentMapping components, VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D) {
         Require(sampleable, "the device cannot sample the multisampled color target's format at its sample count");
         Require(cmask.Refusal().empty(), cmask.Refusal());
         Require(cmask.Keys() != DccKeys::Clear0000, "sampling a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
@@ -136,9 +136,9 @@ public:
             RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
             Recorder::CountBarriers(Recorder::CommandClass::Draw, 1);
         });
-        const std::array<std::uint32_t, 4> key{static_cast<std::uint32_t>(components.r), static_cast<std::uint32_t>(components.g), static_cast<std::uint32_t>(components.b), static_cast<std::uint32_t>(components.a)};
+        const std::array<std::uint32_t, 5> key{static_cast<std::uint32_t>(components.r), static_cast<std::uint32_t>(components.g), static_cast<std::uint32_t>(components.b), static_cast<std::uint32_t>(components.a), static_cast<std::uint32_t>(viewType)};
         if (const auto found = textures.find(key); found != textures.end()) return found->second;
-        auto texture = std::make_shared<Texture>(context, image, target.format, VK_IMAGE_ASPECT_COLOR_BIT, components);
+        auto texture = std::make_shared<Texture>(context, image, target.format, VK_IMAGE_ASPECT_COLOR_BIT, components, viewType);
         textures.emplace(key, texture);
         return texture;
     }
@@ -188,7 +188,7 @@ public:
 
 private:
     bool sampleable = false;
-    std::map<std::array<std::uint32_t, 4>, std::shared_ptr<Texture>> textures;
+    std::map<std::array<std::uint32_t, 5>, std::shared_ptr<Texture>> textures;
 
     void release() noexcept {
         textures.clear();
@@ -465,7 +465,7 @@ VkImageView MultisampleTargetView(const Context& context, const ColorTarget& tar
     return acquire(context, target).view;
 }
 
-std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const GuestTextureResource& resource, VkComponentMapping components) {
+std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const GuestTextureResource& resource, VkComponentMapping components, VkImageViewType viewType) {
     std::lock_guard lock(targetsMutex());
     const auto format = ResolveTextureFormat(resource.format);
     const MultisampleTarget* other = nullptr;
@@ -473,12 +473,12 @@ std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const 
         if (!target->active->load(std::memory_order_acquire)) continue;
         if (target->context.device != context.device || target->target.surfaceAddress != resource.baseAddress) continue;
         const auto& rendered = target->target;
-        if (rendered.format == format && rendered.extent.width == resource.width && rendered.extent.height == resource.height && rendered.samples == resource.samples && rendered.mip == 0) return target->Sampled(components);
+        if (rendered.format == format && rendered.extent.width == resource.width && rendered.extent.height == resource.height && rendered.samples == resource.samples && rendered.mip == 0) return target->Sampled(components, viewType);
         other = target.get();
     }
     if (other == nullptr) {
         Require(Recorder::Active() != nullptr, "a multisampled texture is only sampled by recorded draws and dispatches");
-        return createFilled(context, resource, format).Sampled(components);
+        return createFilled(context, resource, format).Sampled(components, viewType);
     }
     char text[320];
     std::snprintf(text, sizeof(text), "AGC graphics: sampling multisampled color target 0x%llx (%ux%u, %u samples, vk format %d) as a %ux%u texture of %u samples and guest format %u (vk %d) is not implemented", static_cast<unsigned long long>(resource.baseAddress), other->target.extent.width, other->target.extent.height, other->target.samples, static_cast<int>(other->target.format), resource.width, resource.height, resource.samples, resource.format, static_cast<int>(format));

@@ -70,6 +70,13 @@ alignas(256) constexpr std::array<std::uint32_t, 26> LoadCode{
     0x80001301, 0xbf810000,
 };
 
+alignas(256) constexpr std::array<std::uint32_t, 26> ArrayLoadCode{
+    0x34020087, 0xe0301000, 0x80000201, 0xe0301004, 0x80000301, 0xe0301008, 0x80000401, 0xe030100c,
+    0x80000501, 0xe0301010, 0x80000601, 0xe0301014, 0x80000701, 0xbf8c3f70, 0xf0001f38, 0x00011004,
+    0xbf8c3f70, 0xe0701030, 0x80001001, 0xe0701034, 0x80001101, 0xe0701038, 0x80001201, 0xe070103c,
+    0x80001301, 0xbf810000,
+};
+
 constexpr std::array<std::array<float, 4>, 3> Triangle{{
     {-1.0f, -1.0f, 0.5f, 1.0f}, {0.83f, -1.0f, 0.5f, 1.0f}, {-1.0f, 0.71f, 0.5f, 1.0f}
 }};
@@ -199,13 +206,13 @@ std::array<std::uint32_t, 8> TargetDescriptor(const Block& block, std::uint32_t 
     };
 }
 
-ShaderRecompiler::RecompileResult CompileLoad(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, std::vector<std::uint32_t>& userData) {
+ShaderRecompiler::RecompileResult CompileLoad(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, std::vector<std::uint32_t>& userData, bool arrayed = false) {
     const auto address = reinterpret_cast<std::uintptr_t>(Buffer.data());
     const std::array<std::uint32_t, 4> buffer{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), static_cast<std::uint32_t>(Buffer.size() * 4u), 0x31016facu};
     userData.assign(16, 0u);
     std::copy(buffer.begin(), buffer.end(), userData.begin());
     std::copy(texture.begin(), texture.end(), userData.begin() + 4);
-    const std::span<const std::uint32_t> code(LoadCode);
+    const std::span<const std::uint32_t> code(arrayed ? ArrayLoadCode : LoadCode);
     const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
     const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0u, {false, false, false}, false, 1};
     ShaderRecompiler::RecompileRequest request{
@@ -218,24 +225,34 @@ ShaderRecompiler::RecompileResult CompileLoad(AgcDriver::VulkanDevice& device, c
     return ShaderRecompiler::Recompile(request);
 }
 
-std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block) {
+std::vector<std::array<float, 4>> RunLoad(AgcDriver::VulkanDevice& device, const Block& block, bool arrayed) {
     std::vector<std::uint32_t> userData;
-    const auto program = CompileLoad(device, TargetDescriptor(block, SampleShift), userData);
+    const auto program = CompileLoad(device, TargetDescriptor(block, SampleShift), userData, arrayed);
     std::vector<std::array<float, 4>> loaded(Side * Side * Samples);
+    const auto codeAddress = reinterpret_cast<std::uintptr_t>((arrayed ? ArrayLoadCode : LoadCode).data());
     for (std::uint32_t first = 0; first < loaded.size(); first += Threads) {
         Buffer.fill(0xdeadbeefu);
         for (std::uint32_t tid = 0; tid < Threads; ++tid) {
             const auto index = first + tid;
             const auto pixel = index / Samples;
-            const std::array<std::uint32_t, 6> words{0u, 0u, 0u, pixel % Side, pixel / Side, index % Samples};
+            const std::array<std::uint32_t, 6> words = arrayed
+                ? std::array<std::uint32_t, 6>{0u, 0u, pixel % Side, pixel / Side, 0u, index % Samples}
+                : std::array<std::uint32_t, 6>{0u, 0u, 0u, pixel % Side, pixel / Side, index % Samples};
             std::copy(words.begin(), words.end(), &Buffer[tid * Words]);
         }
-        device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(LoadCode.data()));
+        device.Dispatch(program, 1, 1, 1, {}, codeAddress);
         device.WaitIdle();
         for (std::uint32_t tid = 0; tid < Threads; ++tid) {
             for (std::uint32_t component = 0; component < 4u; ++component) loaded[first + tid][component] = std::bit_cast<float>(Buffer[tid * Words + LoadResult + component]);
         }
     }
+    return loaded;
+}
+
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block) {
+    auto loaded = RunLoad(device, block, false);
+    const auto loadedArray = RunLoad(device, block, true);
+    Require(loadedArray == loaded, "Dim2DMsaaArray image_load disagreed with Dim2DMsaa image_load on the multisampled color target");
     return loaded;
 }
 
