@@ -505,6 +505,9 @@ void InitialContents(AgcDriver::VulkanDevice& device) {
             auto color = DecodeTarget(block, 0x8100u);
             color.samples = fragments;
             const auto expected = StoreInitial(block, fragments, 0x8100u, false);
+            auto linear = color;
+            linear.tileMode = ColorTileMode::Linear;
+            RequireInitialRefused(context, linear, "initial multisample color footprint is not implemented");
             for (const auto profile : {0u, 1u, 2u}) {
                 auto unsupported = context;
                 if (profile == 0) unsupported.storageImageMultisample = false;
@@ -528,7 +531,7 @@ void InitialContents(AgcDriver::VulkanDevice& device) {
             const auto state = TargetState(color);
             Draw(device, state);
             CheckSamples(state, LoadSamples(device, block, fragments, 0x8100u), {}, expected);
-            std::printf("native color initial samples: fragments=%u five unsupported profiles refused, restored 256-byte chunks passed\n", fragments);
+            std::printf("native color initial samples: fragments=%u five unsupported capability profiles and linear layout refused, restored 256-byte chunks passed\n", fragments);
             ++exercised;
         }
     }
