@@ -579,6 +579,7 @@ private:
         if (!cmask.empty()) GuestMemory::Read(use.cmaskAddress, cmask);
         const auto clear = MultisampledDccClear(use, dcc, cmask);
         Require(GuestMemory::UnchangedSinceAll(dccRanges), "initial multisampled DCC contents changed during import");
+        for (std::size_t index = 1; index < dccRanges.size(); ++index) GuestMemory::ObserveDccStoreRange_nid_no_patch(dccRanges[index].address, dccRanges[index].bytes);
         return clear;
     }
 
@@ -605,7 +606,7 @@ private:
             const char* reason = "coarse-unchanged";
             const bool stored = !unchanged && GuestMemory::StoredOverWithReason_nid_no_patch(range.address, range.bytes, range.generation, &reason);
             static std::atomic<unsigned> observed{0};
-            if (stored || observed.fetch_add(1, std::memory_order_relaxed) < 24) {
+            if (stored || (!unchanged && observed.fetch_add(1, std::memory_order_relaxed) < 24)) {
                 const auto* plane = range.address == target.address ? "color" : range.address == target.dccAddress ? "DCC" : "CMASK";
                 std::fprintf(stderr, "[dcc-rejection-observe] plane=%s address=0x%llx bytes=0x%zx generation=%llu samples=%u unchanged=%d stored=%d reason=%s\n", plane, static_cast<unsigned long long>(range.address), range.bytes, static_cast<unsigned long long>(range.generation), target.samples, unchanged, stored, reason);
             }

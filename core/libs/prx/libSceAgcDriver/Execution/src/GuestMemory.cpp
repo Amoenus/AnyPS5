@@ -43,6 +43,28 @@
 
 namespace AgcDriver::GuestMemory {
 namespace {
+struct ObservedDccStores {
+    std::mutex mutex;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    unsigned records = 0;
+};
+
+ObservedDccStores& observedDccStores() {
+    static ObservedDccStores value;
+    return value;
+}
+
+void noteObservedDccStore(std::uint64_t address, std::uint64_t end, std::uint64_t generation, const std::source_location& origin) {
+    auto& observed = observedDccStores();
+    std::lock_guard lock(observed.mutex);
+    if (observed.records >= 96) return;
+    for (const auto& [first, last] : observed.ranges) {
+        if (address >= last || first >= end) continue;
+        ++observed.records;
+        std::fprintf(stderr, "[dcc-driver-store-observe] address=0x%llx bytes=0x%llx generation=%llu metadata=0x%llx+0x%llx source=%s:%u function=%s\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(end - address), static_cast<unsigned long long>(generation), static_cast<unsigned long long>(first), static_cast<unsigned long long>(last - first), origin.file_name(), origin.line(), origin.function_name());
+        return;
+    }
+}
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("AGC driver: ") + reason);
 }
@@ -1440,9 +1462,17 @@ bool UnchangedCommittedSince(std::span<const std::pair<std::uint64_t, std::uint6
     return true;
 }
 
-std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::function<std::pair<std::uint64_t, std::uint64_t>()>& store) {
+void ObserveDccStoreRange_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return;
+    auto& observed = observedDccStores();
+    std::lock_guard lock(observed.mutex);
+    const auto range = std::pair{address, address + bytes};
+    if (observed.ranges.size() < 24 && std::ranges::find(observed.ranges, range) == observed.ranges.end()) observed.ranges.push_back(range);
+}
+
+std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::function<std::pair<std::uint64_t, std::uint64_t>()>& store, const std::source_location& origin) {
     if (bytes == 0) return 0;
-    const auto stampStored = [](WriteTracker& tracker, std::pair<std::uint64_t, std::uint64_t> stored) -> std::uint64_t {
+    const auto stampStored = [&](WriteTracker& tracker, std::pair<std::uint64_t, std::uint64_t> stored) -> std::uint64_t {
         if (stored.second <= stored.first) return 0;
         ++tracker.generation;
         if (!tracker.watched || !tracker.covers(stored.first, static_cast<std::size_t>(stored.second - stored.first))) {
@@ -1453,6 +1483,7 @@ std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::func
             tracker.stamp(block, tracker.generation, StampKind::Driver);
             tracker.noteDriverStore(block, stored.first, stored.second, tracker.generation);
         }
+        noteObservedDccStore(stored.first, stored.second, tracker.generation, origin);
         return tracker.generation;
     };
     auto& tracker = Tracker();
@@ -1468,23 +1499,23 @@ std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::func
     return stampStored(tracker, stored);
 }
 
-std::uint64_t StoreOwnBytes(std::uint64_t address, std::size_t bytes, const std::function<void()>& store) {
+std::uint64_t StoreOwnBytes(std::uint64_t address, std::size_t bytes, const std::function<void()>& store, const std::source_location& origin) {
     return storeOwn(address, bytes, [&] {
         store();
         return std::pair<std::uint64_t, std::uint64_t>{address, address + bytes};
-    });
+    }, origin);
 }
 
-std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> source) {
+std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> source, const std::source_location& origin) {
     return StoreOwnBytes(address, source.size(), [&] {
 #ifndef _WIN32
         if (GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix() && GuestArena::GuestArenaWriteSharedBacking_nid_no_patch(address, source.data(), source.size())) return;
 #endif
         std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
-    });
+    }, origin);
 }
 
-std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
+std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes, const std::source_location& origin) {
     auto& tracker = Tracker();
     const auto lock = lockTracker(tracker);
     tracker.initialize();
@@ -1516,6 +1547,7 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
         tracker.stamp(block, tracker.generation, StampKind::Driver);
         tracker.noteDriverStore(block, address, address + bytes, tracker.generation);
     }
+    noteObservedDccStore(address, address + bytes, tracker.generation, origin);
     return tracker.generation;
 }
 
@@ -1559,7 +1591,10 @@ bool StoredOverWithReason_nid_no_patch(std::uint64_t address, std::size_t bytes,
         const auto from = std::max(address, begin) - begin;
         const auto to = std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin;
         for (const auto& piece : entry.pieces) {
-            if (piece.generation > generation && piece.begin < to && from < piece.end) return reject("driver-overlap");
+            if (piece.generation > generation && piece.begin < to && from < piece.end) {
+                if (reason != nullptr) std::fprintf(stderr, "[dcc-rejection-piece] query=0x%llx+0x%zx saved=%llu piece=0x%llx+0x%x generation=%u\n", static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(generation), static_cast<unsigned long long>(begin + piece.begin), piece.end - piece.begin, piece.generation);
+                return reject("driver-overlap");
+            }
         }
     }
     if (reason != nullptr) *reason = "no-overlap";
