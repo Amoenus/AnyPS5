@@ -71,7 +71,7 @@ static std::FILE* OpenNative(const std::filesystem::path& path, const std::strin
     auto filename = path.native();
     std::error_code pathError;
     auto absolutePath = std::filesystem::absolute(path, pathError);
-    if (pathError) { errno = FilesystemError(pathError); return nullptr; }
+    if (pathError) { errno = pathError.default_error_condition().value(); return nullptr; }
     const auto absolute = absolutePath.lexically_normal().make_preferred().native();
     if (absolute.size() >= MAX_PATH && !absolute.starts_with(L"\\\\?\\") && !absolute.starts_with(L"\\\\.\\"))
         filename = absolute.starts_with(L"\\\\") ? L"\\\\?\\UNC\\" + absolute.substr(2) : L"\\\\?\\" + absolute;
