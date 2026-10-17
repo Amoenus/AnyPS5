@@ -86,6 +86,21 @@ auto Observe_nid_no_patch(Operation operation, std::size_t size, std::size_t cou
 
 }
 
+static void RecordStartupFopenMiss_nid_no_patch(const std::filesystem::path& path, int error) {
+    static std::atomic<std::uint64_t> failures{0};
+    const auto occurrence = failures.fetch_add(1, std::memory_order_relaxed);
+    if (occurrence >= 64 && occurrence % 1024 != 0) return;
+    const int savedErrno = errno;
+#ifdef _WIN32
+    const auto savedError = GetLastError();
+    std::fprintf(stderr, "[startup-fopen-miss] occurrence=%llu native_errno=%d path=%ls\n", static_cast<unsigned long long>(occurrence), error, path.c_str());
+    SetLastError(savedError);
+#else
+    std::fprintf(stderr, "[startup-fopen-miss] occurrence=%llu native_errno=%d path=%s\n", static_cast<unsigned long long>(occurrence), error, path.c_str());
+#endif
+    errno = savedErrno;
+}
+
 extern "C" void LibcStartupFileReport_nid_no_patch() {
     constexpr std::array names{"open", "read", "seek", "close"};
     for (std::size_t index = 0; index < names.size(); ++index) {
@@ -367,6 +382,7 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
         std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
         if (!handle) {
             const int error = errno;
+            RecordStartupFopenMiss_nid_no_patch(fpath, error);
             errno = error;
             return nullptr;
         }
