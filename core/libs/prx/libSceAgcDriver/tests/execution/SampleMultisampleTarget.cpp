@@ -503,6 +503,28 @@ void Readback(AgcDriver::VulkanDevice& device) {
         }
         std::printf("native color readback: RGBA16F samples=%u coverage/fill/refusals/chunks passed\n", fragments);
         ++exercised;
+        {
+            Block exact(BlockBytes);
+            auto exactColor = DecodeTarget(exact, 0x8100u);
+            exactColor.samples = fragments;
+            const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, 8u, fragments, Side, Side, 1u, exactColor.pipeBankXor);
+            constexpr std::array<std::uint16_t, 12> patterns{0u, 0x8000u, 1u, 0x8001u, 0x03ffu, 0x0400u, 0x7c00u, 0xfc00u, 0x7e01u, 0xfe55u, 0x7d01u, 0xfdffu};
+            std::vector<std::uint16_t> words(static_cast<std::size_t>(layout.LinearBytes()) / sizeof(std::uint16_t));
+            for (std::size_t index = 0; index < words.size(); ++index) words[index] = patterns[index % patterns.size()];
+            const auto expected = std::as_bytes(std::span(words));
+            auto tiled = std::as_writable_bytes(std::span(exact.data, exact.bytes));
+            layout.Tile(expected, tiled);
+            const std::vector<std::byte> before(tiled.begin(), tiled.end());
+            {
+                std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+                MultisampleTargetView(context, exactColor);
+            }
+            const auto samples = ReadMultisampleTargetSamples_nid_no_patch(context, exactColor);
+            Require(std::equal(samples.begin(), samples.end(), expected.begin(), expected.end()), "native half-float readback changed an exceptional-value bit pattern");
+            const auto snapshot = ReadMultisampleTargetColorSnapshot_nid_no_patch(context, exactColor);
+            Require(snapshot.original == before && snapshot.current == before && std::equal(before.begin(), before.end(), tiled.begin()), "native exceptional-value snapshot changed samples, padding or guest bytes");
+            std::printf("native color readback: RGBA16F samples=%u signed zeros/subnormals/infinities/NaN payload bits preserved\n", fragments);
+        }
     }
     constexpr std::array<VkFormat, 5> formats{VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32A32_UINT};
     constexpr std::array<std::uint32_t, 4> pattern{0x5au, 0x89abcdefu, 0x01234567u, 0xfedcba98u};
