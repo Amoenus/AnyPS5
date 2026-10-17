@@ -4,6 +4,7 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>

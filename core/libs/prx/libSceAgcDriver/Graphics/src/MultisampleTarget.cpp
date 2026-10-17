@@ -591,13 +591,13 @@ private:
     }
 
     void checkDccCurrent(const ColorTarget& use) const {
-        static std::atomic<bool> observed{false};
-        if (!observed.exchange(true, std::memory_order_relaxed)) std::fputs("[dcc-proof-observe] first resident check\n", stderr);
         if (dccRanges.empty()) {
             Require(use.dccAddress == 0, "adding DCC to a resident multisampled color target is not implemented");
             return;
         }
         Require(metadataValid->load(std::memory_order_acquire), "multisampled DCC metadata was released while its color target remains resident");
+        static std::atomic<bool> observed{false};
+        if (!observed.exchange(true, std::memory_order_relaxed)) std::fputs("[dcc-proof-observe] first DCC proof check\n", stderr);
         static_cast<void>(MultisampledDccBytes(use));
         Require(use.address == target.address && use.dccAddress == target.dccAddress && use.dccControl == target.dccControl && use.dccAlphaOnMsb == target.dccAlphaOnMsb && use.dccPipeAligned == target.dccPipeAligned && use.cmaskAddress == target.cmaskAddress && use.cmaskBytes == target.cmaskBytes && use.tileMode == target.tileMode && use.elementBytes == target.elementBytes && use.pipeBankXor == target.pipeBankXor, "multisampled DCC target layout or metadata changed");
         for (const auto& range : dccRanges) {
