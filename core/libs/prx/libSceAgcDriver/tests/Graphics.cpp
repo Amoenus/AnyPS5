@@ -2095,9 +2095,14 @@ void DepthStencilTests() {
     Require(volume.color.layers == 1 && volume.renderLayers == 1 && volume.layerExports == 0, "a color view of one 3D depth slice became layered");
     {
         auto mipmapped = queue;
+        alignas(256) std::array<std::byte, 8192> mipMemory{};
+        const auto mipAddress = reinterpret_cast<std::uintptr_t>(mipMemory.data());
+        mipmapped.context[0x318] = static_cast<std::uint32_t>(mipAddress >> 8u);
+        mipmapped.context[0x390] = static_cast<std::uint32_t>(mipAddress >> 40u);
         mipmapped.context[0x3b0] |= 2u << 28u;
         mipmapped.context[0x31b] = (1u << 26u) | (1u << 13u) | 1u;
-        expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(mipmapped.context, 0); }, "slot 0, 64x4x4, viewMip 1, maxMip 2, slices 1..1, CB_COLOR_INFO 0x00028028, ATTRIB2 0x200fc003, ATTRIB3 0x0a000003, VIEW 0x04002001");
+        const auto mip = AgcDriver::Graphics::DecodeColorBuffer(mipmapped.context, 0);
+        Require(mip.extent.width == 32u && mip.extent.height == 2u && mip.depth == 4u && mip.depthSlice == 1u && mip.layers == 1u && mip.mip == 1u && mip.mipCount == 3u, "a 3D mip diagnostic fixture did not select its minified view");
     }
     queue.context[0x31b] = 4u | (4u << 13u);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "outside the 3D surface");
