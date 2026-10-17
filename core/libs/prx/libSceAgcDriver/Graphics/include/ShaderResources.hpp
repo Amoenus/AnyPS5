@@ -488,6 +488,7 @@ private:
     GuestBufferMemory guestMemory;
     std::size_t maxDrawSnapshotBytes = MaxDrawSnapshotBytes();
     std::unique_ptr<BdaResources> bda;
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> observedBdaProducers;
     bool usesBda = false;
     std::vector<std::uint64_t> multisampleSources;
     bool usesFaultBuffer = false;

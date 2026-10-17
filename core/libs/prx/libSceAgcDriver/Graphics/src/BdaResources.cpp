@@ -319,7 +319,8 @@ void BdaResources::markWrittenPages() const {
                 Require(false, message.str());
             }
         }
-        GuestMemory::MarkWritten(begin, bytes);
+        const auto generation = GuestMemory::MarkWritten(begin, bytes);
+        for (const auto& [stage, variant] : observedProducers) GuestMemory::ObserveDccBdaStore_nid_no_patch(begin, bytes, generation, stage, variant);
     }), "invalid BDA written-page record");
     for (std::uint32_t claim = 0; claim < count; ++claim) {
         const auto slot = words[Abi::WrittenListWord + claim];
@@ -327,6 +328,10 @@ void BdaResources::markWrittenPages() const {
         words[Abi::WrittenSlotsWord + 2 * slot + 1] = 0;
     }
     words[Abi::WrittenCountWord] = 0;
+}
+
+void BdaResources::SetObservedProducers_nid_no_patch(std::vector<std::pair<std::uint32_t, std::uint64_t>> producers) {
+    observedProducers = std::move(producers);
 }
 
 }

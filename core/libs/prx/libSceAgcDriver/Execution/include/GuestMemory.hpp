@@ -82,6 +82,8 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes, const std::s
 std::uint64_t StoreOwnBytes(std::uint64_t address, std::size_t bytes, const std::function<void()>& store, const std::source_location& origin = std::source_location::current());
 std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> source, const std::source_location& origin = std::source_location::current());
 void ObserveDccStoreRange_nid_no_patch(std::uint64_t address, std::size_t bytes);
+void ObserveDccProgram_nid_no_patch(std::uint64_t variant, std::uint64_t program);
+void ObserveDccBdaStore_nid_no_patch(std::uint64_t address, std::size_t bytes, std::uint64_t generation, std::uint32_t stage, std::uint64_t variant);
 bool StoredOver(std::uint64_t address, std::size_t bytes, std::uint64_t generation);
 bool StoredOverWithReason_nid_no_patch(std::uint64_t address, std::size_t bytes, std::uint64_t generation, const char** reason);
 bool StoredAllSince_nid_no_patch(std::uint64_t address, std::size_t bytes, std::uint64_t generation);

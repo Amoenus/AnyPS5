@@ -18,6 +18,7 @@ public:
     VkDescriptorBufferInfo Table() const;
     VkDescriptorBufferInfo Fault() const;
     void CheckFault() const;
+    void SetObservedProducers_nid_no_patch(std::vector<std::pair<std::uint32_t, std::uint64_t>> producers);
     struct ImageTableFaults {
         std::uint32_t stage = 0;
         std::uint64_t shader = 0;
@@ -56,6 +57,7 @@ private:
     std::unique_ptr<Buffer> fault;
     std::size_t tableBytes = 0;
     std::vector<ImageTableFaults> imageTables;
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> observedProducers;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> imageTableRanges;
 };
 

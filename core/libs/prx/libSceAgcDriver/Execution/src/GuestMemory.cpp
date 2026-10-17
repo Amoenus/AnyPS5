@@ -47,6 +47,8 @@ struct ObservedDccStores {
     std::mutex mutex;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
     unsigned records = 0;
+    unsigned bdaRecords = 0;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> programs;
 };
 
 ObservedDccStores& observedDccStores() {
@@ -1513,6 +1515,35 @@ std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> so
 #endif
         std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
     }, origin);
+}
+
+void ObserveDccProgram_nid_no_patch(std::uint64_t variant, std::uint64_t program) {
+    auto& observed = observedDccStores();
+    std::lock_guard lock(observed.mutex);
+    if (!observed.programs.contains(variant) && observed.programs.size() >= 4096u) return;
+    auto& programs = observed.programs[variant];
+    if (std::find(programs.begin(), programs.end(), program) == programs.end()) programs.push_back(program);
+}
+
+void ObserveDccBdaStore_nid_no_patch(std::uint64_t address, std::size_t bytes, std::uint64_t generation, std::uint32_t stage, std::uint64_t variant) {
+    auto& observed = observedDccStores();
+    std::lock_guard lock(observed.mutex);
+    for (const auto& [first, last] : observed.ranges) {
+        if (bytes == 0u || address >= last || (first > address && first - address >= bytes)) continue;
+        if (observed.bdaRecords >= 512u) {
+            if (observed.bdaRecords == 512u) std::fprintf(stderr, "[dcc-bda-producer-observe] observation-limit=512\n");
+            observed.bdaRecords = 513u;
+            return;
+        }
+        const auto sequence = observed.bdaRecords++;
+        const auto found = observed.programs.find(variant);
+        const auto emit = [&](std::uint64_t program) {
+            std::fprintf(stderr, "[dcc-bda-producer-observe] seq=%u address=0x%llx bytes=0x%zx generation=%llu metadata=0x%llx+0x%llx stage=0x%x variant=%llu programCandidate=0x%llx\n", sequence, static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(generation), static_cast<unsigned long long>(first), static_cast<unsigned long long>(last - first), stage, static_cast<unsigned long long>(variant), static_cast<unsigned long long>(program));
+        };
+        if (stage == 0x20u && found != observed.programs.end()) for (const auto program : found->second) emit(program);
+        else emit(0u);
+        return;
+    }
 }
 
 std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes, const std::source_location& origin) {
