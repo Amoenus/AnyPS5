@@ -520,7 +520,8 @@ void DccFastClearTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSa
                         try {
                             device.ColorMetadataPass(pass);
                         } catch (const std::runtime_error& error) {
-                            refused = std::string_view(error.what()).find("writes to a resident multisampled DCC") != std::string_view::npos;
+                            const std::string_view detail(error.what());
+                            refused = detail.find("writes to a resident multisampled DCC") != std::string_view::npos && detail.find("(color samples)") != std::string_view::npos;
                         }
                         Require(refused, "a same-value CPU color store did not invalidate multisampled DCC residency");
                     }
@@ -530,9 +531,23 @@ void DccFastClearTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSa
                         try {
                             device.ColorMetadataPass(pass);
                         } catch (const std::runtime_error& error) {
-                            refused = std::string_view(error.what()).find("writes to a resident multisampled DCC") != std::string_view::npos;
+                            const std::string_view detail(error.what());
+                            refused = detail.find("writes to a resident multisampled DCC") != std::string_view::npos && detail.find("(DCC metadata)") != std::string_view::npos;
                         }
                         Require(refused, "a same-value CPU DCC store did not invalidate multisampled DCC residency");
+                    }
+                    if (code == 0 && alphaOnMsb && cmaskMode == 0xccu) {
+                        auto* address = reinterpret_cast<volatile std::uint8_t*>(target.cmaskAddress);
+                        const auto value = *address;
+                        *address = value;
+                        bool refused = false;
+                        try {
+                            device.ColorMetadataPass(pass);
+                        } catch (const std::runtime_error& error) {
+                            const std::string_view detail(error.what());
+                            refused = detail.find("writes to a resident multisampled DCC") != std::string_view::npos && detail.find("(CMASK metadata)") != std::string_view::npos;
+                        }
+                        Require(refused, "a same-value CPU CMASK store did not identify its invalidated multisampled DCC range");
                     }
                     if (code == 0xc0u && alphaOnMsb && cmaskMode == 0) {
                         AgcDriver::GuestMemory::Unwatch(metadata.Address(), 4096);
