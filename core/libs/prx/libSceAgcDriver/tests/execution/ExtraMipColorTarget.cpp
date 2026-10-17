@@ -38,6 +38,8 @@ struct GuestBlock {
         GuestAllocations::Mutation().Add(registered, bytes, true, true, true);
     }
     ~GuestBlock() { GuestAllocations::Mutation().Remove(registered); }
+    GuestBlock(const GuestBlock&) = delete;
+    GuestBlock& operator=(const GuestBlock&) = delete;
     std::byte* Surface() const { return registered + 65536u; }
 };
 
@@ -177,6 +179,7 @@ int main() {
             CheckCase(*device, 512u, 256u, 12u, 75u, TextureTileMode::kD64KBX, ColorTileMode::D64KBX, 1u, singlePass);
             CheckCase(*device, 32u, 16u, 8u, 20u, TextureTileMode::kR64KBX, ColorTileMode::RenderTarget, 2u, singlePass);
             CheckCase(*device, 7u, 3u, 6u, 20u, TextureTileMode::kLinear, ColorTileMode::Linear, 2u, singlePass);
+            CheckCase(*device, 1u, 1u, 16u, 20u, TextureTileMode::kLinear, ColorTileMode::Linear, 2u, singlePass);
         }
         return 0;
     } catch (const std::exception& error) {
