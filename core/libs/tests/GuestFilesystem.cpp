@@ -249,6 +249,55 @@ static void TestRelinkedModuleNameCase() {
     std::filesystem::remove_all(root);
 }
 
+#ifdef _WIN32
+static std::filesystem::path ExtendedPath(const std::filesystem::path& path) {
+    const auto& native = path.native();
+    if (native.starts_with(L"\\\\?\\") || native.starts_with(L"\\\\.\\")) return path;
+    return native.starts_with(L"\\\\") ? std::filesystem::path(L"\\\\?\\UNC\\" + native.substr(2))
+                                            : std::filesystem::path(L"\\\\?\\" + native);
+}
+
+static void TestLongHostPathStat() {
+    auto root = std::filesystem::absolute(std::filesystem::temp_directory_path()).lexically_normal();
+    if (root.filename().empty()) root = root.parent_path();
+    root /= L"anyps5-stat-long-" + std::to_wstring(std::chrono::steady_clock::now().time_since_epoch().count());
+    auto deep = root;
+    while (deep.native().size() < MAX_PATH + 24) deep /= std::wstring(40, L'd');
+    Require(::CreateDirectoryW(ExtendedPath(root).c_str(), nullptr) != 0);
+    auto directory = root;
+    for (const auto& component : std::filesystem::path(deep).lexically_relative(root)) {
+        directory /= component;
+        Require(::CreateDirectoryW(ExtendedPath(directory).c_str(), nullptr) != 0);
+    }
+    const auto file = deep / L"payload.bin";
+    const auto handle = ::CreateFileW(ExtendedPath(file).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Require(handle != INVALID_HANDLE_VALUE);
+    DWORD written = 0;
+    const bool wrote = ::WriteFile(handle, "metadata", 8, &written, nullptr) != 0 && written == 8;
+    ::CloseHandle(handle);
+    Require(wrote);
+    const auto host = deep.string();
+    AddPathAlias_nid_no_patch("/long-stat-host", host.c_str());
+    FileStat status{};
+    Require(ResolvePath_nid_no_patch("/long-stat-host/payload.bin").native().size() > MAX_PATH);
+    Require(sceKernelStat("/long-stat-host/payload.bin", &status) == 0 && status.st_size == 8);
+    Require(sceKernelStat("/long-stat-host/missing.bin", &status) == static_cast<int>(0x80020002u));
+    Require(sceKernelStat("/long-stat-host/", &status) == 0 && (status.st_mode & 0170000) == 0040000);
+    RemovePathAlias_nid_no_patch("/long-stat-host");
+    const auto extendedHost = ExtendedPath(deep).string();
+    AddPathAlias_nid_no_patch("/long-stat-extended", extendedHost.c_str());
+    Require(ResolvePath_nid_no_patch("/long-stat-extended/payload.bin").native().starts_with(L"\\\\?\\"));
+    Require(sceKernelStat("/long-stat-extended/payload.bin", &status) == 0 && status.st_size == 8);
+    Require(sceKernelStat("/long-stat-extended/missing.bin", &status) == static_cast<int>(0x80020002u));
+    RemovePathAlias_nid_no_patch("/long-stat-extended");
+    ::DeleteFileW(ExtendedPath(file).c_str());
+    for (auto path = deep; ; path = path.parent_path()) {
+        ::RemoveDirectoryW(ExtendedPath(path).c_str());
+        if (path == root) break;
+    }
+}
+#endif
+
 #ifdef __linux__
 static int DirectoryOpens(int watch) {
     alignas(inotify_event) char buffer[4096];
@@ -290,6 +339,9 @@ int main() {
     TestParentTraversal();
     TestRelinkedModuleNames();
     TestRelinkedModuleNameCase();
+#ifdef _WIN32
+    TestLongHostPathStat();
+#endif
 #ifdef __linux__
     TestMissingPathListsDirectoryOnce();
 #endif
