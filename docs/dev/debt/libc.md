@@ -35,6 +35,7 @@
 - [set_constraint_handler_s](../../../core/libs/prx/libc/src/WideConversion.cpp) (libc, re-exported by libSceAmpr) - the default handler is assumed to abort; each module keeps its own handler state, so a handler set through one library is not seen by the other. `ctime_s` and `asctime_s` follow the Dinkumware 26-byte format with `EINVAL` for a buffer under 26 bytes, a null pointer or an out-of-range weekday/month; `ctime_s` uses the guest time zone of `localtime_s`, and the console's exact checks are not verified
 - [__udivti3](../../../core/libs/prx/libc/src/RuntimeSupport.cpp) (libc, re-exported by libSceAmpr) - the hardware traps on a zero divisor; this throws instead
 - [__umodti3](../../../core/libs/prx/libc/src/RuntimeSupport.cpp) (libc) - the hardware traps on a zero divisor; this throws instead
+- [__modti3](../../../core/libs/prx/libc/src/RuntimeSupport.cpp) (libc) - the hardware traps on a zero divisor; this throws instead
 
 ### Functional
 

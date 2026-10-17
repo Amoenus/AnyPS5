@@ -744,7 +744,7 @@ void verifyFloatModeSerialization() {
 
 int runLargeFileWrite() {
     constexpr std::size_t size = (std::size_t{2} << 30u) + 4096u;
-    const auto directory = std::filesystem::temp_directory_path() / "aps5-shader-disk-cache-large-file-test";
+    const auto directory = std::filesystem::temp_directory_path() / ("aps5-shader-disk-cache-large-file-test-" + std::to_string(std::random_device{}()));
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     std::filesystem::create_directories(directory, error);
