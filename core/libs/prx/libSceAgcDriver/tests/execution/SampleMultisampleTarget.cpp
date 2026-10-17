@@ -807,17 +807,27 @@ void Publication(AgcDriver::VulkanDevice& device) {
                 const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, color.elementBytes, fragments, Side, Side, 1u, pipeBankXor);
                 layout.Tile(HalfSamples(loaded), std::span(expected).first(colorBytes));
                 if (fragments == Samples && pipeBankXor == 0u && profile == 0u) {
+                    {
+                        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+                        auto* recording = Recorder::Active();
+                        Require(recording != nullptr && context.recorder != nullptr, "the publication fixture has no owning recorder");
+                        Recorder other(context);
+                        other.Activate();
+                        RequireReadbackRefused(context, color, "another active recorder on the same device");
+                        RequirePublicationRefused(context, color, "another active recorder on the same device");
+                        recording->Activate();
+                    }
                     auto wrong = color;
                     wrong.pipeBankXor = 0x8100u;
                     RequirePublicationRefused(context, wrong, "subresource does not match");
                     {
                         GuestAllocations::Mutation mutation;
-                        mutation.Protect(block.data, colorBytes, true, false, true, [] {});
+                        mutation.Protect(block.data + 4096u, 4096u, true, false, true, [] {});
                     }
                     RequirePublicationRefused(context, color, "requires writable registered guest memory");
                     {
                         GuestAllocations::Mutation mutation;
-                        mutation.Protect(block.data, colorBytes, true, true, true, [] {});
+                        mutation.Protect(block.data + 4096u, 4096u, true, true, true, [] {});
                     }
                     block.data[colorBytes - 1u] ^= 0x5au;
                     RequirePublicationRefused(context, color, "no longer matches its initial contents or a known full fill");
@@ -857,6 +867,7 @@ void Publication(AgcDriver::VulkanDevice& device) {
         }
     }
     Require(exercised != 0u, "no supported native color publication case was exercised");
+    if (!InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, Samples)) return;
     auto completed = std::make_shared<Block>(BlockBytes);
     auto color = DecodeTarget(*completed);
     StoreInitial(*completed, Samples, 0u, false);
