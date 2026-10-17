@@ -292,7 +292,7 @@ public:
         Require(context.detiler != nullptr, "multisample color sample readback requires a texture detiler");
         Require(target.samples == 2u || target.samples == 4u || target.samples == 8u, "unsupported multisample color readback fragment count");
         auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
-        Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires its device's active recorder");
+        Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires a recorder for its device");
         Require(cmask.Refusal().empty(), cmask.Refusal());
         Require(cmask.Keys() != DccKeys::Clear0000, "reading a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
         Require(FindGuestColorTargetFormat(target.format, target.elementBytes).has_value(), "multisample color readback source format or element size is unsupported");
@@ -365,7 +365,7 @@ public:
     }
 
     MultisampleColorSnapshot ColorSnapshot() {
-        Require(target.tileMode == ColorTileMode::RenderTarget && target.dccAddress == 0 && target.cmaskAddress == 0 && target.fmaskAddress == 0, "guest color snapshots with unsupported tiling or multisample metadata are not implemented");
+        Require(target.tileMode == ColorTileMode::RenderTarget && target.dccAddress == 0 && target.cmaskAddress == 0, "guest color snapshots with unsupported tiling or multisample metadata are not implemented");
         Require(!initialColor.empty(), "guest color snapshot has no initial footprint");
         auto original = currentGuestColor();
         const auto samples = ReadSamples();
@@ -757,7 +757,7 @@ std::shared_ptr<MultisampleTarget> snapshotTarget(const Context& context, const 
     for (const auto& candidate : targets()) {
         if (!candidate->active->load(std::memory_order_acquire) || candidate->context.device != context.device || !sameTarget(candidate->target, use)) continue;
         const auto& target = candidate->target;
-        Require(target.address == use.address && target.mip == use.mip && target.mipCount == use.mipCount && target.mipTail == use.mipTail && target.layers == use.layers && target.depth == use.depth && target.arraySlice == use.arraySlice && target.arrayLastSlice == use.arrayLastSlice && target.depthSlice == use.depthSlice && target.elementBytes == use.elementBytes && target.tileMode == use.tileMode && target.pipeBankXor == use.pipeBankXor && target.dccAddress == use.dccAddress && target.cmaskAddress == use.cmaskAddress && target.fmaskAddress == use.fmaskAddress, "multisample color readback subresource does not match the resident target");
+        Require(target.address == use.address && target.mip == use.mip && target.mipCount == use.mipCount && target.mipTail == use.mipTail && target.layers == use.layers && target.depth == use.depth && target.arraySlice == use.arraySlice && target.arrayLastSlice == use.arrayLastSlice && target.depthSlice == use.depthSlice && target.elementBytes == use.elementBytes && target.tileMode == use.tileMode && target.pipeBankXor == use.pipeBankXor && target.dccAddress == use.dccAddress && target.cmaskAddress == use.cmaskAddress, "multisample color readback subresource does not match the resident target");
         return candidate;
     }
     throw std::runtime_error("AGC graphics: multisample color sample readback requires an existing resident target");
