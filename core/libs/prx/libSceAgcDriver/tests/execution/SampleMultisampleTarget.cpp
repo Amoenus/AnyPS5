@@ -934,25 +934,26 @@ void Publication(AgcDriver::VulkanDevice& device, bool automatic = false) {
     {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
-        recorder->OnComplete([completed, automatic, completionRefusal] {
-            StoreWords(*completed, completed->bytes, FillOnes);
-            NoteColorMetadataFill(completed->Address(), completed->bytes, FillOnes);
-            if (automatic) {
-                try {
+        Require(recorder != nullptr, "the publication fixture has no owning recorder");
+        recorder->OnComplete([completed, color, context, automatic, completionRefusal] {
+            try {
+                if (automatic) {
                     std::array<std::byte, 4> word{};
                     AgcDriver::GuestMemory::Read(completed->Address(), word);
-                } catch (const std::exception& error) {
-                    *completionRefusal = error.what();
-                }
+                } else PublishMultisampleTargetColor_nid_no_patch(context, color);
+            } catch (const std::exception& error) {
+                *completionRefusal = error.what();
             }
+            StoreWords(*completed, completed->bytes, FillOnes);
+            NoteColorMetadataFill(completed->Address(), completed->bytes, FillOnes);
         });
     }
     if (!automatic) PublishMultisampleTargetColor_nid_no_patch(context, color);
     std::vector<std::uint32_t> read(completed->bytes / sizeof(std::uint32_t));
     AgcDriver::GuestMemory::Read(completed->Address(), std::as_writable_bytes(std::span(read)));
-    if (automatic) Require(completionRefusal->find("during a recorder completion") != std::string::npos, "recursive publication from a completion was not refused: " + *completionRefusal);
+    Require(completionRefusal->find("during a recorder completion") != std::string::npos, "recursive publication from a completion was not refused: " + *completionRefusal);
     Require(std::all_of(read.begin(), read.end(), [](const auto word) { return word == FillOnes; }), "publication captured its guest baseline before producer completions");
-    std::puts("native color publication: known full fill from a producer completion precedes the publication baseline");
+    std::puts("native color publication: known full fill from a producer completion precedes the publication baseline; recursive publication stays refused");
 }
 
 alignas(256) constexpr std::array<std::uint32_t, 7> BufferLoadCode{0x34020082u, 0xe8001000u | (20u << 19u), 0x80000201u, 0xbf8c0000u, 0xe0701000u, 0x80010201u, 0xbf810000u};
