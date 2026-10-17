@@ -1129,7 +1129,9 @@ void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     refusal.clear();
     try {
         const auto alias = CompileBufferLoad(*device, block.Address() + 4u, block.Address());
-        static_cast<void>(device->PrepareDispatch(alias, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data())));
+        const auto aliasPrepared = device->PrepareDispatch(alias, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
+        Require(aliasPrepared != nullptr, "the overlapping alias probe did not prepare resources");
+        std::puts("native buffer publication: overlapping alias preparation returned a resource plan without refusal");
     } catch (const std::exception& error) {
         refusal = error.what();
     }
