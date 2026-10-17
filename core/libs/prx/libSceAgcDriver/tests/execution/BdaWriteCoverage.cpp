@@ -165,7 +165,7 @@ int RunNativeClear(AgcDriver::VulkanDevice& device) {
         0xd771000a, 0x00120c05, 0xd771000b, 0x00120e05,
         0xdc788000, 0x00020800, 0xbf810000,
     };
-    std::array<std::uint32_t, 6> userData{0u, 0u, static_cast<std::uint32_t>(metadata.Address()), static_cast<std::uint32_t>(metadata.Address() >> 32u), 0xfffffff0u, 0u};
+    std::array<std::uint32_t, 6> userData{0u, 0u, static_cast<std::uint32_t>(metadata.Address()), static_cast<std::uint32_t>(metadata.Address() >> 32u), 0u, 0u};
     const ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u};
     const std::array<MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(std::span(code))}}};
     const auto groups = static_cast<std::uint32_t>(metadataBytes / 1024u);
@@ -183,6 +183,7 @@ int RunNativeClear(AgcDriver::VulkanDevice& device) {
     };
     device.Dispatch(compile(), groups, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(code.data()));
     device.WaitIdle();
+    Require(std::all_of(metadata.Data(), metadata.Data() + BlockBytes, [](auto value) { return value == 0u; }), "the warm-up native clear did not retain zero metadata");
     if (!Memory::Watched(depth.Address(), BlockBytes) || !Memory::Watched(metadata.Address(), BlockBytes)) {
         std::puts("skipped, native clear imports do not retain guest write watching");
         return VulkanTestSkipped;
@@ -212,7 +213,7 @@ int RunNativeClear(AgcDriver::VulkanDevice& device) {
     Require(DepthSurfaceView(context, target) == view, "changing the native clear value replaced its attachment");
     NoteHtileDepthClear(target.htileAddress, metadataBytes, metadataBytes);
     const auto generation = Memory::TrackerGeneration();
-    userData[5] = 0xfffffff0u;
+    userData[4] = 0xfffffff0u;
     device.Dispatch(compile(), groups, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(code.data()));
     device.WaitIdle();
     for (std::size_t offset = 0; offset < BlockBytes; offset += 4u) {
