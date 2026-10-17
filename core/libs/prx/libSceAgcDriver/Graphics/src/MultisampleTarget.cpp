@@ -409,7 +409,7 @@ public:
                 }
                 const auto first = offset++;
                 while (offset < bytes && snapshot.current[offset] != snapshot.original[offset]) ++offset;
-                std::memcpy(destination + first, snapshot.current.data() + first, offset - first);
+                std::memcpy(destination + first, snapshot.original.data() + first, offset - first);
             }
         });
         active->store(false, std::memory_order_release);
