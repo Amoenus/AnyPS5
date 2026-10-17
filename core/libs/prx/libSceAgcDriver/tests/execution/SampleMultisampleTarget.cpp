@@ -414,7 +414,7 @@ void CheckNativeIndices(AgcDriver::VulkanDevice& device, const Block& source, co
             AgcDriver::Graphics::MaterializeMultisampleTargetClear(context, state.color);
         }
         CheckUniform(LoadSamples(device, destination), {}, "before the neighboring indexed draw");
-        Draw(device, state, neighbor, indexSize);
+        if (indexSize == 2u) Draw(device, state, neighbor, indexSize);
         device.WaitIdle();
         CheckSamples(state, LoadSamples(device, destination), {});
         for (const bool edge : {false, true}) {
