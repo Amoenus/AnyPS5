@@ -29,20 +29,11 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
-#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 #include <mutex>
-
-namespace AgcDriver {
-
-struct VulkanDeviceTestAccess {
-    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
-};
-
-}
 
 namespace AgcDriver {
 
