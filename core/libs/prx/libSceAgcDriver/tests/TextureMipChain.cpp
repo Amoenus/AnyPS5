@@ -456,54 +456,54 @@ std::pair<VkImage, VkImageCreateInfo> storageImage(const std::string& what) {
 }
 
 void TestStorageLevelsPastTheFullChain(const Context& context, TextureDetiler& detiler) {
-    // A 28x1 RGBA8 storage surface of 10 levels: the image holds levels 0-4, the last of them 1x1.
     auto descriptor = storageSurface(28, 1, 10);
     GuestSurface memory(static_cast<std::size_t>(DescribeSurface(descriptor).guestBytes));
     descriptor.baseAddress = memory.Address();
     clearRecords();
     {
         const auto texture = StorageTexture::Create(context, detiler, descriptor, 0);
-        const auto [image, info] = storageImage("28x1 storage with 10 levels");
-        Require(info.mipLevels == 5, "a 28x1 storage image of 10 guest levels must keep the 5 levels its extent has, not " + std::to_string(info.mipLevels));
-        for (std::uint32_t level = 0; level < 5; ++level) Require(copiesOfLevel(level) == 1, "level " + std::to_string(level) + " of the storage surface must be uploaded");
-        checkInsideImage(image, info, "28x1 storage upload");
-
-        static_cast<void>(texture->StorageView(4, false));
-        checkInsideImage(image, info, "a storage view of the last level the image holds");
-        requireThrows([&] { static_cast<void>(texture->StorageView(5, false)); }, "a storage image view of mip level 5 of a 28x1x1 surface of 10 levels is not implemented: a Vulkan image of that extent holds 5 levels", "a storage view of level 5 of a 28x1 surface");
-        Require(texture->Attachable(), "the mock RGBA8 storage image must be attachable");
-        requireThrows([&] { static_cast<void>(texture->AttachmentView(VK_FORMAT_R8G8B8A8_UNORM, 7)); }, "a color target of mip level 7", "a color target at level 7 of a 28x1 surface");
-        checkInsideImage(image, info, "28x1 storage views");
-
-        // A fill of the whole surface reaches levels 5-9 too, which a clear of the image would not.
+        const auto image = texture->Image();
+        const auto info = mock.images.at(image);
+        Require(info.mipLevels == 5 && mock.images.size() == 6, "a 28x1 storage surface needs its five-level chain and five extra 1x1 images");
+        for (std::uint32_t level = 0; level < 5; ++level) {
+            Require(std::count_if(mock.copies.begin(), mock.copies.end(), [&](const auto& copy) { return copy.first == image && copy.second.mipLevel == level; }) == 1, "every level of the core storage chain must be uploaded once");
+        }
+        checkInsideImage(image, info, "28x1 core storage image");
+        for (std::uint32_t level = 5; level < 10; ++level) {
+            const auto extra = texture->Image(level);
+            Require(extra != image, "an extra guest mip aliases the physical chain");
+            const auto& created = mock.images.at(extra);
+            Require(created.extent.width == 1 && created.extent.height == 1 && created.mipLevels == 1, "an extra guest mip is not backed by a legal 1x1 image");
+            Require(std::count_if(mock.copies.begin(), mock.copies.end(), [&](const auto& copy) { return copy.first == extra && copy.second.mipLevel == 0; }) == 1, "an extra guest mip was not uploaded exactly once");
+            static_cast<void>(texture->StorageView(level, false));
+            static_cast<void>(texture->AttachmentView(VK_FORMAT_R8G8B8A8_UNORM, level));
+            checkInsideImage(extra, created, "28x1 extra storage mip");
+        }
+        requireThrows([&] { static_cast<void>(texture->StorageView(10, false)); }, "storage texture mip level is outside the texture", "a storage view outside the guest chain");
         const std::array<std::uint32_t, 4> pattern{0, 0, 0, 0};
         const char* refusal = nullptr;
-        Require(!texture->FillClear(pattern, StorageTexture::WholeImage, refusal), "a fill of a surface with levels past its image must not become a clear of the image");
-        Require(refusal != nullptr && std::string_view(refusal) == "levels past the image", std::string("the fill was refused as \"") + (refusal != nullptr ? refusal : "") + "\", not for the levels past the image");
-
-        // So does a buffer copy of another such surface over this one.
+        Require(!texture->FillClear(pattern, StorageTexture::WholeImage, refusal), "the existing full-surface fill fast path must keep its extra-level admission rule");
+        Require(refusal != nullptr && std::string_view(refusal) == "levels past the image", "the fill refusal changed");
         auto otherDescriptor = descriptor;
         GuestSurface otherMemory(static_cast<std::size_t>(DescribeSurface(otherDescriptor).guestBytes));
         otherDescriptor.baseAddress = otherMemory.Address();
         const auto other = StorageTexture::Create(context, detiler, otherDescriptor, 0);
         refusal = nullptr;
-        Require(!texture->CopyFrom(*other, refusal), "a buffer copy between surfaces with levels past their images must not become an image copy");
-        Require(refusal != nullptr && std::string_view(refusal) == "levels past the image", std::string("the copy was refused as \"") + (refusal != nullptr ? refusal : "") + "\", not for the levels past the image");
-
-        // The write-back reads the levels the image holds, and nothing past them.
+        Require(!texture->CopyFrom(*other, refusal), "the existing full-surface copy fast path must keep its extra-level admission rule");
+        Require(refusal != nullptr && std::string_view(refusal) == "levels past the image", "the copy refusal changed");
         mock.readbacks.clear();
         texture->MarkDirty();
         texture->WriteBack();
-        for (std::uint32_t level = 0; level < 5; ++level) {
-            Require(std::any_of(mock.readbacks.begin(), mock.readbacks.end(), [&](const auto& readback) { return readback.first == image && readback.second.mipLevel == level; }), "the write-back must read level " + std::to_string(level) + " of the storage image");
+        for (std::uint32_t level = 0; level < 10; ++level) {
+            const auto physical = texture->Image(level);
+            Require(std::any_of(mock.readbacks.begin(), mock.readbacks.end(), [&](const auto& readback) { return readback.first == physical && readback.second.mipLevel == texture->ImageMipLevel(level); }), "the write-back did not read every guest mip from its physical image");
+            checkInsideImage(physical, mock.images.at(physical), "28x1 storage write-back");
         }
-        checkInsideImage(image, info, "28x1 storage write-back");
     }
-
-    // Creating the storage image for a write of level 7 throws before any image exists.
     clearRecords();
-    requireThrows([&] { static_cast<void>(StorageTexture::Create(context, detiler, descriptor, 7)); }, "a storage image access of mip level 7 of a 28x1x1 surface of 10 levels is not implemented", "a storage image for level 7 of a 28x1 surface");
-    Require(mock.images.empty(), "a storage image for a level past the image's must not be created");
+    const auto texture = StorageTexture::Create(context, detiler, descriptor, 7);
+    Require(mock.images.size() == 6, "creating a storage view of an extra mip lost its sibling backing");
+    Require(!mock.views.empty() && mock.views.back().first == texture->Image(7) && mock.views.back().second.baseMipLevel == 0, "the default storage view did not select its extra mip image");
 }
 
 void TestStorageFullChainIsUnchanged(const Context& context, TextureDetiler& detiler) {
