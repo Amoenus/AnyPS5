@@ -40,7 +40,9 @@ public:
 #ifdef _WIN32
         block = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(BlockBytes, BlockBytes));
         Require(block != nullptr, "cannot allocate the BDA write coverage block");
-        GuestArena::GuestArenaCommit_nid_postfix(block, BlockBytes, PAGE_READWRITE, BlockBytes);
+        section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, BlockBytes, nullptr);
+        Require(section != nullptr, "cannot create the BDA write coverage backing");
+        GuestArena::GuestArenaMapDirect_nid_postfix(block, BlockBytes, section, 0, PAGE_READWRITE);
 #else
         void* raw = mmap(nullptr, 2 * BlockBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         Require(raw != MAP_FAILED, "cannot map the BDA write coverage block");
@@ -61,6 +63,8 @@ public:
 #ifdef _WIN32
         GuestArena::GuestArenaReset_nid_postfix(block, BlockBytes);
         GuestArena::GuestArenaRelease_nid_postfix(block, BlockBytes);
+        GuestArena::GuestArenaForgetSection_nid_postfix(section);
+        CloseHandle(section);
 #else
         munmap(block, BlockBytes);
         GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(block, BlockBytes);
@@ -74,6 +78,9 @@ public:
 
 private:
     std::uint8_t* block = nullptr;
+#ifdef _WIN32
+    HANDLE section = nullptr;
+#endif
 };
 
 void Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
