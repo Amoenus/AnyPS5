@@ -195,7 +195,6 @@ void QueueTargetByteWrite(const Context& context, Recorder& recorder, std::uint6
 std::vector<std::uint32_t> FetchShader(std::uint32_t width, std::uint32_t height, std::uint32_t fragments, bool arrayed, bool floating) {
     ShaderRecompiler::SpirvModule module;
     module.EmitCapability(spv::CapabilityShader);
-    if (arrayed) module.EmitCapability(spv::CapabilityImageMSArray);
     module.AddMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
     const auto u32 = module.Type(spv::OpTypeInt, 32u, 0u);
     const auto i32 = module.Type(spv::OpTypeInt, 32u, 1u);
