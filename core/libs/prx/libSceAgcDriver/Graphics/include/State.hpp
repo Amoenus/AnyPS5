@@ -154,6 +154,8 @@ std::array<VkSampleLocationEXT, 32> SampleLocations(const State& state);
 VkExtent2D SampleLocationGrid(const State& state);
 std::array<std::uint8_t, 8> ExportMappings(const State& state);
 std::array<ShaderRecompiler::ColorExportPacking, 8> ExportPackings(const State& state);
+ShaderRecompiler::ColorOutputType ColorOutputTypeOf(const ColorTarget& color);
+std::array<ShaderRecompiler::ColorOutputType, 8> ExportOutputTypes(const State& state);
 ShaderRecompiler::RasterPrimitive RasterPrimitiveOf(const State& state);
 bool PartialSampleMask(const State& state);
 bool UniformSampleMask(const State& state);

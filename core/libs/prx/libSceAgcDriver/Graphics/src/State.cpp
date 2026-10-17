@@ -1133,7 +1133,10 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         auto color = DecodeColorBuffer(cx, slot);
         if (slotExport == 7 && ((read(cx, 0x31c + slot * 0xfu) >> 8u) & 7u) != 4u) throw std::runtime_error("AGC graphics: color export format 7 (UINT16_ABGR) into a target that is not unsigned integer is unsupported");
         color.exportIndex = index;
-        color.uintExport = slotExport == 7;
+        const auto outputType = ColorOutputTypeOf(color);
+        const bool integerOutput = outputType == ShaderRecompiler::ColorOutputType::Uint || outputType == ShaderRecompiler::ColorOutputType::Sint;
+        Require(!integerOutput || slotExport == 1 || slotExport == 2 || slotExport == 3 || slotExport == 7 || slotExport == 9, "integer attachment needs a raw32 or UINT16 color export");
+        color.uintExport = outputType == ShaderRecompiler::ColorOutputType::Uint;
         if (color.samples > 1 && result.samples == 1 && result.colors.empty() && !result.depth && !result.alphaToCoverage && (read(cx, 0x292) & 1u) == 0) {
             result.samples = color.samples;
             result.customSampleLocations = true;
@@ -1222,7 +1225,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             if (((exportedMask >> ((mapping >> (2u * component)) & 3u)) & 1u) != 0) state.colorWriteMask |= 1u << component;
         }
         state.blendEnable = ((blend >> 30u) & 1u) != 0 && (read(cx, 0x31c + slot * 0xfu) & 0x10000u) == 0;
-        Require(!state.blendEnable || !color.uintExport, "blending into an unsigned integer target is unsupported");
+        Require(!state.blendEnable || ColorOutputTypeOf(color) == ShaderRecompiler::ColorOutputType::Float, "blending into an unsigned integer target or signed integer target is unsupported");
         const bool reversed = mapping == 0x1bu || mapping == 0x93u;
         if (state.blendEnable) {
             const bool opaqueDestination = (read(cx, 0x31d + slot * 0xfu) & 0x20000u) != 0;
@@ -1299,6 +1302,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     if (result.alphaToCoverage) {
         const auto mrt0 = std::find_if(result.colors.begin(), result.colors.end(), [](const ColorTarget& color) { return color.exportIndex == 0; });
+        Require(mrt0 == result.colors.end() || ColorOutputTypeOf(*mrt0) == ShaderRecompiler::ColorOutputType::Float, "alpha-to-coverage into an integer target is unsupported");
         const auto format = read(cx, 0x1c5) & 0xfu;
         Require(format == 3u || format == 4u || format == 5u || format == 6u || format == 9u, "alpha-to-coverage needs an MRT0 export format with a floating-point alpha");
         Require(!result.ditheredAlphaToCoverage || format == 4u || format == 9u, "dithered alpha-to-coverage needs an FP16_ABGR or 32_ABGR export");
@@ -1314,6 +1318,27 @@ std::array<ShaderRecompiler::ColorExportPacking, 8> ExportPackings(const State& 
         if (color.exportIndex < packings.size()) packings[color.exportIndex] = color.packing;
     }
     return packings;
+}
+
+ShaderRecompiler::ColorOutputType ColorOutputTypeOf(const ColorTarget& color) {
+    using Type = ShaderRecompiler::ColorOutputType;
+    if (color.packing != ShaderRecompiler::ColorExportPacking::None) return Type::Float;
+    switch (color.format) {
+        case VK_FORMAT_R8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R32_UINT:
+        case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R8G8B8A8_UINT:
+        case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R16G16B16A16_UINT:
+        case VK_FORMAT_R32G32B32A32_UINT: return Type::Uint;
+        case VK_FORMAT_R32_SINT: return Type::Sint;
+        default: return Type::Float;
+    }
+}
+
+std::array<ShaderRecompiler::ColorOutputType, 8> ExportOutputTypes(const State& state) {
+    std::array<ShaderRecompiler::ColorOutputType, 8> types{};
+    for (const auto& color : state.colors) {
+        if (color.exportIndex < types.size()) types[color.exportIndex] = ColorOutputTypeOf(color);
+    }
+    return types;
 }
 
 bool PartialSampleMask(const State& state) {

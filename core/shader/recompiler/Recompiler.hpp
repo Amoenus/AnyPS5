@@ -115,6 +115,12 @@ enum class ColorExportPacking : std::uint8_t {
     Unorm10_11_11
 };
 
+enum class ColorOutputType : std::uint8_t { Auto, Float, Uint, Sint };
+
+constexpr ColorOutputType ResolveColorOutputType(std::uint8_t mode, ColorOutputType type) {
+    return type == ColorOutputType::Auto ? (mode == 7u ? ColorOutputType::Uint : ColorOutputType::Float) : type;
+}
+
 enum class RasterPrimitive : std::uint8_t {
     Point,
     Line,
@@ -173,6 +179,7 @@ struct ShaderPixelStageInfo {
     std::uint8_t quadPixelMask = 0xf;
     std::array<std::uint16_t, 4> quadSampleMask{0xffffu, 0xffffu, 0xffffu, 0xffffu};
     std::uint32_t reversedBlend = 0;
+    std::array<ColorOutputType, 8> targetOutputType{};
 };
 
 struct ShaderVertexBufferResource {
