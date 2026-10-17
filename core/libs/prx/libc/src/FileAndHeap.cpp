@@ -86,7 +86,7 @@ auto Observe_nid_no_patch(Operation operation, std::size_t size, std::size_t cou
 
 }
 
-void LibcStartupFileReport_nid_no_patch() {
+extern "C" void LibcStartupFileReport_nid_no_patch() {
     constexpr std::array names{"open", "read", "seek", "close"};
     for (std::size_t index = 0; index < names.size(); ++index) {
         const auto& counters = LibcStartupFileObservation::counters_nid_no_patch[index];

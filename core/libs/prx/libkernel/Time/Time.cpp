@@ -33,7 +33,7 @@
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 
-void LibcStartupFileReport_nid_no_patch();
+extern "C" void LibcStartupFileReport_nid_no_patch();
 
 static constexpr int GUEST_EFAULT = 14;
 static constexpr int GUEST_EINVAL = 22;
