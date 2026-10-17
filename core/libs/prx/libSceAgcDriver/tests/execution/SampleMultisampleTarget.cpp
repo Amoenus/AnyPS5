@@ -661,6 +661,8 @@ int main(int argc, char** argv) {
         Block block(4u * BlockBytes);
         Block other(BlockBytes);
         Block output(2u * 1024u * 1024u);
+        Block destination(BlockBytes);
+        Block swapped(4u * BlockBytes);
         struct ReleaseDevice {
             decltype(device)& value;
             ~ReleaseDevice() { value.reset(); }
@@ -742,15 +744,9 @@ int main(int argc, char** argv) {
         RequireStoreRefused(*device, TargetDescriptor(mixedStore, SampleShift), "writing the 16x16 multisampled texture", "storing to a multisampled texture no draw rendered to whose color memory is not uniform");
         std::puts("stores to one sample of each pixel of a drawn 4x target and to samples of zeroed color memory no draw rendered to reach exactly those samples, and a store to non-uniform color memory no draw rendered to is refused");
         std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it, then the fill of its color memory; a surface no draw rendered to loads the value its color memory repeats and keeps it under a later draw");
-        Block swapped(4u * BlockBytes);
         Draw(*device, TargetState(DecodeSwappedTarget(swapped)), 0, 2u, Unorm8PixelCode);
         CheckSwappedSamples(LoadSamples(*device, swapped, Format8888Unorm));
         std::puts("a 4x BGRA8 color target loaded through an RGBA8 texture descriptor reads its drawn color with red and blue swapped");
-        Block destination(BlockBytes);
-        struct ReleaseIndexDevice {
-            std::unique_ptr<AgcDriver::VulkanDevice>& device;
-            ~ReleaseIndexDevice() { device.reset(); }
-        } releaseIndexDevice{device};
         CheckNativeIndices(*device, block, destination);
         return 0;
     } catch (const std::exception& error) {
