@@ -498,6 +498,7 @@ private:
     std::vector<std::unique_ptr<Texture>> retiredTextures;
     VkDeviceSize allocationBytes = 0;
     std::vector<GuestMemory::UnchangedQuery> dccRanges;
+    std::array<std::vector<std::byte>, 2> initialMetadata;
     std::vector<std::byte> initialColor;
     std::optional<std::uint32_t> paddingFill;
     std::unique_ptr<Buffer> initialUpload;
@@ -579,6 +580,8 @@ private:
         if (!cmask.empty()) GuestMemory::Read(use.cmaskAddress, cmask);
         const auto clear = MultisampledDccClear(use, dcc, cmask);
         Require(GuestMemory::UnchangedSinceAll(dccRanges), "initial multisampled DCC contents changed during import");
+        initialMetadata = {std::move(dcc), std::move(cmask)};
+        for (std::size_t index = 1; index < dccRanges.size(); ++index) GuestMemory::ObserveDccStoreRange_nid_no_patch(dccRanges[index].address, dccRanges[index].bytes);
         return clear;
     }
 
@@ -601,9 +604,53 @@ private:
         for (const auto& range : dccRanges) {
             requireDccRange(GuestMemory::Watched(range.address, range.bytes), range, "multisampled DCC target reuse requires watched guest memory");
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
-            requireDccRange(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation) || !GuestMemory::StoredOver(range.address, range.bytes, range.generation), range, "writes to a resident multisampled DCC target or its metadata are not implemented");
+            const bool unchanged = GuestMemory::UnchangedSince(range.address, range.bytes, range.generation);
+            const char* reason = "coarse-unchanged";
+            const bool stored = !unchanged && GuestMemory::StoredOverWithReason_nid_no_patch(range.address, range.bytes, range.generation, &reason);
+            static std::atomic<unsigned> observed{0};
+            if (stored || (!unchanged && observed.fetch_add(1, std::memory_order_relaxed) < 24)) {
+                const auto* plane = range.address == target.address ? "color" : range.address == target.dccAddress ? "DCC" : "CMASK";
+                std::fprintf(stderr, "[dcc-rejection-observe] plane=%s address=0x%llx bytes=0x%zx generation=%llu samples=%u unchanged=%d stored=%d reason=%s\n", plane, static_cast<unsigned long long>(range.address), range.bytes, static_cast<unsigned long long>(range.generation), target.samples, unchanged, stored, reason);
+            }
+            if (stored && range.address != target.address) observeMetadata(range);
+            requireDccRange(unchanged || !stored, range, "writes to a resident multisampled DCC target or its metadata are not implemented");
             if (auto* recorder = Recorder::Active(); recorder != nullptr) requireDccRange(!recorder->PendingWriteOverlaps(range.address, range.bytes), range, "pending writes to a resident multisampled DCC target or its metadata are not implemented");
         }
+    }
+
+    void observeMetadata(const GuestMemory::UnchangedQuery& range) const {
+        const auto index = range.address == target.dccAddress ? 0u : 1u;
+        const auto* plane = index == 0u ? "DCC" : "CMASK";
+        const auto& initial = initialMetadata[index];
+        std::vector<std::byte> current(range.bytes);
+        if (initial.size() != current.size() || GuestMemory::CopyMapped(range.address, current) != GuestMemory::Compare::Equal) {
+            std::fprintf(stderr, "[dcc-metadata-observe] plane=%s snapshot-unavailable\n", plane);
+            return;
+        }
+        std::array<std::size_t, 256> before{}, after{};
+        std::size_t changed = 0, first = range.bytes, last = 0, changedPages = 0;
+        bool pageChanged = false;
+        for (std::size_t offset = 0; offset < current.size(); ++offset) {
+            ++before[std::to_integer<unsigned>(initial[offset])];
+            ++after[std::to_integer<unsigned>(current[offset])];
+            if (initial[offset] != current[offset]) {
+                ++changed;
+                first = std::min(first, offset);
+                last = offset;
+                pageChanged = true;
+            }
+            if ((offset + 1u) % 4096u == 0u || offset + 1u == current.size()) {
+                changedPages += pageChanged;
+                pageChanged = false;
+            }
+        }
+        const auto* recorder = Recorder::Active();
+        const bool pending = recorder != nullptr && recorder->PendingWriteOverlaps(range.address, range.bytes);
+        std::fprintf(stderr, "[dcc-metadata-observe] plane=%s address=0x%llx bytes=0x%zx changed=%zu first=0x%zx last=0x%zx changedPages=%zu pending=%d initial:", plane, static_cast<unsigned long long>(range.address), range.bytes, changed, first, last, changedPages, pending);
+        for (unsigned key = 0; key < before.size(); ++key) if (before[key] != 0) std::fprintf(stderr, " %02x=%zu", key, before[key]);
+        std::fprintf(stderr, " current:");
+        for (unsigned key = 0; key < after.size(); ++key) if (after[key] != 0) std::fprintf(stderr, " %02x=%zu", key, after[key]);
+        std::fprintf(stderr, "\n");
     }
 
     void transitionLayout(VkImageLayout next, VkAccessFlags sourceAccess, VkAccessFlags destinationAccess) {
