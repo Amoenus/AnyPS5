@@ -1350,6 +1350,21 @@ void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     Require(refusal.find("a shader buffer write") != std::string::npos, "a writable native buffer alias lost its refusal: " + refusal);
     CheckUniform(LoadSamples(*device, block), Ones, "after a refused native buffer write");
     std::puts("native buffer publication: writable aliases remain refused without changing native samples");
+    arm();
+    const auto* beforeBegin = reinterpret_cast<const std::byte*>(block.data);
+    const std::vector<std::byte> before(beforeBegin, beforeBegin + block.bytes);
+    refusal.clear();
+    try {
+        const auto alias = CompileBufferLoad(*device, block.Address() + 4u, block.Address());
+        static_cast<void>(device->PrepareDispatch(alias, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data())));
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find("a shader buffer write") != std::string::npos, "an overlapping read-only binding allowed a writable native alias during preparation: " + refusal);
+    Require(std::equal(before.begin(), before.end(), beforeBegin), "a rejected writable alias published its overlapping read-only source");
+    Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * Samples * 8u, "a rejected writable alias retired its native owner");
+    CheckUniform(LoadSamples(*device, block), Ones, "after a refused overlapping read-only and writable binding");
+    std::puts("native buffer publication: overlapping read-only and writable bindings are refused before publication, with bytes and native owner retained");
 }
 
 ShaderRecompiler::RecompileResult CompileMovedVertex(AgcDriver::VulkanDevice& device, std::uint64_t address) {
