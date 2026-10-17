@@ -774,7 +774,7 @@ void RequirePublicationRefused(const AgcDriver::Graphics::Context& context, cons
     Require(refusal.find(expected) != std::string::npos, "native color publication was not refused: " + refusal);
 }
 
-void Publication(AgcDriver::VulkanDevice& device) {
+void Publication(AgcDriver::VulkanDevice& device, bool automatic = false) {
     using namespace AgcDriver::Graphics;
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
     std::uint32_t exercised = 0;
@@ -847,11 +847,18 @@ void Publication(AgcDriver::VulkanDevice& device) {
                     std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
                     MultisampleTargetView(context, color, retained, &oldImage);
                 }
-                PublishMultisampleTargetColor_nid_no_patch(context, color);
+                std::vector<std::byte> read(block.bytes);
+                if (automatic) {
+                    std::array<std::byte, 128> adjacent{};
+                    AgcDriver::GuestMemory::Read(block.Address() + colorBytes, adjacent);
+                    Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * fragments * 8u, "an adjacent CPU read retired the color owner");
+                    AgcDriver::GuestMemory::Read(block.Address(), read);
+                } else {
+                    PublishMultisampleTargetColor_nid_no_patch(context, color);
+                    AgcDriver::GuestMemory::Read(block.Address(), read);
+                }
                 RequireNoMultisampleTarget(block.Address(), colorBytes, "after explicit publication");
                 RequireReadbackRefused(context, color, "requires an existing resident target");
-                std::vector<std::byte> read(block.bytes);
-                AgcDriver::GuestMemory::Read(block.Address(), read);
                 Require(read == expected, "published guest color differs from MIMG samples, padding or neighboring bytes");
                 Draw(device, state);
                 Require(LoadSamples(device, block, fragments, pipeBankXor) == loaded, "a fresh target did not import the published samples");
@@ -880,19 +887,115 @@ void Publication(AgcDriver::VulkanDevice& device) {
             NoteColorMetadataFill(completed->Address(), completed->bytes, FillOnes);
         });
     }
-    PublishMultisampleTargetColor_nid_no_patch(context, color);
+    if (!automatic) PublishMultisampleTargetColor_nid_no_patch(context, color);
     std::vector<std::uint32_t> read(completed->bytes / sizeof(std::uint32_t));
     AgcDriver::GuestMemory::Read(completed->Address(), std::as_writable_bytes(std::span(read)));
     Require(std::all_of(read.begin(), read.end(), [](const auto word) { return word == FillOnes; }), "publication captured its guest baseline before producer completions");
     std::puts("native color publication: known full fill from a producer completion precedes the publication baseline");
 }
 
+alignas(256) constexpr std::array<std::uint32_t, 7> BufferLoadCode{0x34020082u, 0xe8001000u | (20u << 19u), 0x80000201u, 0xbf8c0000u, 0xe0701000u, 0x80010201u, 0xbf810000u};
+
+ShaderRecompiler::RecompileResult CompileBufferLoad(AgcDriver::VulkanDevice& device, std::uint64_t source, std::uint64_t destination) {
+    const std::array<std::uint32_t, 8> userData{
+        static_cast<std::uint32_t>(source), static_cast<std::uint32_t>((source >> 32u) & 0xffffu), Threads * 4u, 0x31016facu,
+        static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>((destination >> 32u) & 0xffffu), Threads * 4u, 0x31016facu
+    };
+    const std::span<const std::uint32_t> code(BufferLoadCode);
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0u, {false, false, false}, false, 1};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
+        {32, 0, userData, compute, std::nullopt, std::nullopt, memory}, device.Target(), {0, 0, 0, 128}
+    };
+    request.useCache = false;
+    return ShaderRecompiler::Recompile(request);
+}
+
+void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+    using namespace AgcDriver::Graphics;
+    Block block(4u * BlockBytes);
+    Block output(2u * 1024u * 1024u);
+    struct ReleaseDevice {
+        std::unique_ptr<AgcDriver::VulkanDevice>& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const auto color = DecodeTarget(block);
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    const auto bytes = static_cast<std::size_t>(MultisampledColorBytes(color));
+    const auto warm = CompileBufferLoad(*device, block.Address(), output.Address());
+    std::shared_ptr<const AgcDriver::Recipe> recipe;
+    const auto check = [&](const auto& action, bool edge, std::uint32_t value) {
+        const std::span words(reinterpret_cast<std::uint32_t*>(output.data), Threads * 2u);
+        std::fill(words.begin(), words.end(), 0xdeadbeefu);
+        action();
+        device->WaitIdle();
+        for (std::size_t index = 0; index < Threads; ++index) Require(words[index] == (edge && index != 0u ? 0u : value), "a native buffer consumer read stale or reordered color words at lane " + std::to_string(index));
+        Require(std::all_of(words.begin() + Threads, words.end(), [](auto word) { return word == 0xdeadbeefu; }), "a native buffer consumer changed its output boundary");
+    };
+    const auto dispatch = [&](const auto& program) { device->Dispatch(program, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data())); };
+    check([&] { device->Dispatch(warm, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), nullptr, &recipe); }, false, 0u);
+    Require(recipe != nullptr, "the buffer publication fixture did not capture a recipe");
+    const auto hit = device->PrepareRecipe(recipe, false);
+    Require(hit != nullptr, "the buffer publication fixture did not prepare a recipe hit");
+    const auto deferredProgram = CompileBufferLoad(*device, block.Address() + Threads * 4u, output.Address());
+    const auto prepared = device->PrepareDispatch(deferredProgram, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
+    Require(prepared != nullptr, "the buffer publication fixture did not prepare a deferred dispatch");
+    const std::vector<std::byte> zeros(bytes);
+    const auto arm = [&] {
+        AgcDriver::GuestMemory::Write(block.Address(), zeros);
+        Draw(*device, TargetState(color));
+        NoteColorMetadataFill(block.Address(), bytes, FillOnes);
+        CheckUniform(LoadSamples(*device, block), Ones, "before a native buffer consumer");
+    };
+    arm();
+    check([&] { dispatch(CompileBufferLoad(*device, block.Address() + bytes, output.Address())); }, false, 0u);
+    Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * Samples * 8u, "a neighboring logical buffer retired the native owner");
+    check([&] { dispatch(warm); }, false, FillOnes);
+    RequireNoMultisampleTarget(block.Address(), bytes, "after warmed buffer publication");
+    std::puts("native buffer publication: adjacent range retains owner; warmed dispatch reads native words");
+    arm();
+    check([&] { dispatch(CompileBufferLoad(*device, block.Address() + 4u, output.Address())); }, false, FillOnes);
+    std::puts("native buffer publication: fresh dispatch reads native words");
+    arm();
+    check([&] { dispatch(CompileBufferLoad(*device, block.Address() + bytes - 4u, output.Address())); }, true, FillOnes);
+    std::puts("native buffer publication: edge range preserves the neighboring words");
+    arm();
+    check([&] { device->Dispatch(deferredProgram, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), prepared); }, false, FillOnes);
+    std::puts("native buffer publication: deferred dispatch refreshes the captured input");
+    arm();
+    check([&] {
+        AgcDriver::VulkanDevice::IndirectOutcome outcome{};
+        device->DispatchRecipe(warm, 1u, 1u, 1u, 0u, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), hit, outcome);
+    }, false, FillOnes);
+    std::puts("native buffer publication: recipe dispatch reads native words");
+    arm();
+    std::string refusal;
+    try {
+        dispatch(CompileBufferLoad(*device, block.Address() + bytes, block.Address()));
+        device->WaitIdle();
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find("a shader buffer write") != std::string::npos, "a writable native buffer alias lost its refusal: " + refusal);
+    CheckUniform(LoadSamples(*device, block), Ones, "after a refused native buffer write");
+    std::puts("native buffer publication: writable aliases remain refused without changing native samples");
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
-        const auto device = OpenVulkanTestDevice();
+        auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--buffer-publication") {
+            BufferPublication(device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--cpu-publication") {
+            Publication(*device, true);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--publication") {
             Publication(*device);
             return 0;
