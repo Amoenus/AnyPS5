@@ -3071,15 +3071,6 @@ void verifyPixelRequestSerialization() {
     const auto encoded = serializer.Serialize(minimal);
     require(requestPrefix(encoded, 8u) == "NVNQQSEAAAA=", "new requests did not use serialization version 33");
     require(serializer.Deserialize(encoded).request.context.pixel->targetOutputType == minimal.context.pixel->targetOutputType, "attachment numeric types did not round-trip");
-    const auto typedBytes = decodeBase64(encoded);
-    for (std::size_t available = 0; available < 8u; ++available) {
-        auto truncated = typedBytes;
-        truncated.resize(truncated.size() - 8u + available);
-        expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(truncated))); }, "truncated data", "a truncated attachment numeric-type array was accepted");
-    }
-    auto invalidType = typedBytes;
-    invalidType.back() = static_cast<std::uint8_t>(ColorOutputType::Sint) + 1u;
-    expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalidType))); }, "invalid color output type", "an invalid attachment numeric type was accepted");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
     withFallbacks.context.linkedCallFallbacks = fallbacks;
@@ -3311,6 +3302,15 @@ void verifyVertexInfoVersion19() {
     pixel.context.pixel = ShaderPixelStageInfo{};
     pixel.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     const auto encodedPixel = serializer.Serialize(pixel);
+    const auto typedBytes = decodeBase64(encodedPixel);
+    for (std::size_t available = 0; available < 8u; ++available) {
+        auto truncated = typedBytes;
+        truncated.resize(truncated.size() - 8u + available);
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(truncated))); }, "truncated data", "a truncated attachment numeric-type array was accepted");
+    }
+    auto invalidType = typedBytes;
+    invalidType.back() = static_cast<std::uint8_t>(ColorOutputType::Sint) + 1u;
+    expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalidType))); }, "invalid color output type", "an invalid attachment numeric type was accepted");
     auto version32Pixel = decodeBase64(encodedPixel);
     version32Pixel.resize(version32Pixel.size() - 8u);
     version32Pixel[4] = 32u;
