@@ -124,14 +124,14 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_import_audit.py)
         add_test(NAME unwrap_self COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_unwrap_self.py)
-        foreach(shard RANGE 0 5)
+        foreach(shard RANGE 0 11)
             if(shard EQUAL 0)
                 set(conventions_test_name conventions_function_bodies)
             else()
                 set(conventions_test_name conventions_function_bodies_shard_${shard})
             endif()
             add_test(NAME ${conventions_test_name} COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_conventions_comments.py --shard ${shard}/6)
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_conventions_comments.py --shard ${shard}/12)
             set_tests_properties(${conventions_test_name} PROPERTIES TIMEOUT 30)
         endforeach()
         add_test(NAME conventions_wrapped_declarations COMMAND ${Python3_EXECUTABLE}

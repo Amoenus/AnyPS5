@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from check_conventions import STUB_BODY, SYSTEM_DEPENDENCY, Check, function_body, links, output
 
-CONVENTIONS_TEST_SHARDS = 6
+CONVENTIONS_TEST_SHARDS = 12
 
 
 def iter_test_cases(suite):
