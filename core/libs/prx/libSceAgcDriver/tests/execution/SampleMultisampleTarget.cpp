@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -25,9 +26,20 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
+
+namespace AgcDriver {
+
+struct VulkanDeviceTestAccess {
+    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+
+}
 
 namespace {
 
@@ -381,12 +393,125 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
     Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
 }
 
+alignas(256) std::array<std::uint32_t, 12> VertexValues{};
+
+void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state, std::uint64_t address) {
+    alignas(256) static constexpr std::array<std::uint32_t, 7> code{
+        0xbe822100u, 0x34020a84u, 0xe0781000u, 0x80010801u, 0xf80008cfu, 0x0b0a0908u, 0xbf810000u,
+    };
+    VertexValues.fill(0xdeadbeefu);
+    const auto output = reinterpret_cast<std::uintptr_t>(VertexValues.data());
+    std::vector<std::uint32_t> userData(12u, 0u);
+    userData[0] = 0x10000000u;
+    userData[1] = 1u;
+    userData[4] = static_cast<std::uint32_t>(output);
+    userData[5] = static_cast<std::uint32_t>((output >> 32u) & 0xffffu);
+    userData[6] = static_cast<std::uint32_t>(sizeof(VertexValues));
+    userData[7] = 0x31016facu;
+    ShaderRecompiler::ShaderVertexStageInfo info{};
+    info.resourcesNum = 1u;
+    info.resources[0].fields = {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), 16u, 0x3104dfacu};
+    info.resourcesDst[0] = {8, 4, 0, 0};
+    info.fetchAttribReg = 8u;
+    info.fetchBufferReg = 10u;
+    info.fetchEmbedded = true;
+    const std::array<ShaderRecompiler::MemoryRegion, 1> vertexMemory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(std::span(code))}}};
+    ShaderRecompiler::RecompileRequest vertexRequest{
+        {ShaderStage::Vertex, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
+        {64u, 0, userData, std::nullopt, std::nullopt, info, vertexMemory},
+        device.Target(), {0, 0, 0, 64}
+    };
+    vertexRequest.useCache = false;
+    const auto vertex = ShaderRecompiler::Recompile(vertexRequest);
+    Require(vertex.vertexAttributes.size() == 1u, "the native vertex probe did not create a fixed-function attribute");
+    const auto vertexPush = static_cast<std::uint32_t>(vertex.pushConstants.size());
+    const auto pixelAddress = reinterpret_cast<std::uintptr_t>(PixelCode.data());
+    const std::array<ShaderRecompiler::MemoryRegion, 1> pixelMemory{{{pixelAddress, std::as_bytes(std::span(PixelCode))}}};
+    const AgcDriver::Registers registers{{0x1b6, 0x8000}, {0x1b3, 0}, {0x1b4, 0}, {0x203, 0}, {0x1c5, Float32Export}};
+    ShaderRecompiler::RecompileRequest pixelRequest{
+        {ShaderStage::Fragment, pixelAddress, PixelCode, 0, {}},
+        {64u, 0, {}, std::nullopt, AgcDriver::Graphics::DecodePixelStageInfo(registers, AgcDriver::Graphics::ExportMappings(state)), std::nullopt, pixelMemory},
+        device.Target(), PixelPushLayout(vertexPush, device.Target())
+    };
+    pixelRequest.useCache = false;
+    const auto pixel = ShaderRecompiler::Recompile(pixelRequest);
+    const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderStage::Vertex, &vertex, 0u}, {ShaderStage::Fragment, &pixel, PixelPushOffset(vertexPush, device.Target())}}};
+    const AgcDriver::Pm4::DrawParameters draw{0u, 3u, 0u, 1u, 0u, false};
+    device.Draw(state, draw, shaders);
+    device.WaitIdle();
 }
 
-int main() {
+void CheckVertexValues(std::uint64_t address) {
+    std::array<std::uint32_t, 4> expected{};
+    std::memcpy(expected.data(), reinterpret_cast<const void*>(address), sizeof(expected));
+    for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
+        for (std::size_t component = 0; component < expected.size(); ++component) {
+            Require(VertexValues[vertex * 4u + component] == expected[component], "the fixed-function vertex probe did not observe the original guest bytes");
+        }
+    }
+}
+
+int NativeVertexInput(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+    Block source(4u * BlockBytes);
+    Block destination(BlockBytes);
+    struct ReleaseDevice {
+        std::unique_ptr<AgcDriver::VulkanDevice>& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    if (context.hostImportAlignment == 0u) {
+        std::puts("native vertex input not tested: host imports unavailable");
+        return VulkanTestSkipped;
+    }
+    const auto color = DecodeTarget(source);
+    const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
+    Require(colorBytes >= 16u && colorBytes + 16u <= source.bytes, "the native vertex probe has no neighboring range");
+    constexpr std::array<float, 4> element{0.25f, -2.0f, 7.5f, 1.0f};
+    std::memcpy(source.data, element.data(), sizeof(element));
+    std::memcpy(source.data + colorBytes - 8u, element.data(), 8u);
+    std::memcpy(source.data + colorBytes, element.data(), sizeof(element));
+    Draw(*device, TargetState(color));
+    AgcDriver::Graphics::NoteColorMetadataFill(source.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
+    CheckUniform(LoadSamples(*device, source), Ones, "before the fixed-function vertex probe");
+    const auto neighbor = source.Address() + colorBytes;
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        const auto* native = AgcDriver::Graphics::HostImportFor(context, source.Address(), 16u);
+        const auto* adjacent = AgcDriver::Graphics::HostImportFor(context, neighbor, 16u);
+        Require(native != nullptr && native == adjacent, "the native and neighboring vertices do not share an import");
+    }
+    AgcDriver::Graphics::RequireNoMultisampleTarget(neighbor, 16u, "the vertex neighbor control");
+    const auto state = TargetState(DecodeTarget(destination));
+    std::uint32_t missed = 0u;
+    for (const bool edge : {false, true}) {
+        DrawVertexInput(*device, state, neighbor);
+        CheckVertexValues(neighbor);
+        const auto address = edge ? neighbor - 8u : source.Address();
+        std::string refusal;
+        try {
+            DrawVertexInput(*device, state, address);
+            CheckVertexValues(address);
+        } catch (const std::exception& error) {
+            refusal = error.what();
+        }
+        const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
+        Require(refusal.empty() || refused, "the native vertex input failed for another reason: " + refusal);
+        std::printf("native vertex %s: refused=%u neighbor=passed original-guest-values=%u detail=%s\n", edge ? "edge" : "base", refused ? 1u : 0u, refused ? 0u : 12u, refusal.c_str());
+        missed += refused ? 0u : 1u;
+    }
+    CheckUniform(LoadSamples(*device, source), Ones, "after fixed-function vertex inputs");
+    std::puts("native vertex controls: shared-import=1 source-samples=1024 neighbor-values=passed");
+    Require(missed == 0u, "native vertex inputs missed " + std::to_string(missed) + " resident-image refusals");
+    return 0;
+}
+
+}
+
+int main(int argc, char** argv) {
     try {
-        const auto device = OpenVulkanTestDevice();
+        auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--native-vertex-input") return NativeVertexInput(device);
         Block block(4u * BlockBytes);
         Block other(BlockBytes);
         const auto color = DecodeTarget(block);
