@@ -600,7 +600,7 @@ void CheckDrawFeedback() {
     std::puts("Native depth feedback refused through the draw resource path");
 }
 
-enum class ClearFault { None, PartialStore, CpuWrite, DepthWrite, BadMetadata, UnprovenDispatch, PendingWrite, Overlap };
+enum class ClearFault { None, PartialStore, CpuWrite, DepthWrite, BadMetadata, UnprovenDispatch, PendingWrite, Overlap, SameValuePartialStore };
 
 void CheckClearDispatch() {
     const std::array<std::uint32_t, 17> code{
@@ -743,13 +743,26 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 Require(DepthSurfaceView(context, target) == view, "updating the native clear value replaced its attachment");
                 const std::uint32_t clearPattern = clearOne ? (depthOnly ? 0xfffffff0u : 0xfffc00f0u) : 0u;
                 const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
+                if (fault == ClearFault::SameValuePartialStore) {
+                    for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) {
+                        std::uint32_t held = 0u;
+                        std::memcpy(&held, metadata.Data() + i * 4u, 4u);
+                        Require(held == clearPattern, "same-value partial HTILE fixture does not already hold the clear pattern");
+                    }
+                }
                 NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
                 if (fault == ClearFault::Overlap) NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
-                const auto storedBytes = fault == ClearFault::PartialStore ? 4u : static_cast<std::size_t>(metadataBytes);
+                const auto storedBytes = (fault == ClearFault::PartialStore || fault == ClearFault::SameValuePartialStore) ? 4u : static_cast<std::size_t>(metadataBytes);
+                const auto storeGeneration = AgcDriver::GuestMemory::TrackerGeneration();
                 AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, storedBytes, [&] {
                     for (std::size_t i = 0u; i < storedBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &clearPattern, 4u);
                     if (fault == ClearFault::BadMetadata) metadata.Data()[0] = std::byte{0x0f};
                 });
+                if (fault == ClearFault::SameValuePartialStore) {
+                    Require(AgcDriver::GuestMemory::StoredOver(target.htileAddress, metadataBytes, storeGeneration), "same-value partial HTILE store has no overlap");
+                    Require(!AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, storeGeneration), "same-value partial HTILE store proved whole-range coverage");
+                    std::printf("Same-value partial HTILE proof: overlap=1 complete=0 stored=%zu metadata=%zu\n", static_cast<std::size_t>(storedBytes), static_cast<std::size_t>(metadataBytes));
+                }
                 if (fault == ClearFault::CpuWrite) metadata.Data()[metadataBytes - 1u] ^= std::byte{0x01};
                 if (fault == ClearFault::DepthWrite) memory.Data()[bytes - 1u] ^= std::byte{0x01};
                 if (fault == ClearFault::PendingWrite) QueueTargetByteWrite(context, recorder, target.htileAddress, std::byte{0});
@@ -762,6 +775,10 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
                 batch.SubmitAndWait();
                 check(false, 0.0f);
+                if (fault == ClearFault::SameValuePartialStore) {
+                    std::printf("Same-value partial HTILE store accepted: stored=%zu metadata=%zu; full native clear sampled correctly\n", static_cast<std::size_t>(storedBytes), static_cast<std::size_t>(metadataBytes));
+                    return;
+                }
             }
             std::printf("Native depth completed clear format=%d samples=%u depthOnly=%u value=%u cycles=3\n", format, fragments, depthOnly, one);
         }
@@ -1100,6 +1117,11 @@ int main(int argc, char** argv) {
         const auto context = device->GetContext();
         const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         Require(DepthSupported(context, VK_FORMAT_D32_SFLOAT, 4u), "the native depth regression requires sampled D32 with four samples");
+        if (argc == 2 && std::string_view(argv[1]) == "--same-value-partial-clear") {
+            TargetRefuses([&] { CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::SameValuePartialStore); }, "no complete tracked HTILE store");
+            std::puts("Same-value partial HTILE clear refused");
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--clear-refusals") {
             for (const auto& [fault, expected] : std::array{
                      std::pair{ClearFault::PartialStore, "no complete tracked HTILE store"},
