@@ -211,6 +211,7 @@ struct Context {
     bool variableDescriptorCount = false;
     std::uint32_t imageTableCapacity = 0;
     std::uint32_t samplerTableCapacity = 0;
+    bool individuallyFreeDescriptorSets = false;
     bool geometryShader = false;
     bool sampleRateShading = false;
     bool storageImageMultisample = false;

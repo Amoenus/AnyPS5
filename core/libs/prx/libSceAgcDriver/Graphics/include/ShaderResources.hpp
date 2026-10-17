@@ -100,6 +100,7 @@ private:
     PFN_vkDestroyDescriptorSetLayout destroyLayout;
     PFN_vkDestroyDescriptorPool destroyPool;
     PFN_vkResetDescriptorPool resetPool;
+    PFN_vkFreeDescriptorSets freeDescriptorSets = nullptr;
     mutable std::mutex mutex;
     std::map<std::vector<std::uint32_t>, VkDescriptorSetLayout> layouts;
     struct Pool {
