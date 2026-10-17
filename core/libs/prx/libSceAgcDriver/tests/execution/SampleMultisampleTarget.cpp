@@ -996,8 +996,7 @@ void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     std::puts("native buffer publication: writable aliases remain refused without changing native samples");
 }
 
-ShaderRecompiler::RecompileResult CompileMovedVertex(AgcDriver::VulkanDevice& device) {
-    const auto address = reinterpret_cast<std::uintptr_t>(Triangle.data());
+ShaderRecompiler::RecompileResult CompileMovedVertex(AgcDriver::VulkanDevice& device, std::uint64_t address) {
     const std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (16u << 16u), static_cast<std::uint32_t>(Triangle.size()), 0x01016facu};
     const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(VertexCode.data()), std::as_bytes(std::span(VertexCode))}}};
     ShaderRecompiler::RecompileRequest request{
@@ -1012,9 +1011,7 @@ ShaderRecompiler::RecompileResult CompileMovedVertex(AgcDriver::VulkanDevice& de
 std::vector<std::array<std::uint32_t, 4>> RasterMovedSnapshot(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::State& state, std::span<const AgcDriver::Graphics::CompiledShader> shaders, const AgcDriver::Graphics::ShaderResources& resources, const AgcDriver::Graphics::ShaderResources::DrawBindings& prepared) {
     using namespace AgcDriver::Graphics;
     const auto vertexInput = BuildVertexInputLayout(context, shaders.front().program->vertexAttributes);
-    Require(vertexInput.bindings.size() == 1u, "the moved raster fixture requires one vertex input");
-    AgcDriver::Graphics::Buffer vertices(context, sizeof(Triangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    std::memcpy(vertices.Bytes().data(), Triangle.data(), sizeof(Triangle));
+    Require(vertexInput.bindings.empty(), "the moved raster shader does not fetch positions through its guest buffer");
     constexpr auto pixelBytes = sizeof(std::array<std::uint32_t, 4>);
     constexpr auto resultBytes = Side * Side * pixelBytes;
     AgcDriver::Graphics::Buffer staging(context, resultBytes + 2u * pixelBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -1044,9 +1041,6 @@ std::vector<std::array<std::uint32_t, 4>> RasterMovedSnapshot(const AgcDriver::G
     pipeline.PushConstants(commands, PushConstantStages(shaders), pushes);
     if (prepared.allocation.set != VK_NULL_HANDLE) context.Resolved(&DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout(), 0u, 1u, &prepared.allocation.set, 0u, nullptr);
     if (prepared.fragmentAllocation.set != VK_NULL_HANDLE) context.Resolved(&DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout(), ShaderRecompiler::RuntimeAbi::FragmentDescriptorSet, 1u, &prepared.fragmentAllocation.set, 0u, nullptr);
-    const auto vertexBuffer = vertices.Handle();
-    constexpr VkDeviceSize vertexOffset = 0u;
-    context.Resolved(&DeviceFunctions::cmdBindVertexBuffers, "vkCmdBindVertexBuffers")(commands, 0u, 1u, &vertexBuffer, &vertexOffset);
     context.Resolved(&DeviceFunctions::cmdDraw, "vkCmdDraw")(commands, static_cast<std::uint32_t>(Triangle.size()), 1u, 0u, 0u);
     EndRenderPass(context, commands);
     RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
@@ -1070,6 +1064,7 @@ void MovedRasterPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     Block source(4u * BlockBytes);
     Block original(BlockBytes);
     Block destination(BlockBytes);
+    Block vertexData(BlockBytes);
     struct ReleaseDevice {
         std::unique_ptr<AgcDriver::VulkanDevice>& value;
         ~ReleaseDevice() { value.reset(); }
@@ -1084,10 +1079,12 @@ void MovedRasterPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     output.extent = {Side, Side};
     output.surfaceExtent = output.extent;
     output.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    output.componentMapping = 0xe4u;
     output.elementBytes = 16u;
     output.bytes = Side * Side * output.elementBytes;
     const auto state = TargetState(output);
-    auto vertex = CompileMovedVertex(*device);
+    std::memcpy(vertexData.data, Triangle.data(), sizeof(Triangle));
+    auto vertex = CompileMovedVertex(*device, vertexData.Address());
     alignas(256) static constexpr std::array<std::uint32_t, 9> code{
         0x7e020280u, 0xe0301000u, 0x80000201u, 0xbf8c3f70u, 0x7e000280u, 0x7e0602f2u, 0xf800180fu, 0x03010002u, 0xbf810000u,
     };
@@ -1108,7 +1105,7 @@ void MovedRasterPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     Require(binding != fragment.bindings.end() && binding->count == 1u && binding->guestDescriptor.size() == 4u && binding->bufferWritten.size() == 1u && !binding->bufferWritten[0], "the moved raster shader does not have one read-only guest buffer");
     const std::array<CompiledShader, 2> shaders{{{ShaderStage::Vertex, &vertex, 0u}, {ShaderStage::Fragment, &fragment, PixelPushOffset(vertexPush, device->Target())}}};
     auto resources = std::make_unique<ShaderResources>(context, shaders, output, 1u, 0u, 0u);
-    Require(resources->Reusable(), "the moved raster resources are not reusable");
+    Require(resources->Reusable(), "the moved raster resources are not reusable: " + resources->Describe());
     auto oldColor = DecodeTarget(original);
     oldColor.tileMode = ColorTileMode::Standard4KB;
     oldColor.bytes = ColorTargetLayout(Side, Side, oldColor.tileMode, oldColor.elementBytes).Bytes();
@@ -1151,7 +1148,7 @@ void MovedRasterPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
         for (std::uint32_t x = 0; x < Side; ++x) {
             const auto& pixel = pixels[y * Side + x];
             const auto distance = std::min({EdgeDistance(x + 0.5, y + 0.5, 0u), EdgeDistance(x + 0.5, y + 0.5, 1u), EdgeDistance(x + 0.5, y + 0.5, 2u)});
-            Require(pixel == drawn || pixel == std::array<std::uint32_t, 4>{}, "the moved fragment shader rendered stale or unexpected buffer bits at pixel " + std::to_string(y * Side + x));
+            Require(pixel == drawn || pixel == std::array<std::uint32_t, 4>{}, "the moved fragment shader rendered stale or unexpected buffer bits at pixel " + std::to_string(y * Side + x) + ": expected red " + std::to_string(word) + ", got " + std::to_string(pixel[0]) + "," + std::to_string(pixel[1]) + "," + std::to_string(pixel[2]) + "," + std::to_string(pixel[3]));
             covered += pixel == drawn ? 1u : 0u;
             if (std::fabs(distance) < EdgeMargin) continue;
             ++checked;
