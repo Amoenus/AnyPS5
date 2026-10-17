@@ -316,7 +316,7 @@ jobs:
         run: echo 'C:\winlibs\mingw64\bin' >> "$GITHUB_PATH"
       - run: cmake -S . -B build-relinker -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DANYPS5_RELINKER_ONLY=ON -DBUILD_TESTING=ON
       - run: cmake --build build-relinker --parallel 3
-      - run: ctest --test-dir build-relinker --output-on-failure --timeout 120
+      - run: ctest --test-dir build-relinker --output-on-failure --timeout 120 --parallel 4
 
   register-context:
     needs: eligibility
