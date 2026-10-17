@@ -957,6 +957,10 @@ struct WriteTracker {
         std::uint32_t dropped = 0;
         std::uint32_t next = 0;
         std::array<DriverPiece, 4> pieces{};
+        std::uint32_t possibleWhole = 0;
+        std::uint32_t possibleDropped = 0;
+        std::uint32_t possibleNext = 0;
+        std::array<DriverPiece, 4> possiblePieces{};
 
         bool covers(std::uint32_t begin, std::uint32_t end, std::uint64_t generation) const {
             if (generation == 0 || begin >= end || dropped > generation) return false;
@@ -1009,7 +1013,7 @@ struct WriteTracker {
 #endif
     }
 
-    void stampWatchedPart(std::uint64_t address, std::uint64_t end, std::uint32_t stampGeneration) {
+    void stampWatchedPart(std::uint64_t address, std::uint64_t end, std::uint32_t stampGeneration, bool complete) {
 #ifdef _WIN32
         address = std::max<std::uint64_t>(address, base);
         end = std::min<std::uint64_t>(end, base + size);
@@ -1023,23 +1027,33 @@ struct WriteTracker {
             const auto stop = std::min<std::uint64_t>(end, blockBegin(block) + WriteBlockBytes);
             if (!blockPartWatched(first, stop)) continue;
             stamp(block, stampGeneration, StampKind::Driver);
-            noteDriverStore(block, address, end, stampGeneration);
+            noteDriverStore(block, address, end, stampGeneration, complete);
         }
     }
 
-    void noteDriverStore(std::uint64_t block, std::uint64_t address, std::uint64_t end, std::uint32_t stampGeneration) {
+    void noteDriverStore(std::uint64_t block, std::uint64_t address, std::uint64_t end, std::uint32_t stampGeneration, bool complete) {
         const auto begin = blockBegin(block);
         const auto from = static_cast<std::uint32_t>(std::max(address, begin) - begin);
         const auto to = static_cast<std::uint32_t>(std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin);
         if (from == 0 && to == WriteBlockBytes) {
             auto& entry = driverPieces[block];
-            entry = DriverPieces{};
-            entry.whole = stampGeneration;
+            if (complete) {
+                entry = DriverPieces{};
+                entry.whole = stampGeneration;
+            } else {
+                entry.possibleWhole = stampGeneration;
+                entry.possibleDropped = 0;
+                entry.possibleNext = 0;
+                entry.possiblePieces = {};
+            }
             return;
         }
         auto& entry = driverPieces[block];
-        auto& slot = entry.pieces[entry.next++ % entry.pieces.size()];
-        entry.dropped = std::max(entry.dropped, slot.generation);
+        auto& pieces = complete ? entry.pieces : entry.possiblePieces;
+        auto& dropped = complete ? entry.dropped : entry.possibleDropped;
+        auto& next = complete ? entry.next : entry.possibleNext;
+        auto& slot = pieces[next++ % pieces.size()];
+        dropped = std::max(dropped, slot.generation);
         slot = {stampGeneration, from, to};
     }
 
@@ -1660,12 +1674,12 @@ std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::func
         ++tracker.generation;
         if (!tracker.watched || !tracker.covers(stored.first, static_cast<std::size_t>(stored.second - stored.first))) {
             tracker.noteUnstampedStore(stored.first, stored.second);
-            if (tracker.watched) tracker.stampWatchedPart(stored.first, stored.second, tracker.generation);
+            if (tracker.watched) tracker.stampWatchedPart(stored.first, stored.second, tracker.generation, true);
             return 0;
         }
         for (auto block = tracker.blockOf(stored.first); block <= tracker.blockOf(stored.second - 1); ++block) {
             tracker.stamp(block, tracker.generation, StampKind::Driver);
-            tracker.noteDriverStore(block, stored.first, stored.second, tracker.generation);
+            tracker.noteDriverStore(block, stored.first, stored.second, tracker.generation, true);
         }
         return tracker.generation;
     };
@@ -1698,7 +1712,7 @@ std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> so
     });
 }
 
-std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
+static std::uint64_t markWritten(std::uint64_t address, std::size_t bytes, bool complete) {
     auto& tracker = Tracker();
     auto lock = lockTracker(tracker);
     tracker.initialize();
@@ -1706,7 +1720,7 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
     ++tracker.generation;
     if (!tracker.watched || !tracker.covers(address, bytes)) {
         tracker.noteUnstampedStore(address, address + bytes);
-        if (tracker.watched) tracker.stampWatchedPart(address, address + bytes, tracker.generation);
+        if (tracker.watched) tracker.stampWatchedPart(address, address + bytes, tracker.generation, complete);
         return 0;
     }
     {
@@ -1732,9 +1746,17 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
     const auto last = tracker.blockOf(address + bytes - 1);
     for (auto block = first; block <= last; ++block) {
         tracker.stamp(block, tracker.generation, StampKind::Driver);
-        tracker.noteDriverStore(block, address, address + bytes, tracker.generation);
+        tracker.noteDriverStore(block, address, address + bytes, tracker.generation, complete);
     }
     return tracker.generation;
+}
+
+std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
+    return markWritten(address, bytes, true);
+}
+
+std::uint64_t MarkPossiblyWritten(std::uint64_t address, std::size_t bytes) {
+    return markWritten(address, bytes, false);
 }
 
 bool StoredOver(std::uint64_t address, std::size_t bytes, std::uint64_t generation) {
@@ -1745,7 +1767,36 @@ bool StoredOver(std::uint64_t address, std::size_t bytes, std::uint64_t generati
 #ifdef _WIN32
     if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(address, bytes)) return true;
 #endif
-    return tracker.storedOver(address, address + bytes, generation, false);
+    const auto end = address + bytes;
+    const auto first = tracker.blockOf(address);
+    const auto last = tracker.blockOf(end - 1);
+    for (auto block = first; block <= last; ++block) {
+        if (tracker.stampOf(block) <= generation) continue;
+        if (const auto found = tracker.cpuPages.find(block); found != tracker.cpuPages.end()) {
+            const auto begin = tracker.blockBegin(block);
+            const auto from = std::max(address, begin) - begin;
+            const auto to = std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin;
+            for (auto page = from / WritePageBytes; page <= (to - 1) / WritePageBytes; ++page) {
+                if (found->second.pages[page] > generation) return true;
+            }
+        } else if (tracker.cpuStampOf(block) > generation) {
+            return true;
+        }
+        const auto found = tracker.driverPieces.find(block);
+        if (found == tracker.driverPieces.end()) return true;
+        const auto& entry = found->second;
+        if (entry.whole > generation || entry.dropped > generation || entry.possibleWhole > generation || entry.possibleDropped > generation) return true;
+        const auto begin = tracker.blockBegin(block);
+        const auto from = std::max(address, begin) - begin;
+        const auto to = std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin;
+        for (const auto& piece : entry.pieces) {
+            if (piece.generation > generation && piece.begin < to && from < piece.end) return true;
+        }
+        for (const auto& piece : entry.possiblePieces) {
+            if (piece.generation > generation && piece.begin < to && from < piece.end) return true;
+        }
+    }
+    return false;
 }
 
 bool StoredAllSince_nid_no_patch(std::uint64_t address, std::size_t bytes, std::uint64_t generation) {
