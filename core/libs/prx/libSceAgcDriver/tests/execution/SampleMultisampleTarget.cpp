@@ -1013,11 +1013,11 @@ std::vector<std::array<std::uint32_t, 4>> RasterMovedSnapshot(const AgcDriver::G
     using namespace AgcDriver::Graphics;
     const auto vertexInput = BuildVertexInputLayout(context, shaders.front().program->vertexAttributes);
     Require(vertexInput.bindings.size() == 1u, "the moved raster fixture requires one vertex input");
-    Buffer vertices(context, sizeof(Triangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    AgcDriver::Graphics::Buffer vertices(context, sizeof(Triangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     std::memcpy(vertices.Bytes().data(), Triangle.data(), sizeof(Triangle));
     constexpr auto pixelBytes = sizeof(std::array<std::uint32_t, 4>);
     constexpr auto resultBytes = Side * Side * pixelBytes;
-    Buffer staging(context, resultBytes + 2u * pixelBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    AgcDriver::Graphics::Buffer staging(context, resultBytes + 2u * pixelBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     std::fill(staging.Bytes().begin(), staging.Bytes().end(), std::byte{0xa5});
     auto target = std::make_shared<RenderTarget>(context, state.color, false);
     Pipeline pipeline(context, state, vertexInput, resources, shaders, VK_IMAGE_LAYOUT_GENERAL);
