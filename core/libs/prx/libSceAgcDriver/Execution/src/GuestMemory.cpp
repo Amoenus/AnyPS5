@@ -877,6 +877,7 @@ struct WriteTracker {
         std::uint32_t generation = 0;
         std::uint32_t begin = 0;
         std::uint32_t end = 0;
+        bool complete = true;
     };
     struct DriverPieces {
         std::uint32_t whole = 0;
@@ -890,7 +891,7 @@ struct WriteTracker {
             while (begin < end) {
                 auto covered = begin;
                 for (const auto& piece : pieces) {
-                    if (piece.generation > generation && piece.begin <= begin && piece.end > covered) covered = piece.end;
+                    if (piece.complete && piece.generation > generation && piece.begin <= begin && piece.end > covered) covered = piece.end;
                 }
                 if (covered == begin) return false;
                 begin = covered;
@@ -918,11 +919,11 @@ struct WriteTracker {
         }
     }
 
-    void noteDriverStore(std::uint64_t block, std::uint64_t address, std::uint64_t end, std::uint32_t stampGeneration) {
+    void noteDriverStore(std::uint64_t block, std::uint64_t address, std::uint64_t end, std::uint32_t stampGeneration, bool complete = true) {
         const auto begin = blockBegin(block);
         const auto from = static_cast<std::uint32_t>(std::max(address, begin) - begin);
         const auto to = static_cast<std::uint32_t>(std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin);
-        if (from == 0 && to == WriteBlockBytes) {
+        if (complete && from == 0 && to == WriteBlockBytes) {
             auto& entry = driverPieces[block];
             entry = DriverPieces{};
             entry.whole = stampGeneration;
@@ -931,7 +932,7 @@ struct WriteTracker {
         auto& entry = driverPieces[block];
         auto& slot = entry.pieces[entry.next++ % entry.pieces.size()];
         entry.dropped = std::max(entry.dropped, slot.generation);
-        slot = {stampGeneration, from, to};
+        slot = {stampGeneration, from, to, complete};
     }
 
     std::uint32_t stampOf(std::uint64_t block) const {
@@ -1484,7 +1485,7 @@ std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> so
     });
 }
 
-std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
+std::uint64_t MarkWrittenWithCoverage_nid_no_patch(std::uint64_t address, std::size_t bytes, bool completeRange) {
     auto& tracker = Tracker();
     const auto lock = lockTracker(tracker);
     tracker.initialize();
@@ -1514,9 +1515,17 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
     const auto last = tracker.blockOf(address + bytes - 1);
     for (auto block = first; block <= last; ++block) {
         tracker.stamp(block, tracker.generation, StampKind::Driver);
-        tracker.noteDriverStore(block, address, address + bytes, tracker.generation);
+        tracker.noteDriverStore(block, address, address + bytes, tracker.generation, completeRange);
     }
     return tracker.generation;
+}
+
+std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
+    return MarkWrittenWithCoverage_nid_no_patch(address, bytes, true);
+}
+
+std::uint64_t MarkPossiblyWritten_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    return MarkWrittenWithCoverage_nid_no_patch(address, bytes, false);
 }
 
 bool StoredOver(std::uint64_t address, std::size_t bytes, std::uint64_t generation) {
