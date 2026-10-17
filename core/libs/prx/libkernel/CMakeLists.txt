@@ -263,6 +263,13 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(guest_filesystem PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        add_test_executable(guest_stat_long_host_path_tests ${LIBS_INCLUDE_DIR}/tests/GuestStatLongHostPath.cpp)
+        target_include_directories(guest_stat_long_host_path_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_stat_long_host_path_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_stat_long_host_path_tests)
+        add_test(NAME guest_stat_long_host_path COMMAND guest_stat_long_host_path_tests)
+        set_tests_properties(guest_stat_long_host_path PROPERTIES TIMEOUT 20 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     if(UNIX)
         add_test_executable(guest_host_standard_error_tests ${LIBS_INCLUDE_DIR}/tests/GuestHostStandardError.cpp)
