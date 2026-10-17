@@ -668,7 +668,7 @@ std::atomic<bool>& anyGuarded() {
 }
 
 void guardReads(std::uint64_t address, std::size_t bytes) {
-    SynchronizeMultisampleTargetRead_nid_no_patch(address, bytes);
+    RequireNoMultisampleTarget(address, bytes, "a CPU read");
 }
 
 void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
