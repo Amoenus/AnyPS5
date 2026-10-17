@@ -1,3 +1,4 @@
+#include "prx/libkernel/File/include/StartupFileObservation.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstddef>
@@ -847,17 +848,19 @@ int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
 }
 
 int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t offset) {
-    if (ExceedsTransferLimit(nbytes)) return PosixFailure(GUEST_EINVAL);
-    if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
-    if (offset < 0) return PosixFailure(GUEST_EINVAL);
-    if (FailPosixPositionedGuestSocket(d)) return -1;
-    const GuestArena::HostWrite destination(buf, nbytes);
-    if (!destination.Open()) return PosixFailure(GUEST_EFAULT);
-    if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
-    if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) return *archived;
-    char empty = 0;
-    const auto result = NativePread(d, buf == nullptr ? &empty : buf, nbytes, offset);
-    return result < 0 ? PosixFailure(SceErrorFromErrno(errno) & 0xffff) : result;
+    return StartupFileObservation::Observe_nid_no_patch(StartupFileObservation::Operation::PosixPositionedRead, d, nbytes, [&]() -> int64_t {
+        if (ExceedsTransferLimit(nbytes)) return PosixFailure(GUEST_EINVAL);
+        if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
+        if (offset < 0) return PosixFailure(GUEST_EINVAL);
+        if (FailPosixPositionedGuestSocket(d)) return -1;
+        const GuestArena::HostWrite destination(buf, nbytes);
+        if (!destination.Open()) return PosixFailure(GUEST_EFAULT);
+        if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
+        if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) return *archived;
+        char empty = 0;
+        const auto result = NativePread(d, buf == nullptr ? &empty : buf, nbytes, offset);
+        return result < 0 ? PosixFailure(SceErrorFromErrno(errno) & 0xffff) : result;
+    });
 }
 
 int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_t nbytes, int64_t offset) {
@@ -871,11 +874,13 @@ int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_
 }
 
 int64_t APS5_VABI read_nid_postfix(int d, void* buf, uint64_t nbytes) {
-    if (ExceedsTransferLimit(nbytes)) return PosixFailure(GUEST_EINVAL);
-    if (GuestSockets::IsOpen(d)) return GuestSockets::Read(d, buf, static_cast<size_t>(nbytes));
-    if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
-    char emptyBuffer = 0;
-    return PosixResult(sceKernelRead(d, buf == nullptr ? &emptyBuffer : buf, static_cast<size_t>(nbytes)));
+    return StartupFileObservation::Observe_nid_no_patch(StartupFileObservation::Operation::PosixRead, d, nbytes, [&]() -> int64_t {
+        if (ExceedsTransferLimit(nbytes)) return PosixFailure(GUEST_EINVAL);
+        if (GuestSockets::IsOpen(d)) return GuestSockets::Read(d, buf, static_cast<size_t>(nbytes));
+        if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
+        char emptyBuffer = 0;
+        return PosixResult(sceKernelRead(d, buf == nullptr ? &emptyBuffer : buf, static_cast<size_t>(nbytes)));
+    });
 }
 
 std::int64_t APS5_VABI _read_nid_postfix(int descriptor, void* buffer, std::size_t count) {
@@ -1093,16 +1098,18 @@ static bool OpenIovecs(const KernelIovec* iov, int iovcnt, std::deque<GuestArena
 #ifdef _WIN32
 
 int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
-    if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
-    if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
-    if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
-    const GuestArena::HostWrite destination(buf, nbytes);
-    if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
-    if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
-    if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) return *archived;
-    char empty = 0;
-    const auto result = NativePread(d, nbytes == 0 && buf == nullptr ? &empty : buf, nbytes, offset);
-    return result < 0 ? SceErrorFromErrno(errno) : result;
+    return StartupFileObservation::Observe_nid_no_patch(StartupFileObservation::Operation::PositionedRead, d, nbytes, [&]() -> int64_t {
+        if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
+        if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
+        if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
+        const GuestArena::HostWrite destination(buf, nbytes);
+        if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
+        if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
+        if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) return *archived;
+        char empty = 0;
+        const auto result = NativePread(d, nbytes == 0 && buf == nullptr ? &empty : buf, nbytes, offset);
+        return result < 0 ? SceErrorFromErrno(errno) : result;
+    });
 }
 
 int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
@@ -1190,15 +1197,17 @@ int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* iov, int iovcnt, in
 #else
 
 int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
-    if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
-    if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
-    if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
-    const GuestArena::HostWrite destination(buf, nbytes);
-    if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
-    if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
-    if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) return *archived;
-    const auto result = NativePread(d, buf, nbytes, offset);
-    return result < 0 ? SceErrorFromErrno(errno) : result;
+    return StartupFileObservation::Observe_nid_no_patch(StartupFileObservation::Operation::PositionedRead, d, nbytes, [&]() -> int64_t {
+        if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
+        if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
+        if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
+        const GuestArena::HostWrite destination(buf, nbytes);
+        if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
+        if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
+        if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) return *archived;
+        const auto result = NativePread(d, buf, nbytes, offset);
+        return result < 0 ? SceErrorFromErrno(errno) : result;
+    });
 }
 
 int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
