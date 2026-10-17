@@ -170,7 +170,7 @@ class Check:
         if not exports:
             return
         pattern = r"(^|[^[:alnum:]_])APS5_VABI[[:space:]]+(" + "|".join(exports) + r")[[:space:]]*\("
-        result = subprocess.run(["git", "grep", "-nE", "--full-name", pattern, self.head, "--", ":(top)core/libs/prx"], capture_output=True, encoding="utf-8", errors="replace")
+        result = subprocess.run(["git", "-c", "core.quotePath=false", "grep", "-nE", "--full-name", pattern, self.head, "--", ":(top)core/libs/prx"], capture_output=True, encoding="utf-8", errors="replace")
         hits = [line.split(":", 3)[1:] for line in filter(None, result.stdout.split("\n"))]
         self.read(path for path, _, _ in hits)
         for path, number, text in hits:
@@ -372,7 +372,9 @@ def jobs(lines, source):
     for index, (number, indent, name, _) in enumerate(entries):
         if indent != entries[0][1]:
             continue
-        fields = {entry[2]: field(source, entry) for entry in block(entries, index) if entry[1] == indent + 2}
+        children = block(entries, index)
+        child = min((entry[1] for entry in children), default=indent + 2)
+        fields = {entry[2]: field(source, entry) for entry in children if entry[1] == child}
         result.append((number, name, re.findall(r"[A-Za-z0-9_-]+", fields.get("needs", "")), fields.get("if", "")))
     return result
 

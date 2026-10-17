@@ -400,8 +400,8 @@ bool TranslationContext::vCvtNormF16(const RdnaInstruction& inst, bool signedVal
 }
 
 bool TranslationContext::vCvtPknormF16(const RdnaInstruction& inst, bool signedValue) {
-    const IrU32 low = normF16(readF16Bits(sourceAt(inst, 0u)), signedValue);
-    const IrU32 high = normF16(readF16Bits(sourceAt(inst, 1u)), signedValue);
+    const IrU32 low = normF16(flushF16Input(readF16Bits(sourceAt(inst, 0u))), signedValue);
+    const IrU32 high = normF16(flushF16Input(readF16Bits(sourceAt(inst, 1u))), signedValue);
     const IrU32 result(ir.BitwiseOr(low.Value(), ir.ShiftLeftLogical(high.Value(), ir.Constant(16u))));
     writeOperand(inst.destination, &result.Value());
     return true;
