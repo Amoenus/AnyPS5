@@ -325,6 +325,21 @@ std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
     });
 }
 
+static void RecordStartupStatMiss_nid_no_patch(const std::filesystem::path& path, int nativeError) {
+    static std::atomic<std::uint64_t> occurrences{0};
+    const auto count = occurrences.fetch_add(1, std::memory_order_relaxed);
+    if (count >= 64u && count % 1024u != 0) return;
+    const int savedErrno = errno;
+#ifdef _WIN32
+    const auto savedError = GetLastError();
+    std::fprintf(stderr, "[startup-stat-miss] occurrence=%llu native_error=%d path=%ls\n", static_cast<unsigned long long>(count), nativeError, path.c_str());
+    SetLastError(savedError);
+#else
+    std::fprintf(stderr, "[startup-stat-miss] occurrence=%llu native_error=%d path=%s\n", static_cast<unsigned long long>(count), nativeError, path.c_str());
+#endif
+    errno = savedErrno;
+}
+
 constexpr int GuestEfault = 14;
 
 int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
@@ -345,6 +360,7 @@ int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
         const auto status = std::filesystem::status(native, error);
         if (error == std::errc::not_a_directory) return SceErrorFromErrno(GuestEnotdir);
         if (!std::filesystem::exists(status)) {
+            RecordStartupStatMiss_nid_no_patch(native, error.value());
             return SceErrorFromErrno(2);
         }
         const std::string_view guestPath(path);

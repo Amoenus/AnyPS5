@@ -9,6 +9,7 @@ int main() {
     FileStat status{};
     std::byte byte{};
     if (sceKernelOpen("", 0, 0) >= 0 || sceKernelStat("", &status) >= 0 || sceKernelRead(-1, &byte, 1) >= 0) return 1;
+    if (sceKernelStat("/app0/__anyps5_observer_missing_stat_path__", &status) >= 0) return 1;
     const std::array<int, 8> inactive{};
     const int active = 0;
     const int zeroDuration = 0;
