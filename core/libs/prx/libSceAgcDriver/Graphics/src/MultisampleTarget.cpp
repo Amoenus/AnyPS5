@@ -183,7 +183,7 @@ public:
     }
 
     void Keep() {
-        if (auto* recorder = Recorder::Active(); recorder != nullptr) {
+        if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->Device() == context.device) {
             recorder->Keep(shared_from_this());
             recorder->KeepBytes(this, allocationBytes);
         }
@@ -218,7 +218,7 @@ public:
         Require(cmask.Refusal().empty(), cmask.Refusal());
         Require(cmask.Keys() != DccKeys::Clear0000, "a storage image access to a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
         auto* recording = Recorder::Active();
-        Require(recording != nullptr, "a multisampled color target is only written by recorded dispatches");
+        Require(recording != nullptr && recording->Device() == context.device, "a multisampled color target is only written by recorded dispatches on its device");
         Keep();
         makeStorable(*recording);
         ApplyFastClear(target);
@@ -246,7 +246,8 @@ public:
         Require(sampleable, "the device cannot sample the multisampled color target's format at its sample count");
         Require(cmask.Refusal().empty(), cmask.Refusal());
         Require(cmask.Keys() != DccKeys::Clear0000, "sampling a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
-        Require(Recorder::Active() != nullptr, "a multisampled color target is only sampled by recorded draws and dispatches");
+        auto* recording = Recorder::Active();
+        Require(recording != nullptr && recording->Device() == context.device, "a multisampled color target is only sampled by recorded draws and dispatches on its device");
         Keep();
         SettleStorageWrites();
         ApplyFastClear(target);
