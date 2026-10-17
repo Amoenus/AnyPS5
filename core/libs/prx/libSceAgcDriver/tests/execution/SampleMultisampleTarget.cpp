@@ -1206,21 +1206,21 @@ void DrawRecipePublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
         RequireNoMultisampleTarget(block.Address(), expected.size(), "after a recipe consumer");
         Require(std::equal(expected.begin(), expected.end(), reinterpret_cast<const std::byte*>(block.data)), "the recipe consumer published incorrect source bytes or padding");
     };
-    const auto consume = [&] {
-        const auto outcome = device->DrawFromRecipe(state, draw, shaders, {}, recipe);
-        if (outcome == AgcDriver::RecipeOutcome::Recorded) {
-            std::puts("native draw recipe: guarded input recorded from recipe");
-        } else {
-            Require(outcome == AgcDriver::RecipeOutcome::Rebuild, "the draw recipe returned an unknown outcome");
+    const auto consume = [&](bool replay) {
+        if (!replay) {
             device->Draw(state, draw, shaders, {}, &recipe);
-            std::puts("native draw recipe: guarded input requested and completed the ordinary rebuild");
+            std::puts("native draw routing: a moved descriptor uses the ordinary draw path");
+            return;
         }
+        const auto outcome = device->DrawFromRecipe(state, draw, shaders, {}, recipe);
+        Require(outcome == AgcDriver::RecipeOutcome::Recorded, "the unchanged guarded input did not replay from its recipe");
+        std::puts("native draw recipe: guarded input recorded from recipe");
     };
     const auto expected = arm(source, FillOnes);
     std::uint32_t word = 0u;
     std::memcpy(&word, expected.data() + 4u, sizeof(word));
     Require(word != FillOnes, "the guarded recipe source did not change its loaded word");
-    consume();
+    consume(true);
     CheckRecipePixels(*device, destination, output, word);
     checkSource(source, expected);
     AgcDriver::GuestMemory::StoreOwnBytes(source.Address(), source.bytes, [&] { StoreWords(source, source.bytes, FillOnes); });
@@ -1241,7 +1241,7 @@ void DrawRecipePublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     std::uint32_t movedWord = 0u;
     std::memcpy(&movedWord, movedExpected.data() + 8u, sizeof(movedWord));
     Require(movedWord != FillOnes && movedWord != word, "the moved recipe source did not distinguish current and old buffers");
-    consume();
+    consume(false);
     CheckRecipePixels(*device, destination, output, movedWord);
     checkSource(movedSource, movedExpected);
     std::string refusal;
