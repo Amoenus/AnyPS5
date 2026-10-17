@@ -122,6 +122,18 @@ int Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
     std::printf("BDA wave%u: exact %zu-byte readback passed; first page overlap=%d complete=%d next page overlap=%d\n", waveSize, BlockBytes, overlap, complete, untouched);
     Require(overlap && !untouched, "BDA stores did not invalidate only their written page");
     Require(!complete, "sparse BDA stores falsely prove a complete 4096-byte overwrite");
+    const auto uncertainGeneration = Memory::CollectWritesUncached(address, BlockBytes);
+    Memory::MarkPossiblyWritten_nid_no_patch(address, 65536);
+    Require(Memory::StoredOver(address, 65536, uncertainGeneration), "a possible whole-block store did not invalidate its range");
+    Require(!Memory::StoredAllSince_nid_no_patch(address, 65536, uncertainGeneration), "a possible whole-block store proved complete coverage");
+    const auto exactGeneration = Memory::CollectWritesUncached(address, BlockBytes);
+    const std::array<std::byte, 4> word{};
+    Memory::StoreOwnBytes(address + 8, word);
+    Require(Memory::StoredAllSince_nid_no_patch(address + 8, word.size(), exactGeneration), "an exact dword store lost its coverage proof");
+    Require(!Memory::StoredAllSince_nid_no_patch(address, PageBytes, exactGeneration), "an exact dword store proved a whole-page overwrite");
+    const std::array<std::byte, PageBytes> page{};
+    Memory::StoreOwnBytes(address, page);
+    Require(Memory::StoredAllSince_nid_no_patch(address, PageBytes, exactGeneration), "an exact page store lost its coverage proof");
     std::puts("BDA sparse-store coverage passed");
     return 0;
 }

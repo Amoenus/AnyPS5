@@ -319,7 +319,7 @@ void BdaResources::markWrittenPages() const {
                 Require(false, message.str());
             }
         }
-        GuestMemory::MarkWritten(begin, bytes);
+        GuestMemory::MarkPossiblyWritten_nid_no_patch(begin, bytes);
     }), "invalid BDA written-page record");
     for (std::uint32_t claim = 0; claim < count; ++claim) {
         const auto slot = words[Abi::WrittenListWord + claim];
