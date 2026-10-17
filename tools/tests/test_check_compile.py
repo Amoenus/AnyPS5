@@ -232,5 +232,37 @@ class CheckCompileTests(unittest.TestCase):
         self.assertIn("1 translation units compile", result.stdout)
 
 
+    def test_argument_arrays_preserve_tokens_and_take_precedence_over_command(self):
+        source = self.source("unit with spaces.cpp")
+        script = self.compiler(
+            "import json\nimport sys\nfrom pathlib import Path\n"
+            "Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))\n")
+        seen = self.root / "arguments.json"
+        flags = ['-DNAME=quoted "value"', '-IC:\\sdk files\\include\\']
+        arguments = [sys.executable, str(script), str(seen), *flags,
+                     "-c", "-o", "unit.o", "-MD", "-MT", "unit.o", "-MF", "unit.o.d",
+                     os.path.relpath(source, self.build)]
+        entry = {"directory": str(self.build), "file": str(source), "arguments": arguments}
+        for command in (None, "nonexistent-compiler -c unit.cpp"):
+            with self.subTest(command=command):
+                if command is not None:
+                    entry["command"] = command
+                self.manifest([entry])
+                result = self.tool(source.name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(seen.read_text(encoding="utf-8")),
+                                 [*flags, "-fsyntax-only", str(source)])
+
+    def test_invalid_argument_arrays_are_rejected_without_a_traceback(self):
+        source = self.source("unit.cpp")
+        for arguments in (None, [], "compiler -c unit.cpp", ["compiler", 3], [""]):
+            with self.subTest(arguments=arguments):
+                self.manifest([{"directory": str(self.build), "file": str(source), "arguments": arguments}])
+                result = self.tool(source.name)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("arguments must be a nonempty list of strings with an executable", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

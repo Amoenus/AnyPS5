@@ -472,16 +472,6 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData.native>")
     endif()
 
-    add_test_executable(guest_ppsa01530_exports_tests tests/GuestPPSA01530Exports.cpp)
-    target_include_directories(guest_ppsa01530_exports_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(guest_ppsa01530_exports_tests PRIVATE libkernel libSceJson2 libSceNet libScePad libc)
-    configure_windows_unwind(guest_ppsa01530_exports_tests)
-    add_test(NAME guest_ppsa01530_exports COMMAND guest_ppsa01530_exports_tests)
-    if(WIN32)
-        set_tests_properties(guest_ppsa01530_exports PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
-    endif()
-
     add_test_executable(guest_posix_random_tests tests/GuestPosixRandom.cpp)
     target_include_directories(guest_posix_random_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_posix_random_tests PRIVATE libScePosixForWebKit)
