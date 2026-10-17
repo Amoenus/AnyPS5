@@ -66,6 +66,7 @@ struct MultisampleColorSnapshot {
 
 std::vector<std::byte> ReadMultisampleTargetSamples_nid_no_patch(const Context& context, const ColorTarget& target);
 MultisampleColorSnapshot ReadMultisampleTargetColorSnapshot_nid_no_patch(const Context& context, const ColorTarget& target);
+void PublishMultisampleTargetColor_nid_no_patch(const Context& context, const ColorTarget& target);
 void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget& target);
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource);
 bool MultisampleTargetStorable(const Context& context, const ColorTarget& target);
