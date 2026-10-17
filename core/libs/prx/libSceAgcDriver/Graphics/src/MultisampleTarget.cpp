@@ -291,8 +291,7 @@ public:
     std::vector<std::byte> ReadSamples() {
         Require(context.detiler != nullptr, "multisample color sample readback requires a texture detiler");
         Require(target.samples == 2u || target.samples == 4u || target.samples == 8u, "unsupported multisample color readback fragment count");
-        auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
-        Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires a recorder for its device");
+        auto& recorder = readbackRecorder();
         Require(cmask.Refusal().empty(), cmask.Refusal());
         Require(cmask.Keys() != DccKeys::Clear0000, "reading a multisampled color target whose CMASK fast clear no draw has applied is not implemented");
         Require(FindGuestColorTargetFormat(target.format, target.elementBytes).has_value(), "multisample color readback source format or element size is unsupported");
@@ -314,12 +313,12 @@ public:
         const auto alignment = std::max<VkDeviceSize>({4u, target.elementBytes, context.limits.minStorageBufferOffsetAlignment});
         const auto stride = context.limits.maxStorageBufferRange / alignment * alignment;
         Require(stride != 0, "multisample color readback storage range cannot hold an aligned element");
-        recorder->Sync();
+        recorder.Sync();
         Require(active->load(std::memory_order_acquire), "multisampled color target was retired before sample readback");
         SettleStorageWrites();
         ApplyFastClear(target);
         ensureGeneralLayout();
-        recorder->Sync();
+        recorder.Sync();
         Require(active->load(std::memory_order_acquire), "multisampled color target was retired during sample readback");
         checkDccCurrent(target);
         const auto snapshot = allocate(readUsage, readFlags, format);
@@ -367,6 +366,8 @@ public:
     MultisampleColorSnapshot ColorSnapshot() {
         Require(target.tileMode == ColorTileMode::RenderTarget && target.dccAddress == 0 && target.cmaskAddress == 0, "guest color snapshots with unsupported tiling or multisample metadata are not implemented");
         Require(!initialColor.empty(), "guest color snapshot has no initial footprint");
+        readbackRecorder().Sync();
+        Require(active->load(std::memory_order_acquire), "multisampled color target was retired before guest color snapshot");
         auto original = currentGuestColor();
         const auto samples = ReadSamples();
         Require(currentGuestColor() == original, "guest color changed during native multisample snapshot");
@@ -494,6 +495,14 @@ private:
         initialUpload = std::make_unique<Buffer>(context, static_cast<std::size_t>(alignedBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         layout.Detile(initialColor, initialUpload->Bytes().first(static_cast<std::size_t>(layout.LinearBytes())));
         return std::nullopt;
+    }
+
+    Recorder& readbackRecorder() const {
+        auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
+        Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires a recorder for its device");
+        const auto* recording = Recorder::Active();
+        Require(recording == nullptr || recording->Device() != context.device || recording == recorder, "native color readback with another active recorder on the same device is not implemented");
+        return *recorder;
     }
 
     std::vector<std::byte> currentGuestColor() const {
