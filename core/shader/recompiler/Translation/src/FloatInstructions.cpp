@@ -213,6 +213,9 @@ bool TranslationContext::vDivFixupF16(const RdnaInstruction& inst) {
         if (operand.negate) {
             bits[index] = IrU32(ir.BitwiseXor(bits[index].Value(), ir.Constant(0x8000u)));
         }
+        if (index != 0u) {
+            bits[index] = flushF16Input(bits[index]);
+        }
         magnitude[index] = IrU32(ir.BitwiseAnd(bits[index].Value(), ir.Constant(0x7fffu)));
     }
     const auto isNan = [&](std::uint32_t index) { return IrU1(ir.UGreaterThan(magnitude[index].Value(), ir.Constant(0x7c00u))); };
