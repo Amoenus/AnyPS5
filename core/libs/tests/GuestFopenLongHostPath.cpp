@@ -25,7 +25,7 @@ void Require(bool value, const char* message) {
 }
 
 std::filesystem::path Extended(const std::filesystem::path& path) {
-    const auto native = path.native();
+    const auto& native = path.native();
     return native.starts_with(L"\\\\") ? L"\\\\?\\UNC\\" + native.substr(2) : L"\\\\?\\" + native;
 }
 
