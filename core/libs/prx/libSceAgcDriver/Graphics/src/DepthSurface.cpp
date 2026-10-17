@@ -212,7 +212,11 @@ public:
             const auto& metadata = sampling.initial[1];
             Require(GuestMemory::UnchangedSince(depth.address, depth.bytes, depth.generation), "guest writes over native multisample depth are not implemented");
             Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
-            Require(GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no complete tracked HTILE store");
+            if (!GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration)) {
+                char detail[384];
+                std::snprintf(detail, sizeof(detail), "native multisample depth clear has no complete tracked HTILE store (range 0x%llx+0x%zx, since %llu, completion %u, overlap %u)", static_cast<unsigned long long>(metadata.address), metadata.bytes, static_cast<unsigned long long>(clearGeneration), clearCompletionSeen ? 1u : 0u, GuestMemory::StoredOver(metadata.address, metadata.bytes, clearGeneration) ? 1u : 0u);
+                Require(false, detail);
+            }
             Require(clearDepth == 0.0f || clearDepth == 1.0f, "native multisample depth clear value is not implemented");
             auto current = sampling.initial;
             current[1].generation = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
@@ -498,6 +502,7 @@ public:
     bool samplingActive = false;
     DepthSamplingState sampling;
     std::uint64_t clearGeneration = 0u;
+    bool clearCompletionSeen = false;
     std::shared_ptr<OwnedImage> owned;
 
 private:
@@ -1314,6 +1319,7 @@ bool NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::siz
             else if (surface->clearGeneration != 0u) surface->sampling.refusal = "overlapping native multisample depth clear transitions are not implemented";
             else {
                 surface->clearGeneration = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
+                surface->clearCompletionSeen = false;
                 completionCandidate = true;
             }
             existing = true;
@@ -1336,6 +1342,7 @@ void CompleteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
         if (bytes < metadata.bytes) continue;
         Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, surface->clearGeneration), "CPU writes raced native multisample depth clear");
         GuestMemory::MarkWritten(metadata.address, metadata.bytes);
+        surface->clearCompletionSeen = true;
     }
 }
 
