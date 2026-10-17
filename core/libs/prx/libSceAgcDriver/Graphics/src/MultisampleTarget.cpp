@@ -612,7 +612,9 @@ private:
                 const auto* plane = range.address == target.address ? "color" : range.address == target.dccAddress ? "DCC" : "CMASK";
                 std::fprintf(stderr, "[dcc-rejection-observe] plane=%s address=0x%llx bytes=0x%zx generation=%llu samples=%u unchanged=%d stored=%d reason=%s\n", plane, static_cast<unsigned long long>(range.address), range.bytes, static_cast<unsigned long long>(range.generation), target.samples, unchanged, stored, reason);
             }
-            if (stored && range.address != target.address) observeMetadata(range);
+            if (stored && range.address != target.address) {
+                for (const auto& metadata : dccRanges) if (metadata.address != target.address) observeMetadata(metadata);
+            }
             requireDccRange(unchanged || !stored, range, "writes to a resident multisampled DCC target or its metadata are not implemented");
             if (auto* recorder = Recorder::Active(); recorder != nullptr) requireDccRange(!recorder->PendingWriteOverlaps(range.address, range.bytes), range, "pending writes to a resident multisampled DCC target or its metadata are not implemented");
         }

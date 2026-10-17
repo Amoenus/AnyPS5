@@ -132,6 +132,13 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         if (const auto htile = Graphics::HtileDepthClearAddress(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads); htile != 0) {
             const auto threads = (packet[4] & 0x20u) != 0 ? static_cast<std::uint64_t>(packet[1]) : static_cast<std::uint64_t>(packet[1]) * compute.numThreads[0];
             const auto nativeBytes = Graphics::HtileDepthClearBytes_nid_no_patch(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet, indirectArguments);
+            static std::atomic<unsigned> observedMasks{0};
+            const auto observation = observedMasks.fetch_add(1, std::memory_order_relaxed);
+            if (observation < 512u) {
+                std::fprintf(stderr, "[dcc-mask-dispatch-observe] seq=%u queue=%u shader=0x%llx metadata=0x%llx bytes=0x%llx nativeBytes=0x%zx groups=%u/%u/%u flags=0x%x indirect=0x%llx user4=0x%08x user5=0x%08x\n", observation, static_cast<unsigned>(submission.queue), static_cast<unsigned long long>(address), static_cast<unsigned long long>(htile), static_cast<unsigned long long>(threads * 16u), nativeBytes, packet[1], packet[2], packet[3], packet[4], static_cast<unsigned long long>(indirectArguments), userData[4], userData[5]);
+            } else if (observation == 512u) {
+                std::fprintf(stderr, "[dcc-mask-dispatch-observe] observation-limit=512\n");
+            }
             Graphics::NoteHtileDepthClear(htile, static_cast<std::size_t>(threads * 16u), nativeBytes);
         }
         if (!partialLastGroup && indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
