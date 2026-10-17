@@ -1191,6 +1191,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         const auto [begin, end] = plan.copies[range];
         const auto bytes = static_cast<std::size_t>(end - begin);
         GuestMemory::CheckRange(reinterpret_cast<const void*>(begin), bytes, 1);
+        RequireNoMultisampleTarget(begin, bytes, "a vertex buffer read");
         if (const auto* import = InPlaceDrawInput(context, begin, bytes, plan.alignments[range], &inputs.vertexInputBehindGpuWrite)) {
             rangeHandles.push_back(import->buffer);
             rangeOffsets.push_back(begin - import->base);
