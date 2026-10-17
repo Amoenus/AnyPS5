@@ -1520,12 +1520,20 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
 }
 
 bool StoredOver(std::uint64_t address, std::size_t bytes, std::uint64_t generation) {
+    return StoredOverWithReason_nid_no_patch(address, bytes, generation, nullptr);
+}
+
+bool StoredOverWithReason_nid_no_patch(std::uint64_t address, std::size_t bytes, std::uint64_t generation, const char** reason) {
+    const auto reject = [&](const char* value) {
+        if (reason != nullptr) *reason = value;
+        return true;
+    };
     auto& tracker = Tracker();
     const auto lock = lockTracker(tracker);
     tracker.initialize();
-    if (!tracker.watched || generation == 0 || bytes == 0 || !tracker.covers(address, bytes)) return true;
+    if (!tracker.watched || generation == 0 || bytes == 0 || !tracker.covers(address, bytes)) return reject("unwatched-or-invalid-query");
 #ifdef _WIN32
-    if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(address, bytes)) return true;
+    if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(address, bytes)) return reject("host-region-uncertain");
 #endif
     const auto end = address + bytes;
     const auto first = tracker.blockOf(address);
@@ -1537,22 +1545,24 @@ bool StoredOver(std::uint64_t address, std::size_t bytes, std::uint64_t generati
             const auto from = std::max(address, begin) - begin;
             const auto to = std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin;
             for (auto page = from / WritePageBytes; page <= (to - 1) / WritePageBytes; ++page) {
-                if (found->second.pages[page] > generation) return true;
+                if (found->second.pages[page] > generation) return reject("cpu-page");
             }
         } else if (tracker.cpuStampOf(block) > generation) {
-            return true;
+            return reject("cpu-block");
         }
         const auto found = tracker.driverPieces.find(block);
-        if (found == tracker.driverPieces.end()) return true;
+        if (found == tracker.driverPieces.end()) return reject("driver-history-unavailable");
         const auto& entry = found->second;
-        if (entry.whole > generation || entry.dropped > generation) return true;
+        if (entry.whole > generation) return reject("driver-whole-block");
+        if (entry.dropped > generation) return reject("driver-history-dropped");
         const auto begin = tracker.blockBegin(block);
         const auto from = std::max(address, begin) - begin;
         const auto to = std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin;
         for (const auto& piece : entry.pieces) {
-            if (piece.generation > generation && piece.begin < to && from < piece.end) return true;
+            if (piece.generation > generation && piece.begin < to && from < piece.end) return reject("driver-overlap");
         }
     }
+    if (reason != nullptr) *reason = "no-overlap";
     return false;
 }
 

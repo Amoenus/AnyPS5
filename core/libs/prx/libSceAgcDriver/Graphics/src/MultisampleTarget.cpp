@@ -601,7 +601,15 @@ private:
         for (const auto& range : dccRanges) {
             requireDccRange(GuestMemory::Watched(range.address, range.bytes), range, "multisampled DCC target reuse requires watched guest memory");
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
-            requireDccRange(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation) || !GuestMemory::StoredOver(range.address, range.bytes, range.generation), range, "writes to a resident multisampled DCC target or its metadata are not implemented");
+            const bool unchanged = GuestMemory::UnchangedSince(range.address, range.bytes, range.generation);
+            const char* reason = "coarse-unchanged";
+            const bool stored = !unchanged && GuestMemory::StoredOverWithReason_nid_no_patch(range.address, range.bytes, range.generation, &reason);
+            static std::atomic<unsigned> observed{0};
+            if (stored || observed.fetch_add(1, std::memory_order_relaxed) < 24) {
+                const auto* plane = range.address == target.address ? "color" : range.address == target.dccAddress ? "DCC" : "CMASK";
+                std::fprintf(stderr, "[dcc-rejection-observe] plane=%s address=0x%llx bytes=0x%zx generation=%llu samples=%u unchanged=%d stored=%d reason=%s\n", plane, static_cast<unsigned long long>(range.address), range.bytes, static_cast<unsigned long long>(range.generation), target.samples, unchanged, stored, reason);
+            }
+            requireDccRange(unchanged || !stored, range, "writes to a resident multisampled DCC target or its metadata are not implemented");
             if (auto* recorder = Recorder::Active(); recorder != nullptr) requireDccRange(!recorder->PendingWriteOverlaps(range.address, range.bytes), range, "pending writes to a resident multisampled DCC target or its metadata are not implemented");
         }
     }
