@@ -4664,14 +4664,16 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
 }
 
 void ShaderResources::synchronizeGuestBuffers(std::span<const MovedBuffer> moved) const {
-    for (std::size_t index = 0; index < allocations.size(); ++index) {
-        const auto& item = allocations[index];
-        if (!item.guest) continue;
-        const auto override = std::find_if(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation == index; });
-        const auto address = override != moved.end() ? override->address : item.address;
-        const auto bytes = override != moved.end() ? override->size : item.size;
-        if (item.written) RequireNoMultisampleTarget(address, bytes, "a shader buffer write");
-        else SynchronizeMultisampleTargetRead_nid_no_patch(address, bytes);
+    for (const auto written : {true, false}) {
+        for (std::size_t index = 0; index < allocations.size(); ++index) {
+            const auto& item = allocations[index];
+            if (!item.guest || item.written != written) continue;
+            const auto override = std::find_if(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation == index; });
+            const auto address = override != moved.end() ? override->address : item.address;
+            const auto bytes = override != moved.end() ? override->size : item.size;
+            if (written) RequireNoMultisampleTarget(address, bytes, "a shader buffer write");
+            else SynchronizeMultisampleTargetRead_nid_no_patch(address, bytes);
+        }
     }
 }
 
