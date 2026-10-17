@@ -370,7 +370,7 @@ public:
         auto original = currentGuestColor();
         const auto samples = ReadSamples();
         Require(currentGuestColor() == original, "guest color changed during native multisample snapshot");
-        auto current = original;
+        auto current = std::vector<std::byte>(original.size());
         if (paddingFill) {
             for (std::size_t offset = 0; offset < current.size(); offset += sizeof(*paddingFill)) std::memcpy(current.data() + offset, &*paddingFill, sizeof(*paddingFill));
         }
