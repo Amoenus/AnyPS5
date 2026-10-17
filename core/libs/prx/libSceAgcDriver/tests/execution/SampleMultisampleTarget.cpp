@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -28,6 +29,14 @@
 #include <span>
 #include <string>
 #include <vector>
+
+namespace AgcDriver {
+
+struct VulkanDeviceTestAccess {
+    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+
+}
 
 namespace {
 
@@ -156,7 +165,7 @@ AgcDriver::Graphics::State TargetState(const AgcDriver::Graphics::ColorTarget& c
     return state;
 }
 
-void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state) {
+void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state, const AgcDriver::Pm4::DrawParameters::IndirectDraw* indirect = nullptr, bool indexed = false) {
     const auto target = device.Target();
     constexpr std::uint32_t waveSize = 64;
     std::vector<std::uint32_t> vertexUserData(4, 0u);
@@ -195,7 +204,14 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& sta
         {ShaderStage::Vertex, &vertexResult, 0},
         {ShaderStage::Fragment, pixelResult.get(), PixelPushOffset(vertexPush, target)}
     }};
-    const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
+    AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
+    if (indirect != nullptr) draw.indirect = *indirect;
+    static constexpr std::array<std::uint16_t, 3> indices{0u, 1u, 2u};
+    if (indexed) {
+        draw.indexAddress = reinterpret_cast<std::uintptr_t>(indices.data());
+        draw.indexSize = sizeof(indices[0]);
+        draw.indexed = true;
+    }
     device.Draw(state, draw, shaders);
 }
 
@@ -381,12 +397,97 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
     Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
 }
 
+int NativeIndirectInput(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+#ifdef _WIN32
+    _putenv_s("APS5_PROFILE_DRAW", "1");
+#else
+    setenv("APS5_PROFILE_DRAW", "1", 1);
+#endif
+    Block source(4u * BlockBytes);
+    Block destination(BlockBytes);
+    struct ReleaseDevice {
+        std::unique_ptr<AgcDriver::VulkanDevice>& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    if (context.hostImportAlignment == 0u || !context.drawIndirectCount) {
+        std::puts("native indirect inputs not tested: host imports or indirect count unavailable");
+        return VulkanTestSkipped;
+    }
+    const auto color = DecodeTarget(source);
+    const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
+    Require(colorBytes + 512u <= source.bytes, "native indirect probe has no neighbor");
+    const auto neighbor = source.Address() + colorBytes + 256u;
+    Draw(*device, TargetState(color));
+    AgcDriver::Graphics::NoteColorMetadataFill(source.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
+    CheckUniform(LoadSamples(*device, source), Ones, "before native indirect inputs");
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        const auto* native = AgcDriver::Graphics::HostImportFor(context, source.Address(), 16u);
+        Require(native != nullptr && native == AgcDriver::Graphics::HostImportFor(context, neighbor, 16u), "native indirect inputs do not share an import with their neighbor");
+    }
+    const auto state = TargetState(DecodeTarget(destination));
+    const std::array<std::uint32_t, 5> arguments{3u, 1u, 0u, 0u, 0u};
+    std::memcpy(reinterpret_cast<void*>(neighbor), arguments.data(), sizeof(arguments));
+    const auto draw = [&](std::uint64_t address, bool count, std::uint64_t countAddress, bool indexed) {
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            AgcDriver::Graphics::NoteColorMetadataFill(destination.Address(), static_cast<std::size_t>(AgcDriver::Graphics::MultisampledColorBytes(state.color)), 0u);
+            AgcDriver::Graphics::MaterializeMultisampleTargetClear(context, state.color);
+        }
+        const std::uint32_t recordBytes = indexed ? 20u : 16u;
+        const AgcDriver::Pm4::DrawParameters::IndirectDraw input{address, indexed ? 0x25u : 0x24u, recordBytes, recordBytes, 1u, count, countAddress, 0x280u, 0x280u, 0x280u, false, 0u};
+        const auto before = AgcDriver::Graphics::IndirectDrawCounts();
+        Draw(*device, state, &input, indexed);
+        device->WaitIdle();
+        const auto after = AgcDriver::Graphics::IndirectDrawCounts();
+        Require(after[0] == before[0] + 1u, "native indirect probe did not use GPU arguments");
+        CheckSamples(state, LoadSamples(*device, destination), {});
+    };
+    std::uint32_t missed = 0u;
+    for (const bool indexed : {false, true}) {
+        for (const bool count : {false, true}) {
+            for (const bool edge : {false, true}) {
+                const auto address = edge ? source.Address() + colorBytes - 4u : source.Address();
+                const std::uint32_t one = 1u;
+                if (count) std::memcpy(reinterpret_cast<void*>(address), &one, sizeof(one));
+                else std::memcpy(reinterpret_cast<void*>(address), arguments.data(), sizeof(arguments));
+                std::memcpy(reinterpret_cast<void*>(neighbor + 64u), &one, sizeof(one));
+                std::array<std::byte, 20> cpuBytes{};
+                std::string cpuRefusal;
+                try {
+                    AgcDriver::GuestMemory::Read(address, std::span(cpuBytes).first(count ? 4u : indexed ? 20u : 16u), 4u);
+                } catch (const std::exception& error) {
+                    cpuRefusal = error.what();
+                }
+                Require(cpuRefusal.find("whose samples are only on the host") != std::string::npos, "native indirect CPU control did not refuse the read: " + cpuRefusal);
+                draw(neighbor, count, neighbor + 64u, indexed);
+                std::string refusal;
+                try {
+                    draw(count ? neighbor : address, count, count ? address : 0u, indexed);
+                } catch (const std::exception& error) {
+                    refusal = error.what();
+                }
+                const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
+                Require(refusal.empty() || refused, "native indirect probe failed for another reason: " + refusal);
+                std::printf("native indirect %u %s %s: refused=%u cpu-refused=1 neighbor=passed stale-triangle=%u detail=%s\n", indexed ? 20u : 16u, count ? "count" : "arguments", edge ? "edge" : "base", refused ? 1u : 0u, refused ? 0u : 1u, refusal.c_str());
+                missed += refused ? 0u : 1u;
+            }
+        }
+    }
+    CheckUniform(LoadSamples(*device, source), Ones, "after native indirect inputs");
+    std::puts("native indirect controls: shared-import=1 source-samples=1024 neighbor-triangle=passed");
+    Require(missed == 0u, "native indirect inputs missed " + std::to_string(missed) + " resident-image refusals");
+    return 0;
 }
 
-int main() {
+}
+
+int main(int argc, char** argv) {
     try {
-        const auto device = OpenVulkanTestDevice();
+        auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--native-indirect-input") return NativeIndirectInput(device);
         Block block(4u * BlockBytes);
         Block other(BlockBytes);
         const auto color = DecodeTarget(block);
