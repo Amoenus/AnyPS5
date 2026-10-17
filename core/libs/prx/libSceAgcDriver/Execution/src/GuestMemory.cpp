@@ -1470,7 +1470,7 @@ void ObserveDccStoreRange_nid_no_patch(std::uint64_t address, std::size_t bytes)
     if (observed.ranges.size() < 24 && std::ranges::find(observed.ranges, range) == observed.ranges.end()) observed.ranges.push_back(range);
 }
 
-std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::function<std::pair<std::uint64_t, std::uint64_t>()>& store, const std::source_location& origin) {
+std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::function<std::pair<std::uint64_t, std::uint64_t>()>& store, const std::source_location& origin = std::source_location::current()) {
     if (bytes == 0) return 0;
     const auto stampStored = [&](WriteTracker& tracker, std::pair<std::uint64_t, std::uint64_t> stored) -> std::uint64_t {
         if (stored.second <= stored.first) return 0;
