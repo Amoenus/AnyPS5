@@ -69,12 +69,14 @@ static std::FILE* OpenNative(const std::filesystem::path& path, const std::strin
         : nativeMode.find('x') != std::string::npos ? CREATE_NEW : access == 'w' ? CREATE_ALWAYS : OPEN_ALWAYS;
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     auto filename = path.native();
-    std::error_code pathError;
-    auto absolutePath = std::filesystem::absolute(path, pathError);
-    if (pathError) { errno = pathError.default_error_condition().value(); return nullptr; }
-    const auto absolute = absolutePath.lexically_normal().make_preferred().native();
-    if (absolute.size() >= MAX_PATH && !absolute.starts_with(L"\\\\?\\") && !absolute.starts_with(L"\\\\.\\"))
-        filename = absolute.starts_with(L"\\\\") ? L"\\\\?\\UNC\\" + absolute.substr(2) : L"\\\\?\\" + absolute;
+    if (!filename.starts_with(L"\\\\?\\") && !filename.starts_with(L"\\\\.\\")) {
+        std::error_code pathError;
+        auto absolutePath = std::filesystem::absolute(path, pathError);
+        if (pathError) { errno = pathError.default_error_condition().value(); return nullptr; }
+        const auto absolute = absolutePath.lexically_normal().make_preferred().native();
+        if (absolute.size() >= MAX_PATH)
+            filename = absolute.starts_with(L"\\\\") ? L"\\\\?\\UNC\\" + absolute.substr(2) : L"\\\\?\\" + absolute;
+    }
     const auto handle = CreateFileW(filename.c_str(), desired, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security,
         disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {

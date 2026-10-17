@@ -54,6 +54,7 @@ void Run() {
         std::filesystem::path deep;
         ~Cleanup() {
             RemovePathAlias_nid_no_patch("/long-host-file");
+            RemovePathAlias_nid_no_patch("/extended-host-file");
             RemovePathAlias_nid_no_patch("/relative-long-host-file");
             DeleteFileW(Extended(deep / "payload.bin").c_str());
             DeleteFileW(Extended(deep / "new.bin").c_str());
@@ -73,9 +74,10 @@ void Run() {
     Require(prepared, "cannot write fixture payload");
     const auto host = deep.string();
     AddPathAlias_nid_no_patch("/long-host-file", host.c_str());
+    AddPathAlias_nid_no_patch("/extended-host-file", Extended(deep).string().c_str());
     Require(ResolvePath_nid_no_patch("/long-host-file/payload.bin").native().size() > MAX_PATH, "fixture does not cross MAX_PATH");
-    {
-        auto stream = Open("/long-host-file/payload.bin", "rb");
+    for (const auto* path : {"/long-host-file/payload.bin", "/extended-host-file/payload.bin"}) {
+        auto stream = Open(path, "rb");
         std::array<char, 4> data{};
         Require(fread_nid_postfix(data.data(), 1, data.size(), stream.get()) == 4 && data == std::array{'a', 'b', 'c', 'd'}, "long-path contents differ");
     }
