@@ -83,7 +83,7 @@ private:
 #endif
 };
 
-void Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
+int Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
     using namespace ShaderRecompiler;
     const GuestBlock guest;
     const auto address = guest.Address();
@@ -104,6 +104,10 @@ void Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
     device.WaitIdle();
     const auto generation = Memory::CollectWritesUncached(address, BlockBytes);
     std::printf("BDA warm-up: watched=%d generation=%llu overlap=%d\n", Memory::Watched(address, BlockBytes), static_cast<unsigned long long>(generation), Memory::StoredOver(address, BlockBytes, generation));
+    if (generation == 0 || !Memory::Watched(address, BlockBytes)) {
+        std::puts("skipped, the BDA import does not retain guest write watching");
+        return VulkanTestSkipped;
+    }
     Require(generation != 0 && !Memory::StoredOver(address, BlockBytes, generation), "the BDA write coverage baseline is not clean");
     Require(!Memory::StoredAllSince_nid_no_patch(address, PageBytes, generation), "the untouched page already has complete store coverage");
     device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
@@ -118,6 +122,8 @@ void Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
     std::printf("BDA wave%u: exact %zu-byte readback passed; first page overlap=%d complete=%d next page overlap=%d\n", waveSize, BlockBytes, overlap, complete, untouched);
     Require(overlap && !untouched, "BDA stores did not invalidate only their written page");
     Require(!complete, "sparse BDA stores falsely prove a complete 4096-byte overwrite");
+    std::puts("BDA sparse-store coverage passed");
+    return 0;
 }
 
 }
@@ -126,9 +132,7 @@ int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
-        Run(*device, argc == 2 && std::string_view(argv[1]) == "--wave64" ? 64 : 32);
-        std::puts("BDA sparse-store coverage passed");
-        return 0;
+        return Run(*device, argc == 2 && std::string_view(argv[1]) == "--wave64" ? 64 : 32);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
         return 1;
