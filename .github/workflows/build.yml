@@ -503,8 +503,9 @@ jobs:
       - run: echo 'C:\winlibs\mingw64\bin' >> "$GITHUB_PATH"
       - uses: hendrikmuhs/ccache-action@v1.2.24
         with:
-          key: windows
-          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          key: ${{ github.event_name == 'workflow_dispatch' && 'dispatch-windows' || 'windows' }}
+          restore-keys: ${{ github.event_name == 'workflow_dispatch' && 'windows' || '' }}
+          save: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
           evict-old-files: job
       - id: ffmpeg-cache
         uses: actions/cache/restore@v6
@@ -577,3 +578,4 @@ jobs:
           [ -f ctest.log ] || exit 0
           awk '/Test +#[0-9]+: / && $NF == "sec" { for (i = 1; i <= NF; i++) if ($i ~ /^#[0-9]+:$/) name = $(i + 1); t = $(NF - 1) + 0; if (t > max[name]) max[name] = t }
             END { for (name in max) if (max[name] > 30) printf "::warning title=Slow test::%s took %.1f s on %s; tests must finish in 30 s (CONTRIBUTING.md)\n", name, max[name], ENVIRON["RUNNER_OS"] }' ctest.log
+
