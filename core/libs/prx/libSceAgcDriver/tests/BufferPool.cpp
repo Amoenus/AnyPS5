@@ -594,6 +594,101 @@ void AllocationFailure(VkResult initial, VkResult final, bool cached) {
     Expect(mock.liveBytes == 0 && mock.liveBuffers.empty(), "failure cleanup leaked a resource");
 }
 
+struct ReclaimMock {
+    VkDeviceMemory external = VK_NULL_HANDLE;
+    VkDeviceSize externalBytes = 0;
+    std::uint64_t requests = 0;
+    VkDeviceSize asked = 0;
+};
+
+ReclaimMock reclaimMock;
+
+VkDeviceMemory ExternalAllocation(VkDeviceSize bytes) {
+    VkMemoryAllocateInfo info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    info.allocationSize = bytes;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    Expect(mockAllocateMemory(VK_NULL_HANDLE, &info, nullptr, &memory) == VK_SUCCESS, "the external allocation of the reclaim test failed");
+    reclaimMock.external = memory;
+    reclaimMock.externalBytes = bytes;
+    return memory;
+}
+
+VkDeviceSize mockCacheReclaim(VkDeviceSize bytes) {
+    ++reclaimMock.requests;
+    reclaimMock.asked = bytes;
+    if (reclaimMock.external == VK_NULL_HANDLE) return 0;
+    mockFreeMemory(VK_NULL_HANDLE, reclaimMock.external, nullptr);
+    reclaimMock.external = VK_NULL_HANDLE;
+    return reclaimMock.externalBytes;
+}
+
+void CacheReclaimRecovery() {
+    Expect(BufferPool::ReclaimTarget(4 * MiB) == 260 * MiB, "a 4 MiB request does not ask the caches for 256 MiB on top of itself");
+    Expect(BufferPool::ReclaimTarget(512 * MiB) == 1024 * MiB, "a 512 MiB request does not ask the caches for twice its size");
+    constexpr auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    mock = MockDevice{};
+    reclaimMock = ReclaimMock{};
+    {
+        auto context = mockContext();
+        context.cacheReclaim = mockCacheReclaim;
+        { DeviceBuffer idle(context, 2 * MiB, usage); }
+        ExternalAllocation(10 * MiB);
+        mock.limit = 12 * MiB;
+        const auto before = mock.attempts;
+        try {
+            DeviceBuffer recovered(context, 4 * MiB, usage);
+            Expect(mock.attempts == before + 3, "an allocation the pool's own slots could not satisfy did not retry once after the trim and once after the cache release");
+            Expect(reclaimMock.requests == 1 && reclaimMock.asked == 260 * MiB, "the caches were not asked once for the request plus its reserve");
+            Expect(mock.frees == 2 && mock.liveBytes == 4 * MiB, "the trim or the cache release did not free its memory");
+        } catch (const std::exception& error) {
+            Expect(false, std::string("the cache release did not permit recovery: ") + error.what());
+        }
+    }
+    Expect(mock.liveBytes == 0 && mock.liveBuffers.empty(), "cache release recovery leaked a resource");
+    mock = MockDevice{};
+    reclaimMock = ReclaimMock{};
+    {
+        auto context = mockContext();
+        context.cacheReclaim = mockCacheReclaim;
+        ExternalAllocation(10 * MiB);
+        mock.limit = 12 * MiB;
+        const auto before = mock.attempts;
+        try {
+            DeviceBuffer recovered(context, 4 * MiB, usage);
+            Expect(mock.attempts == before + 2 && reclaimMock.requests == 1, "an empty pool did not go straight to the cache release and retry once");
+        } catch (const std::exception& error) {
+            Expect(false, std::string("the cache release alone did not permit recovery: ") + error.what());
+        }
+    }
+    Expect(mock.liveBytes == 0 && mock.liveBuffers.empty(), "cache release recovery with an empty pool leaked a resource");
+    mock = MockDevice{};
+    reclaimMock = ReclaimMock{};
+    {
+        auto context = mockContext();
+        context.cacheReclaim = mockCacheReclaim;
+        mock.limit = 2 * MiB;
+        const auto before = mock.attempts;
+        std::string failure;
+        try {
+            DeviceBuffer buffer(context, 4 * MiB, usage);
+        } catch (const std::exception& error) {
+            failure = error.what();
+        }
+        Expect(reclaimMock.requests == 1 && mock.attempts == before + 1, "a cache release that freed nothing was retried after");
+        Expect(failure.find("Vulkan result -2") != std::string::npos && failure.find("released=0") != std::string::npos, "the failure after an empty cache release lost its result or the released bytes");
+        mock.results = {VK_ERROR_DEVICE_LOST};
+        mock.limit = 0;
+        failure.clear();
+        try {
+            DeviceBuffer buffer(context, 4 * MiB, usage);
+        } catch (const std::exception& error) {
+            failure = error.what();
+        }
+        Expect(reclaimMock.requests == 1 && failure.find("Vulkan result -4") != std::string::npos, "a device loss asked the caches for memory");
+    }
+    Expect(mock.liveBytes == 0 && mock.liveBuffers.empty(), "the failed cache release leaked a resource");
+}
+
 void SuccessfulAllocationKeepsPool() {
     mock = MockDevice{};
     {
@@ -656,6 +751,7 @@ int main(int argc, char** argv) {
         AllocationFailure(VK_ERROR_OUT_OF_DEVICE_MEMORY, VK_ERROR_DEVICE_LOST, true);
         SuccessfulAllocationKeepsPool();
         PartialSlabDoesNotRetry();
+        CacheReclaimRecovery();
         HostPlacement();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL: %s\n", error.what());

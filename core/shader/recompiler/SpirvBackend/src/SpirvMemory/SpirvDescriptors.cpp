@@ -75,7 +75,17 @@ void DecorateTableNonUniform(SpirvEmitterState& state, std::uint32_t id) {
     if (!state.tableIndexNonUniform) return;
     state.module.EmitCapability(spv::CapabilityShaderNonUniform);
     state.module.EmitCapability(spv::CapabilitySampledImageArrayNonUniformIndexing);
+    if (std::any_of(state.tableImageVariables.begin(), state.tableImageVariables.end(), [](const SpirvTableImageVariable& variable) { return ImageBindingResourceClass(variable.kind) == ImageResourceClass::Storage; })) state.module.EmitCapability(spv::CapabilityStorageImageArrayNonUniformIndexing);
     state.module.AddAnnotation(spv::OpDecorate, id, spv::DecorationNonUniform);
+}
+
+std::uint32_t TableStorageImagePointer(SpirvEmitterState& state, DescriptorBindingKind kind, std::uint32_t resource, std::uint32_t pointerType) {
+    const auto found = std::find_if(state.tableImageVariables.begin(), state.tableImageVariables.end(), [&](const SpirvTableImageVariable& variable) { return variable.kind == kind; });
+    if (found == state.tableImageVariables.end() || !state.tableAccess.active) ExitDescriptorBindingFailure(state, kind, resource, "image storage table array was not emitted for the mode");
+    const auto pointer = state.module.AllocateId();
+    state.module.AddFunction(spv::OpAccessChain, pointerType, pointer, found->variable, state.tableAccess.element);
+    DecorateTableNonUniform(state, pointer);
+    return pointer;
 }
 
 bool TableModeEmitted(const ImageResource& mode) {
@@ -216,8 +226,9 @@ std::uint32_t StorageImageDescriptorPointer(SpirvEmitterState& state, std::uint3
         FailEmit("storage image descriptor requested for a non-storage image");
     }
     const auto kind = DescriptorBindingForImage(image);
-    const auto arrayIndex = ResourceForDescriptor(state, kind, resource);
     const auto pointerType = state.module.Type(spv::OpTypePointer, spv::StorageClassUniformConstant, ImageType(state, image));
+    if (image.table != NoTable) return TableStorageImagePointer(state, kind, resource, pointerType);
+    const auto arrayIndex = ResourceForDescriptor(state, kind, resource);
     const auto variable = state.imageVariables.at(ImageBindingIndex(kind));
     return DescriptorElementPointer(state, pointerType, variable, arrayIndex, kind, resource, "storage image descriptor array was not emitted");
 }
@@ -231,9 +242,17 @@ void EmitStorageImageWrite(SpirvEmitterState& state, std::uint32_t resource, std
         state.module.EmitCapability(spv::CapabilityStorageImageWriteWithoutFormat);
     }
     const auto kind = DescriptorBindingForImage(image);
-    const auto arrayIndex = ResourceForDescriptor(state, kind, resource);
     const auto imageType = ImageType(state, image);
     const auto pointerType = state.module.Type(spv::OpTypePointer, spv::StorageClassUniformConstant, imageType);
+    if (image.table != NoTable) {
+        if (RdnaImageDimensionInfoFor(image.dimension).multisampled != 0u || image.mipMode == ImageMipMode::DynamicStorage) FailEmit("an image table store to a multisampled image or through dynamic mips is not implemented");
+        const auto descriptor = state.module.AllocateId();
+        state.module.AddFunction(spv::OpLoad, imageType, descriptor, TableStorageImagePointer(state, kind, resource, pointerType));
+        DecorateTableNonUniform(state, descriptor);
+        state.module.AddFunction(spv::OpImageWrite, descriptor, coord, texel);
+        return;
+    }
+    const auto arrayIndex = ResourceForDescriptor(state, kind, resource);
     const auto variable = state.imageVariables.at(ImageBindingIndex(kind));
     const auto loadAt = [&](std::uint32_t index) {
         const auto pointer = DescriptorElementPointer(state, pointerType, variable, index, kind, resource, "storage image descriptor array was not emitted");

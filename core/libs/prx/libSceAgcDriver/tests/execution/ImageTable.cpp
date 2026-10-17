@@ -184,6 +184,11 @@ alignas(256) constexpr std::array<std::uint32_t, 15> StoreTableCode{
     0xf42c0802u, 0x24000000u, 0x360200bfu, 0x7e040280u, 0xf0208f08u, 0x00090401u, 0xbf810000u,
 };
 
+alignas(256) constexpr std::array<std::uint32_t, 16> StoreLaneTableCode{
+    0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0x8f108202u, 0xf4200444u, 0x20000000u, 0x9312b011u,
+    0xf42c0802u, 0x24000000u, 0x360200bfu, 0x7e040280u, 0x7e080301u, 0xf0208f08u, 0x00090401u, 0xbf810000u,
+};
+
 alignas(256) constexpr std::array<std::uint32_t, 17> StoreTableCutCode{
     0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0x8f108202u, 0xf4200444u, 0x20000000u, 0x9312b011u,
     0xf42c0802u, 0x24000000u, 0x360200bfu, 0x7e040280u, 0x7da400ffu, 0x00001000u, 0xf0208f08u, 0x00090401u,
@@ -368,7 +373,7 @@ Outcome Execute(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> 
     outcome.cacheable = AgcDriver::DriverDetail::CacheableResult(result);
     outcome.imageTableReadRanges = result.imageTableReadRanges;
     for (const auto& binding : result.bindings) {
-        if (binding.role == ShaderRecompiler::DescriptorRole::ImageTable) outcome.imageTableCount = binding.count;
+        if (binding.role == ShaderRecompiler::DescriptorRole::ImageTable || binding.role == ShaderRecompiler::DescriptorRole::ImageStorageTable) outcome.imageTableCount = binding.count;
         if (binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers) outcome.samplers = SamplerWords(binding.guestDescriptor);
         if (binding.role == ShaderRecompiler::DescriptorRole::SamplerTable) outcome.samplerTable = SamplerWords(binding.guestDescriptor);
     }
@@ -988,15 +993,37 @@ void RunModeTests(AgcDriver::VulkanDevice& device) {
 }
 
 void RunStoreTests(AgcDriver::VulkanDevice& device) {
+    struct Registration {
+        void* data;
+        Registration(void* data, std::size_t bytes) : data(data) { GuestAllocations::Mutation().Add(data, bytes, true, true, true); }
+        ~Registration() { GuestAllocations::Mutation().Remove(data); }
+    } registeredUint(UintTexels.data(), sizeof(UintTexels)), registeredFloat(FloatTexels.data(), sizeof(FloatTexels)), registeredSint(SintTexels.data(), sizeof(SintTexels));
     SetClassRecords();
-    const auto saved = UintTexels;
+    const auto savedUint = UintTexels;
+    const auto savedFloat = FloatTexels;
+    const auto savedSint = SintTexels;
+    const auto untouched = [&] { return UintTexels == savedUint && FloatTexels == savedFloat && SintTexels == savedSint; };
     Keys = {};
     Keys[0] = 1;
     const auto cut = Run(device, StoreTableCutCode, 1, Lanes, 64);
+    AgcDriver::Graphics::StorageTexture::FlushAllPending("image table store test");
     Require(!Faulted(cut), "image table store: a store with EXEC clear faulted:\n" + cut.log);
-    const auto stored = Run(device, StoreTableCode, 1, Lanes, 64);
-    Require(Faulted(stored) && stored.log.find("unsupported operation") != std::string::npos, "image table store: an image_store through a table did not fault as an unsupported operation:\n" + stored.log);
-    Require(UintTexels == saved, "image table store: an unsupported store reached the image");
+    Require(untouched(), "image table store: a store with EXEC clear reached an image");
+    const auto stored = Run(device, StoreLaneTableCode, 1, Lanes, 64);
+    AgcDriver::Graphics::StorageTexture::FlushAllPending("image table store test");
+    Require(!Faulted(stored), "image table store: a store through a table faulted:\n" + stored.log);
+    Require(stored.imageTableCount == 2u, "image table store: the storage table does not hold one element per distinct T# (" + std::to_string(stored.imageTableCount) + ")");
+    for (std::uint32_t x = 0; x < Width; ++x) Require(UintTexels[x] == x, "image table store: texel " + std::to_string(x) + " of the selected image is " + Hex(UintTexels[x]) + ", expected " + Hex(x));
+    Require(std::equal(UintTexels.begin() + Width, UintTexels.end(), savedUint.begin() + Width), "image table store: a store to row 0 reached another row");
+    Require(FloatTexels == savedFloat && SintTexels == savedSint, "image table store: a store through key 1 reached another entry's image");
+    UintTexels = savedUint;
+    const auto restored = Run(device, StoreTableCutCode, 1, Lanes, 64);
+    AgcDriver::Graphics::StorageTexture::FlushAllPending("image table store test");
+    Require(!Faulted(restored) && untouched(), "image table store: restoring the image failed:\n" + restored.log);
+    Keys[0] = 6;
+    const auto null = Run(device, StoreLaneTableCode, 1, Lanes, 64);
+    AgcDriver::Graphics::StorageTexture::FlushAllPending("image table store test");
+    Require(untouched(), "image table store: a store through a null entry reached an image:\n" + null.log);
 }
 
 void RunPointerTests(AgcDriver::VulkanDevice& device) {

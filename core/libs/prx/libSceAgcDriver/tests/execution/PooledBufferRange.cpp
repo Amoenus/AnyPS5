@@ -1,3 +1,4 @@
+#include "../CommandBatchFailure.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -483,6 +484,7 @@ int main() {
         SlabMetadataFailures(device->GetContext());
         RobustReadPastEnd(device->GetContext());
         ExactSizes(device->GetContext());
+        AgcDriver::Tests::RunCommandBatchFailureTests(device->GetContext(), true);
         device.reset();
         Require(AllocationErrors == 0 && LiveBytes == 0, "native buffer cleanup left an invalid memory state");
         std::puts("pooled buffer range tests passed");

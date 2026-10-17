@@ -106,8 +106,8 @@ void ValidateProvokingVertex(const Context& context, const State& state, std::sp
         return;
     }
     Require(context.provokingVertexLast, "last provoking vertex requires VK_EXT_provoking_vertex with provokingVertexLast enabled");
-    Require(!state.rectList && state.stages.path == ShaderPath::Vertex && !state.stages.mesh && !state.stages.tessellation, "last provoking vertex is unsupported for generated primitive pipelines");
-    Require(state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, "last provoking vertex is unsupported for this primitive topology");
+    Require(state.stages.path == ShaderPath::Vertex && !state.stages.mesh && !state.stages.tessellation, "last provoking vertex is unsupported for generated primitive pipelines");
+    Require(state.rectList || state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, "last provoking vertex is unsupported for this primitive topology");
     for (const auto& shader : shaders) {
         if (shader.stage != ShaderRecompiler::ShaderStage::Fragment) continue;
         Require(shader.program != nullptr, "missing compiled fragment shader");
@@ -911,6 +911,7 @@ struct PipelineStore {
         // The device's buffer pool at insertion: it is made and reset with the device, so it tells
         // the device instance apart from a later one the loader gave the same handle value.
         std::weak_ptr<BufferPool> pool;
+        bool tracksPool;
         std::uint64_t hash;
         std::vector<std::byte> key;
         std::shared_ptr<Pipeline> pipeline;
@@ -936,8 +937,12 @@ PipelineStore& Pipelines() {
 
 // Whether the entry's objects belong to the device the context names. A context without a buffer
 // pool (tests) is identified by the handle alone.
-bool alive(const PipelineStore::Entry& entry, const Context& context) {
+bool alive(PipelineStore::Entry& entry, const Context& context) {
     if (entry.device != context.device) return false;
+    if (!entry.tracksPool && context.bufferPool != nullptr) {
+        entry.pool = context.bufferPool;
+        entry.tracksPool = true;
+    }
     return context.bufferPool == nullptr || entry.pool.lock() == context.bufferPool;
 }
 
@@ -1048,10 +1053,10 @@ std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& st
         // the title's own pipelines evict it first, and a full store takes none.
         if (replaying && store.entries.size() >= bound) return pipeline;
         if (replaying) {
-            store.entries.push_front({context.device, context.bufferPool, hash, std::vector<std::byte>(key), pipeline});
+            store.entries.push_front({context.device, context.bufferPool, context.bufferPool != nullptr, hash, std::vector<std::byte>(key), pipeline});
             store.index[hash] = store.entries.begin();
         } else {
-            store.entries.push_back({context.device, context.bufferPool, hash, std::vector<std::byte>(key), pipeline});
+            store.entries.push_back({context.device, context.bufferPool, context.bufferPool != nullptr, hash, std::vector<std::byte>(key), pipeline});
             store.index[hash] = std::prev(store.entries.end());
         }
         while (store.entries.size() > bound) {

@@ -373,9 +373,9 @@ void CommandBatch::Submit() {
     submission.pCommandBuffers = &commands;
     timing.Mark("command_end");
     Check(context.Function<PFN_vkQueueSubmit>("vkQueueSubmit")(context.queue, 1, &submission, fence), "vkQueueSubmit graphics");
-    timing.Mark("queue_submit");
     pending = true;
     submitted = true;
+    timing.Mark("queue_submit");
 }
 
 void CommandBatch::Wait() {

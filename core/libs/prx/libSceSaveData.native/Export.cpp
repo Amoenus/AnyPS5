@@ -217,6 +217,7 @@ int APS5_VABI sceSaveDataCommit(const SaveDataCommitParam* param) {
 
 int APS5_VABI sceSaveDataCreateTransactionResource(uint32_t size) {
     (void)size;
+    if (g_initializations == 0) return SAVE_DATA_ERROR_NOT_INITIALIZED;
     return g_transaction_counter.fetch_add(1);
 }
 
@@ -271,6 +272,7 @@ int APS5_VABI sceSaveDataDelete(const SaveDataDelete* del) {
 
 int APS5_VABI sceSaveDataDeleteTransactionResource(int32_t resource) {
     (void)resource;
+    if (g_initializations == 0) return SAVE_DATA_ERROR_NOT_INITIALIZED;
     return SAVE_DATA_OK;
 }
 

@@ -1523,7 +1523,8 @@ void ResourceMaterializer::ApplyStaticInterface(IrProgram& program, bool nativeS
         if (image.table == NoTable) continue;
         tables = true;
         const auto modes = RuntimeImageModes(image);
-        if (modes.empty() || modes.size() > ImageTableAbi::MaxModes) image.tableOperation = TableOperation::Unsupported;
+        const bool storage = image.resourceClass == ImageResourceClass::Storage;
+        if (modes.empty() || modes.size() > ImageTableAbi::MaxModes || (storage && image.mipMode == ImageMipMode::DynamicStorage)) image.tableOperation = TableOperation::Unsupported;
     }
     for (const auto& pair : resources.info.sampledPairs) {
         if (pair.image >= images.size() || pair.sampler >= resources.info.samplers.size()) throw std::runtime_error("static sampled pair is out of range");

@@ -56,7 +56,7 @@ public:
         }
     }
 
-    std::vector<std::uint32_t> EmitControl() {
+    std::vector<std::uint32_t> EmitControl(std::uint32_t flatVertex) {
         defineEntry(spv::ExecutionModelTessellationControl);
         const auto floatOne = constant(floatType, std::bit_cast<std::uint32_t>(1.0f));
 
@@ -123,11 +123,11 @@ public:
                 store(access(ptrOutputVec4Float, outputs[i], invocation), result(spv::OpCompositeConstruct, vec4FloatType, zero, zero, zero, zero));
                 continue;
             }
-            const auto input0 = load(vec4FloatType, access(ptrInputVec4Float, inputs[i], intConstant(0)));
             if (parameters[i].flat) {
-                store(access(ptrOutputVec4Float, outputs[i], invocation), input0);
+                store(access(ptrOutputVec4Float, outputs[i], invocation), load(vec4FloatType, access(ptrInputVec4Float, inputs[i], intConstant(flatVertex))));
                 continue;
             }
+            const auto input0 = load(vec4FloatType, access(ptrInputVec4Float, inputs[i], intConstant(0)));
             const auto input1 = load(vec4FloatType, access(ptrInputVec4Float, inputs[i], intConstant(1)));
             const auto input2 = load(vec4FloatType, access(ptrInputVec4Float, inputs[i], intConstant(2)));
             const auto input3 = interpolate(input0, input1, input2, barycentric);
@@ -398,7 +398,7 @@ RectListShaders BuildRectListShaders(const RecompileResult& vertex, const Recomp
     RectListEmitter control(parameters, spv::ExecutionModelTessellationControl, target.spirvVersion, faultBinding);
     RectListEmitter evaluation(parameters, spv::ExecutionModelTessellationEvaluation, target.spirvVersion, faultBinding);
     RectListShaders shaders;
-    shaders.control.spirv = control.EmitControl();
+    shaders.control.spirv = control.EmitControl(0u);
     shaders.control.bindings.push_back({DescriptorKind::StorageBuffer, DescriptorRole::FaultBuffer, 0, faultBinding, 1, {}});
     shaders.control.bdaAbiVersion = BdaAbi::Version;
     shaders.evaluation.spirv = evaluation.EmitEvaluation();
@@ -406,6 +406,14 @@ RectListShaders BuildRectListShaders(const RecompileResult& vertex, const Recomp
     shaders.control.spirv = ValidateAndOptimizeSpirv(shaders.control.spirv, target.vulkanVersion, target.spirvVersion);
     shaders.evaluation.spirv = ValidateAndOptimizeSpirv(shaders.evaluation.spirv, target.vulkanVersion, target.spirvVersion);
 #endif
+    shaders.lastVertexControl = shaders.control;
+    if (std::any_of(parameters.begin(), parameters.end(), [](const Parameter& parameter) { return parameter.flat && !parameter.missing; })) {
+        RectListEmitter lastVertexControl(parameters, spv::ExecutionModelTessellationControl, target.spirvVersion, faultBinding);
+        shaders.lastVertexControl.spirv = lastVertexControl.EmitControl(2u);
+#if ANYPS5_ENABLE_SPIRV_TOOLS
+        shaders.lastVertexControl.spirv = ValidateAndOptimizeSpirv(shaders.lastVertexControl.spirv, target.vulkanVersion, target.spirvVersion);
+#endif
+    }
     return shaders;
 }
 
