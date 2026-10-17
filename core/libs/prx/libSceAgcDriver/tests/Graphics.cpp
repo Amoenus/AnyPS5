@@ -612,6 +612,15 @@ void hardwareScreenOffsetTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
 }
 
+void depthCopyFormatTests() {
+    using AgcDriver::Graphics::Texture;
+    Require(Texture::DepthCopyFormat(VK_FORMAT_R32_SFLOAT) == VK_FORMAT_D32_SFLOAT, "a 32-bit float color format did not map to the 32-bit float depth format");
+    Require(Texture::DepthCopyFormat(VK_FORMAT_R16_UNORM) == VK_FORMAT_D16_UNORM, "a 16-bit unorm color format did not map to the 16-bit unorm depth format");
+    for (const auto format : {VK_FORMAT_UNDEFINED, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_D32_SFLOAT}) {
+        Require(Texture::DepthCopyFormat(format) == VK_FORMAT_UNDEFINED, "a color format without a depth counterpart mapped to a depth format");
+    }
+}
+
 void UnwrittenSampleLocationTests() {
     using AgcDriver::Graphics::DecodeState;
     using AgcDriver::Graphics::DrawRejection;
@@ -8259,6 +8268,7 @@ int main(int argc, char** argv) {
         clipDistanceTests();
         framebufferLayerTests();
         UnwrittenSampleLocationTests();
+        depthCopyFormatTests();
         quadPixelMaskTests();
         ShaderStageTests();
         NggVertexWorkgroupTests();

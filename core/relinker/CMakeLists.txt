@@ -375,6 +375,9 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/include
         ${CMAKE_CURRENT_SOURCE_DIR}/io/include
     )
+    if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR (NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")))
+        target_link_options(amd64_only_converter_tests PRIVATE "LINKER:-pagezero_size,0x10000")
+    endif()
     add_test(NAME amd64_only_converter COMMAND amd64_only_converter_tests)
     add_test_executable(call_site_resolver_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/CallSiteResolverTests.cpp
