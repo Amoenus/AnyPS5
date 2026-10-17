@@ -97,10 +97,6 @@ int RunNativeClear(AgcDriver::VulkanDevice& device) {
     using namespace ShaderRecompiler;
     using namespace AgcDriver::Graphics;
     const std::lock_guard lock(Memory::GpuMutex());
-    if (!Memory::WriteWatched()) {
-        std::puts("skipped, guest write watching is unavailable");
-        return VulkanTestSkipped;
-    }
     const GuestBlock depth, metadata;
     metadata.FillWith(0);
     constexpr VkExtent2D extent{5u, 3u};
@@ -131,7 +127,7 @@ int RunNativeClear(AgcDriver::VulkanDevice& device) {
     device.WaitIdle();
     Require(std::all_of(metadata.Data(), metadata.Data() + BlockBytes, [](auto value) { return value == 0u; }), "the warm-up native clear did not retain zero metadata");
     if (!Memory::Watched(depth.Address(), BlockBytes) || !Memory::Watched(metadata.Address(), BlockBytes)) {
-        std::puts("skipped, native clear imports do not retain guest write watching");
+        std::puts("skipped, the device does not retain guest write watching for native clear imports");
         return VulkanTestSkipped;
     }
     const auto context = AgcDriver::VulkanDeviceTestAccess::Context(device);
