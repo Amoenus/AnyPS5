@@ -349,10 +349,7 @@ static std::uint64_t ProcessCpuResolutionNanos() {
 }
 #endif
 
-int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
-    if (tp == nullptr) {
-        APS5_INVALID_ARG_EX;
-    }
+static int ReadClock(int clockId, KernelTimespec* tp) {
     if (IsCpuClock(clockId)) {
         std::uint64_t nanos = 0;
         if (!GuestThreadCpuNanos(static_cast<int>(static_cast<std::uint32_t>(clockId) & CPU_CLOCK_ID_MASK), &nanos)) {
@@ -402,7 +399,7 @@ int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
         tp->tv_nsec = static_cast<std::int64_t>(nanos % 1000000000ULL);
         return 0;
     }
-    throw std::runtime_error(std::string(__func__) + ": unsupported clock_id " + std::to_string(clockId));
+    throw std::runtime_error(std::string("clock_gettime") + ": unsupported clock_id " + std::to_string(clockId));
 #else
     clockid_t nativeId;
     switch (clockId) {
@@ -435,7 +432,7 @@ int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
             nativeId = CLOCK_PROCESS_CPUTIME_ID;
             break;
         default:
-            throw std::runtime_error(std::string(__func__) + ": unsupported clock_id " + std::to_string(clockId));
+            throw std::runtime_error(std::string("clock_gettime") + ": unsupported clock_id " + std::to_string(clockId));
     }
     struct timespec ts{};
     if (clock_gettime(nativeId, &ts) != 0) {
@@ -445,6 +442,17 @@ int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
     tp->tv_nsec = clockId == 13 ? 0 : static_cast<std::int64_t>(ts.tv_nsec);
     return 0;
 #endif
+}
+
+int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
+    KernelTimespec value{};
+    if (ReadClock(clockId, &value) != 0) return -1;
+    if (tp == nullptr) {
+        *__error_nid_postfix() = GUEST_EFAULT;
+        return -1;
+    }
+    *tp = value;
+    return 0;
 }
 
 int APS5_VABI gettimeofday_nid_postfix(KernelTimeval* tv, KernelTimezone* tz) {

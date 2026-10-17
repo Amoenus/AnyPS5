@@ -709,8 +709,10 @@ def main(argv=None):
         exports, libraries = built_libraries(args.libs)
         host_dependencies = built_host_dependencies(args.libs)
         module_imports, module_exports = read_modules(args.modules)
-        records, missing = audit(imports, exports, source_stubs(args.source), libraries, set(module_imports), module_imports, module_exports, needed_libraries=needed)
-        missing_hosts = audit_host_dependencies(host_dependencies, libraries, set(module_imports))
+        modules = set(module_imports)
+        modules |= {name.removesuffix(".guest.prx") for name in modules if name.endswith(".guest.prx")}
+        records, missing = audit(imports, exports, source_stubs(args.source), libraries, modules, module_imports, module_exports, needed_libraries=needed)
+        missing_hosts = audit_host_dependencies(host_dependencies, libraries, modules)
         if args.names:
             attach_names(records, load_names(args.names))
         summary = summarize(records, sum(record["references"] for record in records), missing, missing_hosts)

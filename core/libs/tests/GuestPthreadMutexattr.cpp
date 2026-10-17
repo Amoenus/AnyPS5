@@ -113,11 +113,22 @@ static void CheckProcessSharing() {
     Require(pthread_mutexattr_setpshared_nid_postfix(&attr, 0) == GUEST_EINVAL);
 }
 
+static void CheckInvalidPriorityAttribute(PthreadMutexattr* attr) {
+    int ceiling = -1;
+    Require(pthread_mutexattr_setprotocol_nid_postfix(attr, PRIO_PROTECT) == GUEST_EINVAL);
+    Require(pthread_mutexattr_setprotocol_nid_postfix(attr, -1) == GUEST_EINVAL);
+    Require(pthread_mutexattr_setprioceiling_nid_postfix(attr, 300) == GUEST_EINVAL);
+    Require(pthread_mutexattr_getprioceiling_nid_postfix(attr, &ceiling) == GUEST_EINVAL && ceiling == -1);
+    Require(pthread_mutexattr_getprioceiling_nid_postfix(attr, nullptr) == GUEST_EINVAL);
+}
+
 int main() {
     CheckType();
     CheckProcessSharing();
     CheckTimedlockInvalidDeadline();
     PthreadMutexattr attr = nullptr;
+    CheckInvalidPriorityAttribute(nullptr);
+    CheckInvalidPriorityAttribute(&attr);
     Require(pthread_mutexattr_init_nid_postfix(&attr) == 0);
     int ceiling = -1;
     Require(pthread_mutexattr_getprioceiling_nid_postfix(&attr, &ceiling) == GUEST_EINVAL && ceiling == -1);
@@ -139,7 +150,6 @@ int main() {
     Require(pthread_mutexattr_getprioceiling_nid_postfix(&attr, &ceiling) == GUEST_EINVAL);
     Require(Throws([&] { pthread_mutexattr_getprioceiling_nid_postfix(&attr, nullptr); }));
     Require(pthread_mutexattr_destroy_nid_postfix(&attr) == 0);
-    Require(Throws([&] { pthread_mutexattr_setprioceiling_nid_postfix(&attr, 300); }));
-    Require(Throws([&] { pthread_mutexattr_getprioceiling_nid_postfix(&attr, &ceiling); }));
+    CheckInvalidPriorityAttribute(&attr);
     return 0;
 }

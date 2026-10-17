@@ -5,6 +5,7 @@ import gzip
 import html
 import json
 import sys
+import zlib
 from pathlib import Path
 
 DESCRIPTION = """Digest of an APS5_TRACE_FRAMES / APS5_TRACE_SECONDS capture (aps5-trace-*.json.gz) for an issue or a
@@ -341,4 +342,8 @@ def main(arguments=None):
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (EOFError, OSError, ValueError, zlib.error) as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        sys.exit(2)

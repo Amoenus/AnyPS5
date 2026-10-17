@@ -34,7 +34,7 @@ def entries(build):
     ninja = shutil.which("ninja")
     if ninja is None:
         raise ValueError(f"no {manifest} and ninja is not on PATH")
-    result = capture([ninja, "-C", str(build), "-t", "compdb"])
+    result = capture([ninja, "-C", str(build), "-t", "compdb", "-x"])
     if result.returncode != 0:
         raise ValueError(f"ninja -t compdb: {result.stderr.strip()}")
     return json.loads(result.stdout)

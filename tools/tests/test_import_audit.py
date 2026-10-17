@@ -487,6 +487,19 @@ class ImportAuditTests(unittest.TestCase):
         self.assertEqual(records[("AAAAAAAAAAA", "provider.data")]["providers"], ["libSceA.prx"])
         self.assertEqual(records[("BBBBBBBBBBB", "consumer.prx")]["providers"], ["provider.data"])
 
+    def test_converted_module_matches_imports_of_its_base_name(self):
+        work = self.work
+        (work.libs / "libc.prx").write_bytes(exporting())
+        (work.modules / "libSceFace.prx.guest.prx").write_bytes(exporting("AAAAAAAAAAA"))
+        registry, result = work.root / "game.json", work.root / "audit.json"
+        write_registry(registry, [("AAAAAAAAAAA", "libSceFace.prx")])
+        code, _, err = work.run(registry, "--json", str(result))
+        self.assertEqual((code, err), (0, ""))
+        data = json.loads(result.read_text())
+        self.assertEqual(data["missing_libraries"], {})
+        record = next(record for record in data["imports"] if record["library"] == "libSceFace.prx")
+        self.assertEqual(record["class"], "module")
+
     def test_bad_named_modules_and_malformed_elf_are_not_ignored(self):
         work = self.work
         (work.libs / "libc.prx").write_bytes(exporting())

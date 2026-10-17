@@ -14,6 +14,24 @@ TOOL = Path(__file__).resolve().parents[1] / "check_compile.py"
 
 
 class CheckCompileTests(unittest.TestCase):
+    def test_ninja_response_file_is_expanded_before_syntax_rewriting(self):
+        compiler = shutil.which("clang") or shutil.which("gcc")
+        if compiler is None or shutil.which("ninja") is None:
+            self.skipTest("needs Ninja and a C compiler")
+        source = self.source("unit.c", "#ifndef REQUIRED\n#error missing definition\n#endif\nint x;\n")
+        command = subprocess.list2cmdline([compiler]) if os.name == "nt" else '"' + compiler + '"'
+        (self.build / "build.ninja").write_text(
+            "rule cc\n  command = " + command + " @$out.rsp\n"
+            "  rspfile = $out.rsp\n  rspfile_content = -DREQUIRED -c $in -o $out -MD -MF $out.d\n"
+            "build unit.o: cc ../unit.c\n", encoding="utf-8")
+        self.assertFalse((self.build / "unit.o.rsp").exists())
+        result = self.tool("unit.c")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 translation units compile", result.stdout)
+        self.assertFalse((self.build / "unit.o").exists())
+        self.assertFalse((self.build / "unit.o.d").exists())
+        self.assertFalse((self.build / "unit.o.rsp").exists())
+
     def test_syntax_check_preserves_existing_clang_compilation_fragment(self):
         compiler = shutil.which("clang")
         if compiler is None:

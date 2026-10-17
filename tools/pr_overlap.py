@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -21,8 +22,8 @@ def git(*args):
 
 
 def own(prs, sha):
-    return {n: pr for n, pr in prs.items()
-            if pr["sha"] != sha and subprocess.run(["git", "merge-base", "--is-ancestor", pr["sha"], sha], capture_output=True).returncode != 0}
+    ancestors = set(git("rev-list", sha).splitlines())
+    return {n: pr for n, pr in prs.items() if pr["sha"] not in ancestors}
 
 
 def gh(*args):
@@ -122,6 +123,11 @@ def scan(pr):
             pr["added"].add(path)
     diff = git("diff", "-U0", "--no-color", old, new, "--", "core/libs/prx/*.cpp")
     pr["exports"] = exports(diff)
+
+
+def scan_all(prs, jobs):
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        list(executor.map(scan, prs.values()))
 
 
 def hunks(pr, path):
@@ -236,9 +242,12 @@ if __name__ == "__main__":
     parser.add_argument("--out", type=Path, help="write <number>.md for every open pull request (empty when clean)")
     parser.add_argument("--branch", help="check a local branch against the open pull requests instead")
     parser.add_argument("--repo", help="owner/name; defaults to the upstream of the current checkout")
+    parser.add_argument("--jobs", type=int, default=4, help="number of pull request comparisons to run at once")
     args = parser.parse_args()
     if bool(args.out) == bool(args.branch):
         parser.error("pass exactly one of --out or --branch")
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
     REPO = args.repo or upstream()
     prs = open_prs(args.base)
     fetch(args.base, prs)
@@ -246,8 +255,7 @@ if __name__ == "__main__":
         sha = git("rev-parse", args.branch).strip()
         prs = own(prs, sha)
         prs[0] = {"ref": sha, "author": None, "depends": set()}
-    for pr in prs.values():
-        scan(pr)
+    scan_all(prs, args.jobs)
     rows = {n: {} for n in prs}
     pairs = [(0, n) for n in prs if n] if args.branch else combinations(prs, 2)
     for a, b in pairs:

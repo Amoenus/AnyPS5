@@ -1693,6 +1693,10 @@ int main(int argc, char** argv) {
         Block other(BlockBytes);
         const auto color = DecodeTarget(block);
         const auto state = TargetState(color);
+        if (!AgcDriver::VulkanDeviceTestAccess::ContextOf(*device).storageImageMultisample) {
+            std::puts("multisampled target sampling not tested: storage image multisampling unavailable");
+            return VulkanTestSkipped;
+        }
         Draw(*device, state);
         CheckSamples(state, LoadSamples(*device, block), {});
         const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
