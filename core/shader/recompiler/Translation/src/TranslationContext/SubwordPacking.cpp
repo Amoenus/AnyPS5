@@ -184,8 +184,12 @@ IrU32 TranslationContext::flushF16Result(IrU32 bits) {
 
 IrF32 TranslationContext::flushF16InputValue(IrF32 value) {
     if (!floatMode.has_value() || (floatMode->floatMode & 0x40u) != 0u) return value;
+    return flushTinyF16Value(value, 0x38800000u);
+}
+
+IrF32 TranslationContext::flushTinyF16Value(IrF32 value, std::uint32_t threshold) {
     const IrU32 bits(ir.BitCastU32(value.Value()));
-    const IrU1 tiny(ir.ULessThan(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffffffu)), ir.Constant(0x38800000u)));
+    const IrU1 tiny(ir.ULessThan(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffffffu)), ir.Constant(threshold)));
     return IrF32(ir.BitCastF32(ir.Select(tiny.Value(), ir.BitwiseAnd(bits.Value(), ir.Constant(0x80000000u)), bits.Value())));
 }
 
