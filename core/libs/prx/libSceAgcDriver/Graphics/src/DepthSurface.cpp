@@ -212,7 +212,7 @@ public:
             const auto& metadata = sampling.initial[1];
             Require(GuestMemory::UnchangedSince(depth.address, depth.bytes, depth.generation), "guest writes over native multisample depth are not implemented");
             Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
-            Require(GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no complete tracked HTILE store");
+            if (!clearKernelProvesCoverage) Require(GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no complete tracked HTILE store");
             Require(clearDepth == 0.0f || clearDepth == 1.0f, "native multisample depth clear value is not implemented");
             auto current = sampling.initial;
             current[1].generation = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
@@ -225,6 +225,7 @@ public:
             RecordClear(VK_IMAGE_ASPECT_DEPTH_BIT);
             sampling.initial = current;
             clearGeneration = 0u;
+            clearKernelProvesCoverage = false;
             pendingClear = 0u;
         }
         Require(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes over native multisample depth are not implemented");
@@ -476,6 +477,7 @@ public:
     bool samplingActive = false;
     DepthSamplingState sampling;
     std::uint64_t clearGeneration = 0u;
+    bool clearKernelProvesCoverage = false;
     std::shared_ptr<OwnedImage> owned;
 
 private:
@@ -1284,7 +1286,10 @@ void NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::siz
             const auto& metadata = surface->sampling.initial[1];
             if (nativeBytes != bytes || nativeBytes < metadata.bytes || !GuestMemory::Accessible(reinterpret_cast<const void*>(metadata.address), metadata.bytes) || !GuestMemory::Watched(metadata.address, metadata.bytes)) surface->sampling.refusal = "native multisample depth incomplete or unproven fast-clear transition is not implemented";
             else if (surface->clearGeneration != 0u) surface->sampling.refusal = "overlapping native multisample depth clear transitions are not implemented";
-            else surface->clearGeneration = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
+            else {
+                surface->clearGeneration = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
+                surface->clearKernelProvesCoverage = nativeBytes == bytes && nativeBytes >= metadata.bytes;
+            }
             existing = true;
             continue;
         }
