@@ -153,10 +153,10 @@ int RunNativeClear(AgcDriver::VulkanDevice& device) {
     device.WaitIdle();
     target.clearDepth = 1.0f;
     Require(DepthSurfaceView(context, target) == view, "changing the native clear value replaced its attachment");
-    NoteHtileDepthClear(target.htileAddress, metadataBytes, metadataBytes);
+    Require(NoteHtileDepthClear(target.htileAddress, metadataBytes, metadataBytes), "the recognized native clear did not request completion evidence");
     const auto generation = Memory::TrackerGeneration();
     userData[4] = 0xfffffff0u;
-    device.Dispatch(compile(), groups, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(code.data()));
+    device.Dispatch(compile(), groups, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(code.data()), nullptr, nullptr, std::pair{target.htileAddress, metadataBytes});
     device.WaitIdle();
     for (std::size_t offset = 0; offset < BlockBytes; offset += 4u) {
         std::uint32_t value = 0;
@@ -164,6 +164,7 @@ int RunNativeClear(AgcDriver::VulkanDevice& device) {
         Require(value == (offset < metadataBytes ? 0xfffffff0u : 0u), "the native GPU clear did not write its exact metadata range");
     }
     std::printf("Native full BDA clear: exact %zu-byte metadata readback passed; complete=%d\n", metadataBytes, Memory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation));
+    Require(Memory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "the completed recognized native clear did not record exact coverage");
     Require(CachedSampledTexture(context, words) == sampled, "a completed full BDA clear lost its native sampled view");
     Require(DepthSurfaceView(context, target) == view, "a completed full BDA clear replaced its native attachment");
     device.WaitIdle();
