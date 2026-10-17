@@ -1577,7 +1577,7 @@ void ReversedComponentOrderBlendTests() {
         expectFailure([&] { DecodeState(reversedBlendQueue(10u, 6u, swap, 0x65010504u)); }, std::string("reversed component order is not implemented for sRGB targets ") + registers);
         expectFailure([&] { DecodeState(reversedBlendQueue(10u, 1u, swap, 0x65010504u)); }, "reversed component order is not implemented for signed normalized targets");
         expectFailure([&] { DecodeState(reversedBlendQueue(12u, 1u, swap, 0x65010504u)); }, "reversed component order is not implemented for signed normalized targets");
-        expectFailure([&] { DecodeState(reversedBlendQueue(12u, 4u, swap, 0x65010504u)); }, "reversed component order is not implemented for integer targets");
+        expectFailure([&] { DecodeState(reversedBlendQueue(12u, 4u, swap, 0x65010504u)); }, "blending into an unsigned integer target or signed integer target is unsupported");
         auto masked = reversedBlendQueue(10u, 0u, swap, 0x65010504u);
         masked.context[0x8e] = 7u;
         Require(DecodeState(masked).blends.at(0).colorWriteMask == 0xeu, "a reversed target's blend did not keep the export-order write mask of its first three exports");
