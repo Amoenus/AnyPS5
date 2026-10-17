@@ -734,13 +734,9 @@ void InitialContents(AgcDriver::VulkanDevice& device, bool snapshots = false) {
         Block block(BlockBytes);
         Block metadata(BlockBytes);
         auto color = DecodeTarget(block);
-        color.fmaskAddress = metadata.Address();
-        {
-            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-            MultisampleTargetView(context, color);
-        }
-        RequireColorSnapshotRefused(context, color, "unsupported tiling or multisample metadata");
-        std::puts("native color snapshot: unmodeled metadata payload refused");
+        color.cmaskAddress = metadata.Address();
+        RequireInitialRefused(context, color, "CMASK require a modeled metadata import");
+        std::puts("native color snapshot: unmodeled CMASK import refused before target creation");
     }
     Require(exercised != 0, "no supported native color initial-content case was exercised");
 }
