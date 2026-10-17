@@ -532,6 +532,7 @@ private:
     }
 
     Recorder& readbackRecorder() const {
+        Require(!Recorder::InCompletion(), "native color readback during a recorder completion is not implemented");
         auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
         Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires a recorder for its device");
         const auto* recording = Recorder::Active();
