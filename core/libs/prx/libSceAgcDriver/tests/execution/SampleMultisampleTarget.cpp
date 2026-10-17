@@ -925,44 +925,6 @@ void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics:
     device.WaitIdle();
 }
 
-ShaderRecompiler::RecompileResult CompileBufferLoad(AgcDriver::VulkanDevice& device, std::uint64_t source, std::uint64_t destination) {
-    const std::array<std::uint32_t, 8> userData{
-        static_cast<std::uint32_t>(source), static_cast<std::uint32_t>((source >> 32u) & 0xffffu), Threads * 4u, 0x31016facu,
-        static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>((destination >> 32u) & 0xffffu), Threads * 4u, 0x31016facu
-    };
-    const std::span<const std::uint32_t> code(BufferLoadCode);
-    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
-    const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0u, {false, false, false}, false, 1};
-    ShaderRecompiler::RecompileRequest request{
-        {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
-        {32, 0, userData, compute, std::nullopt, std::nullopt, memory}, device.Target(), {0, 0, 0, 128}
-    };
-    request.useCache = false;
-    return ShaderRecompiler::Recompile(request);
-}
-
-void CheckBufferLoad(AgcDriver::VulkanDevice& device, const ShaderRecompiler::RecompileResult& program, const Block& output, std::shared_ptr<const AgcDriver::Recipe>* recipe = nullptr) {
-    const std::span words(reinterpret_cast<std::uint32_t*>(output.data), Threads * 2u);
-    std::fill(words.begin(), words.end(), 0xdeadbeefu);
-    device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), nullptr, recipe);
-    device.WaitIdle();
-    Require(std::all_of(words.begin(), words.begin() + Threads, [](auto word) { return word == 0; }), "the nonresident typed buffer load did not read zeroes");
-    Require(std::all_of(words.begin() + Threads, words.end(), [](auto word) { return word == 0xdeadbeefu; }), "the typed buffer load overwrote its output boundary");
-}
-
-template<class TAction>
-void CheckBufferRefused(TAction&& action, const char* name, std::vector<std::string>& missing) {
-    std::string refusal;
-    try {
-        action();
-    } catch (const std::runtime_error& error) {
-        refusal = error.what();
-    }
-    const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
-    std::cout << "native buffer " << name << ": " << (refused ? "refused" : "missing refusal") << '\n';
-    if (!refused) missing.emplace_back(std::string(name) + ": " + refusal);
-}
-
 void CheckVertexValues(std::uint64_t address, std::uint32_t stride) {
     std::array<std::uint32_t, 4> expected{};
     for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
