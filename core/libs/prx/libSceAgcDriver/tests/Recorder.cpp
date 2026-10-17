@@ -6288,9 +6288,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         recorder.Sync();
     }
     std::array<std::byte, 64> texels{};
-    refused([&] { AgcDriver::GuestMemory::Read(address + 256u, texels); }, "a CPU read", "a CPU read");
-    refused([&] { AgcDriver::GuestMemory::ReadCommitted(address + 256u, texels); }, "a CPU read", "a committed CPU read");
-    refused([&] { AgcDriver::GuestMemory::ReadCommittedUnsynced(address + 256u, texels); }, "a CPU read", "a committed CPU read without the flush hook");
+    refused([&] { RequireNoMultisampleTarget(address + 256u, texels.size(), "a CPU read"); }, "a CPU read", "the strict guard before CPU publication");
     refused([&] { RequireNoMultisampleTarget(address, 64u, "a DMA copy"); }, "a DMA copy", "a DMA copy");
     ShaderRecompiler::RecompileResult program;
     ShaderRecompiler::DescriptorBinding binding;
@@ -6398,7 +6396,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
     } else {
         refusedSample(ShaderRecompiler::DescriptorKind::StorageImage, multisampledWords(side, 2u, address), "as a storage image at its sample count", "storage access to a multisampled target without shaderStorageImageMultisample");
     }
-    refused([&] { AgcDriver::GuestMemory::Read(address + 3u * 65536u + 256u, texels); }, "a CPU read", "a CPU read in the last block of the 4x target");
+    refused([&] { RequireNoMultisampleTarget(address + 3u * 65536u + 256u, texels.size(), "a CPU read"); }, "a CPU read", "the strict guard in the last block of the 4x target");
     AgcDriver::GuestMemory::Read(address + 4u * 65536u, texels);
     clearTargets();
     target.extent = {side / 2u, side / 2u};
@@ -6410,7 +6408,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         device.WaitQueue();
         recorder.Sync();
     }
-    refused([&] { AgcDriver::GuestMemory::Read(address + targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the tiled multisampled target");
+    refused([&] { RequireNoMultisampleTarget(address + targetBytes - texels.size(), texels.size(), "a CPU read"); }, "a CPU read", "the strict guard inside the tiled multisampled target");
     AgcDriver::GuestMemory::Read(address + targetBytes, texels);
     clearTargets();
     if ((base.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_2_BIT) != 0) {
@@ -6424,7 +6422,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
             device.WaitQueue();
             recorder.Sync();
         }
-        refused([&] { AgcDriver::GuestMemory::Read(address + 2u * targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the 2x tile-height padding");
+        refused([&] { RequireNoMultisampleTarget(address + 2u * targetBytes - texels.size(), texels.size(), "a CPU read"); }, "a CPU read", "the strict guard inside the 2x tile-height padding");
         AgcDriver::GuestMemory::Read(address + 2u * targetBytes, texels);
         clearTargets();
     }
@@ -6439,7 +6437,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
             device.WaitQueue();
             recorder.Sync();
         }
-        refused([&] { AgcDriver::GuestMemory::Read(address + 2u * targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the 8x tile-height padding");
+        refused([&] { RequireNoMultisampleTarget(address + 2u * targetBytes - texels.size(), texels.size(), "a CPU read"); }, "a CPU read", "the strict guard inside the 8x tile-height padding");
         AgcDriver::GuestMemory::Read(address + 2u * targetBytes, texels);
         clearTargets();
     }

@@ -852,7 +852,9 @@ void Publication(AgcDriver::VulkanDevice& device, bool automatic = false) {
                     std::array<std::byte, 128> adjacent{};
                     AgcDriver::GuestMemory::Read(block.Address() + colorBytes, adjacent);
                     Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * fragments * 8u, "an adjacent CPU read retired the color owner");
-                    AgcDriver::GuestMemory::Read(block.Address(), read);
+                    if (profile == 0u) AgcDriver::GuestMemory::Read(block.Address(), read);
+                    else if (profile == 1u) AgcDriver::GuestMemory::ReadCommitted(block.Address(), read);
+                    else AgcDriver::GuestMemory::ReadCommittedUnsynced(block.Address(), read);
                 } else {
                     PublishMultisampleTargetColor_nid_no_patch(context, color);
                     AgcDriver::GuestMemory::Read(block.Address(), read);
