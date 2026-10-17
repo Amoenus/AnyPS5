@@ -5,6 +5,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -994,12 +996,191 @@ void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     std::puts("native buffer publication: writable aliases remain refused without changing native samples");
 }
 
+ShaderRecompiler::RecompileResult CompileMovedVertex(AgcDriver::VulkanDevice& device) {
+    const auto address = reinterpret_cast<std::uintptr_t>(Triangle.data());
+    const std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (16u << 16u), static_cast<std::uint32_t>(Triangle.size()), 0x01016facu};
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(VertexCode.data()), std::as_bytes(std::span(VertexCode))}}};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Vertex, reinterpret_cast<std::uintptr_t>(VertexCode.data()), VertexCode, 0, {}},
+        {64, 0, userData, std::nullopt, std::nullopt, ShaderRecompiler::ShaderVertexStageInfo{}, memory},
+        device.Target(), {0, 0, 0, 64}
+    };
+    request.useCache = false;
+    return ShaderRecompiler::Recompile(request);
+}
+
+std::vector<std::array<std::uint32_t, 4>> RasterMovedSnapshot(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::State& state, std::span<const AgcDriver::Graphics::CompiledShader> shaders, const AgcDriver::Graphics::ShaderResources& resources, const AgcDriver::Graphics::ShaderResources::DrawBindings& prepared) {
+    using namespace AgcDriver::Graphics;
+    const auto vertexInput = BuildVertexInputLayout(context, shaders.front().program->vertexAttributes);
+    Require(vertexInput.bindings.size() == 1u, "the moved raster fixture requires one vertex input");
+    Buffer vertices(context, sizeof(Triangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    std::memcpy(vertices.Bytes().data(), Triangle.data(), sizeof(Triangle));
+    constexpr auto pixelBytes = sizeof(std::array<std::uint32_t, 4>);
+    constexpr auto resultBytes = Side * Side * pixelBytes;
+    Buffer staging(context, resultBytes + 2u * pixelBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    std::fill(staging.Bytes().begin(), staging.Bytes().end(), std::byte{0xa5});
+    auto target = std::make_shared<RenderTarget>(context, state.color, false);
+    Pipeline pipeline(context, state, vertexInput, resources, shaders, VK_IMAGE_LAYOUT_GENERAL);
+    const std::array views{target->View()};
+    const std::array<std::shared_ptr<void>, 1> owners{target};
+    const auto framebuffer = pipeline.AcquireFramebuffer(views, owners, state.renderExtent);
+    CommandBatch batch(context);
+    const auto commands = batch.Handle();
+    VkImageMemoryBarrier initialize{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    initialize.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    initialize.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    initialize.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    initialize.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    initialize.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    initialize.image = target->Image();
+    initialize.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+    context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &initialize);
+    VkClearColorValue clear{};
+    context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, target->Image(), VK_IMAGE_LAYOUT_GENERAL, &clear, 1u, &initialize.subresourceRange);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+    pipeline.Begin(commands, *framebuffer, state.renderExtent, state);
+    auto pushes = AssemblePushConstants(shaders);
+    resources.PatchPushConstants(pushes);
+    pipeline.PushConstants(commands, PushConstantStages(shaders), pushes);
+    if (prepared.allocation.set != VK_NULL_HANDLE) context.Resolved(&DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout(), 0u, 1u, &prepared.allocation.set, 0u, nullptr);
+    if (prepared.fragmentAllocation.set != VK_NULL_HANDLE) context.Resolved(&DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout(), ShaderRecompiler::RuntimeAbi::FragmentDescriptorSet, 1u, &prepared.fragmentAllocation.set, 0u, nullptr);
+    const auto vertexBuffer = vertices.Handle();
+    constexpr VkDeviceSize vertexOffset = 0u;
+    context.Resolved(&DeviceFunctions::cmdBindVertexBuffers, "vkCmdBindVertexBuffers")(commands, 0u, 1u, &vertexBuffer, &vertexOffset);
+    context.Resolved(&DeviceFunctions::cmdDraw, "vkCmdDraw")(commands, static_cast<std::uint32_t>(Triangle.size()), 1u, 0u, 0u);
+    EndRenderPass(context, commands);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = pixelBytes;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+    copy.imageExtent = {Side, Side, 1u};
+    context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, target->Image(), VK_IMAGE_LAYOUT_GENERAL, staging.Handle(), 1u, &copy);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    batch.SubmitAndWait();
+    staging.Invalidate();
+    const auto bytes = staging.Bytes();
+    Require(std::all_of(bytes.begin(), bytes.begin() + pixelBytes, [](auto value) { return value == std::byte{0xa5}; }) && std::all_of(bytes.end() - pixelBytes, bytes.end(), [](auto value) { return value == std::byte{0xa5}; }), "moved raster readback changed its outer sentinels");
+    std::vector<std::array<std::uint32_t, 4>> result(Side * Side);
+    std::memcpy(result.data(), bytes.data() + pixelBytes, resultBytes);
+    return result;
+}
+
+void MovedRasterPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+    using namespace AgcDriver::Graphics;
+    Block source(4u * BlockBytes);
+    Block original(BlockBytes);
+    Block destination(BlockBytes);
+    struct ReleaseDevice {
+        std::unique_ptr<AgcDriver::VulkanDevice>& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    Require(context.recorder != nullptr, "the moved raster fixture has no recorder");
+    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    StoreWords(original, original.bytes, FillOnes);
+    ColorTarget output{};
+    output.address = destination.Address();
+    output.surfaceAddress = output.address;
+    output.extent = {Side, Side};
+    output.surfaceExtent = output.extent;
+    output.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    output.elementBytes = 16u;
+    output.bytes = Side * Side * output.elementBytes;
+    const auto state = TargetState(output);
+    auto vertex = CompileMovedVertex(*device);
+    alignas(256) static constexpr std::array<std::uint32_t, 9> code{
+        0x7e020280u, 0xe0301000u, 0x80000201u, 0xbf8c3f70u, 0x7e000280u, 0x7e0602f2u, 0xf800180fu, 0x03010002u, 0xbf810000u,
+    };
+    const auto oldAddress = original.Address() + 4u;
+    const std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(oldAddress), static_cast<std::uint32_t>((oldAddress >> 32u) & 0xffffu), Threads * 4u, 0x31016facu};
+    const auto codeAddress = reinterpret_cast<std::uintptr_t>(code.data());
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{codeAddress, std::as_bytes(std::span(code))}}};
+    const AgcDriver::Registers registers{{0x1b6, 0x8000}, {0x1b3, 0}, {0x1b4, 0}, {0x203, 0}, {0x1c5, Float32Export}};
+    const auto vertexPush = static_cast<std::uint32_t>(vertex.pushConstants.size());
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Fragment, codeAddress, code, 0, {}},
+        {64, 0, userData, std::nullopt, DecodePixelStageInfo(registers, ExportMappings(state)), std::nullopt, memory},
+        device->Target(), PixelPushLayout(vertexPush, device->Target())
+    };
+    request.useCache = false;
+    auto fragment = ShaderRecompiler::Recompile(request);
+    const auto binding = std::find_if(fragment.bindings.begin(), fragment.bindings.end(), [](const auto& entry) { return entry.role == ShaderRecompiler::DescriptorRole::GuestBuffers; });
+    Require(binding != fragment.bindings.end() && binding->count == 1u && binding->guestDescriptor.size() == 4u && binding->bufferWritten.size() == 1u && !binding->bufferWritten[0], "the moved raster shader does not have one read-only guest buffer");
+    const std::array<CompiledShader, 2> shaders{{{ShaderStage::Vertex, &vertex, 0u}, {ShaderStage::Fragment, &fragment, PixelPushOffset(vertexPush, device->Target())}}};
+    auto resources = std::make_unique<ShaderResources>(context, shaders, output, 1u, 0u, 0u);
+    Require(resources->Reusable(), "the moved raster resources are not reusable");
+    auto oldColor = DecodeTarget(original);
+    oldColor.tileMode = ColorTileMode::Standard4KB;
+    oldColor.bytes = ColorTargetLayout(Side, Side, oldColor.tileMode, oldColor.elementBytes).Bytes();
+    MultisampleTargetView(context, oldColor);
+    std::string unsupported;
+    try {
+        SynchronizeMultisampleTargetRead_nid_no_patch(oldAddress, Threads * 4u);
+    } catch (const std::exception& error) {
+        unsupported = error.what();
+    }
+    Require(unsupported.find("unsupported tiling or multisample metadata") != std::string::npos, "the old moved-buffer range did not retain its unsupported publication control: " + unsupported);
+    const auto color = DecodeTarget(source);
+    Draw(*device, TargetState(color));
+    NoteColorMetadataFill(source.Address(), static_cast<std::size_t>(MultisampledColorBytes(color)), FillOnes);
+    CheckUniform(LoadSamples(*device, source), Ones, "before the moved raster storage writes");
+    StoreSamples(*device, TargetDescriptor(source, SampleShift), SampleWrites([](std::uint32_t, std::uint32_t y, std::uint32_t sample) { return y < 2u && sample == 0u; }));
+    const auto loaded = LoadSamples(*device, source);
+    const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, color.elementBytes, Samples, Side, Side, 1u, 0u);
+    std::vector<std::byte> expected(static_cast<std::size_t>(layout.Bytes()));
+    for (std::size_t offset = 0; offset < expected.size(); offset += sizeof(FillOnes)) std::memcpy(expected.data() + offset, &FillOnes, sizeof(FillOnes));
+    layout.Tile(HalfSamples(loaded), expected);
+    Require(std::all_of(source.data, source.data + expected.size(), [](auto value) { return value == 0u; }), "the moved source was published before snapshot preparation");
+    const auto address = source.Address() + 4u;
+    binding->guestDescriptor[0] = static_cast<std::uint32_t>(address);
+    binding->guestDescriptor[1] = (binding->guestDescriptor[1] & 0xffff0000u) | static_cast<std::uint32_t>((address >> 32u) & 0xffffu);
+    Require(resources->Revalidate(shaders), "the moved draw template was not reusable");
+    const auto moved = resources->MovedReadOnlyBuffers(shaders, *context.recorder);
+    Require(moved.has_value() && std::any_of(moved->begin(), moved->end(), [&](const auto& item) { return item.address == address && item.size == Threads * 4u; }), "the current fragment buffer was not recognized as moved");
+    const auto prepared = resources->PrepareDrawBindings(*context.recorder, *moved);
+    Require(prepared != nullptr, "the moved draw did not prepare snapshot descriptors");
+    context.recorder->Sync();
+    const auto pixels = RasterMovedSnapshot(context, state, shaders, *resources, *prepared);
+    std::uint32_t word = 0u;
+    std::memcpy(&word, expected.data() + 4u, sizeof(word));
+    Require(word != 0u && word != FillOnes, "the moved raster source did not distinguish the current and original descriptors");
+    const std::array<std::uint32_t, 4> drawn{word, 0u, 0u, std::bit_cast<std::uint32_t>(1.0f)};
+    std::uint32_t checked = 0u;
+    std::uint32_t covered = 0u;
+    for (std::uint32_t y = 0; y < Side; ++y) {
+        for (std::uint32_t x = 0; x < Side; ++x) {
+            const auto& pixel = pixels[y * Side + x];
+            const auto distance = std::min({EdgeDistance(x + 0.5, y + 0.5, 0u), EdgeDistance(x + 0.5, y + 0.5, 1u), EdgeDistance(x + 0.5, y + 0.5, 2u)});
+            Require(pixel == drawn || pixel == std::array<std::uint32_t, 4>{}, "the moved fragment shader rendered stale or unexpected buffer bits at pixel " + std::to_string(y * Side + x));
+            covered += pixel == drawn ? 1u : 0u;
+            if (std::fabs(distance) < EdgeMargin) continue;
+            ++checked;
+            Require((pixel == drawn) == (distance > 0.0), "the moved raster result disagrees with triangle coverage");
+        }
+    }
+    Require(checked >= Side * Side * 9u / 10u && covered != 0u && covered != pixels.size(), "the moved raster fixture did not check both covered and clear pixels");
+    Require(std::equal(expected.begin(), expected.end(), reinterpret_cast<const std::byte*>(source.data)), "the moved draw published incorrect source samples or padding");
+    RequireNoMultisampleTarget(source.Address(), expected.size(), "after the moved raster draw");
+    std::string oldGuard;
+    try {
+        RequireNoMultisampleTarget(oldAddress, Threads * 4u, "the retained old moved range");
+    } catch (const std::exception& error) {
+        oldGuard = error.what();
+    }
+    Require(oldGuard.find("overlaps multisampled color target") != std::string::npos, "the moved draw retired its unused original range");
+    std::printf("native moved raster: word=0x%08x covered=%u checked=%u; adjusted snapshot, old guard, complete bytes and readback sentinels passed\n", word, covered, checked);
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--moved-raster") {
+            MovedRasterPublication(device);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--buffer-publication") {
             BufferPublication(device);
             return 0;
