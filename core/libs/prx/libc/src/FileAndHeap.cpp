@@ -67,7 +67,11 @@ static std::FILE* OpenNative(const std::filesystem::path& path, const std::strin
     const DWORD disposition = access == 'r' ? OPEN_EXISTING
         : nativeMode.find('x') != std::string::npos ? CREATE_NEW : access == 'w' ? CREATE_ALWAYS : OPEN_ALWAYS;
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-    const auto handle = CreateFileW(path.c_str(), desired, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security,
+    auto filename = path.native();
+    const auto absolute = std::filesystem::absolute(path).lexically_normal().make_preferred().native();
+    if (absolute.size() >= MAX_PATH && !absolute.starts_with(L"\\\\?\\") && !absolute.starts_with(L"\\\\.\\"))
+        filename = absolute.starts_with(L"\\\\") ? L"\\\\?\\UNC\\" + absolute.substr(2) : L"\\\\?\\" + absolute;
+    const auto handle = CreateFileW(filename.c_str(), desired, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security,
         disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         errno = WindowsOpenError_nid_no_patch(GetLastError());
