@@ -881,17 +881,27 @@ void Publication(AgcDriver::VulkanDevice& device, bool automatic = false) {
     auto color = DecodeTarget(*completed);
     StoreInitial(*completed, Samples, 0u, false);
     Draw(device, TargetState(color));
+    const auto completionRefusal = std::make_shared<std::string>();
     {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
-        recorder->OnComplete([completed] {
+        recorder->OnComplete([completed, automatic, completionRefusal] {
             StoreWords(*completed, completed->bytes, FillOnes);
             NoteColorMetadataFill(completed->Address(), completed->bytes, FillOnes);
+            if (automatic) {
+                try {
+                    std::array<std::byte, 4> word{};
+                    AgcDriver::GuestMemory::Read(completed->Address(), word);
+                } catch (const std::exception& error) {
+                    *completionRefusal = error.what();
+                }
+            }
         });
     }
     if (!automatic) PublishMultisampleTargetColor_nid_no_patch(context, color);
     std::vector<std::uint32_t> read(completed->bytes / sizeof(std::uint32_t));
     AgcDriver::GuestMemory::Read(completed->Address(), std::as_writable_bytes(std::span(read)));
+    if (automatic) Require(completionRefusal->find("during a recorder completion") != std::string::npos, "recursive publication from a completion was not refused: " + *completionRefusal);
     Require(std::all_of(read.begin(), read.end(), [](const auto word) { return word == FillOnes; }), "publication captured its guest baseline before producer completions");
     std::puts("native color publication: known full fill from a producer completion precedes the publication baseline");
 }
