@@ -30,7 +30,7 @@ using AgcDriver::Graphics::Require;
 using namespace NarrowConstantStoreFixture;
 namespace Memory = AgcDriver::GuestMemory;
 
-constexpr std::size_t BlockBytes = 65536;
+constexpr std::size_t BlockBytes = 1048576;
 constexpr std::size_t PageBytes = 4096;
 
 class GuestBlock {
@@ -115,7 +115,7 @@ void Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
     const auto overlap = Memory::StoredOver(address, PageBytes, generation);
     const auto complete = Memory::StoredAllSince_nid_no_patch(address, PageBytes, generation);
     const auto untouched = Memory::StoredOver(address + PageBytes, PageBytes, generation);
-    std::printf("BDA wave%u: exact 64 KiB readback passed; first page overlap=%d complete=%d next page overlap=%d\n", waveSize, overlap, complete, untouched);
+    std::printf("BDA wave%u: exact %zu-byte readback passed; first page overlap=%d complete=%d next page overlap=%d\n", waveSize, BlockBytes, overlap, complete, untouched);
     Require(overlap && !untouched, "BDA stores did not invalidate only their written page");
     Require(!complete, "sparse BDA stores falsely prove a complete 4096-byte overwrite");
 }
