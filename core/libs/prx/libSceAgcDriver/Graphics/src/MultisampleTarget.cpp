@@ -591,6 +591,8 @@ private:
     }
 
     void checkDccCurrent(const ColorTarget& use) const {
+        static std::atomic<bool> observed{false};
+        if (!observed.exchange(true, std::memory_order_relaxed)) std::fputs("[dcc-proof-observe] first resident check\n", stderr);
         if (dccRanges.empty()) {
             Require(use.dccAddress == 0, "adding DCC to a resident multisampled color target is not implemented");
             return;
@@ -601,7 +603,14 @@ private:
         for (const auto& range : dccRanges) {
             requireDccRange(GuestMemory::Watched(range.address, range.bytes), range, "multisampled DCC target reuse requires watched guest memory");
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
-            requireDccRange(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation) || !GuestMemory::StoredOver(range.address, range.bytes, range.generation), range, "writes to a resident multisampled DCC target or its metadata are not implemented");
+            const bool unchanged = GuestMemory::UnchangedSince(range.address, range.bytes, range.generation);
+            const bool valid = unchanged || !GuestMemory::StoredOver(range.address, range.bytes, range.generation);
+            if (!unchanged) {
+                static std::atomic<unsigned> records{0};
+                const auto record = records.fetch_add(1, std::memory_order_relaxed);
+                if (record < 32u) std::fprintf(stderr, "[dcc-proof-observe] coarse_changed=1 fine_accept=%u record=%u\n", valid ? 1u : 0u, record);
+            }
+            requireDccRange(valid, range, "writes to a resident multisampled DCC target or its metadata are not implemented");
             if (auto* recorder = Recorder::Active(); recorder != nullptr) requireDccRange(!recorder->PendingWriteOverlaps(range.address, range.bytes), range, "pending writes to a resident multisampled DCC target or its metadata are not implemented");
         }
     }

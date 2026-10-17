@@ -191,6 +191,8 @@ PadData BuildData(const PadInputState& state, std::uint64_t changeTime, std::uin
 }
 
 Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
+    static const bool observed = [] { std::fputs("[pad-input-observe] first guest input poll\n", stderr); return true; }();
+    static_cast<void>(observed);
     static Pad::InputCommandFile commands([] {
 #ifdef _WIN32
         const auto* path = _wgetenv(L"APS5_PAD_INPUT_FILE");

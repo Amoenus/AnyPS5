@@ -4,6 +4,7 @@
 #include <array>
 #include <charconv>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -35,6 +36,7 @@ public:
                 lastSequence = command.sequence;
                 input = command.input;
                 until = now + command.durationMs * 1000ull;
+                if (++observedCommands <= 32u) std::fprintf(stderr, "[pad-input-observe] accepted sequence=%llu buttons=0x%x duration_ms=%u\n", static_cast<unsigned long long>(lastSequence), input.buttons, command.durationMs);
             }
         }
         return now < until ? input : Input{};
@@ -90,6 +92,7 @@ private:
     std::uint64_t nextPoll = 0;
     std::uint64_t until = 0;
     Input input;
+    unsigned observedCommands = 0;
 };
 }
 
