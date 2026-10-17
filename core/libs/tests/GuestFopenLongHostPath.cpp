@@ -46,16 +46,22 @@ void Run() {
     const auto root = temp / ("anyps5-fopen-long-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Require(root.parent_path() == temp && root.filename().string().starts_with("anyps5-fopen-long-"), "invalid fixture root");
     Require(!std::filesystem::exists(root), "fixture root already exists");
-    struct Cleanup {
-        std::filesystem::path root;
-        ~Cleanup() {
-            RemovePathAlias_nid_no_patch("/long-host-file");
-            std::error_code error;
-            std::filesystem::remove_all(Extended(root), error);
-        }
-    } cleanup{root};
     auto deep = root;
     while (deep.native().size() < 290) deep /= std::string(40, 'd');
+    Require(deep.native().starts_with(root.native() + L"\\"), "fixture escapes its root");
+    struct Cleanup {
+        std::filesystem::path root;
+        std::filesystem::path deep;
+        ~Cleanup() {
+            RemovePathAlias_nid_no_patch("/long-host-file");
+            DeleteFileW(Extended(deep / "payload.bin").c_str());
+            DeleteFileW(Extended(deep / "new.bin").c_str());
+            for (auto path = deep; ; path = path.parent_path()) {
+                RemoveDirectoryW(Extended(path).c_str());
+                if (path == root) break;
+            }
+        }
+    } cleanup{root, deep};
     Require(std::filesystem::create_directories(Extended(deep)), "cannot create fixture directories");
     const auto payload = deep / "payload.bin";
     const auto handle = CreateFileW(Extended(payload).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
