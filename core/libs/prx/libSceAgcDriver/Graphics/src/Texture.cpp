@@ -1537,7 +1537,8 @@ VkImageView StorageTexture::AttachmentView(VkFormat format, std::uint32_t mip, s
     Require(attachable, "storage image cannot be a color attachment");
     Require(mip < descriptor.mipCount, "attachment mip exceeds the storage image");
     const bool volume = descriptor.dimension == TextureDimension::k3D;
-    Require((depthSlice == 0 && layers == 1) || (volume && mip == 0 && layers != 0 && depthSlice + layers - 1u <= descriptor.depthOrLastArray), "attachment slice is outside the storage image");
+    const auto depth = volume ? std::max((descriptor.depthOrLastArray + 1u) >> mip, 1u) : 1u;
+    Require(layers != 0 && depthSlice < depth && layers <= depth - depthSlice, "attachment slice is outside the storage image");
     Require(layer == 0 || (!volume && descriptor.dimension == TextureDimension::k2DArray && descriptor.baseArray + layer <= descriptor.depthOrLastArray), "attachment layer is outside the storage image");
     const auto found = attachmentViews.find({format, mip, depthSlice, layers, layer});
     if (found != attachmentViews.end()) return found->second;
