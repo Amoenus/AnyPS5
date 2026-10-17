@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -32,6 +34,65 @@
 #ifdef __linux__
 #include <stdio_ext.h>
 #endif
+
+namespace LibcStartupFileObservation {
+
+enum class Operation { Open, Read, Seek, Close, Count };
+
+struct Counters {
+    std::atomic<std::uint64_t> started{0};
+    std::atomic<std::uint64_t> returned{0};
+    std::atomic<std::uint64_t> active{0};
+    std::atomic<std::uint64_t> exceptions{0};
+    std::atomic<std::uint64_t> zeroResults{0};
+    std::atomic<std::uint64_t> negativeResults{0};
+    std::atomic<std::uint64_t> bytes{0};
+    std::atomic<std::uint64_t> lastSize{0};
+    std::atomic<std::uint64_t> lastCount{0};
+    std::atomic<std::int64_t> lastResult{0};
+};
+
+static std::array<Counters, static_cast<std::size_t>(Operation::Count)> counters_nid_no_patch{};
+
+template<class TAction>
+auto Observe_nid_no_patch(Operation operation, std::size_t size, std::size_t count, TAction&& action) {
+    auto& counters = counters_nid_no_patch[static_cast<std::size_t>(operation)];
+    counters.started.fetch_add(1, std::memory_order_relaxed);
+    counters.active.fetch_add(1, std::memory_order_relaxed);
+    counters.lastSize.store(size, std::memory_order_relaxed);
+    counters.lastCount.store(count, std::memory_order_relaxed);
+    struct Active {
+        Counters& counters;
+        bool returned = false;
+        ~Active() {
+            if (!returned) counters.exceptions.fetch_add(1, std::memory_order_relaxed);
+            counters.active.fetch_sub(1, std::memory_order_relaxed);
+        }
+    } active{counters};
+    const auto result = action();
+    std::int64_t numeric;
+    if constexpr (std::is_pointer_v<decltype(result)>) numeric = result ? 1 : 0;
+    else numeric = static_cast<std::int64_t>(result);
+    counters.lastResult.store(numeric, std::memory_order_relaxed);
+    counters.returned.fetch_add(1, std::memory_order_relaxed);
+    if (numeric == 0) counters.zeroResults.fetch_add(1, std::memory_order_relaxed);
+    if (numeric < 0) counters.negativeResults.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (!std::is_pointer_v<decltype(result)>) {
+        if (operation == Operation::Read) counters.bytes.fetch_add(static_cast<std::uint64_t>(result) * size, std::memory_order_relaxed);
+    }
+    active.returned = true;
+    return result;
+}
+
+}
+
+void LibcStartupFileReport_nid_no_patch() {
+    constexpr std::array names{"open", "read", "seek", "close"};
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        const auto& counters = LibcStartupFileObservation::counters_nid_no_patch[index];
+        std::fprintf(stderr, "[startup-stdio] %s started=%llu returned=%llu active=%llu exceptions=%llu zero_results=%llu negative_results=%llu bytes=%llu last_size=%llu last_count=%llu last_result=%lld\n", names[index], static_cast<unsigned long long>(counters.started.load(std::memory_order_relaxed)), static_cast<unsigned long long>(counters.returned.load(std::memory_order_relaxed)), static_cast<unsigned long long>(counters.active.load(std::memory_order_relaxed)), static_cast<unsigned long long>(counters.exceptions.load(std::memory_order_relaxed)), static_cast<unsigned long long>(counters.zeroResults.load(std::memory_order_relaxed)), static_cast<unsigned long long>(counters.negativeResults.load(std::memory_order_relaxed)), static_cast<unsigned long long>(counters.bytes.load(std::memory_order_relaxed)), static_cast<unsigned long long>(counters.lastSize.load(std::memory_order_relaxed)), static_cast<unsigned long long>(counters.lastCount.load(std::memory_order_relaxed)), static_cast<long long>(counters.lastResult.load(std::memory_order_relaxed)));
+    }
+}
 
 struct GuestFileMode {
     std::string native;
@@ -293,26 +354,29 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
 }
 
 FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) {
-    if (!filename || !mode) throw std::runtime_error(std::string(__func__) + ": " + FOPEN_MSG_NULL_ARG);
-    const auto parsed = ParseFileMode(mode);
-    if (!parsed) {
-        errno = EINVAL;
-        return nullptr;
-    }
-    std::filesystem::path fpath;
-    if (const int error = ResolvePathError_nid_no_patch(filename, fpath)) { errno = error; return nullptr; }
-    std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
-    if (!handle) {
-        const int error = errno;
-        errno = error;
-        return nullptr;
-    }
-    // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());
-    if (parsed->append) static_cast<void>(std::fseek(handle.get(), 0, SEEK_END));
-    if (parsed->writes) RecordWrittenPath_nid_no_patch(fpath);
-    auto stream = std::make_unique<FileStream>(handle.get(), true);
-    handle.release();
-    return stream.release();
+    const char* const function = __func__;
+    return LibcStartupFileObservation::Observe_nid_no_patch(LibcStartupFileObservation::Operation::Open, 0, 0, [&]() -> FileStream* {
+        if (!filename || !mode) throw std::runtime_error(std::string(function) + ": " + FOPEN_MSG_NULL_ARG);
+        const auto parsed = ParseFileMode(mode);
+        if (!parsed) {
+            errno = EINVAL;
+            return nullptr;
+        }
+        std::filesystem::path fpath;
+        if (const int error = ResolvePathError_nid_no_patch(filename, fpath)) { errno = error; return nullptr; }
+        std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
+        if (!handle) {
+            const int error = errno;
+            errno = error;
+            return nullptr;
+        }
+        // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());
+        if (parsed->append) static_cast<void>(std::fseek(handle.get(), 0, SEEK_END));
+        if (parsed->writes) RecordWrittenPath_nid_no_patch(fpath);
+        auto stream = std::make_unique<FileStream>(handle.get(), true);
+        handle.release();
+        return stream.release();
+    });
 }
 
 int APS5_VABI fopen_s_nid_postfix(FileStream** result, const char* filename, const char* mode) {
@@ -326,14 +390,16 @@ int APS5_VABI fopen_s_nid_postfix(FileStream** result, const char* filename, con
 }
 
 int APS5_VABI fclose_nid_postfix(FileStream* stream) {
-    if (stream && !stream->IsOpen()) {
+    return LibcStartupFileObservation::Observe_nid_no_patch(LibcStartupFileObservation::Operation::Close, 0, 0, [&]() -> int {
+        if (stream && !stream->IsOpen()) {
+            std::unique_ptr<FileStream> owner(stream->IsDynamic() ? stream : nullptr);
+            errno = 9;
+            return -1;
+        }
+        GetNativeStream(stream);
         std::unique_ptr<FileStream> owner(stream->IsDynamic() ? stream : nullptr);
-        errno = 9;
-        return -1;
-    }
-    GetNativeStream(stream);
-    std::unique_ptr<FileStream> owner(stream->IsDynamic() ? stream : nullptr);
-    return stream->Close();
+        return stream->Close();
+    });
 }
 
 int APS5_VABI fseek_nid_postfix(FileStream* stream, std::int64_t offset, int origin);
@@ -362,18 +428,20 @@ FileStream* APS5_VABI _ZSt7_FiopenPKcNSt5_IosbIiE9_OpenmodeEi_nid_postfix(const 
 }
 
 size_t APS5_VABI fread_nid_postfix(void* buffer, size_t size, size_t count, FileStream* stream) {
-    if (stream && !stream->IsOpen()) { errno = 9; return 0; }
-    auto* handle = GetNativeStream(stream);
-    if (size == 0 || count == 0) return 0;
-    if (!buffer) throw std::runtime_error("fread: null buffer");
-    if (count > std::numeric_limits<std::size_t>::max() / size) throw std::overflow_error("fread: buffer size overflow");
-    const auto bytes = size * count;
-    if (bytes > std::numeric_limits<std::uintptr_t>::max() - reinterpret_cast<std::uintptr_t>(buffer)) throw std::overflow_error("fread: buffer address overflow");
-    const GuestArena::HostWrite destination(buffer, bytes);
-    if (!destination.Open()) throw std::runtime_error("fread: buffer is not writable");
-    const auto result = std::fread(buffer, size, count, handle);
-    stream->SyncStatus();
-    return result;
+    return LibcStartupFileObservation::Observe_nid_no_patch(LibcStartupFileObservation::Operation::Read, size, count, [&]() -> std::size_t {
+        if (stream && !stream->IsOpen()) { errno = 9; return 0; }
+        auto* handle = GetNativeStream(stream);
+        if (size == 0 || count == 0) return 0;
+        if (!buffer) throw std::runtime_error("fread: null buffer");
+        if (count > std::numeric_limits<std::size_t>::max() / size) throw std::overflow_error("fread: buffer size overflow");
+        const auto bytes = size * count;
+        if (bytes > std::numeric_limits<std::uintptr_t>::max() - reinterpret_cast<std::uintptr_t>(buffer)) throw std::overflow_error("fread: buffer address overflow");
+        const GuestArena::HostWrite destination(buffer, bytes);
+        if (!destination.Open()) throw std::runtime_error("fread: buffer is not writable");
+        const auto result = std::fread(buffer, size, count, handle);
+        stream->SyncStatus();
+        return result;
+    });
 }
 
 size_t APS5_VABI fwrite_nid_postfix(const void* buffer, size_t size, size_t count, FileStream* stream) {
@@ -387,20 +455,22 @@ size_t APS5_VABI fwrite_nid_postfix(const void* buffer, size_t size, size_t coun
 }
 
 int APS5_VABI fseeko_nid_postfix(FileStream* stream, std::int64_t offset, int origin) {
-    if (stream && !stream->IsOpen()) { errno = 9; return -1; }
-    if (origin != SEEK_SET && origin != SEEK_CUR && origin != SEEK_END) { errno = 22; return -1; }
-#ifdef _WIN32
-    auto* native = GetNativeStream(stream);
-    if (IsPipeStream(native)) { errno = 29; return -1; }
-    const int result = _fseeki64(native, offset, origin);
-#else
-    static_assert(sizeof(off_t) == 8);
-    const int result = ::fseeko(GetNativeStream(stream), offset, origin);
-#endif
-    const int nativeError = errno;
-    stream->SyncStatus();
-    if (result) errno = nativeError == EOVERFLOW ? 84 : nativeError;
-    return result;
+    return LibcStartupFileObservation::Observe_nid_no_patch(LibcStartupFileObservation::Operation::Seek, 0, 0, [&]() -> int {
+        if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+        if (origin != SEEK_SET && origin != SEEK_CUR && origin != SEEK_END) { errno = 22; return -1; }
+    #ifdef _WIN32
+        auto* native = GetNativeStream(stream);
+        if (IsPipeStream(native)) { errno = 29; return -1; }
+        const int result = _fseeki64(native, offset, origin);
+    #else
+        static_assert(sizeof(off_t) == 8);
+        const int result = ::fseeko(GetNativeStream(stream), offset, origin);
+    #endif
+        const int nativeError = errno;
+        stream->SyncStatus();
+        if (result) errno = nativeError == EOVERFLOW ? 84 : nativeError;
+        return result;
+    });
 }
 
 std::int64_t APS5_VABI ftello_nid_postfix(FileStream* stream) {

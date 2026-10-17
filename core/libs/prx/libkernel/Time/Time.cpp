@@ -33,6 +33,8 @@
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 
+void LibcStartupFileReport_nid_no_patch();
+
 static constexpr int GUEST_EFAULT = 14;
 static constexpr int GUEST_EINVAL = 22;
 static constexpr int GUEST_CLOCK_REALTIME = 0;
@@ -236,6 +238,7 @@ void KernelTraceWait_nid_postfix(const char* kind, const void* caller, std::uint
     std::erase_if(hot, [](const auto& item) { return item.second.calls == 0; });
     std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second.nanos > b.second.nanos; });
     StartupFileObservation::Report_nid_no_patch();
+    LibcStartupFileReport_nid_no_patch();
     std::fprintf(stderr, "[waits]");
     for (std::size_t i = 0; i < hot.size() && i < 8; ++i) {
         const auto& s = hot[i].second;
