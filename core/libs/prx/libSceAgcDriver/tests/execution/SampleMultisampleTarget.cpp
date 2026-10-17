@@ -46,14 +46,6 @@ struct VulkanDeviceTestAccess {
 
 }
 
-namespace AgcDriver {
-
-struct VulkanDeviceTestAccess {
-    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
-};
-
-}
-
 namespace {
 
 using AgcDriver::Graphics::ColorTargetLayout;
