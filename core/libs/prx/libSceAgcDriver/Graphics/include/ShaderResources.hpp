@@ -44,6 +44,7 @@ std::uint64_t SampledTextureCacheBudget(const Context& context);
 std::shared_ptr<Texture> CachedSampledTexture(const Context& context, std::span<const std::uint32_t> words, VkImageViewType multisampleViewType = VK_IMAGE_VIEW_TYPE_2D);
 bool SampledTexturesShareEntry(std::span<const std::uint32_t> first, std::span<const std::uint32_t> second);
 bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std::size_t bytes);
+bool SpirvStoresThroughAddresses(std::span<const std::uint32_t> words);
 
 // The cached storage image of a surface (render targets use it as their resident image); brought up
 // to date with guest memory before it is returned.
@@ -125,6 +126,12 @@ struct ImageTableReuseCounts {
 };
 ImageTableReuseCounts ImageTableReuses();
 
+struct PresyncSurface {
+    std::uint64_t address;
+    std::uint64_t bytes;
+    bool dccKeys;
+};
+
 class ShaderResources {
 public:
     ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes);
@@ -185,6 +192,7 @@ public:
     // Whether a written buffer was copied (its results reach guest memory by the CPU write-back).
     bool HasCopiedWrites() const { return guestMemory.HasCopiedWrites(); }
     bool HoldsLease() const { return guestMemory.HoldsLease(); }
+    bool BdaReadOnly() const { return usesBda && bdaReadOnly; }
     bool UsesAddressTable() const { return usesBda; }
     std::size_t CopiedBytes() const { return guestMemory.CopiedBytes(); }
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const { return guestMemory.WritesOverlap(address, bytes); }
@@ -283,7 +291,7 @@ public:
     // Usable right after the deferred constructor, for address-based builds too (it decodes the
     // compiled shader's bindings itself when stage A has not run), and on a completed object from
     // the resource cache (its Revalidate repeats the same lookups), without the device lock.
-    std::vector<std::pair<std::uint64_t, std::uint64_t>> PresyncSurfaces() const;
+    std::vector<PresyncSurface> PresyncSurfaces() const;
 
 private:
     friend class AgcDriver::VulkanDevice;
@@ -495,6 +503,7 @@ private:
     std::size_t maxDrawSnapshotBytes = MaxDrawSnapshotBytes();
     std::unique_ptr<BdaResources> bda;
     bool usesBda = false;
+    bool bdaReadOnly = true;
     std::vector<std::uint64_t> multisampleSources;
     bool usesFaultBuffer = false;
     bool faultChecks = false;
