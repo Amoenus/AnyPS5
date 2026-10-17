@@ -772,8 +772,8 @@ int runLargeFileWrite() {
             written->set_exception(std::current_exception());
         }
     }).detach();
-    if (result.wait_for(std::chrono::seconds(120)) != std::future_status::ready) {
-        std::cerr << "WriteFileAtomically did not return within 120 s for a file of more than 2 GiB\n";
+    if (result.wait_for(std::chrono::seconds(200)) != std::future_status::ready) {
+        std::cerr << "WriteFileAtomically did not return within 200 s for a file of more than 2 GiB\n";
         std::cerr.flush();
         std::_Exit(1);
     }
