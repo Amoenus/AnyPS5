@@ -395,7 +395,7 @@ void RequireRefused(AgcDriver::VulkanDevice& device, const std::array<std::uint3
 
 alignas(256) std::array<std::uint32_t, 12> VertexValues{};
 
-void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state, std::uint64_t address) {
+void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state, std::uint64_t address, std::uint32_t stride) {
     alignas(256) static constexpr std::array<std::uint32_t, 7> code{
         0xbe822100u, 0x34020a84u, 0xe0781000u, 0x80010801u, 0xf80008cfu, 0x0b0a0908u, 0xbf810000u,
     };
@@ -410,7 +410,7 @@ void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics:
     userData[7] = 0x31016facu;
     ShaderRecompiler::ShaderVertexStageInfo info{};
     info.resourcesNum = 1u;
-    info.resources[0].fields = {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), 16u, 0x3104dfacu};
+    info.resources[0].fields = {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (stride << 16u), stride == 0u ? 16u : 3u, 0x3104dfacu};
     info.resourcesDst[0] = {8, 4, 0, 0};
     info.fetchAttribReg = 8u;
     info.fetchBufferReg = 10u;
@@ -441,10 +441,10 @@ void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics:
     device.WaitIdle();
 }
 
-void CheckVertexValues(std::uint64_t address) {
+void CheckVertexValues(std::uint64_t address, std::uint32_t stride) {
     std::array<std::uint32_t, 4> expected{};
-    std::memcpy(expected.data(), reinterpret_cast<const void*>(address), sizeof(expected));
     for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
+        std::memcpy(expected.data(), reinterpret_cast<const void*>(address + vertex * stride), sizeof(expected));
         for (std::size_t component = 0; component < expected.size(); ++component) {
             Require(VertexValues[vertex * 4u + component] == expected[component], "the fixed-function vertex probe did not observe the original guest bytes");
         }
@@ -465,39 +465,43 @@ int NativeVertexInput(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     }
     const auto color = DecodeTarget(source);
     const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
-    Require(colorBytes >= 16u && colorBytes + 16u <= source.bytes, "the native vertex probe has no neighboring range");
+    Require(colorBytes >= 48u && colorBytes + 48u <= source.bytes, "the native vertex probe has no neighboring range");
     constexpr std::array<float, 4> element{0.25f, -2.0f, 7.5f, 1.0f};
-    std::memcpy(source.data, element.data(), sizeof(element));
+    for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
+        std::memcpy(source.data + vertex * sizeof(element), element.data(), sizeof(element));
+        std::memcpy(source.data + colorBytes + vertex * sizeof(element), element.data(), sizeof(element));
+    }
     std::memcpy(source.data + colorBytes - 8u, element.data(), 8u);
-    std::memcpy(source.data + colorBytes, element.data(), sizeof(element));
     Draw(*device, TargetState(color));
     AgcDriver::Graphics::NoteColorMetadataFill(source.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
     CheckUniform(LoadSamples(*device, source), Ones, "before the fixed-function vertex probe");
     const auto neighbor = source.Address() + colorBytes;
     {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-        const auto* native = AgcDriver::Graphics::HostImportFor(context, source.Address(), 16u);
-        const auto* adjacent = AgcDriver::Graphics::HostImportFor(context, neighbor, 16u);
+        const auto* native = AgcDriver::Graphics::HostImportFor(context, source.Address(), 48u);
+        const auto* adjacent = AgcDriver::Graphics::HostImportFor(context, neighbor, 48u);
         Require(native != nullptr && native == adjacent, "the native and neighboring vertices do not share an import");
     }
-    AgcDriver::Graphics::RequireNoMultisampleTarget(neighbor, 16u, "the vertex neighbor control");
+    AgcDriver::Graphics::RequireNoMultisampleTarget(neighbor, 48u, "the vertex neighbor control");
     const auto state = TargetState(DecodeTarget(destination));
     std::uint32_t missed = 0u;
-    for (const bool edge : {false, true}) {
-        DrawVertexInput(*device, state, neighbor);
-        CheckVertexValues(neighbor);
-        const auto address = edge ? neighbor - 8u : source.Address();
-        std::string refusal;
-        try {
-            DrawVertexInput(*device, state, address);
-            CheckVertexValues(address);
-        } catch (const std::exception& error) {
-            refusal = error.what();
+    for (const auto stride : {0u, 16u}) {
+        for (const bool edge : {false, true}) {
+            DrawVertexInput(*device, state, neighbor, stride);
+            CheckVertexValues(neighbor, stride);
+            const auto address = edge ? neighbor - 8u : source.Address();
+            std::string refusal;
+            try {
+                DrawVertexInput(*device, state, address, stride);
+                CheckVertexValues(address, stride);
+            } catch (const std::exception& error) {
+                refusal = error.what();
+            }
+            const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
+            Require(refusal.empty() || refused, "the native vertex input failed for another reason: " + refusal);
+            std::printf("native vertex stride %u %s: refused=%u neighbor=passed original-guest-values=%u detail=%s\n", stride, edge ? "edge" : "base", refused ? 1u : 0u, refused ? 0u : 12u, refusal.c_str());
+            missed += refused ? 0u : 1u;
         }
-        const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
-        Require(refusal.empty() || refused, "the native vertex input failed for another reason: " + refusal);
-        std::printf("native vertex %s: refused=%u neighbor=passed original-guest-values=%u detail=%s\n", edge ? "edge" : "base", refused ? 1u : 0u, refused ? 0u : 12u, refusal.c_str());
-        missed += refused ? 0u : 1u;
     }
     CheckUniform(LoadSamples(*device, source), Ones, "after fixed-function vertex inputs");
     std::puts("native vertex controls: shared-import=1 source-samples=1024 neighbor-values=passed");
