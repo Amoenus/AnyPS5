@@ -3,6 +3,7 @@
 #include "AllocationFailure.hpp"
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <deque>
@@ -220,6 +221,31 @@ void SizeClassesAndDirections() {
     Expect(MemoryOf(writeBack.Handle()) == first && mock.allocations == made, "a retained 11 MiB device buffer did not serve a write-back of another size and direction in its class");
     Expect(writeBack.Size() == 10 * MiB + 512 * 1024, "a reused device buffer reports the retained size");
     Expect(mock.sizes.at(writeBack.Handle()) == 10 * MiB + 512 * 1024, "a reused device buffer kept the VkBuffer of the earlier size");
+}
+
+void SmallDeviceRetention() {
+    mock = MockDevice{};
+    {
+        auto context = mockContext();
+        constexpr auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        const auto deviceBudget = BufferPool::DeviceBudget(context.memory);
+        const auto bytes = static_cast<std::size_t>((deviceBudget != 0 ? deviceBudget : 512 * MiB) / 2) + MiB;
+        VkDeviceMemory small = VK_NULL_HANDLE;
+        {
+            DeviceBuffer buffer(context, 256, usage);
+            small = MemoryOf(buffer.Handle());
+        }
+        std::vector<std::unique_ptr<DeviceBuffer>> large;
+        for (int i = 0; i < 2; ++i) large.push_back(std::make_unique<DeviceBuffer>(context, bytes, usage));
+        large.clear();
+        Expect(mock.frees != 0, "large device buffers did not exercise pool budget eviction");
+        const auto made = mock.allocations;
+        const bool isolated = std::getenv("APS5_BUFFER_POOL_SHARED") == nullptr;
+        DeviceBuffer again(context, 256, usage);
+        Expect((MemoryOf(again.Handle()) == small) == isolated, "small device buffer retention did not follow the separate or shared pool budget");
+        Expect(mock.allocations == made + (isolated ? 0 : 1), "large device buffer churn changed small buffer allocation reuse");
+    }
+    Expect(mock.liveBytes == 0 && mock.liveBuffers.empty(), "device pool tier retention leaked Vulkan objects");
 }
 
 void LargerClass() {
@@ -602,11 +628,16 @@ void PartialSlabDoesNotRetry() {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--small-device-retention") {
+            SmallDeviceRetention();
+            return failures == 0 ? 0 : 1;
+        }
         SizeClassesAndDirections();
         LargerClass();
         KeptUntilFence();
+        SmallDeviceRetention();
         Budget();
         AddressAndHostUnchanged();
         SmallDeviceClasses();
