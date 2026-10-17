@@ -1234,6 +1234,9 @@ void DrawRecipePublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         MultisampleTargetView(context, oldColor);
     }
+    const auto retainedRecipe = recipe;
+    const auto retainedTemplate = retainedRecipe->templateRef.lock();
+    Require(retainedTemplate != nullptr, "the moved draw lost its warmed resource template");
     const auto movedExpected = arm(movedSource, 0u);
     const auto movedAddress = movedSource.Address() + 8u;
     binding->guestDescriptor[0] = static_cast<std::uint32_t>(movedAddress);
@@ -1242,6 +1245,7 @@ void DrawRecipePublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     std::memcpy(&movedWord, movedExpected.data() + 8u, sizeof(movedWord));
     Require(movedWord != FillOnes && movedWord != word, "the moved recipe source did not distinguish current and old buffers");
     consume(false);
+    Require(SharedResourceCache().Find(retainedRecipe->key) == retainedTemplate, "the moved draw rebuilt its template instead of rebinding it");
     CheckRecipePixels(*device, destination, output, movedWord);
     checkSource(movedSource, movedExpected);
     std::string refusal;
