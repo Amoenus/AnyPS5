@@ -54,6 +54,7 @@ void Run() {
         std::filesystem::path deep;
         ~Cleanup() {
             RemovePathAlias_nid_no_patch("/long-host-file");
+            RemovePathAlias_nid_no_patch("/relative-long-host-file");
             DeleteFileW(Extended(deep / "payload.bin").c_str());
             DeleteFileW(Extended(deep / "new.bin").c_str());
             for (auto path = deep; ; path = path.parent_path()) {
@@ -95,7 +96,15 @@ void Run() {
     }
     *__error_nid_postfix() = 0;
     Require(!fopen_nid_postfix("/long-host-file/missing.bin", "rb") && *__error_nid_postfix() == 2, "missing long-path file did not report ENOENT");
-    std::puts("long host path read/create/exclusive/append/update/missing checks passed");
+    const auto relative = std::filesystem::relative(deep, std::filesystem::current_path()).string();
+    Require(!std::filesystem::path(relative).is_absolute(), "fixture alias is not relative");
+    AddPathAlias_nid_no_patch("/relative-long-host-file", relative.c_str());
+    {
+        auto stream = Open("/relative-long-host-file/payload.bin", "rb");
+        std::array<char, 4> data{};
+        Require(fread_nid_postfix(data.data(), 1, data.size(), stream.get()) == 4 && data == std::array{'a', 'b', 'c', 'd'}, "relative long-path contents differ");
+    }
+    std::puts("long host path read/create/exclusive/append/update/missing/relative checks passed");
 }
 
 }
