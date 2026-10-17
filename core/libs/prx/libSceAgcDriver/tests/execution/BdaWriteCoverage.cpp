@@ -93,7 +93,10 @@ void Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
     };
     const auto result = Recompile(request);
     Require(std::ranges::any_of(result.bindings, [](const auto& binding) { return binding.role == DescriptorRole::BdaPagetable; }), "the coverage shader did not use BDA");
+    device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
+    device.WaitIdle();
     const auto generation = Memory::CollectWritesUncached(address, BlockBytes);
+    std::printf("BDA warm-up: watched=%d generation=%llu overlap=%d\n", Memory::Watched(address, BlockBytes), static_cast<unsigned long long>(generation), Memory::StoredOver(address, BlockBytes, generation));
     Require(generation != 0 && !Memory::StoredOver(address, BlockBytes, generation), "the BDA write coverage baseline is not clean");
     Require(!Memory::StoredAllSince_nid_no_patch(address, PageBytes, generation), "the untouched page already has complete store coverage");
     device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
