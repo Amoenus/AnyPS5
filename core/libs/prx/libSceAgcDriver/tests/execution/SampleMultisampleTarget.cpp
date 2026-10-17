@@ -773,11 +773,22 @@ void InitialContents(AgcDriver::VulkanDevice& device, bool snapshots = false) {
             auto completedColor = DecodeTarget(*completed);
             StoreInitial(*completed, Samples, 0u, false);
             Draw(device, TargetState(completedColor));
+            auto completionRefusals = std::make_shared<std::array<std::string, 2>>();
             {
                 std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
                 auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
                 Require(recorder != nullptr, "the snapshot fixture has no owning recorder");
-                recorder->OnComplete([completed] {
+                recorder->OnComplete([completed, completedColor, context, completionRefusals] {
+                    try {
+                        static_cast<void>(ReadMultisampleTargetSamples_nid_no_patch(context, completedColor));
+                    } catch (const std::exception& error) {
+                        (*completionRefusals)[0] = error.what();
+                    }
+                    try {
+                        static_cast<void>(ReadMultisampleTargetColorSnapshot_nid_no_patch(context, completedColor));
+                    } catch (const std::exception& error) {
+                        (*completionRefusals)[1] = error.what();
+                    }
                     StoreWords(*completed, completed->bytes, FillOnes);
                     NoteColorMetadataFill(completed->Address(), completed->bytes, FillOnes);
                 });
@@ -789,6 +800,7 @@ void InitialContents(AgcDriver::VulkanDevice& device, bool snapshots = false) {
                 recording->Activate();
             }
             const auto snapshot = ReadMultisampleTargetColorSnapshot_nid_no_patch(context, completedColor);
+            Require(std::all_of(completionRefusals->begin(), completionRefusals->end(), [](const auto& error) { return error.find("during a recorder completion") != std::string::npos; }), "a native color snapshot recursively completed its producer");
             std::vector<std::byte> expected(completed->bytes);
             for (std::size_t offset = 0; offset < expected.size(); offset += sizeof(FillOnes)) std::memcpy(expected.data() + offset, &FillOnes, sizeof(FillOnes));
             Require(snapshot.original == expected && snapshot.current == expected, "the native snapshot captured its baseline before producer completion");
