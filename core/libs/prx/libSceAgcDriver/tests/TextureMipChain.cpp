@@ -193,6 +193,13 @@ VKAPI_ATTR void VKAPI_CALL cmdCopyImageToBuffer(VkCommandBuffer, VkImage image, 
     for (std::uint32_t index = 0; index < count; ++index) mock.readbacks.emplace_back(image, regions[index].imageSubresource);
 }
 
+VKAPI_ATTR void VKAPI_CALL cmdBlitImage(VkCommandBuffer, VkImage source, VkImageLayout, VkImage target, VkImageLayout, std::uint32_t count, const VkImageBlit* regions, VkFilter) {
+    for (std::uint32_t index = 0; index < count; ++index) {
+        mock.readbacks.emplace_back(source, regions[index].srcSubresource);
+        mock.copies.emplace_back(target, regions[index].dstSubresource);
+    }
+}
+
 VKAPI_ATTR void VKAPI_CALL cmdClearColorImage(VkCommandBuffer, VkImage image, VkImageLayout, const VkClearColorValue*, std::uint32_t count, const VkImageSubresourceRange* ranges) {
     for (std::uint32_t index = 0; index < count; ++index) mock.clears.emplace_back(image, ranges[index]);
 }
@@ -245,6 +252,7 @@ PFN_vkVoidFunction VKAPI_CALL deviceProc(VkDevice, const char* name) {
         {"vkCmdCopyBuffer", reinterpret_cast<PFN_vkVoidFunction>(cmdCopyBuffer)},
         {"vkCmdCopyBufferToImage", reinterpret_cast<PFN_vkVoidFunction>(cmdCopyBufferToImage)},
         {"vkCmdCopyImageToBuffer", reinterpret_cast<PFN_vkVoidFunction>(cmdCopyImageToBuffer)},
+        {"vkCmdBlitImage", reinterpret_cast<PFN_vkVoidFunction>(cmdBlitImage)},
         {"vkCmdClearColorImage", reinterpret_cast<PFN_vkVoidFunction>(cmdClearColorImage)},
         {"vkCmdBindPipeline", reinterpret_cast<PFN_vkVoidFunction>(cmdBindPipeline)},
         {"vkCmdBindDescriptorSets", reinterpret_cast<PFN_vkVoidFunction>(cmdBindDescriptorSets)},
@@ -455,6 +463,43 @@ std::pair<VkImage, VkImageCreateInfo> storageImage(const std::string& what) {
     return *mock.images.begin();
 }
 
+void TestSrgbExpansionLevels(const Context& context, TextureDetiler& detiler) {
+    auto expanded = context;
+    const auto format = ShaderRecompiler::IrBufferFormat::Format8Srgb;
+    expanded.srgbDecodeFormats = ShaderRecompiler::SrgbDecodeBit(format);
+    expanded.srgbCopyFormats = expanded.srgbDecodeFormats;
+    for (const auto base : {0u, 7u}) {
+        auto descriptor = arrayTexture(0x1004000000u, static_cast<std::uint32_t>(format), 28u, 1u, 4u, 10u);
+        descriptor.baseLevel = base;
+        const auto geometry = DescribeSurface(descriptor);
+        const std::vector<std::byte> snapshot(static_cast<std::size_t>(geometry.guestBytes));
+        clearRecords();
+        const auto texture = std::make_shared<Texture>(expanded, detiler, descriptor, VkComponentMapping{}, snapshot);
+        Require(mock.images.size() == 2u, "sRGB expansion did not create an upload and expanded image");
+        Require(!mock.readbacks.empty(), "sRGB expansion did not record a blit");
+        for (const auto& [image, info] : mock.images) {
+            Require(info.mipLevels == 5u, "sRGB expansion recreated the overlong mip chain");
+            checkInsideImage(image, info, "sRGB sampled expansion");
+        }
+    }
+    auto descriptor = storageSurface(28u, 1u, 10u);
+    descriptor.format = static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Format8UNorm);
+    GuestSurface memory(static_cast<std::size_t>(DescribeSurface(descriptor).guestBytes));
+    descriptor.baseAddress = memory.Address();
+    clearRecords();
+    const auto source = StorageTexture::Create(expanded, detiler, descriptor, 0u);
+    descriptor.format = static_cast<std::uint32_t>(format);
+    descriptor.baseLevel = 7u;
+    Require(Texture::CanSrgbExpandFrom(expanded, *source, descriptor), "sRGB storage expansion fixture is not eligible");
+    const auto texture = std::make_shared<Texture>(expanded, source, descriptor, VkComponentMapping{}, Texture::SrgbExpandTag{});
+    Require(texture->RefreshDepthCopy(), "sRGB storage expansion did not refresh");
+    Require(mock.images.size() == 2u && !mock.readbacks.empty(), "sRGB storage expansion did not create and blit its copy");
+    for (const auto& [image, info] : mock.images) {
+        Require(info.mipLevels == 5u, "sRGB storage expansion recreated the overlong mip chain");
+        checkInsideImage(image, info, "sRGB storage expansion");
+    }
+}
+
 void TestStorageLevelsPastTheFullChain(const Context& context, TextureDetiler& detiler) {
     // A 28x1 RGBA8 storage surface of 10 levels: the image holds levels 0-4, the last of them 1x1.
     auto descriptor = storageSurface(28, 1, 10);
@@ -532,6 +577,7 @@ void TestShaderLevelsPastTheView(const Context& context, TextureDetiler& detiler
     const std::array cases{
         Case{"28x1 2D array of levels 0-9", imageWords(13, 28, 1, 4, 0, 9, 9), 5u, false},
         Case{"28x1 2D array of levels 7-9", imageWords(13, 28, 1, 4, 7, 9, 9), 2u, true},
+        Case{"28x1 2D array of level 7", imageWords(13, 28, 1, 4, 7, 7, 9), 0u, true},
         Case{"28x1 2D of levels 2-6 of 10", imageWords(9, 28, 1, 1, 2, 6, 9), 2u, false},
         Case{"4x1 2D of levels 0-10", imageWords(9, 4, 1, 1, 0, 10, 10), 8u, false},
         Case{"4x4x16 3D of levels 0-7", imageWords(10, 4, 4, 16, 0, 7, 7), 3u, false},
@@ -583,6 +629,10 @@ void TestShaderLevelsPastTheView(const Context& context, TextureDetiler& detiler
     Require(!accepts(ShaderRecompiler::ImageLevelUseLodQuery, ShaderRecompiler::NoTable, cases[0].words), "image_get_lod of a T# whose levels reach past its chain must be refused");
     Require(!accepts(ShaderRecompiler::ImageLevelUseQuery, 0u, cases[0].words), "image_get_resinfo through an image table of a T# whose levels reach past its chain must be refused");
     Require(accepts(ShaderRecompiler::ImageLevelUseMipLoad | ShaderRecompiler::ImageLevelUseLodQuery | ShaderRecompiler::ImageLevelUseLoad, ShaderRecompiler::NoTable, imageWords(13, 64, 64, 4, 0, 6, 6)), "a full 64x64 chain must be served to every access");
+    const auto single = imageWords(13, 28, 1, 4, 7, 7, 9);
+    Require(accepts(ShaderRecompiler::ImageLevelUseQuery, ShaderRecompiler::NoTable, single), "a single-level query past the chain must retain its one level");
+    Require(accepts(ShaderRecompiler::ImageLevelUseQuery, 0u, single), "a single-level image table query past the chain needs no missing-level metadata");
+    for (const auto use : {ShaderRecompiler::ImageLevelUseLoad, ShaderRecompiler::ImageLevelUseMipLoad, ShaderRecompiler::ImageLevelUseLodQuery}) Require(!accepts(use, ShaderRecompiler::NoTable, single), "a load or LOD query of a single unrepresented base level must be refused");
 }
 
 }
@@ -595,6 +645,7 @@ void RunTextureMipChainTests() {
         TextureDetiler detiler(context);
         TestLevelsPastTheFullChain(context, detiler);
         TestFullChainsAreUnchanged(context, detiler);
+        TestSrgbExpansionLevels(context, detiler);
         TestStorageLevelsPastTheFullChain(context, detiler);
         TestStorageFullChainIsUnchanged(context, detiler);
         TestShaderLevelsPastTheView(context, detiler);
