@@ -1106,7 +1106,6 @@ int main(int argc, char** argv) {
         }
         const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
         Require(colorBytes == BlockBytes, "the native color target does not occupy exactly one BDA block");
-        const auto state = TargetState(color);
         CheckBdaSpan(*device, block, 0, false);
         CheckBdaSpan(*device, block, BlockBytes, false);
         Draw(*device, state);
