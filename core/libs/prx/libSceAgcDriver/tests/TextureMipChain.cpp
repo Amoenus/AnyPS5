@@ -9,6 +9,7 @@
 #include "Optimization/ResourceMaterializer.hpp"
 #include "PipelineSpecialization.hpp"
 #include "RuntimeAbi.hpp"
+#include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
 #include <bit>
 #include <cstddef>
@@ -500,6 +501,29 @@ void TestSrgbExpansionLevels(const Context& context, TextureDetiler& detiler) {
     }
 }
 
+void TestRepackCopyLevels(const Context& context, TextureDetiler& detiler) {
+    auto copied = context;
+    copied.detiler = &detiler;
+    for (const auto base : {0u, 7u}) {
+        auto descriptor = storageSurface(28u, 1u, 10u);
+        descriptor.format = static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Format32UInt);
+        GuestSurface memory(static_cast<std::size_t>(DescribeSurface(descriptor).guestBytes));
+        descriptor.baseAddress = memory.Address();
+        clearRecords();
+        const auto source = StorageTexture::Create(copied, detiler, descriptor, 0u);
+        descriptor.format = static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Format10_11_11Float);
+        descriptor.baseLevel = base;
+        Require(Texture::CanRepackCopyFrom(*source, descriptor), "repacked storage copy fixture is not eligible");
+        const auto texture = std::make_shared<Texture>(copied, source, descriptor, VkComponentMapping{}, Texture::RepackCopyTag{});
+        Require(texture->RefreshDepthCopy(), "repacked storage copy did not refresh");
+        Require(mock.images.size() == 2u && !mock.readbacks.empty(), "repacked storage copy did not read its source");
+        for (const auto& [image, info] : mock.images) {
+            Require(info.mipLevels == 5u, "repacked storage copy recreated the overlong mip chain");
+            checkInsideImage(image, info, "repacked storage copy");
+        }
+    }
+}
+
 void TestStorageLevelsPastTheFullChain(const Context& context, TextureDetiler& detiler) {
     // A 28x1 RGBA8 storage surface of 10 levels: the image holds levels 0-4, the last of them 1x1.
     auto descriptor = storageSurface(28, 1, 10);
@@ -646,6 +670,7 @@ void RunTextureMipChainTests() {
         TestLevelsPastTheFullChain(context, detiler);
         TestFullChainsAreUnchanged(context, detiler);
         TestSrgbExpansionLevels(context, detiler);
+        TestRepackCopyLevels(context, detiler);
         TestStorageLevelsPastTheFullChain(context, detiler);
         TestStorageFullChainIsUnchanged(context, detiler);
         TestShaderLevelsPastTheView(context, detiler);
