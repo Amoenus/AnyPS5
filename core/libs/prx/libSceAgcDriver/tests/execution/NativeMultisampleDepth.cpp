@@ -7,6 +7,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
@@ -137,7 +139,7 @@ private:
 
 class TargetMemory {
 public:
-    explicit TargetMemory(std::size_t bytes) : bytes(bytes) {
+    explicit TargetMemory(std::size_t bytes, bool registerAllocation = false) : bytes(bytes), registered(registerAllocation) {
 #ifdef _WIN32
         pointer = GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536u);
         GuestArena::GuestArenaCommit_nid_postfix(pointer, bytes, PAGE_READWRITE, bytes);
@@ -153,8 +155,10 @@ public:
 #endif
         Require(pointer != nullptr, "multisample target fixture allocation failed");
         std::memset(pointer, 0xa5, bytes);
+        if (registered) GuestAllocations::Mutation().Add(pointer, bytes, true, true, true);
     }
     ~TargetMemory() {
+        if (registered) GuestAllocations::Mutation().Remove(pointer);
 #ifdef _WIN32
         GuestArena::GuestArenaReset_nid_postfix(pointer, bytes);
         GuestArena::GuestArenaRelease_nid_postfix(pointer, bytes);
@@ -168,7 +172,42 @@ public:
 private:
     void* pointer = nullptr;
     std::size_t bytes;
+    bool registered = false;
 };
+
+alignas(256) constexpr std::array<std::uint32_t, 17> HtileMaskKernel{
+    0xd7460000u, 0x04010c06u, 0x34000084u, 0xdc388000u, 0x04020000u, 0xbf8c3f70u, 0xd7710008u, 0x00120805u,
+    0xd7710009u, 0x00120a05u, 0xd771000au, 0x00120c05u, 0xd771000bu, 0x00120e05u, 0xdc788000u, 0x00020800u,
+    0xbf810000u,
+};
+
+std::vector<std::uint32_t> DriverPm4Packet(std::uint32_t opcode, std::initializer_list<std::uint32_t> body) {
+    std::vector<std::uint32_t> words{0xc0000000u | (static_cast<std::uint32_t>(body.size() - 1u) << 16u) | (opcode << 8u)};
+    words.insert(words.end(), body);
+    return words;
+}
+
+void SubmitDriverHtileClear(std::uint64_t address) {
+    const auto shader = reinterpret_cast<std::uintptr_t>(HtileMaskKernel.data());
+    std::vector<std::uint32_t> commands;
+    const auto append = [&commands](std::vector<std::uint32_t> packet) { commands.insert(commands.end(), packet.begin(), packet.end()); };
+    append(DriverPm4Packet(0x76u, {0x20cu, static_cast<std::uint32_t>(shader >> 8u)}));
+    append(DriverPm4Packet(0x76u, {0x20du, static_cast<std::uint32_t>(shader >> 40u) & 0xffu}));
+    append(DriverPm4Packet(0x76u, {0x207u, 64u}));
+    append(DriverPm4Packet(0x76u, {0x208u, 1u}));
+    append(DriverPm4Packet(0x76u, {0x209u, 1u}));
+    append(DriverPm4Packet(0x76u, {0x213u, 8u << 1u}));
+    append(DriverPm4Packet(0x76u, {0x240u, 0u}));
+    append(DriverPm4Packet(0x76u, {0x241u, 0u}));
+    append(DriverPm4Packet(0x76u, {0x242u, static_cast<std::uint32_t>(address)}));
+    append(DriverPm4Packet(0x76u, {0x243u, static_cast<std::uint32_t>(address >> 32u)}));
+    append(DriverPm4Packet(0x76u, {0x244u, 0xf0u}));
+    append(DriverPm4Packet(0x76u, {0x245u, 0xf0u}));
+    append(DriverPm4Packet(0x15u, {static_cast<std::uint32_t>(1u), 1u, 1u, 0x41u}));
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0u, {}};
+    Require(sceAgcDriverSubmitDcb(&packet) == 0, "native depth HTILE clear: PM4 submission failed");
+    AgcDriverWaitIdle_nid_postfix();
+}
 
 template<typename Action>
 void TargetRefuses(Action action, std::string_view expected) {
@@ -600,7 +639,7 @@ void CheckDrawFeedback() {
     std::puts("Native depth feedback refused through the draw resource path");
 }
 
-enum class ClearFault { None, PartialStore, CpuWrite, DepthWrite, BadMetadata, UnprovenDispatch, PendingWrite, Overlap, PossibleStore, CompletedPossibleStore };
+enum class ClearFault { None, PartialStore, CpuWrite, DepthWrite, BadMetadata, UnprovenDispatch, PendingWrite, Overlap, PossibleStore, CompletedPossibleStore, DriverDispatch };
 
 void CheckClearDispatch() {
     const std::array<std::uint32_t, 17> code{
@@ -652,7 +691,7 @@ void CheckClearDispatch() {
 void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing = false, std::optional<bool> depthOnlyOverride = std::nullopt, ClearFault fault = ClearFault::None) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
-    TargetMemory memory(bytes), metadata(65536u);
+    TargetMemory memory(bytes), metadata(65536u, fault == ClearFault::DriverDispatch);
     const auto metadataBytes = HtileMetadataBytes(extent);
     const bool depthOnly = depthOnlyOverride.value_or(one);
     const std::uint32_t pattern = one ? (depthOnly ? 0xfffffff0u : 0xfffc00f0u) : 0u;
@@ -759,25 +798,29 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 target.clearDepth = clearOne ? 1.0f : 0.0f;
                 Require(DepthSurfaceView(context, target) == view, "updating the native clear value replaced its attachment");
                 const std::uint32_t clearPattern = clearOne ? (depthOnly ? 0xfffffff0u : 0xfffc00f0u) : 0u;
-                const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
-                if (fault == ClearFault::PartialStore || fault == ClearFault::PossibleStore || fault == ClearFault::CompletedPossibleStore) {
-                    for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &clearPattern, 4u);
+                if (fault == ClearFault::DriverDispatch && clearOne) {
+                    SubmitDriverHtileClear(target.htileAddress);
+                } else {
+                    const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
+                    if (fault == ClearFault::PartialStore || fault == ClearFault::PossibleStore || fault == ClearFault::CompletedPossibleStore) {
+                        for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &clearPattern, 4u);
+                    }
+                    NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
+                    if (fault == ClearFault::Overlap) NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
+                    const auto storedBytes = fault == ClearFault::PartialStore ? 4u : static_cast<std::size_t>(metadataBytes);
+                    if (fault == ClearFault::PossibleStore || fault == ClearFault::CompletedPossibleStore) {
+                        const auto generation = AgcDriver::GuestMemory::TrackerGeneration();
+                        AgcDriver::GuestMemory::MarkPossiblyWritten(target.htileAddress, metadataBytes);
+                        Require(!AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "a possible HTILE range proved complete coverage");
+                        if (fault == ClearFault::CompletedPossibleStore) CompleteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes));
+                    } else AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, storedBytes, [&] {
+                        for (std::size_t i = 0u; i < storedBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &clearPattern, 4u);
+                        if (fault == ClearFault::BadMetadata) metadata.Data()[0] = std::byte{0x0f};
+                    });
+                    if (fault == ClearFault::CpuWrite) metadata.Data()[metadataBytes - 1u] ^= std::byte{0x01};
+                    if (fault == ClearFault::DepthWrite) memory.Data()[bytes - 1u] ^= std::byte{0x01};
+                    if (fault == ClearFault::PendingWrite) QueueTargetByteWrite(context, recorder, target.htileAddress, std::byte{0});
                 }
-                NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
-                if (fault == ClearFault::Overlap) NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
-                const auto storedBytes = fault == ClearFault::PartialStore ? 4u : static_cast<std::size_t>(metadataBytes);
-                if (fault == ClearFault::PossibleStore || fault == ClearFault::CompletedPossibleStore) {
-                    const auto generation = AgcDriver::GuestMemory::TrackerGeneration();
-                    AgcDriver::GuestMemory::MarkPossiblyWritten(target.htileAddress, metadataBytes);
-                    Require(!AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "a possible HTILE range proved complete coverage");
-                    if (fault == ClearFault::CompletedPossibleStore) CompleteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes));
-                } else AgcDriver::GuestMemory::StoreOwnBytes(target.htileAddress, storedBytes, [&] {
-                    for (std::size_t i = 0u; i < storedBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &clearPattern, 4u);
-                    if (fault == ClearFault::BadMetadata) metadata.Data()[0] = std::byte{0x0f};
-                });
-                if (fault == ClearFault::CpuWrite) metadata.Data()[metadataBytes - 1u] ^= std::byte{0x01};
-                if (fault == ClearFault::DepthWrite) memory.Data()[bytes - 1u] ^= std::byte{0x01};
-                if (fault == ClearFault::PendingWrite) QueueTargetByteWrite(context, recorder, target.htileAddress, std::byte{0});
                 Require(DepthSurfaceHolds(context, DecodeTextureResource(words), texture.get()), "completed native depth clear lost its sampled view");
                 recorder.Sync();
                 Require(DepthSurfaceView(context, target) == view && CachedSampledTexture(context, words) == texture, "completed native depth clear replaced an attachment or cached view");
@@ -1155,6 +1198,8 @@ int main(int argc, char** argv) {
                 }
             }
             CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::CompletedPossibleStore);
+            ++checked;
+            CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::DriverDispatch);
             ++checked;
             std::printf("Native depth completed clear cases checked=%u unavailable=%u\n", checked, unavailable);
             return 0;
