@@ -794,7 +794,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         const auto geometry = DescribeSurface(descriptor);
         copyWidth = descriptor.width;
         copyHeight = descriptor.height;
-        copyLevels = descriptor.mipCount;
+        copyLevels = geometry.imageLevels;
         copyLayers = geometry.imageLayers;
         APS5_LOG_OUT("Texture address=0x%llx %ux%u mips=%u layers=%u sRGB copy of storage image (guest format %u)", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.mipCount, copyLayers, descriptor.format);
         auto expanded = CreateExpandImage(context, descriptor, 1u, copyLayers, copyLevels);
@@ -802,7 +802,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         owned = std::move(expanded.owned);
         allocationBytes = expanded.bytes;
 
-        const auto viewLevelCount = std::min(descriptor.lastLevel, descriptor.mipCount - 1u) - descriptor.baseLevel + 1u;
+        const auto [viewBaseLevel, viewLevelCount] = ViewLevels(descriptor, copyLevels);
         const auto viewLayerCount = geometry.imageLayers - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
             Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
@@ -813,7 +813,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         viewInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
         viewFormat = viewInfo.format;
         viewInfo.components = components;
-        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
+        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, viewBaseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
         VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
         ChainMinLod(context, descriptor, viewInfo, minLod);
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView sRGB copy");
