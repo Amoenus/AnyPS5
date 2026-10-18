@@ -52,7 +52,7 @@ static void CheckAlignment() {
     Require(aligned(blocks[0]));
     void* small = sceLibcMspaceMemalign_nid_postfix(arena, 16, 40);
     Require(aligned(small));
-    void* moved = sceLibcMspaceReallocalign_nid_postfix(arena, nullptr, 40, 8);
+    void* moved = sceLibcMspaceReallocalign_nid_postfix(arena, nullptr, 8, 40);
     Require(aligned(moved));
     void* posix = nullptr;
     Require(sceLibcMspacePosixMemalign_nid_postfix(arena, &posix, 8, 40) == 0 && aligned(posix));
@@ -102,7 +102,7 @@ static void CheckMovedBlockKeepsUsableBytes() {
     void* other = sceLibcMspaceMalloc_nid_postfix(arena, 1);
     const auto otherUsable = fill(other);
     Require(sceLibcMspaceMalloc_nid_postfix(arena, 1) != nullptr);
-    void* realigned = sceLibcMspaceReallocalign_nid_postfix(arena, other, 4096, 256);
+    void* realigned = sceLibcMspaceReallocalign_nid_postfix(arena, other, 256, 4096);
     Require(realigned != nullptr && realigned != other && kept(realigned, otherUsable));
     Require(sceLibcMspaceDestroy_nid_postfix(arena) == 0);
 }
@@ -126,7 +126,7 @@ int main() {
         Require(sceLibcMspaceRealloc_nid_postfix(arena, first, size) == nullptr);
         Require(*__error_nid_postfix() == 12);
         *__error_nid_postfix() = 0;
-        Require(sceLibcMspaceReallocalign_nid_postfix(arena, first, size, 16) == nullptr);
+        Require(sceLibcMspaceReallocalign_nid_postfix(arena, first, 16, size) == nullptr);
         Require(*__error_nid_postfix() == 12);
         Require(sceLibcMspaceMallocUsableSize_nid_postfix(first) == 128);
         for (int i = 0; i < 128; ++i) Require(first[i] == i);
@@ -194,12 +194,17 @@ int main() {
     unsigned char* realigned = static_cast<unsigned char*>(sceLibcMspaceReallocalign_nid_postfix(arena, nullptr, 64, 64));
     Require(realigned && (reinterpret_cast<std::uintptr_t>(realigned) & 63) == 0);
     for (int i = 0; i < 64; ++i) realigned[i] = static_cast<unsigned char>(i + 1);
-    unsigned char* regrown = static_cast<unsigned char*>(sceLibcMspaceReallocalign_nid_postfix(arena, realigned, 256, 64));
+    unsigned char* regrown = static_cast<unsigned char*>(sceLibcMspaceReallocalign_nid_postfix(arena, realigned, 64, 256));
     Require(regrown && (reinterpret_cast<std::uintptr_t>(regrown) & 63) == 0);
     for (int i = 0; i < 64; ++i) Require(regrown[i] == static_cast<unsigned char>(i + 1));
-    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 16, 0) == nullptr);
-    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 16, 3) == nullptr);
-    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 0, 16) == nullptr);
+    *__error_nid_postfix() = 0;
+    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 0, 16) == regrown);
+    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 3, 16) == regrown);
+    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, std::size_t{1} << 63, 16) == nullptr);
+    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 64, 0) == regrown && regrown[63] == 64);
+    Require(*__error_nid_postfix() == 0);
+    unsigned char* rounded = static_cast<unsigned char*>(sceLibcMspaceReallocalign_nid_postfix(arena, nullptr, 100, 0));
+    Require(rounded && (reinterpret_cast<std::uintptr_t>(rounded) & 127) == 0);
     Require(sceLibcMspaceMallocStatsFast_nid_postfix(arena, &stats) == 0 && stats.currentInuseSize >= 100);
     sceLibcMspaceFree_nid_postfix(arena, memaligned);
     void* region = sceLibcMspaceMalloc_nid_postfix(arena, 8192);

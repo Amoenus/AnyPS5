@@ -1,5 +1,6 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -265,19 +266,15 @@ void* APS5_VABI sceLibcMspaceAlignedAlloc_nid_postfix(void* handle, std::size_t 
     return sceLibcMspaceMemalign_nid_postfix(handle, alignment, size);
 }
 
-void* APS5_VABI sceLibcMspaceReallocalign_nid_postfix(void* handle, void* pointer, std::size_t size, std::size_t alignment) {
-    if (alignment == 0 || (alignment & (alignment - 1))) {
-        Error(22);
-        return nullptr;
-    }
-    const auto effective = std::max<std::size_t>(alignment, 16);
+void* APS5_VABI sceLibcMspaceReallocalign_nid_postfix(void* handle, void* pointer, std::size_t alignment, std::size_t size) {
+    if (alignment >> 63) return nullptr;
+    const auto effective = std::bit_ceil(std::max<std::size_t>(alignment, MinimumAlignment));
     std::lock_guard lock(arenaMutex);
     auto* arena = Find(handle);
     if (!pointer) return Allocate(arena, size, effective);
     std::map<std::uintptr_t, Chunk>::iterator chunk;
     if (!FindUsed(arena, pointer, chunk)) return nullptr;
-    if (!size) { Release(*arena, chunk); return nullptr; }
-    const auto needed = AlignUp(size, Granule);
+    const auto needed = AlignUp(std::max<std::size_t>(size, 1), MinimumAlignment);
     if (needed < size) { Error(12); return nullptr; }
     const auto start = chunk->first;
     const auto capacity = chunk->second.end - start;
@@ -311,4 +308,5 @@ std::size_t APS5_VABI sceLibcMspaceMallocUsableSize_nid_postfix(const void* poin
     Error(22);
     return 0;
 }
+
 }
