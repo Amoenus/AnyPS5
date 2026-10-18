@@ -777,7 +777,10 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 });
                 if (fault == ClearFault::CpuWrite) metadata.Data()[metadataBytes - 1u] ^= std::byte{0x01};
                 if (fault == ClearFault::DepthWrite) memory.Data()[bytes - 1u] ^= std::byte{0x01};
-                if (fault == ClearFault::PendingWrite) QueueTargetByteWrite(context, recorder, target.htileAddress, std::byte{0});
+                if (fault == ClearFault::PendingWrite) {
+                    QueueTargetByteWrite(context, recorder, target.htileAddress, std::byte{0});
+                    TargetRefuses([&] { CachedSampledTexture(context, words); }, "external GPU writes");
+                }
                 Require(DepthSurfaceHolds(context, DecodeTextureResource(words), texture.get()), "completed native depth clear lost its sampled view");
                 recorder.Sync();
                 Require(DepthSurfaceView(context, target) == view && CachedSampledTexture(context, words) == texture, "completed native depth clear replaced an attachment or cached view");

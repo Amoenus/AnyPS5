@@ -159,6 +159,7 @@ int RunNativeClear(AgcDriver::VulkanDevice& device) {
     device.Dispatch(compile(), groups, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(code.data()), nullptr, nullptr, std::pair{target.htileAddress, metadataBytes});
     std::puts("Native full BDA clear: checking sampled owner before explicit WaitIdle");
     Require(context.recorder->PendingWriteOverlaps(target.htileAddress, metadataBytes), "the recognized HTILE clear is missing its pending write range");
+    Require(DepthSurfaceHolds(context, DecodeTextureResource(words), sampled.get()), "a pending full BDA clear lost its native sampled owner");
     Require(CachedSampledTexture(context, words) == sampled, "a pending full BDA clear lost its native sampled view");
     Require(!context.recorder->PendingWriteOverlaps(target.htileAddress, metadataBytes), "the native HTILE consumer did not settle its clear's pending write");
     Require(Memory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "the native HTILE consumer did not complete its recognized clear");
