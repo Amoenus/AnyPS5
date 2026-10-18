@@ -1027,7 +1027,7 @@ void settlePendingHtileClear(const Context& context, std::uint64_t address) {
     {
         std::lock_guard lock(surfacesMutex());
         const auto* surface = planeSurface(context.device, address);
-        if (surface == nullptr || !surface->samplingActive || surface->clearGeneration == 0u || !surface->clearCompletionQueued || !surface->sampling.refusal.empty()) return;
+        if (surface == nullptr || !surface->samplingActive || surface->clearGeneration == 0u || !surface->sampling.refusal.empty()) return;
         const auto& range = surface->sampling.initial[1];
         metadata = {range.address, range.bytes};
     }
