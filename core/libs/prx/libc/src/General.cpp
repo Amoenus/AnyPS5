@@ -390,6 +390,10 @@ extern "C" int KeepHostStandardError_nid_no_patch() {
 extern "C" int HostStandardError_nid_no_patch() {
     return g_hostStandardError.load();
 }
+
+extern "C" int DuplicateHostDescriptor_nid_no_patch(int descriptor) {
+    return ::fcntl(descriptor, F_DUPFD_CLOEXEC, 3);
+}
 #endif
 
 extern "C" void AddPathAlias_nid_no_patch(const char* guestPrefix, const char* hostPath) {
@@ -645,6 +649,12 @@ extern "C" void* HostStandardHandle_nid_no_patch(int descriptor) {
 extern "C" void KeepStandardHandle_nid_no_patch(int descriptor, void* handle) {
     if (handle != nullptr && !SetStdHandle(StandardHandleId(descriptor), handle))
         throw std::runtime_error("Cannot keep the host standard handle of descriptor " + std::to_string(descriptor));
+}
+extern "C" int DuplicateHostDescriptor_nid_no_patch(int descriptor) {
+    const auto previous = _set_thread_local_invalid_parameter_handler([](const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {});
+    const int kept = ::_dup(descriptor);
+    _set_thread_local_invalid_parameter_handler(previous);
+    return kept;
 }
 #endif
 
