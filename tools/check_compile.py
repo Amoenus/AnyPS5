@@ -155,6 +155,9 @@ def check(root, build, files):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
         description="compile the changed translation units only, to check a change builds without a full build")
     parser.add_argument("--build", type=Path, default=Path("build"),

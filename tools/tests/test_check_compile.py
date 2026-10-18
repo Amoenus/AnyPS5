@@ -61,7 +61,7 @@ class CheckCompileTests(unittest.TestCase):
         environment = dict(os.environ)
         environment.update(env or {})
         return subprocess.run([sys.executable, "-I", str(TOOL), *arguments], cwd=self.root,
-                              capture_output=True, text=True, env=environment)
+                              capture_output=True, text=True, encoding="utf-8", env=environment)
 
     def source(self, relative, text="int x;\n"):
         path = self.root / relative
