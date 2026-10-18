@@ -374,6 +374,12 @@ void stateTests() {
     queue.context[0x90] = 0x10003;
     state = AgcDriver::Graphics::DecodeState(queue);
     Require(state.scissor.offset.x == 3 && state.scissor.offset.y == 1 && state.scissor.extent.width == 29 && state.scissor.extent.height == 2, "a scissor that applies the zero window offset changed");
+    queue.context[0x90] = 0x80040003;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.scissor.extent.height == 0, "a scissor whose top is below its bottom passes pixels");
+    queue.context[0x90] = 0x80010021;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.scissor.extent.width == 0, "a scissor whose left edge is right of its right edge passes pixels");
     queue.context[0x90] = 0x80008000;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "scissor reserved bits");
     queue.context[0x90] = 0x80010003;
@@ -3512,6 +3518,11 @@ void multisampleTests() {
     Require(MultisampledColorBytes(narrow) == 0x50000, "an 8x 4-byte target is not 32x64 pixels per 64 KiB block");
     srgb.extent = {100, 100};
     Require(MultisampledColorBytes(srgb) == 0x40000, "a 4x 100x100 4-byte target does not span 2x2 64 KiB blocks");
+    for (const auto mode : {ColorTileMode::Z64KBX, ColorTileMode::D64KBX}) {
+        auto swizzled = srgb;
+        swizzled.tileMode = mode;
+        Require(MultisampledColorBytes(swizzled) == 0x40000, "a 4x 100x100 4-byte surface of another 64 KiB swizzle does not span 2x2 64 KiB blocks");
+    }
     srgb.tileMode = ColorTileMode::Standard4KB;
     Require(MultisampledColorBytes(srgb) == 0x31000, "a 4x 4-byte target is not 16x16 pixels per 4 KiB block");
     srgb.tileMode = ColorTileMode::Linear;
