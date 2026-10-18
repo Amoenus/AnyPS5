@@ -68,6 +68,7 @@ inline constexpr std::array InputMapping{
     InputBinding{SDL_SCANCODE_BACKSPACE, MouseButton::None, InputControl::TouchLeft},
     InputBinding{SDL_SCANCODE_TAB, MouseButton::None, InputControl::TouchRight},
     InputBinding{SDL_SCANCODE_F7, MouseButton::None, InputControl::ToggleMouse},
+    InputBinding{SDL_SCANCODE_X, MouseButton::None, InputControl::Shake},
     InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::Middle, InputControl::ToggleMouse},
     InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::Left, InputControl::Button, PadButton::Square},
     InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::Right, InputControl::Button, PadButton::R2},

@@ -1022,6 +1022,18 @@ VkImageView MultisampleTargetView(const Context& context, const ColorTarget& tar
     return acquired.view;
 }
 
+VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target, std::shared_ptr<void>& owner, VkImage* image) {
+    std::lock_guard lock(targetsMutex());
+    auto& acquired = acquire(context, target);
+    owner = acquired.shared_from_this();
+    if (image != nullptr) *image = acquired.image;
+    return acquired.view;
+}
+
+void KeepMultisampleTarget_nid_no_patch(const std::shared_ptr<void>& owner) {
+    std::static_pointer_cast<MultisampleTarget>(owner)->Keep();
+}
+
 namespace {
 
 bool redBlueSwapped(VkFormat rendered, VkFormat sampled) {
@@ -1039,18 +1051,6 @@ VkComponentMapping swapRedBlue(VkComponentMapping components) {
     return {swapped(components.r, VK_COMPONENT_SWIZZLE_R), swapped(components.g, VK_COMPONENT_SWIZZLE_G), swapped(components.b, VK_COMPONENT_SWIZZLE_B), swapped(components.a, VK_COMPONENT_SWIZZLE_A)};
 }
 
-}
-
-VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target, std::shared_ptr<void>& owner, VkImage* image) {
-    std::lock_guard lock(targetsMutex());
-    auto& acquired = acquire(context, target);
-    owner = acquired.shared_from_this();
-    if (image != nullptr) *image = acquired.image;
-    return acquired.view;
-}
-
-void KeepMultisampleTarget_nid_no_patch(const std::shared_ptr<void>& owner) {
-    std::static_pointer_cast<MultisampleTarget>(owner)->Keep();
 }
 
 std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const GuestTextureResource& resource, VkComponentMapping components, VkImageViewType viewType) {
