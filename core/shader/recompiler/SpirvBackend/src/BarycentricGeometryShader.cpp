@@ -189,9 +189,9 @@ public:
         if (clipDistances != 0u) {
             clipArrayType = builder.Type(spv::OpTypeArray, floatType, constant(uintType, clipDistances));
             controlInputClipType = builder.Type(spv::OpTypeArray, clipArrayType, constant(uintType, 3u));
-            ptrControlInputClip = builder.Type(spv::OpTypePointer, spv::StorageClassInput, controlInputClipType);
+            ptrControlInputClip = builder.Type(spv::OpTypePointer, spv::StorageClassInput, clipArrayType);
             ptrControlOutputClip = builder.Type(spv::OpTypePointer, spv::StorageClassOutput, clipArrayType);
-            ptrEvaluationInputClip = builder.Type(spv::OpTypePointer, spv::StorageClassInput, controlInputClipType);
+            ptrEvaluationInputClip = builder.Type(spv::OpTypePointer, spv::StorageClassInput, clipArrayType);
             ptrEvaluationOutputClip = builder.Type(spv::OpTypePointer, spv::StorageClassOutput, clipArrayType);
         }
         perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType);
@@ -213,7 +213,7 @@ public:
         if (clipDistances != 0u) {
             clipIn = addInterface(spv::StorageClassInput, controlInputClipType);
             decorate(clipIn, spv::DecorationBuiltIn, spv::BuiltInClipDistance);
-            clipOut = addInterface(spv::StorageClassOutput, clipArrayType);
+            clipOut = addInterface(spv::StorageClassOutput, controlInputClipType);
             decorate(clipOut, spv::DecorationBuiltIn, spv::BuiltInClipDistance);
         }
         const auto floatArray = [&](std::uint32_t size) { return builder.Type(spv::OpTypeArray, floatType, constant(uintType, size)); };
