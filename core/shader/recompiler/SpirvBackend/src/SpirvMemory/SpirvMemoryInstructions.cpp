@@ -761,6 +761,11 @@ std::uint32_t UpdateFunctionElement(SpirvEmitterState& state, std::uint32_t poin
 template<typename TUpdate>
 std::uint32_t LockedLdsUpdate(SpirvEmitterState& state, std::uint32_t type, std::uint32_t zero, TUpdate&& update);
 
+template<typename TNext>
+std::uint32_t LdsBufferAtomic64(SpirvEmitterState& state, std::uint32_t low, TNext&& next) {
+    return Unary(state, spv::OpBitcast, TypeU64(state), AtomicUpdateTyped(state, EmitLdsBufferU64Pointer(state, low), ResourceKind::Lds, TypeScalarU64(state), next));
+}
+
 template<typename TOperation>
 std::uint32_t EmitLdsAtomic32(SpirvEmitterState& state, const MemoryInfo& mem, TOperation&& operation) {
     if (mem.kind != ResourceKind::Lds || !state.requirements.ldsLock) return operation();
@@ -1145,7 +1150,7 @@ std::uint32_t ApertureAtomic64(SpirvValueEmitContext& ctx, const IrValue& inst, 
     const auto unaligned = Binary(state, spv::OpINotEqual, TypeBool(state), Binary(state, spv::OpBitwiseAnd, TypeU32(state), byteOffset, ConstantU32(state, 7u)), ConstantU32(state, 0u));
     EmitIfCondition(state, unaligned, [&] { RecordBdaFault(state, address, ConstantU32(state, 8u), instruction, BdaAbi::FaultReason::Unaligned); });
     if (kind == ResourceKind::Scratch && state.program.Info().scratchDwords == 0u) return ConstantU64(state, 0u);
-    if (kind == ResourceKind::Lds && !state.requirements.ldsLock) ctx.Fail(inst, "64-bit LDS atomic reached through a flat address without the workgroup lock");
+    if (kind == ResourceKind::Lds && !state.requirements.ldsLock && !state.requirements.ldsBufferInt64Atomics) ctx.Fail(inst, "64-bit LDS atomic reached through a flat address without the workgroup lock");
     MemoryInfo storage{};
     storage.kind = kind;
     const auto resource = PrepareMemoryResourceAccess(state, storage);
@@ -1155,6 +1160,7 @@ std::uint32_t ApertureAtomic64(SpirvValueEmitContext& ctx, const IrValue& inst, 
     const auto opcode = inst.Opcode();
     return EmitValueOrDefaultIfCondition(state, aligned, TypeU64(state), ConstantU64(state, 0u), [&] {
         return EmitValueOrDefaultIfCondition(state, EmitMemoryElementInBounds(state, resource, high), TypeU64(state), ConstantU64(state, 0u), [&] {
+            if (kind == ResourceKind::Lds && state.requirements.ldsBufferInt64Atomics) return LdsBufferAtomic64(state, low, [&](std::uint32_t old) { return FlatAtomicNext64(state, opcode, old, value, comparator); });
             const auto update = [&]() {
                 const auto lowPointer = EmitMemoryElementPointer(state, resource, low);
                 const auto highPointer = EmitMemoryElementPointer(state, resource, high);
@@ -1387,6 +1393,12 @@ std::uint32_t SharedAtomic64(SpirvValueEmitContext& ctx, const IrValue& inst, TR
         const auto low = EmitMemoryElementIndex(state, resource, rawIndex);
         const auto high = EmitMemoryElementIndex(state, resource, Binary(state, spv::OpIAdd, TypeU32(state), rawIndex, ConstantU32(state, 1u)));
         return EmitValueOrDefaultIfCondition(state, EmitMemoryElementInBounds(state, resource, high), TypeU64(state), ConstantU64(state, 0u), [&]() {
+            if (state.requirements.ldsBufferInt64Atomics) {
+                const auto unaligned = Binary(state, spv::OpINotEqual, TypeBool(state), Binary(state, spv::OpBitwiseAnd, TypeU32(state), low, ConstantU32(state, 1u)), ConstantU32(state, 0u));
+                EmitIfCondition(state, unaligned, [&] { RecordBdaFaultWords(state, Binary(state, spv::OpShiftLeftLogical, TypeU32(state), rawIndex, ConstantU32(state, 2u)), ConstantU32(state, 0u), ConstantU32(state, 8u), ConstantU32(state, inst.Flags<MemoryFlags>().pc), BdaAbi::FaultReason::Unaligned); });
+                const auto aligned = Unary(state, spv::OpLogicalNot, TypeBool(state), unaligned);
+                return EmitValueOrDefaultIfCondition(state, aligned, TypeU64(state), ConstantU64(state, 0u), [&]() { return LdsBufferAtomic64(state, low, [&](std::uint32_t old) { return replacement(state, old); }); });
+            }
             const auto update = [&]() {
                 const auto lowPointer = EmitMemoryElementPointer(state, resource, low);
                 const auto highPointer = EmitMemoryElementPointer(state, resource, high);
