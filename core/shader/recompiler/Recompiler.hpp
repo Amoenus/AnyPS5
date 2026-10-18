@@ -708,6 +708,13 @@ struct GeometryStageLimits {
 
 [[nodiscard]] RecompileResult BuildBarycentricGeometryShader(const RecompileResult& vertex, const RecompileResult& fragment, const SpirvTarget& target, const std::optional<GeometryStageLimits>& limits);
 
+struct BarycentricTessellationShaders {
+    RecompileResult control;
+    RecompileResult evaluation;
+};
+
+[[nodiscard]] BarycentricTessellationShaders BuildBarycentricTessellationShaders(const RecompileResult& vertex, const RecompileResult& fragment, const SpirvTarget& target, std::uint32_t maxFragmentInputComponents);
+
 }
 
 #endif

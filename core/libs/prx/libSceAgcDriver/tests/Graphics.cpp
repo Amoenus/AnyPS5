@@ -5989,7 +5989,67 @@ void barycentricEmulationTests() {
     expectFailure([&] { static_cast<void>(BuildBarycentricGeometryShader(vertex, plain, target, limits)); }, "does not emulate barycentrics");
     expectFailure([&] { static_cast<void>(BuildBarycentricGeometryShader(vertex, fragment, target, std::nullopt)); }, "geometry shaders are unavailable");
     expectFailure([&] { static_cast<void>(BuildBarycentricGeometryShader(vertex, fragment, target, GeometryStageLimits{64u, 12u, 256u, 1024u, 128u})); }, "exceeds device limits");
+
+    const std::array<std::uint32_t, 2> tessellationCapabilities{spv::CapabilityShader, spv::CapabilityTessellation};
+    SpirvTarget tessellationTarget = target;
+    tessellationTarget.supportedCapabilities = tessellationCapabilities;
+    tessellationTarget.tessellation = TessellationTargetLimits{32u, 128u, 128u, 120u, 4096u, 128u, 128u};
+    const auto modes = [](const RecompileResult& result) {
+        std::vector<std::uint32_t> values;
+        const auto& words = result.spirv.Words();
+        for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
+            if (static_cast<spv::Op>(words[at] & 0xffffu) == spv::OpExecutionMode) values.push_back(words[at + 2]);
+        }
+        return values;
+    };
+    auto patches = BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u);
+    Require(modes(patches.control) == std::vector<std::uint32_t>{spv::ExecutionModeOutputVertices, spv::ExecutionModeTriangles, spv::ExecutionModeSpacingEqual, spv::ExecutionModeVertexOrderCw}, "the generated control stage does not declare three output vertices and the triangle domain");
+    Require(modes(patches.evaluation) == std::vector<std::uint32_t>{spv::ExecutionModeTriangles, spv::ExecutionModeSpacingEqual, spv::ExecutionModeVertexOrderCw}, "the generated evaluation stage does not declare the triangle domain");
+    const std::array<CompiledShader, 4> patchShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &patches.control, 0}, {ShaderStage::TessellationEvaluation, &patches.evaluation, 0}, {ShaderStage::Fragment, &fragment, 0}}};
+    Require(BarycentricPatches(state, patchShaders) && !BarycentricPatches(state, shaders), "generated tessellation stages were not recognised as barycentric patches");
+    state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    ValidateShaders(patchShaders, state, subgroup, false);
+    for (const auto topology : {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, VK_PRIMITIVE_TOPOLOGY_POINT_LIST}) {
+        state.topology = topology;
+        expectFailure([&] { ValidateShaders(patchShaders, state, subgroup, false); }, "require a triangle list");
+    }
+    state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    const std::array<CompiledShader, 4> plainPatchShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &patches.control, 0}, {ShaderStage::TessellationEvaluation, &patches.evaluation, 0}, {ShaderStage::Fragment, &plain, 0}}};
+    expectFailure([&] { ValidateShaders(plainPatchShaders, state, subgroup, false); }, "stage count");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, plain, tessellationTarget, 128u)); }, "does not emulate barycentrics");
+    auto noTessellation = tessellationTarget;
+    noTessellation.tessellation.reset();
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noTessellation, 128u)); }, "tessellation shaders are unavailable");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, target, 128u)); }, "tessellation shaders are unavailable");
+    auto noCapability = tessellationTarget;
+    noCapability.supportedCapabilities = std::span<const std::uint32_t>(capabilities).first(1);
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noCapability, 128u)); }, "tessellation capability is unavailable");
+    auto smallPatches = tessellationTarget;
+    smallPatches.tessellation->maxEvaluationOutputComponents = 4u;
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, smallPatches, 128u)); }, "exceeds device limits");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 0u)); }, "exceeds device limits");
+
+    RecompileResult clipped;
+    clipped.spirv = makeModule({.parameterOutput = true, .clipDistanceLength = 2});
+    clipped.parameterExports = {0u};
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(clipped, fragment, tessellationTarget, 128u)); }, "need shaderClipDistance");
+    const std::array<std::uint32_t, 3> clipCapabilities{spv::CapabilityShader, spv::CapabilityTessellation, spv::CapabilityClipDistance};
+    auto clipTarget = tessellationTarget;
+    clipTarget.supportedCapabilities = clipCapabilities;
+    auto clippedPatches = BuildBarycentricTessellationShaders(clipped, fragment, clipTarget, 128u);
+    const auto memberBuiltIn = [](const RecompileResult& result, spv::BuiltIn builtin) {
+        const auto& words = result.spirv.Words();
+        for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
+            if (static_cast<spv::Op>(words[at] & 0xffffu) == spv::OpMemberDecorate && words[at + 3] == spv::DecorationBuiltIn && words[at + 4] == builtin) return true;
+        }
+        return false;
+    };
+    Require(!memberBuiltIn(patches.control, spv::BuiltInClipDistance) && !memberBuiltIn(patches.evaluation, spv::BuiltInClipDistance), "a generated tessellation stage declares clip distances the vertex shader does not write");
+    Require(memberBuiltIn(clippedPatches.control, spv::BuiltInClipDistance) && memberBuiltIn(clippedPatches.evaluation, spv::BuiltInClipDistance), "a generated tessellation stage does not forward the vertex clip distances");
+    const std::array<CompiledShader, 4> clippedShaders{{{ShaderStage::Vertex, &clipped, 0}, {ShaderStage::TessellationControl, &clippedPatches.control, 0}, {ShaderStage::TessellationEvaluation, &clippedPatches.evaluation, 0}, {ShaderStage::Fragment, &fragment, 0}}};
+    ValidateShaders(clippedShaders, state, subgroup, false, false, false, false, false, false, true);
     vertex.parameterExports.clear();
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u)); }, "not exported by the vertex shader");
     expectFailure([&] { static_cast<void>(BuildBarycentricGeometryShader(vertex, fragment, target, limits)); }, "not exported by the vertex shader");
 }
 
