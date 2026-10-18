@@ -3308,11 +3308,63 @@ std::shared_ptr<ShaderResources> ResourceCache::Find(const Key& key) {
     std::lock_guard lock(mutex);
     const auto found = index.find(key);
     if (found == index.end()) {
+        noteReturn(key);
         noteMiss(key);
         return nullptr;
     }
     entries.splice(entries.begin(), entries, found->second);
+    noteUse(key);
     return found->second->second;
+}
+
+void ResourceCache::noteEvicted(const Key& key) {
+    if (fixedCapacity) return;
+    const auto hash = KeyHash{}(key);
+    if (const auto found = evictedKeys.find(hash); found != evictedKeys.end()) evictedOrder.erase(found->second);
+    evictedOrder.push_front(hash);
+    evictedKeys[hash] = evictedOrder.begin();
+    while (evictedOrder.size() > capacity) {
+        evictedKeys.erase(evictedOrder.back());
+        evictedOrder.pop_back();
+    }
+    if (++evictionsSinceCheck < capacity / 4u) return;
+    const bool churning = returnsSinceCheck * 2u > evictionsSinceCheck;
+    evictionsSinceCheck = 0;
+    returnsSinceCheck = 0;
+    if (!churning || capacity >= MaximumEntries) return;
+    const auto previous = capacity;
+    capacity = std::min(capacity * 2u, MaximumEntries);
+    if (shrankLast) shrinkWindow = std::min(shrinkWindow * 2u, MaximumShrinkWindow);
+    shrankLast = false;
+    usedKeys.clear();
+    usesSinceCheck = 0;
+    std::fprintf(stderr, "[rescache] capacity %zu -> %zu entries: keys it evicted keep coming back\n", previous, capacity);
+}
+
+void ResourceCache::noteUse(const Key& key) {
+    if (fixedCapacity || capacity <= baseEntries) return;
+    usedKeys.insert(KeyHash{}(key));
+    if (++usesSinceCheck < capacity * shrinkWindow) return;
+    const auto used = usedKeys.size();
+    const auto uses = usesSinceCheck;
+    usedKeys.clear();
+    usesSinceCheck = 0;
+    if (used * 4u > capacity) return;
+    const auto previous = capacity;
+    capacity = std::max(capacity / 2u, baseEntries);
+    shrankLast = true;
+    evictionsSinceCheck = 0;
+    returnsSinceCheck = 0;
+    std::fprintf(stderr, "[rescache] capacity %zu -> %zu entries: %zu keys served the last %zu uses\n", previous, capacity, used, uses);
+}
+
+void ResourceCache::noteReturn(const Key& key) {
+    if (fixedCapacity) return;
+    const auto found = evictedKeys.find(KeyHash{}(key));
+    if (found == evictedKeys.end()) return;
+    evictedOrder.erase(found->second);
+    evictedKeys.erase(found);
+    ++returnsSinceCheck;
 }
 
 namespace {
@@ -3442,12 +3494,15 @@ void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> reso
     }
     entries.emplace_front(key, std::move(resources));
     index.emplace(key, entries.begin());
-    static const std::size_t capacity = [] {
+    if (capacity == 0) {
         const char* value = std::getenv("APS5_RESOURCE_CACHE_ENTRIES");
-        const auto parsed = value ? std::strtoull(value, nullptr, 10) : 1024ull;
-        return static_cast<std::size_t>(parsed != 0 ? parsed : 1024ull);
-    }();
+        const auto parsed = value ? std::strtoull(value, nullptr, 10) : 0ull;
+        fixedCapacity = parsed != 0;
+        capacity = fixedCapacity ? static_cast<std::size_t>(parsed) : baseEntries;
+    }
+    noteUse(key);
     while (entries.size() > capacity) {
+        noteEvicted(entries.back().first);
         if (evicted != nullptr) evicted->push_back(std::move(entries.back().second));
         index.erase(entries.back().first);
         entries.pop_back();
@@ -3496,6 +3551,7 @@ bool ResourceCache::Touch(const Key& key) {
     const auto found = index.find(key);
     if (found == index.end()) return false;
     entries.splice(entries.begin(), entries, found->second);
+    noteUse(key);
     return true;
 }
 
@@ -3511,11 +3567,31 @@ void ResourceCache::Clear() {
     std::lock_guard lock(mutex);
     index.clear();
     entries.clear();
+    evictedKeys.clear();
+    evictedOrder.clear();
+    evictionsSinceCheck = 0;
+    returnsSinceCheck = 0;
+    usedKeys.clear();
+    usesSinceCheck = 0;
+    shrinkWindow = baseShrinkWindow;
+    shrankLast = false;
+    if (!fixedCapacity) capacity = 0;
+}
+
+void ResourceCache::SetBase(std::size_t entries, std::size_t window) {
+    std::lock_guard lock(mutex);
+    baseEntries = entries;
+    baseShrinkWindow = window;
 }
 
 std::size_t ResourceCache::Size() const {
     std::lock_guard lock(mutex);
     return entries.size();
+}
+
+std::size_t ResourceCache::Capacity() const {
+    std::lock_guard lock(mutex);
+    return capacity == 0 ? baseEntries : capacity;
 }
 
 std::uint64_t ResourceCache::TableElementBudget() {

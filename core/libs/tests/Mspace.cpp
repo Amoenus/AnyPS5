@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <thread>
 
 extern "C" {
@@ -22,6 +23,15 @@ void* APS5_VABI sceLibcMspaceAlignedAlloc_nid_postfix(void*, std::size_t, std::s
 void* APS5_VABI sceLibcMspaceReallocalign_nid_postfix(void*, void*, std::size_t, std::size_t);
 int APS5_VABI sceLibcMspaceMallocStats_nid_postfix(void*, void*);
 int APS5_VABI sceLibcMspaceMallocStatsFast_nid_postfix(void*, void*);
+void* APS5_VABI sceLibcPafMspaceCreate_nid_postfix(const char*, void*, std::size_t, unsigned, const void*);
+int APS5_VABI sceLibcPafMspaceDestroy_nid_postfix(void*);
+void* APS5_VABI sceLibcPafMspaceMalloc_nid_postfix(void*, std::size_t, const void*);
+void APS5_VABI sceLibcPafMspaceFree_nid_postfix(void*, void*, const void*);
+void* APS5_VABI sceLibcPafMspaceCalloc_nid_postfix(void*, std::size_t, std::size_t, const void*);
+void* APS5_VABI sceLibcPafMspaceRealloc_nid_postfix(void*, void*, std::size_t, const void*);
+void* APS5_VABI sceLibcPafMspaceReallocalign_nid_postfix(void*, void*, std::size_t, std::size_t, const void*);
+int APS5_VABI sceLibcPafMspaceMallocStats_nid_postfix(void*, void*);
+int APS5_VABI sceLibcPafMspaceMallocStatsFast_nid_postfix(void*, void*);
 }
 struct MallocManagedSize {
     std::uint16_t size;
@@ -34,6 +44,38 @@ struct MallocManagedSize {
 };
 static void Require(bool value) {
     if (!value) { std::fputs("Mspace check failed\n", stderr); std::abort(); }
+}
+static void CheckPaf() {
+    alignas(64) static std::array<unsigned char, 65536> storage{};
+    bool rejected = false;
+    int options = 0;
+    try { sceLibcPafMspaceCreate_nid_postfix("paf", storage.data(), storage.size(), 0, &options); }
+    catch (const std::runtime_error&) { rejected = true; }
+    Require(rejected);
+    void* arena = sceLibcPafMspaceCreate_nid_postfix("paf", storage.data(), storage.size(), 0, nullptr);
+    Require(arena == storage.data());
+    const int owner = 0;
+    auto* block = static_cast<unsigned char*>(sceLibcPafMspaceMalloc_nid_postfix(arena, 40, &owner));
+    Require(block != nullptr && sceLibcMspaceMallocUsableSize_nid_postfix(block) >= 40);
+    std::memset(block, 0x5a, 40);
+    auto* zeroed = static_cast<unsigned char*>(sceLibcPafMspaceCalloc_nid_postfix(arena, 4, 8, arena));
+    Require(zeroed != nullptr && zeroed[0] == 0 && zeroed[31] == 0);
+    block = static_cast<unsigned char*>(sceLibcPafMspaceRealloc_nid_postfix(arena, block, 4000, &owner));
+    Require(block != nullptr && block[0] == 0x5a && block[39] == 0x5a);
+    block = static_cast<unsigned char*>(sceLibcPafMspaceReallocalign_nid_postfix(arena, block, 256, 64, &owner));
+    Require(block != nullptr && reinterpret_cast<std::uintptr_t>(block) % 256 == 0 && block[39] == 0x5a);
+    MallocManagedSize viaPaf{}, viaMspace{}, fastPaf{}, fastMspace{};
+    viaPaf.size = viaMspace.size = fastPaf.size = fastMspace.size = sizeof(MallocManagedSize);
+    viaPaf.version = viaMspace.version = fastPaf.version = fastMspace.version = 1;
+    Require(sceLibcPafMspaceMallocStats_nid_postfix(arena, &viaPaf) == sceLibcMspaceMallocStats_nid_postfix(arena, &viaMspace));
+    Require(sceLibcPafMspaceMallocStatsFast_nid_postfix(arena, &fastPaf) == sceLibcMspaceMallocStatsFast_nid_postfix(arena, &fastMspace));
+    Require(viaPaf.currentInuseSize == viaMspace.currentInuseSize && viaPaf.currentInuseSize > 0);
+    Require(fastPaf.currentInuseSize == fastMspace.currentInuseSize);
+    sceLibcPafMspaceFree_nid_postfix(arena, block, &owner);
+    sceLibcPafMspaceFree_nid_postfix(arena, zeroed, arena);
+    sceLibcPafMspaceFree_nid_postfix(arena, nullptr, &owner);
+    Require(sceLibcPafMspaceDestroy_nid_postfix(arena) == 0);
+    Require(sceLibcPafMspaceDestroy_nid_postfix(arena) == -1);
 }
 static void CheckAlignment() {
     alignas(32) static std::array<unsigned char, 65536 + 16> storage{};
@@ -107,6 +149,7 @@ static void CheckMovedBlockKeepsUsableBytes() {
     Require(sceLibcMspaceDestroy_nid_postfix(arena) == 0);
 }
 int main() {
+    CheckPaf();
     CheckAlignment();
     CheckAdjacentBlocks();
     CheckMovedBlockKeepsUsableBytes();

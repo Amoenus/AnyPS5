@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <utility>
 
 extern "C" int* APS5_VABI __error_nid_postfix();
@@ -309,4 +310,45 @@ std::size_t APS5_VABI sceLibcMspaceMallocUsableSize_nid_postfix(const void* poin
     return 0;
 }
 
+void* APS5_VABI sceLibcPafMspaceCreate_nid_postfix(const char* name, void* base, std::size_t size, unsigned flags, const void* options) {
+    if (options) throw std::runtime_error("sceLibcPafMspaceCreate: creation options are not supported");
+    return sceLibcMspaceCreate_nid_postfix(name, base, size, flags);
+}
+
+int APS5_VABI sceLibcPafMspaceDestroy_nid_postfix(void* handle) {
+    return sceLibcMspaceDestroy_nid_postfix(handle);
+}
+
+void* APS5_VABI sceLibcPafMspaceMalloc_nid_postfix(void* handle, std::size_t size, const void* owner) {
+    (void)owner;
+    return sceLibcMspaceMalloc_nid_postfix(handle, size);
+}
+
+void APS5_VABI sceLibcPafMspaceFree_nid_postfix(void* handle, void* pointer, const void* owner) {
+    (void)owner;
+    sceLibcMspaceFree_nid_postfix(handle, pointer);
+}
+
+void* APS5_VABI sceLibcPafMspaceCalloc_nid_postfix(void* handle, std::size_t count, std::size_t size, const void* owner) {
+    (void)owner;
+    return sceLibcMspaceCalloc_nid_postfix(handle, count, size);
+}
+
+void* APS5_VABI sceLibcPafMspaceRealloc_nid_postfix(void* handle, void* pointer, std::size_t size, const void* owner) {
+    (void)owner;
+    return sceLibcMspaceRealloc_nid_postfix(handle, pointer, size);
+}
+
+void* APS5_VABI sceLibcPafMspaceReallocalign_nid_postfix(void* handle, void* pointer, std::size_t alignment, std::size_t size, const void* owner) {
+    (void)owner;
+    return sceLibcMspaceReallocalign_nid_postfix(handle, pointer, alignment, size);
+}
+
+int APS5_VABI sceLibcPafMspaceMallocStats_nid_postfix(void* handle, MallocManagedSize* stats) {
+    return sceLibcMspaceMallocStats_nid_postfix(handle, stats);
+}
+
+int APS5_VABI sceLibcPafMspaceMallocStatsFast_nid_postfix(void* handle, MallocManagedSize* stats) {
+    return sceLibcMspaceMallocStatsFast_nid_postfix(handle, stats);
+}
 }

@@ -1380,10 +1380,6 @@ struct NpUniversalDataSystemMemoryStat {
     std::size_t current_inuse_size;
 };
 
-struct NpUniversalDataSystemEvent {};
-struct NpUniversalDataSystemEventPropertyObject {};
-struct NpUniversalDataSystemEventPropertyArray {};
-
 struct NpUniversalDataSystemStorageStat {
     std::size_t in_events;
     std::size_t out_events;
