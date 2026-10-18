@@ -690,7 +690,7 @@ void Readback(AgcDriver::VulkanDevice& device) {
 std::vector<std::array<float, 4>> StoreInitial(const Block& block, std::uint32_t fragments, std::uint32_t pipeBankXor, bool uniform) {
     using namespace AgcDriver::Graphics;
     const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, 8u, fragments, Side, Side, 1u, pipeBankXor);
-    Require(layout.Bytes() == block.bytes, "the initial fixture does not cover one complete color block");
+    Require(layout.Bytes() <= block.bytes, "the initial color footprint exceeds its allocation");
     StoreWords(block, block.bytes, 0x38003800u);
     std::vector<std::byte> linear(static_cast<std::size_t>(layout.LinearBytes()));
     std::vector<std::array<float, 4>> expected(Side * Side * fragments);
@@ -702,7 +702,7 @@ std::vector<std::array<float, 4>> StoreInitial(const Block& block, std::uint32_t
         std::memcpy(linear.data() + index * sizeof(bits), bits.data(), sizeof(bits));
         expected[index] = ones ? Ones : Written;
     }
-    layout.Tile(linear, std::as_writable_bytes(std::span(block.data, block.bytes)));
+    layout.Tile(linear, std::as_writable_bytes(std::span(block.data, static_cast<std::size_t>(layout.Bytes()))));
     return expected;
 }
 
@@ -1029,12 +1029,147 @@ int NativeVertexInput(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     return 0;
 }
 
+void RequirePublicationRefused(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::ColorTarget& color, const std::string& expected) {
+    std::string refusal;
+    try {
+        AgcDriver::Graphics::PublishMultisampleTargetColor_nid_no_patch(context, color);
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find(expected) != std::string::npos, "native color publication was not refused: " + refusal);
+}
+
+void Publication(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    std::uint32_t exercised = 0;
+    for (const auto fragments : {2u, 4u, 8u}) {
+        if (!InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, fragments)) continue;
+        for (const auto pipeBankXor : {0u, 0x8100u}) {
+            for (const auto profile : {0u, 1u, 2u}) {
+                Block block(2u * BlockBytes);
+                auto color = DecodeTarget(block, pipeBankXor);
+                color.samples = fragments;
+                const auto initial = StoreInitial(block, fragments, pipeBankXor, false);
+                RequirePublicationRefused(context, color, "requires an existing resident target");
+                const auto state = TargetState(color);
+                Draw(device, state);
+                const auto colorBytes = static_cast<std::size_t>(MultisampledColorBytes(color));
+                if (profile != 0u) {
+                    NoteColorMetadataFill(block.Address(), colorBytes, profile == 1u ? FillOnes : 0u);
+                    Draw(device, state);
+                }
+                const auto loaded = LoadSamples(device, block, fragments, pipeBankXor);
+                if (profile == 0u) CheckSamples(state, loaded, {}, initial);
+                else CheckSamples(state, loaded, profile == 1u ? Ones : std::array<float, 4>{});
+                const auto* begin = reinterpret_cast<const std::byte*>(block.data);
+                const std::vector<std::byte> before(begin, begin + block.bytes);
+                auto expected = before;
+                if (profile != 0u) {
+                    const auto pattern = profile == 1u ? FillOnes : 0u;
+                    for (std::size_t offset = 0; offset < colorBytes; offset += sizeof(pattern)) std::memcpy(expected.data() + offset, &pattern, sizeof(pattern));
+                }
+                const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, color.elementBytes, fragments, Side, Side, 1u, pipeBankXor);
+                layout.Tile(HalfSamples(loaded), std::span(expected).first(colorBytes));
+                if (fragments == Samples && pipeBankXor == 0u && profile == 0u) {
+                    {
+                        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+                        auto* recording = Recorder::Active();
+                        Require(recording != nullptr && context.recorder != nullptr, "the publication fixture has no owning recorder");
+                        Recorder other(context);
+                        other.Activate();
+                        RequireReadbackRefused(context, color, "another active recorder on the same device");
+                        RequirePublicationRefused(context, color, "another active recorder on the same device");
+                        recording->Activate();
+                    }
+                    auto wrong = color;
+                    wrong.pipeBankXor = 0x8100u;
+                    RequirePublicationRefused(context, wrong, "subresource does not match");
+                    {
+                        GuestAllocations::Mutation mutation;
+                        mutation.Protect(block.data + 4096u, 4096u, true, false, true, [] {});
+                    }
+                    RequirePublicationRefused(context, color, "requires writable registered guest memory");
+                    {
+                        GuestAllocations::Mutation mutation;
+                        mutation.Protect(block.data + 4096u, 4096u, true, true, true, [] {});
+                    }
+                    block.data[colorBytes - 1u] ^= 0x5au;
+                    RequirePublicationRefused(context, color, "no longer matches its initial contents or a known full fill");
+                    block.data[colorBytes - 1u] ^= 0x5au;
+                    Require(std::equal(before.begin(), before.end(), begin), "refused publication changed guest bytes");
+                    std::string guard;
+                    try {
+                        RequireNoMultisampleTarget(block.Address(), 1u, "publication refusal validation");
+                    } catch (const std::exception& error) {
+                        guard = error.what();
+                    }
+                    Require(guard.find("overlaps multisampled color target") != std::string::npos, "refused publication lost its resident guard");
+                }
+                std::shared_ptr<void> retained;
+                VkImage oldImage = VK_NULL_HANDLE;
+                {
+                    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+                    MultisampleTargetView(context, color, retained, &oldImage);
+                }
+                std::vector<std::byte> read(block.bytes);
+                PublishMultisampleTargetColor_nid_no_patch(context, color);
+                AgcDriver::GuestMemory::Read(block.Address(), read);
+                RequireNoMultisampleTarget(block.Address(), colorBytes, "after explicit publication");
+                RequireReadbackRefused(context, color, "requires an existing resident target");
+                Require(read == expected, "published guest color differs from MIMG samples, padding or neighboring bytes");
+                Draw(device, state);
+                Require(LoadSamples(device, block, fragments, pipeBankXor) == loaded, "a fresh target did not import the published samples");
+                VkImage newImage = VK_NULL_HANDLE;
+                {
+                    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+                    MultisampleTargetView(context, color, &newImage);
+                }
+                Require(newImage != oldImage, "publication reused the retired native image");
+                std::printf("native color publication: fragments=%u xor=0x%x profile=%u complete bytes, bounds, retirement and reimport passed\n", fragments, pipeBankXor, profile);
+                ++exercised;
+            }
+        }
+    }
+    Require(exercised != 0u, "no supported native color publication case was exercised");
+    if (!InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, Samples)) return;
+    auto completed = std::make_shared<Block>(BlockBytes);
+    auto color = DecodeTarget(*completed);
+    StoreInitial(*completed, Samples, 0u, false);
+    Draw(device, TargetState(color));
+    const auto completionRefusal = std::make_shared<std::string>();
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
+        Require(recorder != nullptr, "the publication fixture has no owning recorder");
+        recorder->OnComplete([completed, color, context, completionRefusal] {
+            try {
+                PublishMultisampleTargetColor_nid_no_patch(context, color);
+            } catch (const std::exception& error) {
+                *completionRefusal = error.what();
+            }
+            StoreWords(*completed, completed->bytes, FillOnes);
+            NoteColorMetadataFill(completed->Address(), completed->bytes, FillOnes);
+        });
+    }
+    PublishMultisampleTargetColor_nid_no_patch(context, color);
+    std::vector<std::uint32_t> read(completed->bytes / sizeof(std::uint32_t));
+    AgcDriver::GuestMemory::Read(completed->Address(), std::as_writable_bytes(std::span(read)));
+    Require(completionRefusal->find("during a recorder completion") != std::string::npos, "recursive publication from a completion was not refused: " + *completionRefusal);
+    Require(std::all_of(read.begin(), read.end(), [](const auto word) { return word == FillOnes; }), "publication captured its guest baseline before producer completions");
+    std::puts("native color publication: known full fill from a producer completion precedes the publication baseline; recursive publication stays refused");
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--publication") {
+            Publication(*device);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--readback") {
             Readback(*device);
             return 0;
