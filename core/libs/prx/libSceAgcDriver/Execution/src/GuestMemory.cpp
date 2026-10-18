@@ -881,11 +881,9 @@ struct WriteTracker {
     struct DriverPieces {
         std::uint32_t whole = 0;
         std::uint32_t dropped = 0;
-        std::uint32_t next = 0;
         std::array<DriverPiece, 4> pieces{};
         std::uint32_t possibleWhole = 0;
         std::uint32_t possibleDropped = 0;
-        std::uint32_t possibleNext = 0;
         std::array<DriverPiece, 4> possiblePieces{};
 
         bool covers(std::uint32_t begin, std::uint32_t end, std::uint64_t generation) const {
@@ -934,7 +932,6 @@ struct WriteTracker {
             } else {
                 entry.possibleWhole = stampGeneration;
                 entry.possibleDropped = 0;
-                entry.possibleNext = 0;
                 entry.possiblePieces = {};
             }
             return;
@@ -942,10 +939,22 @@ struct WriteTracker {
         auto& entry = driverPieces[block];
         auto& pieces = complete ? entry.pieces : entry.possiblePieces;
         auto& dropped = complete ? entry.dropped : entry.possibleDropped;
-        auto& next = complete ? entry.next : entry.possibleNext;
-        auto& slot = pieces[next++ % pieces.size()];
-        dropped = std::max(dropped, slot.generation);
-        slot = {stampGeneration, from, to};
+        DriverPiece* contained = nullptr;
+        for (auto& piece : pieces) {
+            if (piece.generation == 0 || piece.begin < from || piece.end > to) continue;
+            if (contained == nullptr) contained = &piece;
+            else piece = {};
+        }
+        if (contained != nullptr) {
+            *contained = {stampGeneration, from, to};
+            return;
+        }
+        auto* oldest = &pieces.front();
+        for (auto& piece : pieces) {
+            if (piece.generation < oldest->generation) oldest = &piece;
+        }
+        dropped = std::max(dropped, oldest->generation);
+        *oldest = {stampGeneration, from, to};
     }
 
     std::uint32_t stampOf(std::uint64_t block) const {
@@ -1513,11 +1522,11 @@ static std::uint64_t markWritten(std::uint64_t address, std::size_t bytes, bool 
         const auto blockStop = (address + bytes + WriteBlockBytes - 1) & ~(std::uint64_t{WriteBlockBytes} - 1);
         StampRuns runs{tracker, StampKind::Fresh};
 #ifdef _WIN32
-        const bool complete = collectWindowsWrites(runs, blockFirst, blockStop, false);
+        const bool collected = collectWindowsWrites(runs, blockFirst, blockStop, false);
 #else
-        const bool complete = GuestWriteWatch::GuestWriteWatchCollectFresh_nid_postfix(static_cast<std::uintptr_t>(blockFirst), static_cast<std::size_t>(blockStop - blockFirst), &stampWrittenRun, &runs);
+        const bool collected = GuestWriteWatch::GuestWriteWatchCollectFresh_nid_postfix(static_cast<std::uintptr_t>(blockFirst), static_cast<std::size_t>(blockStop - blockFirst), &stampWrittenRun, &runs);
 #endif
-        if (!complete) {
+        if (!collected) {
             unwatchLocked(tracker, blockFirst, static_cast<std::size_t>(blockStop - blockFirst));
             tracker.noteUnstampedStore(address, address + bytes);
             return 0;
