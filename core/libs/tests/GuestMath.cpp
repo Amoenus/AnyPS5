@@ -2,6 +2,7 @@
 #include <bit>
 #include <cerrno>
 #include <cfenv>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -85,6 +86,8 @@ float APS5_VABI erff_nid_postfix(float);
 double APS5_VABI lgamma_nid_postfix(double);
 extern int signgam_nid_postfix;
 float APS5_VABI logbf_nid_postfix(float);
+int APS5_VABI ilogb_nid_postfix(double);
+int APS5_VABI ilogbf_nid_postfix(float);
 double APS5_VABI exp2_nid_postfix(double);
 float APS5_VABI __powisf2_nid_postfix(float, int);
 double APS5_VABI __powidf2_nid_postfix(double, int);
@@ -1062,6 +1065,18 @@ int main() {
     Require(logbf_nid_postfix(0.f) == -std::numeric_limits<float>::infinity());
     Require(logbf_nid_postfix(-std::numeric_limits<float>::infinity()) == std::numeric_limits<float>::infinity());
     Require(std::isnan(logbf_nid_postfix(std::numeric_limits<float>::quiet_NaN())));
+    Require(ilogb_nid_postfix(8.0) == 3 && ilogb_nid_postfix(-0.75) == -1 && ilogb_nid_postfix(1.0) == 0);
+    Require(ilogb_nid_postfix(1024.0) == 10 && ilogb_nid_postfix(0.125) == -3);
+    Require(ilogbf_nid_postfix(8.f) == 3 && ilogbf_nid_postfix(-0.75f) == -1 && ilogbf_nid_postfix(1.f) == 0);
+    Require(ilogbf_nid_postfix(1024.f) == 10 && ilogbf_nid_postfix(0.125f) == -3);
+    Require(ilogb_nid_postfix(0.0) == INT_MIN && ilogb_nid_postfix(-0.0) == INT_MIN);
+    Require(ilogb_nid_postfix(std::numeric_limits<double>::infinity()) == INT_MAX);
+    Require(ilogb_nid_postfix(-std::numeric_limits<double>::infinity()) == INT_MAX);
+    Require(ilogb_nid_postfix(std::numeric_limits<double>::quiet_NaN()) == INT_MAX);
+    Require(ilogbf_nid_postfix(0.f) == INT_MIN && ilogbf_nid_postfix(-0.f) == INT_MIN);
+    Require(ilogbf_nid_postfix(std::numeric_limits<float>::infinity()) == INT_MAX);
+    Require(ilogbf_nid_postfix(std::numeric_limits<float>::quiet_NaN()) == INT_MAX);
+    Require(ilogbf_nid_postfix(std::numeric_limits<float>::denorm_min()) == -149);
     Require(exp2_nid_postfix(-3.) == 0.125);
     Require(ldexp_nid_postfix(0.75, 4) == 12.);
     CheckSquareRoot();

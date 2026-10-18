@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cerrno>
 #include <cfenv>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -547,6 +548,16 @@ long double APS5_VABI powl_nid_postfix(long double base, long double exp) { retu
 long double APS5_VABI ldexpl_nid_postfix(long double x, int exp) { return std::ldexp(x, exp); }
 long double APS5_VABI truncl_nid_postfix(long double x) { return std::trunc(x); }
 double APS5_VABI logb_nid_postfix(double x) { return std::logb(x); }
+int APS5_VABI ilogb_nid_postfix(double x) {
+    if (x == 0.0) {
+        return INT_MIN;
+    }
+    if (!std::isfinite(x)) {
+        return INT_MAX;
+    }
+    return std::ilogb(x);
+}
+int APS5_VABI ilogbf_nid_postfix(float x) { return ilogb_nid_postfix(static_cast<double>(x)); }
 double APS5_VABI remainder_nid_postfix(double x, double y) { return std::remainder(x, y); }
 float APS5_VABI _FSinh_nid_postfix(float x, float y) { return y * std::sinh(x); }
 float APS5_VABI _FCosh_nid_postfix(float x, float y) { return y * std::cosh(x); }
