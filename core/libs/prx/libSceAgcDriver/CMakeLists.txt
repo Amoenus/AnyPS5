@@ -792,6 +792,19 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+add_test_executable(agc_layer_input_tests EXCLUDE_FROM_ALL tests/LayerInput.cpp)
+target_link_libraries(agc_layer_input_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_layer_input_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_layer_input_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_layer_input_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_layer_input COMMAND agc_layer_input_tests)
+    set_tests_properties(agc_layer_input PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+    if(WIN32)
+        set_tests_properties(agc_layer_input PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 add_test_executable(agc_dpp_write_tests EXCLUDE_FROM_ALL tests/DppWrite.cpp)
 target_link_libraries(agc_dpp_write_tests PRIVATE shader_recompiler_agc_driver libc)
 set_target_properties(agc_dpp_write_tests PROPERTIES CXX_EXTENSIONS OFF)
@@ -1844,6 +1857,8 @@ target_include_directories(agc_driver_pipeline_journal_tests PRIVATE $<TARGET_PR
 target_include_directories(agc_driver_buffer_descriptor_runtime_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 
 target_include_directories(agc_driver_shutdown_threads_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
+
+target_include_directories(agc_driver_image_converted_unorm_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 
 target_include_directories(agc_driver_prepared_publication_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 
