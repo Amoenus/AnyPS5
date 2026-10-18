@@ -4858,6 +4858,26 @@ void verifyUnnormalizedSamplers() {
     pixel.context.userData = normalizedPixelData;
     const auto pixelNormalized = Recompile(pixel);
     require(proven(pixelNormalized, false) && implicitSamples(pixelNormalized.spirv.Words()) == 1u, "unnormalized samplers: a pixel image_sample through a normalized S# is not an implicit-LOD sample");
+    const std::array<std::uint32_t, 7> pixelOffsetCode{0x7e0202ffu, 0x00000201u, 0xf0c00f08u, 0x00400801u, 0xf800180fu, 0x0b0a0908u, 0xbf810000u};
+    pixel.shader = {ShaderStage::Fragment, 0x50000u, pixelOffsetCode, 0, {}};
+    pixel.context.userData = pixelData;
+    pixel.target.supportedCapabilities = capabilities;
+    pixel.target.nonConstantImageOffsets = true;
+    const auto pixelOffsetUnnormalized = Recompile(pixel);
+    require(proven(pixelOffsetUnnormalized, true), "unnormalized texel offsets: a pixel image_sample_o through an unnormalized S# was not flagged");
+    auditSpirv(pixelOffsetUnnormalized.spirv.Words());
+    require(foldedSamples(pixelOffsetUnnormalized.spirv.Words()), "unnormalized texel offsets: a pixel image_sample_o offset was not added to the base-level coordinates");
+    pixel.context.userData = normalizedPixelData;
+    const auto pixelOffsetNormalized = Recompile(pixel);
+    std::vector<std::uint32_t> implicitMasks;
+    const auto offsetWords = pixelOffsetNormalized.spirv.Words();
+    for (std::size_t cursor = 5; cursor < offsetWords.size();) {
+        const auto count = offsetWords[cursor] >> 16u;
+        require(count != 0 && count <= offsetWords.size() - cursor, "unnormalized texel offsets: truncated SPIR-V instruction");
+        if ((offsetWords[cursor] & 0xffffu) == spv::OpImageSampleImplicitLod && count > 5u) implicitMasks.push_back(offsetWords[cursor + 5]);
+        cursor += count;
+    }
+    require(proven(pixelOffsetNormalized, false) && implicitMasks.size() == 1u && (implicitMasks[0] & (spv::ImageOperandsConstOffsetMask | spv::ImageOperandsOffsetMask)) != 0u, "unnormalized texel offsets: a normalized pixel image_sample_o is not an implicit-LOD sample with its offset");
 }
 
 void verifyUnusedUnnormalizedSampler() {
@@ -5753,6 +5773,25 @@ void verifyVolumeArrayLoadMode() {
     expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(store, descriptor, ResourceMaterializer::RuntimeImageModes(store))); }, "incompatible with the static runtime image interface", "2D-array image atomic on a 3D T# was accepted");
 }
 
+void verifyDynamicStorageMipChain() {
+    using namespace ShaderRecompiler;
+    ImageResource image{};
+    image.resourceClass = ImageResourceClass::Storage;
+    image.numericClass = IrTextureNumericClass::Float;
+    image.dimension = RdnaImageDimension::Dim2D;
+    image.mipMode = ImageMipMode::DynamicStorage;
+    image.written = true;
+    image.fmaskCompatible = false;
+    const auto modes = ResourceMaterializer::RuntimeImageModes(image);
+    const DescriptorValue tenLevels{{0x12366e00u, 0xc2400000u, 0x007fc07fu, 0xd1b903acu, 0x17u, 0x00700090u, 0u, 0u}, 8u};
+    const auto selected = ResourceMaterializer::TryRuntimeImageMode(image, tenLevels, modes);
+    require(selected.mode.has_value(), "a dynamic-mip storage image of a 512x512 surface with ten levels was rejected");
+    require(modes[*selected.mode].mipCount >= 10u, "a dynamic-mip storage mode does not hold ten levels");
+    auto allLevels = tenLevels;
+    allLevels.dwords[3] |= 0xf0000u;
+    require(ResourceMaterializer::TryRuntimeImageMode(image, allLevels, modes).mode.has_value(), "a dynamic-mip storage image with sixteen levels was rejected");
+}
+
 void verifySrgbDepthCompareModes() {
     using namespace ShaderRecompiler;
     for (const auto decodeFormats : {0u, 1u, 2u, 3u}) {
@@ -5882,6 +5921,7 @@ int main(int argc, char** argv) {
         verifyGuardedNullPointers();
         verifyCubeDepthCompareMode();
         verifyVolumeArrayLoadMode();
+        verifyDynamicStorageMipChain();
         verifySrgbDepthCompareModes();
         verifyQuadMaskNeighbourReads();
         verifyCoherentGds();
