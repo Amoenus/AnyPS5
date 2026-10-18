@@ -196,14 +196,14 @@ void SubmitDriverHtileClear(std::uint64_t address) {
     append(DriverPm4Packet(0x76u, {0x207u, 64u}));
     append(DriverPm4Packet(0x76u, {0x208u, 1u}));
     append(DriverPm4Packet(0x76u, {0x209u, 1u}));
-    append(DriverPm4Packet(0x76u, {0x213u, 8u << 1u}));
+    append(DriverPm4Packet(0x76u, {0x213u, (6u << 1u) | 0x80u}));
     append(DriverPm4Packet(0x76u, {0x240u, 0u}));
     append(DriverPm4Packet(0x76u, {0x241u, 0u}));
     append(DriverPm4Packet(0x76u, {0x242u, static_cast<std::uint32_t>(address)}));
     append(DriverPm4Packet(0x76u, {0x243u, static_cast<std::uint32_t>(address >> 32u)}));
-    append(DriverPm4Packet(0x76u, {0x244u, 0xf0u}));
-    append(DriverPm4Packet(0x76u, {0x245u, 0xf0u}));
-    append(DriverPm4Packet(0x15u, {static_cast<std::uint32_t>(1u), 1u, 1u, 0x41u}));
+    append(DriverPm4Packet(0x76u, {0x244u, 0xfffc00f0u}));
+    append(DriverPm4Packet(0x76u, {0x245u, 0u}));
+    append(DriverPm4Packet(0x15u, {32u, 1u, 1u, 0x41u}));
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0u, {}};
     Require(sceAgcDriverSubmitDcb(&packet) == 0, "native depth HTILE clear: PM4 submission failed");
     AgcDriverWaitIdle_nid_postfix();
@@ -648,7 +648,7 @@ void CheckClearDispatch() {
         0xd771000a, 0x00120c05, 0xd771000b, 0x00120e05,
         0xdc788000, 0x00020800, 0xbf810000,
     };
-    const std::array<std::uint32_t, 6> userData{0u, 0u, 65536u, 0u, 0xf0u, 0xf0u};
+    const std::array<std::uint32_t, 6> userData{0u, 0u, 65536u, 0u, 0xfffc00f0u, 0u};
     const ShaderRecompiler::ShaderComputeStageInfo compute{{64u, 1u, 1u}, 0u, {true, false, false}, false, 1u};
     const std::array<std::uint32_t, 5> packet{0u, 32u, 1u, 1u, 1u};
     Require(HtileDepthClearBytes_nid_no_patch(code, userData, compute, packet, 0u) == 32768u, "complete HTILE mask dispatch was not recognized");
