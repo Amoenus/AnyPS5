@@ -76,6 +76,7 @@ int APS5_VABI open_nid_postfix(const char*, int, int);
 int APS5_VABI socket_nid_postfix(int, int, int);
 int APS5_VABI bind_nid_postfix(int, const void*, std::uint32_t);
 int APS5_VABI close_nid_postfix(int);
+bool GuestSocketIsOpen_nid_no_patch(int);
 int APS5_VABI setsockopt_nid_postfix(int, int, int, const void*, std::uint32_t);
 int APS5_VABI fcntl_nid_postfix(int, int, ...);
 struct GuestPollEntry {
@@ -855,6 +856,17 @@ static void CheckStreamAddressLengths() {
     for (const int descriptor : {accepted, client, listener}) Require(sceNetSocketClose(descriptor) == 0);
 }
 
+static void CheckKernelSocketOption() {
+    const int kernel = socket_nid_postfix(2, 1, 0);
+    Require(kernel >= 0);
+    const int size = 65536;
+    Require(sceNetSetsockopt(kernel, 0xffff, 0x1001, &size, sizeof(size)) == 0);
+    const int one = 1;
+    Require(sceNetSetsockopt(kernel, 6, 1, &one, sizeof(one)) == 0);
+    Require(close_nid_postfix(kernel) == 0);
+    Require(Failed(sceNetSetsockopt(kernel, 0xffff, 0x1001, &size, sizeof(size)), 9));
+}
+
 static void CheckBufferSizes() {
     const int socket = sceNetSocket("buffer-sizes", 2, 2, 17);
     Require(socket >= 0);
@@ -870,6 +882,28 @@ static void CheckBufferSizes() {
         Require(sceNetGetsockopt(socket, 0xffff, option, &value, &size) == 0 && size == sizeof(value) && value == requested);
     }
     Require(sceNetSocketClose(socket) == 0);
+}
+
+static void CheckOnesBroadcast() {
+    const auto read = [](int socket) {
+        int value = -1;
+        std::uint32_t size = sizeof(value);
+        Require(sceNetGetsockopt(socket, 0xffff, 0x10000, &value, &size) == 0 && size == sizeof(value));
+        return value;
+    };
+    const int socket = sceNetSocket("ones-broadcast", 2, 2, 17);
+    const int other = sceNetSocket("ones-broadcast-other", 2, 2, 17);
+    Require(socket >= 0 && other >= 0);
+    Require(read(socket) == 0);
+    for (const int requested : {1, 0, 7}) {
+        Require(sceNetSetsockopt(socket, 0xffff, 0x10000, &requested, sizeof(requested)) == 0);
+        Require(read(socket) == requested);
+    }
+    Require(read(other) == 0);
+    const std::uint8_t truncated = 1;
+    Require(Failed(sceNetSetsockopt(socket, 0xffff, 0x10000, &truncated, sizeof(truncated)), 22));
+    Require(read(socket) == 7);
+    for (const int descriptor : {socket, other}) Require(sceNetSocketClose(descriptor) == 0);
 }
 
 static void CheckUnspecifiedIpv6() {
@@ -969,6 +1003,14 @@ static void CheckSocketError() {
     Require(sceNetSocketClose(refused) == 0);
 }
 
+static void CheckCloseKernelSocket() {
+    const int kernel = socket_nid_postfix(2, 1, 0);
+    Require(kernel >= 0 && GuestSocketIsOpen_nid_no_patch(kernel));
+    Require(sceNetSocketClose(kernel) == 0);
+    Require(!GuestSocketIsOpen_nid_no_patch(kernel));
+    Require(Failed(sceNetSocketClose(kernel), 9));
+}
+
 static void CheckDatagramDisconnect() {
     const int peer = sceNetSocket("disconnect-peer", 2, 2, 17);
     const int other = sceNetSocket("disconnect-other", 2, 2, 17);
@@ -1038,6 +1080,7 @@ int main() {
     CheckUnspecifiedIpv6();
     if (!ipv6Unavailable) CheckIpv6SocketsAreIpv6Only();
     CheckDatagramDisconnect();
+    CheckCloseKernelSocket();
 
     const int closed = sceNetSocket("closed-by-kernel", 2, 2, 17);
     Require(closed >= 0);
@@ -1083,6 +1126,8 @@ int main() {
     CheckDatagramAddressLengths(28);
     CheckStreamAddressLengths();
     CheckBufferSizes();
+    CheckOnesBroadcast();
+    CheckKernelSocketOption();
 
     const int epoll = sceNetEpollCreate("guest-sce-net", 0);
     Require(epoll >= 0);

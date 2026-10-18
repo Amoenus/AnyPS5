@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstddef>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -36,6 +37,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
+#include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 
 // Guest socket descriptors retain PS5 semantics while their transport is backed by host sockets.
 
@@ -87,6 +89,7 @@ constexpr int NET_SO_ERROR = 0x1007;
 constexpr int NET_SO_NBIO = 0x1200;
 constexpr int NET_SO_REUSEADDR = 0x4;
 constexpr int NET_SO_BROADCAST = 0x20;
+constexpr int NET_SO_ONESBCAST = 0x10000;
 constexpr int NET_SO_SNDBUF = 0x1001;
 constexpr int NET_SO_RCVBUF = 0x1002;
 constexpr int NET_SO_SCE_SNDTIMEO = 0x1105;
@@ -252,6 +255,7 @@ struct Sock {
     int reported_error = 0;
     int snd_buffer = 0;
     int rcv_buffer = 0;
+    int onesbcast = 0;
 };
 
 #ifdef _WIN32
@@ -761,14 +765,23 @@ int APS5_VABI sceNetSocket(const char* name, int family, int type, int protocol)
     return fd;
 }
 
+extern "C" int APS5_VABI close_nid_postfix(int d);
+
 int APS5_VABI sceNetSocketClose(int s) {
     std::shared_ptr<NativeSocketHandle> native;
+    bool found = false;
     {
         std::lock_guard lk(g_mutex);
         const auto it = g_socks.find(s);
-        if (it == g_socks.end()) return fail(NET_EBADF);
-        native = it->second.native;
-        g_socks.erase(it);
+        if (it != g_socks.end()) {
+            native = it->second.native;
+            g_socks.erase(it);
+            found = true;
+        }
+    }
+    if (!found) {
+        if (!GuestSocketIsOpen_nid_no_patch(s)) return fail(NET_EBADF);
+        return close_nid_postfix(s) == 0 ? 0 : fail(*__error_nid_postfix());
     }
     KernelReleaseSocketNumber_nid_no_patch(s);
     if (native) {
@@ -985,6 +998,8 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+    const GuestArena::HostWrite lengthOutput(from == nullptr ? nullptr : fromlen, from == nullptr ? 0 : sizeof(*fromlen));
+    if (!lengthOutput.Open()) return fail(NET_EFAULT);
 #ifdef _WIN32
     if (const int wait = wait_for_local_address(s, socket, len == 0)) {
         if (wait != RECEIVE_NOTHING) return fail(wait);
@@ -992,6 +1007,10 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
         return 0;
     }
 #endif
+    const auto addressBytes = from != nullptr && socket.type == NET_SOCK_DGRAM ?
+        std::min<std::uint32_t>(*fromlen, socket.family == NET_AF_INET ? 16u : 28u) : 0u;
+    const GuestArena::HostWrite addressOutput(addressBytes == 0 ? nullptr : from, addressBytes);
+    if (!addressOutput.Open()) return fail(NET_EFAULT);
     const GuestArena::HostWrite destination(len == 0 ? nullptr : buf, len);
     if (!destination.Open()) return fail(NET_EFAULT);
     sockaddr_storage peer{};
@@ -1081,6 +1100,14 @@ int64_t APS5_VABI sceNetRecvmsg(int s, NetMsghdr* msg, int flags) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+    const GuestArena::HostWrite messageOutput(msg, sizeof(*msg));
+    if (!messageOutput.Open()) return fail(NET_EFAULT);
+    std::deque<GuestArena::HostWrite> destinations;
+    for (int i = 0; i < msg->iov_length; ++i) {
+        const auto& entry = msg->iov[i];
+        if (entry.length == 0) continue;
+        if (!destinations.emplace_back(entry.base, static_cast<std::size_t>(entry.length)).Open()) return fail(NET_EFAULT);
+    }
     const bool datagram = socket.type != NET_SOCK_STREAM;
 #ifdef _WIN32
     if (const int wait = wait_for_local_address(s, socket, total == 0)) {
@@ -1144,13 +1171,22 @@ int APS5_VABI sceNetShutdown(int s, int how) {
     return error == 0 ? 0 : fail(error);
 }
 
+extern "C" int APS5_VABI setsockopt_nid_postfix(int descriptor, int level, int option, const void* value, std::uint32_t length);
+
 int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval, uint32_t optlen) {
     Sock socket;
+    bool found = false;
     {
         std::lock_guard lk(g_mutex);
         auto it = g_socks.find(s);
-        if (it == g_socks.end()) return fail(NET_EBADF);
-        socket = it->second;
+        if (it != g_socks.end()) {
+            socket = it->second;
+            found = true;
+        }
+    }
+    if (!found) {
+        if (!GuestSocketIsOpen_nid_no_patch(s)) return fail(NET_EBADF);
+        return setsockopt_nid_postfix(s, level, optname, optval, optlen) == 0 ? 0 : fail(*__error_nid_postfix());
     }
     if (level != NET_SOL_SOCKET) return fail(NET_EOPNOTSUPP);
     if (optname == NET_SO_RCVTIMEO || optname == NET_SO_SNDTIMEO) {
@@ -1177,6 +1213,7 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
         const int native_option = optname == NET_SO_REUSEADDR ? SO_REUSEADDR : optname == NET_SO_BROADCAST ? SO_BROADCAST : optname == NET_SO_SNDBUF ? SO_SNDBUF : SO_RCVBUF;
         if (::setsockopt(socket.native->value, SOL_SOCKET, native_option, reinterpret_cast<const char*>(&value), sizeof(value)) != 0)
             return fail(native_error());
+    } else if (optname == NET_SO_ONESBCAST) {
     } else {
         return fail(NET_EOPNOTSUPP);
     }
@@ -1188,6 +1225,7 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
         if (optname == NET_SO_SNDTIMEO) it->second.snd_timeout_us = value;
         if (optname == NET_SO_SNDBUF) it->second.snd_buffer = value;
         if (optname == NET_SO_RCVBUF) it->second.rcv_buffer = value;
+        if (optname == NET_SO_ONESBCAST) it->second.onesbcast = value;
     }
     return 0;
 }
@@ -1215,6 +1253,7 @@ int APS5_VABI sceNetGetsockopt(int s, int level, int optname, void* optval, uint
         case NET_SO_NBIO: value = socket.nonblock ? 1 : 0; break;
         case NET_SO_RCVTIMEO: value = socket.rcv_timeout_us; break;
         case NET_SO_SNDTIMEO: value = socket.snd_timeout_us; break;
+        case NET_SO_ONESBCAST: value = socket.onesbcast; break;
         case NET_SO_ERROR: {
             int pending = 0;
             NativeLength size = sizeof(pending);

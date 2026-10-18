@@ -375,6 +375,9 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/include
         ${CMAKE_CURRENT_SOURCE_DIR}/io/include
     )
+    if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR (NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")))
+        target_link_options(amd64_only_converter_tests PRIVATE "LINKER:-pagezero_size,0x10000")
+    endif()
     add_test(NAME amd64_only_converter COMMAND amd64_only_converter_tests)
     add_test_executable(call_site_resolver_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/CallSiteResolverTests.cpp
@@ -405,6 +408,9 @@ if(BUILD_TESTING)
         add_test(NAME windows_fixed_base COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_windows_fixed_base.py $<TARGET_FILE:relinker>)
         set_tests_properties(windows_fixed_base PROPERTIES TIMEOUT 20)
+        add_test(NAME linux_gnu_segments COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_gnu_segments.py $<TARGET_FILE:relinker>)
+        set_tests_properties(linux_gnu_segments PROPERTIES TIMEOUT 20)
         add_test(NAME elf_offsets COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_elf_offsets.py $<TARGET_FILE:relinker>)
         add_test(NAME conversion_diagnostics COMMAND ${Python3_EXECUTABLE}
@@ -432,6 +438,7 @@ if(BUILD_TESTING)
         foreach(opcode IN ITEMS add or adc sbb and sub xor cmp)
             list(APPEND tlsCoverageGroups alu_${opcode})
         endforeach()
+        list(APPEND tlsCoverageGroups gs_traps)
         foreach(group IN LISTS tlsCoverageGroups)
             add_test(NAME tls_function_coverage_${group} COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_tls_function_coverage.py $<TARGET_FILE:relinker> ${group})
@@ -529,6 +536,9 @@ if(BUILD_TESTING)
         add_test(NAME guest_module_fini COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_module_fini.py
             $<TARGET_FILE:relinker> $<TARGET_FILE:guest_module_args_host>)
+        add_asan_test_options(guest_module_args verify_asan_link_order=0)
+        add_asan_test_options(guest_deferred_dependencies verify_asan_link_order=0)
+        add_asan_test_options(guest_module_fini verify_asan_link_order=0)
         add_test(NAME guest_needed_nested_modules COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_needed_nested_modules.py $<TARGET_FILE:relinker>)
         set(windows_stdio_host_arguments)
@@ -595,6 +605,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_sce_code_extent.py $<TARGET_FILE:relinker>)
         add_test(NAME sce_relro COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_sce_relro.py $<TARGET_FILE:relinker>)
+        add_test(NAME sce_module_code_extent COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_sce_module_code_extent.py $<TARGET_FILE:relinker>)
         add_test(NAME call_registry COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_call_registry.py $<TARGET_FILE:relinker>)
         add_test(NAME jmprel_table_bounds COMMAND ${Python3_EXECUTABLE}
@@ -729,6 +741,12 @@ if(BUILD_TESTING)
         )
         add_test(NAME reloc_table_bounds COMMAND reloc_table_bounds_tests $<TARGET_FILE:relinker>)
     endif()
+
+    set(relinkerTestTemp ${CMAKE_CURRENT_BINARY_DIR}/test-temp)
+    file(MAKE_DIRECTORY ${relinkerTestTemp})
+    get_property(relinkerTests DIRECTORY PROPERTY TESTS)
+    set_property(TEST ${relinkerTests} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+        "TMPDIR=set:${relinkerTestTemp};TEMP=set:${relinkerTestTemp};TMP=set:${relinkerTestTemp}")
 endif()
 
 if(BUILD_TESTING AND Python3_Interpreter_FOUND)
