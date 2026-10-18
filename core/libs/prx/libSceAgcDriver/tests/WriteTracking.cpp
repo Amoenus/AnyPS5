@@ -225,6 +225,17 @@ void CheckStoredAllSince() {
     Require(!StoredAllSince_nid_no_patch(base + 2048, 16, before), "repeated possible writes proved complete byte coverage");
 
     before = TrackerGeneration();
+    constexpr unsigned PossibleIntervals = 8;
+    for (unsigned interval = 0; interval < PossibleIntervals; ++interval) {
+        MarkPossiblyWritten(base + 4096 + static_cast<std::uint64_t>(interval) * 32, 16);
+    }
+    Require(!StoredOver(base + 4096, 16, before), "an evicted possible-write interval remained in the bounded history");
+    Require(StoredOver(base + 4096 + (PossibleIntervals - 1) * 32, 16, before), "the newest possible-write interval was evicted");
+    MarkPossiblyWritten(base + 4096, 16);
+    Require(StoredOver(base + 4096, 16, before), "a possible-write interval was not retained after being re-recorded");
+    Require(!StoredAllSince_nid_no_patch(base + 4096, 16, before), "possible-write eviction or re-recording proved complete byte coverage");
+
+    before = TrackerGeneration();
     MarkWritten(base + 2560, 16);
     MarkPossiblyWritten(base, Block);
     Require(StoredAllSince_nid_no_patch(base + 2560, 16, before), "a possible whole-block range erased an exact partial-store proof");
