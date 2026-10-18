@@ -205,7 +205,14 @@ public:
         addDomain();
         const auto invocationId = addInterface(spv::StorageClassInput, intType);
         decorate(invocationId, spv::DecorationBuiltIn, spv::BuiltInInvocationId);
-        const auto glIn = addInterface(spv::StorageClassInput, perVertexArrayType);
+        const auto positionType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType);
+        const auto inputVertices = builder.Type(spv::OpTypeArray, positionType, constant(uintType, 3u));
+        const auto glIn = addInterface(spv::StorageClassInput, inputVertices);
+        std::uint32_t clipIn = 0u;
+        if (clipDistances != 0u) {
+            clipIn = addInterface(spv::StorageClassInput, builder.Type(spv::OpTypeArray, clipArrayType, constant(uintType, 3u)));
+            decorate(clipIn, spv::DecorationBuiltIn, spv::BuiltInClipDistance);
+        }
         const auto glOut = addInterface(spv::StorageClassOutput, perVertexArrayType);
         const auto floatArray = [&](std::uint32_t size) { return builder.Type(spv::OpTypeArray, floatType, constant(uintType, size)); };
         const auto outer = addInterface(spv::StorageClassOutput, floatArray(4u));
@@ -239,7 +246,7 @@ public:
         builder.AddFunction(spv::OpBranch, afterLevels);
         builder.AddFunction(spv::OpLabel, afterLevels);
         store(result(spv::OpAccessChain, ptrOutputVec4, glOut, invocation, constant(intType, 0u)), load(vec4FloatType, result(spv::OpAccessChain, ptrInputVec4, glIn, invocation, constant(intType, 0u))));
-        if (clipDistances != 0u) store(result(spv::OpAccessChain, ptrOutputClip, glOut, invocation, constant(intType, 1u)), load(clipArrayType, result(spv::OpAccessChain, ptrInputClip, glIn, invocation, constant(intType, 1u))));
+        if (clipDistances != 0u) store(result(spv::OpAccessChain, ptrOutputClip, glOut, invocation, constant(intType, 1u)), load(clipArrayType, result(spv::OpAccessChain, ptrInputClip, clipIn, invocation)));
         for (const auto& [input, output] : parameters) store(result(spv::OpAccessChain, ptrOutputVec4, output, invocation), load(vec4FloatType, result(spv::OpAccessChain, ptrInputVec4, input, invocation)));
         return finish();
     }
