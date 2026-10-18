@@ -1366,11 +1366,21 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
     const auto held = [&](const auto& surface) {
         return surface->active->load(std::memory_order_acquire) && surface->context.device == context.device && !surface->retired && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
     };
+    std::optional<std::pair<std::uint64_t, std::size_t>> pendingHtile;
     {
         std::lock_guard lock(surfacesMutex());
-        if (std::none_of(surfaces().begin(), surfaces().end(), held)) return nullptr;
+        const auto found = std::find_if(surfaces().begin(), surfaces().end(), held);
+        if (found == surfaces().end()) return nullptr;
+        const auto& surface = **found;
+        if (surface.samplingActive && surface.clearGeneration != 0u && surface.sampling.refusal.empty()) {
+            const auto& metadata = surface.sampling.initial[1];
+            pendingHtile = std::pair{metadata.address, metadata.bytes};
+        }
     }
     std::lock_guard gpu(GuestMemory::GpuMutex());
+    if (pendingHtile && !Recorder::InCompletion()) {
+        if (auto* recorder = RecorderFor(context); recorder != nullptr && recorder->PendingWriteOverlaps(pendingHtile->first, pendingHtile->second)) recorder->SyncThrough(pendingHtile->first, pendingHtile->second);
+    }
     std::lock_guard lock(surfacesMutex());
     auto* found = planeSurface(context.device, resource.baseAddress);
     if (found == nullptr) return nullptr;
