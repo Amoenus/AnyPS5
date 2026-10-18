@@ -137,7 +137,13 @@ public:
             Require(count != 0, "no Vulkan device");
             std::vector<VkPhysicalDevice> devices(count);
             Check(enumerate(instance, &count, devices.data()), "vkEnumeratePhysicalDevices");
-            context.physical = devices.front();
+            const auto physicalProperties = function<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
+            std::vector<VkPhysicalDeviceProperties> deviceProperties(devices.size());
+            for (std::size_t index = 0; index < devices.size(); ++index) physicalProperties(devices[index], &deviceProperties[index]);
+            const char* requestedName = std::getenv("ANYPS5_GPU");
+            const auto selectedIndex = selectDevice(deviceProperties, requestedName != nullptr ? requestedName : "");
+            Require(selectedIndex.has_value(), requestedName != nullptr && *requestedName != '\0' ? std::string("no Vulkan 1.1 device matching ANYPS5_GPU=\"") + requestedName + "\"" : "no Vulkan 1.1 device");
+            context.physical = devices[*selectedIndex];
             const auto extensions = function<PFN_vkEnumerateDeviceExtensionProperties>("vkEnumerateDeviceExtensionProperties");
             Check(extensions(context.physical, nullptr, &count, nullptr), "vkEnumerateDeviceExtensionProperties");
             std::vector<VkExtensionProperties> available(count);
@@ -808,7 +814,8 @@ int main(int argc, char** argv) {
         try {
             device = std::make_unique<Device>(resources);
         } catch (const std::exception& error) {
-            if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr) throw;
+            const char* requestedName = std::getenv("ANYPS5_GPU");
+            if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr || (requestedName != nullptr && *requestedName != '\0')) throw;
             std::printf("skipped, no usable Vulkan device: %s\n", error.what());
             return VulkanTestSkipped;
         }
