@@ -806,6 +806,7 @@ struct WriteTracker {
     std::mutex mutex;
     bool initialized = false;
     bool watched = false;
+    static constexpr std::size_t CoarseBlocks = 64;
 #ifdef _WIN32
     std::uintptr_t base = 0;
     std::size_t size = 0;
@@ -815,6 +816,7 @@ struct WriteTracker {
     // late label rule asks whether the CPU touched a label's block, and the driver's own GPU label
     // records in the same block (the title's per-job slots are 0x20 apart) must not count.
     std::vector<std::uint32_t> cpuBlocks;
+    std::vector<std::uint32_t> coarseBlocks;
     WriteWatchCoverage coverage;
     std::vector<std::uint32_t> hintBlocks;
 #else
@@ -823,6 +825,7 @@ struct WriteTracker {
     struct Leaf {
         std::array<std::uint32_t, LeafBlocks> blocks{};
         std::array<std::uint32_t, LeafBlocks> cpuBlocks{};
+        std::array<std::uint32_t, LeafBlocks / CoarseBlocks> coarseBlocks{};
     };
     std::vector<std::unique_ptr<Leaf>> leaves;
 #endif
@@ -858,6 +861,7 @@ struct WriteTracker {
         if (!watched) return;
         blocks.assign(size / WriteBlockBytes + 1, 0);
         cpuBlocks.assign(size / WriteBlockBytes + 1, 0);
+        coarseBlocks.assign(blocks.size() / CoarseBlocks + 1, 0);
         coverage.Initialize(base, size);
         hintBlocks.assign(size / WriteBlockBytes + 1, 0);
         pages.resize(1u << 16);
@@ -1051,23 +1055,33 @@ struct WriteTracker {
         return newest;
     }
 
+    std::uint32_t coarseStampOf(std::uint64_t block) const {
+#ifdef _WIN32
+        return coarseBlocks[block / CoarseBlocks];
+#else
+        const auto& leaf = leaves[block / LeafBlocks];
+        return leaf != nullptr ? leaf->coarseBlocks[(block % LeafBlocks) / CoarseBlocks] : 0;
+#endif
+    }
+
     bool unchanged(std::uint64_t first, std::uint64_t last, std::uint64_t since) const {
         if (first == last) return stampOf(first) <= since;
         const auto newer = [since](std::uint32_t stamp) { return stamp > since; };
-#ifdef _WIN32
-        return std::none_of(blocks.begin() + first, blocks.begin() + last + 1, newer);
-#else
         while (first <= last) {
-            const auto index = first / LeafBlocks;
-            const auto end = std::min<std::uint64_t>(last + 1, (index + 1) * LeafBlocks);
-            if (const auto& leaf = leaves[index]; leaf != nullptr) {
-                const auto begin = leaf->blocks.begin() + first % LeafBlocks;
-                if (std::any_of(begin, begin + (end - first), newer)) return false;
+            const auto end = std::min<std::uint64_t>(last + 1, (first / CoarseBlocks + 1) * CoarseBlocks);
+            if (end - first < CoarseBlocks || coarseStampOf(first) > since) {
+#ifdef _WIN32
+                if (std::any_of(blocks.begin() + first, blocks.begin() + end, newer)) return false;
+#else
+                if (const auto& leaf = leaves[first / LeafBlocks]; leaf != nullptr) {
+                    const auto begin = leaf->blocks.begin() + first % LeafBlocks;
+                    if (std::any_of(begin, begin + (end - first), newer)) return false;
+                }
+#endif
             }
             first = end;
         }
         return true;
-#endif
     }
 
     std::uint32_t cpuStampOf(std::uint64_t block) const {
@@ -1083,12 +1097,20 @@ struct WriteTracker {
         const bool cpu = kind == StampKind::Cpu || kind == StampKind::ImportWindow;
         const bool stored = kind != StampKind::ImportWindow;
 #ifdef _WIN32
-        if (stored) blocks[block] = stampGeneration;
+        if (stored) {
+            blocks[block] = stampGeneration;
+            auto& coarse = coarseBlocks[block / CoarseBlocks];
+            coarse = std::max(coarse, stampGeneration);
+        }
         if (cpu) cpuBlocks[block] = stampGeneration;
 #else
         auto& leaf = leaves[block / LeafBlocks];
         if (leaf == nullptr) leaf = std::make_unique<Leaf>();
-        if (stored) leaf->blocks[block % LeafBlocks] = stampGeneration;
+        if (stored) {
+            leaf->blocks[block % LeafBlocks] = stampGeneration;
+            auto& coarse = leaf->coarseBlocks[(block % LeafBlocks) / CoarseBlocks];
+            coarse = std::max(coarse, stampGeneration);
+        }
         if (cpu) leaf->cpuBlocks[block % LeafBlocks] = stampGeneration;
 #endif
     }
@@ -1136,6 +1158,7 @@ void watchPrivateMapping(std::uintptr_t address, std::size_t bytes, std::uint64_
 // presenter, game threads inside the flush hook), as nothing orders the CPU's writes for it.
 std::atomic<std::uint64_t> nextCollectEpoch{1};
 thread_local std::uint64_t threadCollectEpoch = 0;
+std::atomic<std::uint64_t> lastBumpedEpoch{0};
 
 std::uint64_t currentCollectEpoch() {
     if (threadCollectEpoch != 0) return threadCollectEpoch;
@@ -1330,6 +1353,8 @@ std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
 
 void BumpCollectEpoch() {
     threadCollectEpoch = nextCollectEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
+    auto last = lastBumpedEpoch.load(std::memory_order_relaxed);
+    while (last < threadCollectEpoch && !lastBumpedEpoch.compare_exchange_weak(last, threadCollectEpoch, std::memory_order_release, std::memory_order_relaxed)) {}
     collectEpochBumps.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1339,6 +1364,11 @@ std::uint64_t ThreadCollectEpoch() {
 
 std::uint64_t UnwatchSerial() {
     return unwatchSerial.load(std::memory_order_acquire);
+}
+
+void AdoptLatestCollectEpoch() {
+    const auto latest = lastBumpedEpoch.load(std::memory_order_acquire);
+    if (latest > threadCollectEpoch) threadCollectEpoch = latest;
 }
 
 std::uint64_t CollectEpochBumps() {
