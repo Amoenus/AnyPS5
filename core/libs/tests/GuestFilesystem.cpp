@@ -13,6 +13,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 #ifdef _WIN32
 #include <io.h>
@@ -596,7 +597,13 @@ int main() {
         Require(rename_nid_postfix(name(replacement).c_str(), name(dangling).c_str()) == 0);
         Require(!std::filesystem::is_symlink(dangling) && std::filesystem::is_regular_file(dangling));
 #endif
-        std::filesystem::remove_all(area);
+        std::error_code cleanupError;
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            std::filesystem::remove_all(area, cleanupError);
+            if (!cleanupError) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        Require(!cleanupError);
     }
     Require(remove_nid_postfix(file.string().c_str()) == 0);
     Require(!std::filesystem::exists(file));
