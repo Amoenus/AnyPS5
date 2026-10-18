@@ -164,6 +164,25 @@ void nonAsciiPaths() {
     require(message.find(utf8Name) != std::string::npos, "a missing file names the path in UTF-8");
 }
 
+std::size_t toggleMouseBindings(const Pad::InputConfiguration& configuration, SDL_Scancode key, Pad::MouseButton button) {
+    std::size_t count = 0;
+    for (const auto& binding : configuration.bindings) {
+        if (binding.control == Pad::InputControl::ToggleMouse && binding.key == key && binding.mouseButton == button) ++count;
+    }
+    return count;
+}
+
+void toggleMouseDefaults() {
+    useConfig("Cross = KEY:F\n");
+    auto configuration = Pad::LoadInputMapping();
+    require(toggleMouseBindings(configuration, SDL_SCANCODE_F7, Pad::MouseButton::None) == 1, "F7 toggles the mouse by default");
+    require(toggleMouseBindings(configuration, SDL_SCANCODE_UNKNOWN, Pad::MouseButton::Middle) == 1, "the middle button toggles the mouse by default");
+    useConfig("ToggleMouse = MOUSE:Right\n");
+    configuration = Pad::LoadInputMapping();
+    require(toggleMouseBindings(configuration, SDL_SCANCODE_F7, Pad::MouseButton::None) == 0, "a ToggleMouse line replaces F7");
+    require(toggleMouseBindings(configuration, SDL_SCANCODE_UNKNOWN, Pad::MouseButton::Right) == 1, "a ToggleMouse line adds its own binding");
+}
+
 void deadzoneOffMatchesRawSticks() {
     for (const std::int16_t axis : {std::int16_t{-32768}, std::int16_t{-20000}, std::int16_t{-1}, std::int16_t{0}, std::int16_t{1}, std::int16_t{1234}, std::int16_t{32767}}) {
         const auto stick = Pad::StickWithDeadzone(axis, axis, 0);
@@ -201,6 +220,7 @@ int main() try {
     mouseLookDefault();
     mouseLookParse();
     mouseLookReject();
+    toggleMouseDefaults();
     nonAsciiPaths();
     deadzoneOffMatchesRawSticks();
     deadzoneShapesSticks();
