@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
@@ -64,6 +65,9 @@ constexpr std::uint32_t Unorm8x4SwappedInfo = 0x8828u;
 constexpr std::uint32_t Format8888Unorm = 56;
 constexpr std::uint32_t Type2DMsaa = 14;
 constexpr std::uint32_t TileRenderTarget = 0x1b;
+constexpr std::uint32_t TileZ64KBX = 0x18;
+constexpr std::uint32_t TileS64KBX = 0x19;
+constexpr std::uint32_t TileD64KBX = 0x1a;
 constexpr std::uint32_t Threads = 32;
 constexpr std::uint32_t Words = 32;
 constexpr std::uint32_t LoadResult = 12;
@@ -261,13 +265,13 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& sta
     device.Draw(state, draw, shaders);
 }
 
-std::array<std::uint32_t, 8> TargetDescriptor(const Block& block, std::uint32_t sampleShift, std::uint32_t pipeBankXor = 0, std::uint32_t format = Format16161616Float) {
+std::array<std::uint32_t, 8> TargetDescriptor(const Block& block, std::uint32_t sampleShift, std::uint32_t pipeBankXor = 0, std::uint32_t format = Format16161616Float, std::uint32_t tileMode = TileRenderTarget) {
     const auto address = block.Address() | pipeBankXor;
     return {
         static_cast<std::uint32_t>(address >> 8u),
         static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (format << 20u) | (((Side - 1u) & 3u) << 30u),
         ((Side - 1u) >> 2u) | ((Side - 1u) << 14u),
-        0xfacu | (sampleShift << 16u) | (TileRenderTarget << 20u) | (Type2DMsaa << 28u),
+        0xfacu | (sampleShift << 16u) | (tileMode << 20u) | (Type2DMsaa << 28u),
         0u,
         sampleShift << 4u,
         0u,
@@ -350,9 +354,9 @@ void RequireStoreRefused(AgcDriver::VulkanDevice& device, const std::array<std::
     Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
 }
 
-std::vector<std::array<float, 4>> RunLoad(AgcDriver::VulkanDevice& device, const Block& block, bool arrayed, std::uint32_t fragments, std::uint32_t pipeBankXor, std::uint32_t format) {
+std::vector<std::array<float, 4>> RunLoad(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, bool arrayed, std::uint32_t fragments) {
     std::vector<std::uint32_t> userData;
-    const auto program = CompileLoad(device, TargetDescriptor(block, static_cast<std::uint32_t>(std::countr_zero(fragments)), pipeBankXor, format), userData, arrayed);
+    const auto program = CompileLoad(device, texture, userData, arrayed);
     std::vector<std::array<float, 4>> loaded(Side * Side * fragments);
     const auto codeAddress = reinterpret_cast<std::uintptr_t>((arrayed ? ArrayLoadCode : LoadCode).data());
     for (std::uint32_t first = 0; first < loaded.size(); first += Threads) {
@@ -374,11 +378,23 @@ std::vector<std::array<float, 4>> RunLoad(AgcDriver::VulkanDevice& device, const
     return loaded;
 }
 
-std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t fragments = Samples, std::uint32_t pipeBankXor = 0, std::uint32_t format = Format16161616Float) {
-    auto loaded = RunLoad(device, block, false, fragments, pipeBankXor, format);
-    const auto loadedArray = RunLoad(device, block, true, fragments, pipeBankXor, format);
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, std::uint32_t fragments = Samples) {
+    auto loaded = RunLoad(device, texture, false, fragments);
+    const auto loadedArray = RunLoad(device, texture, true, fragments);
     Require(loadedArray == loaded, "Dim2DMsaaArray image_load disagreed with Dim2DMsaa image_load on the multisampled color target");
     return loaded;
+}
+
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t fragments = Samples, std::uint32_t pipeBankXor = 0, std::uint32_t format = Format16161616Float, std::uint32_t tileMode = TileRenderTarget) {
+    return LoadSamples(device, TargetDescriptor(block, static_cast<std::uint32_t>(std::countr_zero(fragments)), pipeBankXor, format, tileMode), fragments);
+}
+
+std::array<std::uint32_t, 8> CompressedDescriptor(const Block& block, std::uint32_t tileMode, std::uint64_t htile) {
+    auto texture = TargetDescriptor(block, SampleShift, 0u, Format16161616Float, tileMode);
+    const auto meta = htile >> 8u;
+    texture[6] = (1u << 20u) | (1u << 21u) | (static_cast<std::uint32_t>(meta & 0xffu) << 24u);
+    texture[7] = static_cast<std::uint32_t>(meta >> 8u);
+    return texture;
 }
 
 double EdgeDistance(double x, double y, std::size_t from) {
@@ -1089,6 +1105,37 @@ int main(int argc, char** argv) {
         std::memcpy(mixedStore.data + colorBytes - sizeof(odd), &odd, sizeof(odd));
         RequireStoreRefused(*device, TargetDescriptor(mixedStore, SampleShift), "writing the 16x16 multisampled texture", "storing to a multisampled texture no draw rendered to whose color memory is not uniform");
         std::puts("stores to one sample of each pixel of a drawn 4x target and to samples of zeroed color memory no draw rendered to reach exactly those samples, and a store to non-uniform color memory no draw rendered to is refused");
+        for (const auto mode : {TileZ64KBX, TileD64KBX}) {
+            Block swizzled(BlockBytes);
+            StoreWords(swizzled, colorBytes, FillOnes);
+            CheckUniform(LoadSamples(*device, swizzled, Samples, 0u, Format16161616Float, mode), Ones, "from the uniform memory of a " + std::to_string(mode) + " swizzle surface no draw rendered to");
+        }
+        const auto htileBytes = AgcDriver::Graphics::HtileMetadataBytes({Side, Side});
+        Require(htileBytes <= BlockBytes, "the HTILE of the 4x texture does not fit one block");
+        Block cleared(2u * BlockBytes);
+        StoreWords(cleared, colorBytes, FillOnes);
+        cleared.data[0] ^= 1u;
+        const auto clearedHtile = cleared.Address() + BlockBytes;
+        CheckUniform(LoadSamples(*device, CompressedDescriptor(cleared, TileZ64KBX, clearedHtile)), {}, "from a Z swizzle surface whose HTILE is all cleared to 0.0 over nonuniform color memory");
+        AgcDriver::Graphics::NoteColorMetadataFill(clearedHtile, sizeof(std::uint32_t), 0u);
+        RequireRefused(*device, CompressedDescriptor(cleared, TileZ64KBX, clearedHtile), "over the HTILE", "loading a Z swizzle texture after a fill over part of its HTILE");
+        AgcDriver::Graphics::NoteColorMetadataFill(clearedHtile, static_cast<std::size_t>(htileBytes), 0u);
+        CheckUniform(LoadSamples(*device, CompressedDescriptor(cleared, TileZ64KBX, clearedHtile)), {}, "from a Z swizzle surface after a fill of 0 over its whole HTILE");
+        Block expanded(2u * BlockBytes);
+        StoreWords(expanded, colorBytes, FillOnes);
+        std::fill_n(reinterpret_cast<std::uint32_t*>(expanded.data + BlockBytes), htileBytes / sizeof(std::uint32_t), 0xffffffffu);
+        CheckUniform(LoadSamples(*device, CompressedDescriptor(expanded, TileZ64KBX, expanded.Address() + BlockBytes)), Ones, "from the uniform memory of a Z swizzle surface whose HTILE is all expanded");
+        Block partial(2u * BlockBytes);
+        StoreWords(partial, colorBytes, FillOnes);
+        const std::uint32_t expandedTile = 0xfu;
+        std::memcpy(partial.data + BlockBytes + htileBytes - sizeof(expandedTile), &expandedTile, sizeof(expandedTile));
+        RequireRefused(*device, CompressedDescriptor(partial, TileZ64KBX, partial.Address() + BlockBytes), "neither all cleared to 0.0 nor all expanded", "loading a Z swizzle texture whose HTILE mixes cleared and expanded tiles");
+        Block display(2u * BlockBytes);
+        StoreWords(display, colorBytes, FillOnes);
+        RequireRefused(*device, CompressedDescriptor(display, TileD64KBX, display.Address() + BlockBytes), "compression metadata", "loading a D swizzle multisampled texture no draw rendered to with compression metadata");
+        Block standard(BlockBytes);
+        StoreWords(standard, colorBytes, FillOnes);
+        RequireRefused(*device, TargetDescriptor(standard, SampleShift, 0u, Format16161616Float, TileS64KBX), "has no modeled multisampled color footprint", "loading an S swizzle multisampled texture no draw rendered to");
         std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it, then the fill of its color memory; a surface no draw rendered to loads the value its color memory repeats and keeps it under a later draw");
         Block swapped(4u * BlockBytes);
         Draw(*device, TargetState(DecodeSwappedTarget(swapped)), 0, 2u, Unorm8PixelCode);

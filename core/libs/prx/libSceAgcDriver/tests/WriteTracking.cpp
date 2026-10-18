@@ -350,6 +350,23 @@ void CheckWatchedMiddleStore() {
 }
 #endif
 
+void CheckCoarseRuns() {
+    constexpr std::size_t bytes = 192 * Block;
+    void* memory = AllocateWatched(bytes);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    std::memset(memory, 0x11, bytes);
+    BumpCollectEpoch();
+    const auto collected = CollectWrites(base, bytes);
+    Require(collected != 0 && UnchangedSince(base, bytes, collected), "a range nothing wrote after its collect reports a change");
+    const auto stored = MarkWritten(base + bytes / 2, 4);
+    Require(stored > collected && !UnchangedSince(base, bytes, collected), "a driver store inside whole 4 MiB runs of the range is not seen");
+    Require(UnchangedSince(base, bytes / 2, collected), "a driver store after a range made it changed");
+    Require(UnchangedSince(base, bytes, stored), "a range checked at its newest stamp reports a change");
+    static_cast<volatile std::uint8_t*>(memory)[bytes - 1] = 0x22;
+    CollectWritesUncached(base + bytes - Block, Block);
+    Require(!UnchangedSince(base, bytes, stored), "a CPU store into the last block of the range is not seen");
+}
+
 #ifdef _WIN32
 void CheckDeferredSharedImports() {
     constexpr std::size_t bytes = 4 * Block;
@@ -1049,6 +1066,30 @@ void CheckCommittedRanges() {
     Require(!UnchangedCommittedSince(first, 0), "an unknown generation was accepted for the committed parts");
 }
 
+void CheckAdoptLatestEpoch() {
+    std::uint64_t bumped = 0;
+    std::thread([&] {
+        BumpCollectEpoch();
+        bumped = CollectEpoch();
+    }).join();
+    Require(bumped != 0, "a bumped thread has no collect epoch");
+    std::uint64_t before = 1;
+    std::uint64_t adopted = 0;
+    bool keptOwn = false;
+    std::thread([&] {
+        before = CollectEpoch();
+        AdoptLatestCollectEpoch();
+        adopted = CollectEpoch();
+        BumpCollectEpoch();
+        const auto own = CollectEpoch();
+        AdoptLatestCollectEpoch();
+        keptOwn = CollectEpoch() == own;
+    }).join();
+    Require(before == 0, "a thread that never bumped had a collect epoch");
+    Require(adopted == bumped, "a thread that never bumped did not take the newest bumped collect epoch");
+    Require(keptOwn, "adopting the newest collect epoch moved a thread off its own");
+}
+
 int main() {
     try {
         if (!WriteWatched()) {
@@ -1071,6 +1112,7 @@ int main() {
         CheckWatchOverlaps();
         CheckWatchedMiddleStore();
 #endif
+        CheckCoarseRuns();
 #ifdef _WIN32
         CheckDeferredSharedImports();
         CheckPrivateMappingReuse();
@@ -1086,6 +1128,7 @@ int main() {
         CheckStoreAcrossImports();
         CheckUnwatchedImport();
         CheckCommittedRanges();
+        CheckAdoptLatestEpoch();
     } catch (const std::exception& error) {
         std::cerr << "write tracking test failed: " << error.what() << "\n";
         return 1;
