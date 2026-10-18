@@ -138,7 +138,14 @@ PipelineCache::File PipelineCache::readFile() const {
 }
 
 std::optional<PipelineCache::FileHeader> PipelineCache::readHeader() const {
+#ifdef _WIN32
+    std::error_code error;
+    const auto native = ShaderRecompiler::NativeCachePath_nid_no_patch(path, error);
+    if (error) return std::nullopt;
+    std::ifstream file(native, std::ios::binary);
+#else
     std::ifstream file(path, std::ios::binary);
+#endif
     FileHeader header{};
     if (!file.read(reinterpret_cast<char*>(&header), sizeof(header))) return std::nullopt;
     return header;
