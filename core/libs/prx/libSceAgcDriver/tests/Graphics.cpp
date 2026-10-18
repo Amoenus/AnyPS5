@@ -2845,14 +2845,20 @@ void cmaskTests() {
 }
 
 void uint8x2TargetTests() {
-    auto queue = makeState();
-    queue.context[0x1c5] = 7;
-    queue.context[0x31c] = (queue.context[0x31c] & ~0x1ffcu) | (3u << 2u) | (4u << 8u);
-    const auto state = AgcDriver::Graphics::DecodeState(queue);
-    Require(state.color.format == VK_FORMAT_R8G8_UINT && state.color.elementBytes == 2 && state.color.componentMapping == 0xe4u && state.color.uintExport, "an 8_8 UINT color target was rejected");
-    queue.context[0x31c] = (queue.context[0x31c] & ~0x1800u) | (1u << 11u);
-    const auto alt = AgcDriver::Graphics::DecodeState(queue);
-    Require(alt.color.format == VK_FORMAT_R8G8_UINT && alt.color.componentMapping == 0xecu, "an 8_8 UINT SWAP_ALT color target was rejected");
+    using Type = ShaderRecompiler::ColorOutputType;
+    for (const auto mode : {1u, 2u, 3u, 7u, 9u}) {
+        for (const auto swap : {0u, 1u}) {
+            auto queue = makeState();
+            queue.context[0x1c5] = mode;
+            queue.context[0x31c] = (queue.context[0x31c] & ~0x1ffcu) | (3u << 2u) | (4u << 8u) | (swap << 11u);
+            const auto state = AgcDriver::Graphics::DecodeState(queue);
+            Require(state.color.format == VK_FORMAT_R8G8_UINT && state.color.elementBytes == 2 && state.color.uintExport, "an 8_8 UINT color target was rejected");
+            Require(state.color.componentMapping == (swap == 0u ? 0xe4u : 0xecu), "an 8_8 UINT color target lost its component mapping");
+            Require(AgcDriver::Graphics::ExportOutputTypes(state)[0] == Type::Uint, "an 8_8 UINT color export lost its unsigned interface");
+            queue.context[0x1e0] = 1u << 30u;
+            expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "integer target");
+        }
+    }
 }
 
 void uint8x4TargetTests() {

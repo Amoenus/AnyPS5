@@ -1398,7 +1398,7 @@ ShaderRecompiler::ColorOutputType ColorOutputTypeOf(const ColorTarget& color) {
     using Type = ShaderRecompiler::ColorOutputType;
     if (color.packing != ShaderRecompiler::ColorExportPacking::None) return Type::Float;
     switch (color.format) {
-        case VK_FORMAT_R8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R32_UINT:
+        case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R32_UINT:
         case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R8G8B8A8_UINT:
         case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R16G16B16A16_UINT:
         case VK_FORMAT_R32G32B32A32_UINT: return Type::Uint;
