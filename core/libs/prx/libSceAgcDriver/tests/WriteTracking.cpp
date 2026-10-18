@@ -151,6 +151,7 @@ void CheckStoredAllSince() {
     Require(!StoredAllSince_nid_no_patch(base + 2048, 16, before), "a possible driver write proved complete byte coverage");
     for (unsigned repeat = 0; repeat < 6; ++repeat) MarkPossiblyWritten(base + 2048, 16);
     Require(StoredOver(base + 2048, 16, before), "repeated possible writes lost their overlap evidence");
+    Require(!StoredOver(base + 2064, 16, before), "repeated possible writes invalidated an adjacent range");
     Require(!StoredAllSince_nid_no_patch(base + 2048, 16, before), "repeated possible writes proved complete byte coverage");
 
     before = TrackerGeneration();
