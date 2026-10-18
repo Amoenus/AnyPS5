@@ -51,14 +51,14 @@ static void VerifyCachePaths(const std::filesystem::path& root) {
             Require(ShaderRecompiler::ReadWholeFile(extended(path), bytes) && bytes == original, "cannot read extended cache path");
             const auto old = CreateFileW(extended(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            Require(old != INVALID_HANDLE_VALUE);
+            Require(old != INVALID_HANDLE_VALUE, "cannot retain the original cache reader");
             struct Close { HANDLE file; ~Close() { CloseHandle(file); } } close{old};
             Require(ShaderRecompiler::WriteFileAtomically(alias, replacement), "cannot replace cache path with retained reader");
-            Require(ShaderRecompiler::ReadWholeFile(alias, bytes) && bytes == replacement);
+            Require(ShaderRecompiler::ReadWholeFile(alias, bytes) && bytes == replacement, "replacement cache bytes do not match");
             std::byte retained[4]{};
             DWORD count = 0;
-            Require(ReadFile(old, retained, sizeof(retained), &count, nullptr) && count == original.size());
-            Require(std::equal(original.begin(), original.end(), retained));
+            Require(ReadFile(old, retained, sizeof(retained), &count, nullptr) && count == original.size(), "cannot read the retained cache handle");
+            Require(std::equal(original.begin(), original.end(), retained), "retained cache bytes changed after replacement");
         }
         WIN32_FIND_DATAW data{};
         const auto temporary = FindFirstFileW((extended(path).parent_path() / L"*.tmp.*").c_str(), &data);
@@ -75,13 +75,21 @@ static void VerifyCachePaths(const std::filesystem::path& root) {
     while (deep.native().size() < 300) deep /= std::wstring(40, L'd');
     verify(deep / L"cache \u00e4\u6f22.bin");
     std::filesystem::create_directories(root / "relative");
+    struct RestoreDirectory {
+        std::filesystem::path previous = std::filesystem::current_path();
+        ~RestoreDirectory() {
+            std::error_code error;
+            std::filesystem::current_path(previous, error);
+        }
+    } restoreDirectory;
+    std::filesystem::current_path(root);
     auto relative = (root / "relative" / ".." / "relative.bin").lexically_relative(std::filesystem::current_path());
-    Require(!relative.empty());
-    Require(ShaderRecompiler::WriteFileAtomically(relative, original));
+    Require(!relative.empty(), "cannot construct the cache relative path");
+    Require(ShaderRecompiler::WriteFileAtomically(relative, original), "cannot write the cache relative path");
     std::vector<std::byte> bytes;
-    Require(ShaderRecompiler::ReadWholeFile(relative, bytes) && bytes == original);
+    Require(ShaderRecompiler::ReadWholeFile(relative, bytes) && bytes == original, "cannot read the cache relative path");
     const auto missing = deep / "missing.bin";
-    Require(!ShaderRecompiler::ReadWholeFile(missing, bytes) && bytes.empty());
+    Require(!ShaderRecompiler::ReadWholeFile(missing, bytes) && bytes.empty(), "missing cache path did not clear the read buffer");
 }
 #endif
 
