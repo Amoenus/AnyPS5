@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -22,6 +23,20 @@ constexpr std::uint32_t Width = 64;
 constexpr std::uint32_t Height = 48;
 constexpr float Unwritten = -7.0f;
 alignas(256) std::array<float, Width * Height * 4> Pixels{};
+
+bool HasBuiltinVariable(std::span<const std::uint32_t> words, spv::StorageClass storage, spv::BuiltIn builtin) {
+    std::set<std::uint32_t> variables;
+    for (std::size_t i = 5; i < words.size();) {
+        const auto count = words[i] >> 16u;
+        const auto opcode = words[i] & 0xffffu;
+        Require(count != 0u && i + count <= words.size(), "the barycentric fixture received malformed SPIR-V");
+        const auto* word = words.data() + i;
+        if (opcode == spv::OpDecorate && count == 4u && word[2] == spv::DecorationBuiltIn && word[3] == builtin) variables.insert(word[1]);
+        if (opcode == spv::OpVariable && count >= 4u && word[3] == storage && variables.contains(word[2])) return true;
+        i += count;
+    }
+    return false;
+}
 
 alignas(256) constexpr std::array<std::uint32_t, 8> VertexCode{
     0xe0382000, 0x80000005, 0xbf8c3f70, 0xf800020f, 0x03020100, 0xf80008cf, 0x03020100, 0xbf810000,
@@ -109,6 +124,7 @@ ShaderRecompiler::RecompileResult Draw(AgcDriver::VulkanDevice& device, Emulatio
         shaders.push_back({ShaderStage::Geometry, &geometry, 0});
     } else if (pixelResult.barycentricEmulation.active) {
         patches = ShaderRecompiler::BuildBarycentricTessellationShaders(vertexResult, pixelResult, target, device.MaxFragmentInputComponents());
+        if (HasBuiltinVariable(vertexResult.spirv.Words(), spv::StorageClassOutput, spv::BuiltInClipDistance)) Require(HasBuiltinVariable(patches.control.spirv.Words(), spv::StorageClassInput, spv::BuiltInClipDistance), "the tessellation control input does not match the standalone vertex clip distances");
         shaders.push_back({ShaderStage::TessellationControl, &patches.control, 0});
         shaders.push_back({ShaderStage::TessellationEvaluation, &patches.evaluation, 0});
     }
