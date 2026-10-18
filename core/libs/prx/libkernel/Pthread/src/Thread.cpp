@@ -6,6 +6,7 @@
 #include "prx/libc/include/general/AsmMacros.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libc/include/CpuTopology.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -172,12 +173,32 @@ static void FreeGuestStack(PthreadPrivate*) {}
 static void RetireGuestStack(PthreadPrivate*) {}
 #endif
 
+#ifdef _WIN32
+static bool CommittedReadWrite(std::uintptr_t begin, std::uintptr_t end) {
+    for (auto cursor = begin; cursor < end;) {
+        MEMORY_BASIC_INFORMATION memory{};
+        if (VirtualQuery(reinterpret_cast<const void*>(cursor), &memory, sizeof(memory)) != sizeof(memory) || memory.RegionSize == 0)
+            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Querying the host thread stack");
+        if (memory.State != MEM_COMMIT || memory.Protect != PAGE_READWRITE) return false;
+        cursor = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
+    }
+    return true;
+}
+
+static std::uintptr_t PrecommittedStackStart(std::uintptr_t low, std::uintptr_t high) {
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    const std::uintptr_t start = low + system.dwAllocationGranularity;
+    return start < high && CommittedReadWrite(start, high) ? start : low;
+}
+#endif
+
 static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
 #ifdef _WIN32
     ULONG_PTR lowLimit = 0;
     ULONG_PTR highLimit = 0;
     GetCurrentThreadStackLimits(&lowLimit, &highLimit);
-    *low = lowLimit;
+    *low = PrecommittedStackStart(lowLimit, highLimit);
     *high = highLimit;
 #else
     pthread_attr_t attr;
@@ -229,6 +250,7 @@ static void RestoreStackPages(std::uintptr_t start, std::size_t bytes) noexcept 
     const bool restored = ::mprotect(reinterpret_cast<void*>(start), bytes, PROT_READ | PROT_WRITE) == 0;
 #endif
     if (!restored) std::fprintf(stderr, "[thread] cannot restore the protection of guest stack pages 0x%llx+0x%zx at thread exit\n", static_cast<unsigned long long>(start), bytes);
+    GuestAllocations::GuestAllocationsInvalidate_nid_postfix(start, bytes);
 }
 
 void NoteGuestStackProtection(std::uintptr_t start, std::size_t bytes, bool readWrite) {
@@ -674,12 +696,8 @@ static unsigned __stdcall StartNativeThread(void* opaque) {
         if (high <= low || high - low < self->stackSize)
             throw std::runtime_error("Cannot query guest thread stack");
         self->stackAddress = reinterpret_cast<void*>(high - self->stackSize);
-        for (auto cursor = high - self->stackSize; cursor < high;) {
-            MEMORY_BASIC_INFORMATION memory{};
-            if (VirtualQuery(reinterpret_cast<void*>(cursor), &memory, sizeof(memory)) != sizeof(memory) || memory.State != MEM_COMMIT || memory.Protect != PAGE_READWRITE || memory.RegionSize == 0)
-                throw std::runtime_error("Guest thread stack is not fully committed");
-            cursor = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
-        }
+        if (!CommittedReadWrite(high - self->stackSize, high))
+            throw std::runtime_error("Guest thread stack is not fully committed");
         self->threadId = std::this_thread::get_id();
         CurrentGuestState().current = self;
         if (!self->name.empty()) {
