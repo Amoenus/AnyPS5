@@ -196,6 +196,7 @@ bool Pad::KeyboardMouse::Advance(Clock::time_point now) {
     }
     bool changed = advanceAxes(now);
     for (std::size_t index = 0; index < configuration.bindings.size(); ++index) {
+        if (pressed[index] && configuration.bindings[index].control == InputControl::Shake) changed = true;
         if (configuration.bindings[index].wheelDirection == 0 || !pressed[index] || now < wheelReleaseTimes[index]) continue;
         pressed[index] = false;
         wheelReleaseTimes[index] = {};
@@ -290,8 +291,15 @@ PadInputState Pad::KeyboardMouse::Compose(const PadInputState& controller) const
             case InputControl::RightStickRight:
             case InputControl::RightStickUp:
             case InputControl::RightStickDown:
-            case InputControl::StickModifier:
-            case InputControl::ToggleMouse:
+            case InputControl::StickModifier: break;
+            case InputControl::Shake: {
+                const float sign = (lastAdvance.time_since_epoch() / ShakeHalfPeriod) % 2 == 0 ? 1.0f : -1.0f;
+                state.hasMotion = true;
+                state.accel = {sign * ShakeAcceleration, 9.80665f, 0.0f};
+                state.gyro = {0.0f, 0.0f, sign * ShakeAngularVelocity};
+                break;
+            }
+            case InputControl::ToggleMouse: break;
             case InputControl::ToggleFullscreen: break;
             case InputControl::TogglePerformanceOverlay: break;
         }

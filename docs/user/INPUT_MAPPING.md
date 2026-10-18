@@ -16,7 +16,7 @@ While a title has a mouse open (`sceMouseOpen`) and the window is focused, AnyPS
 
 Game-controller bindings are enabled automatically and are not affected by keyboard or mouse overrides in this file.
 
-Supported actions are `Cross`, `Circle`, `Triangle`, `Square`, `L1`, `R1`, `L2`, `R2`, `L3`, `R3`, `Options`, `Up`, `Right`, `Down`, `Left`, `LeftStickLeft`, `LeftStickRight`, `LeftStickUp`, `LeftStickDown`, `RightStickLeft`, `RightStickRight`, `RightStickUp`, `RightStickDown`, `TouchLeft`, `TouchRight`, `StickModifier`, `ToggleMouse`, `ToggleFullscreen` (F11), and `TogglePerformanceOverlay` (F10, the [performance overlay](USAGE.md#performance-overlay)). `ToggleFullscreen` and `TogglePerformanceOverlay` accept only keyboard keys.
+Supported actions are `Cross`, `Circle`, `Triangle`, `Square`, `L1`, `R1`, `L2`, `R2`, `L3`, `R3`, `Options`, `Up`, `Right`, `Down`, `Left`, `LeftStickLeft`, `LeftStickRight`, `LeftStickUp`, `LeftStickDown`, `RightStickLeft`, `RightStickRight`, `RightStickUp`, `RightStickDown`, `TouchLeft`, `TouchRight`, `StickModifier`, `Shake`, `ToggleMouse`, `ToggleFullscreen` (F11), and `TogglePerformanceOverlay` (F10, the [performance overlay](USAGE.md#performance-overlay)). `ToggleFullscreen` and `TogglePerformanceOverlay` accept only keyboard keys.
 
 ### Default bindings
 
@@ -39,6 +39,7 @@ Without an `anyps5-input.ini`, or for actions the file does not mention, these b
 | `LeftStickLeft`, `LeftStickRight`, `LeftStickUp`, `LeftStickDown` | A, D, W, S |
 | `RightStickLeft`, `RightStickRight`, `RightStickUp`, `RightStickDown` | F, H, T, G |
 | `TouchLeft`, `TouchRight` | Backspace, Tab |
+| `Shake` | X (reports a swinging acceleration and angular velocity while held) |
 | `ToggleMouse` | Middle mouse button, F7 |
 | `ToggleFullscreen` | F11 |
 
@@ -90,6 +91,10 @@ StickModifierScale = 0.4
 With `KeyboardRampMs` above 0, keyboard stick bindings move the stick toward their tilt at a steady speed instead of jumping, and back to the center the same way when the keys are let go. Opposite keys held together move the stick to the center at the same speed.
 
 With `TriggerRampMs` above 0, a key or mouse button bound to `L2` or `R2` presses the analog trigger gradually and lets it go the same way, for throttle and brake in racing titles. A pressed controller trigger is not slowed, and the larger of the two values is passed on.
+
+## Shake
+
+While the `Shake` input is held (X by default), the controller reports its acceleration and angular velocity swinging back and forth every 50 ms, for titles that ask the player to shake the controller. A controller's own motion sensors are used otherwise.
 
 ## Mouse as the right stick
 
