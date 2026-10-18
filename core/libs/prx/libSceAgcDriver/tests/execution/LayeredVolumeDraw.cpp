@@ -286,6 +286,10 @@ void MipTargets(AgcDriver::VulkanDevice& device) {
         std::uint32_t pipeBankXor = 0;
     };
     constexpr Selection selections[] = {
+        {96, 32, 1, 1, 0, 0, 1, ColorTileMode::Linear, false},
+        {96, 32, 1, 1, 0, 0, 1, ColorTileMode::Standard4KB, false},
+        {96, 32, 1, 1, 0, 0, 1, ColorTileMode::RenderTarget, false},
+        {96, 32, 1, 1, 0, 0, 1, ColorTileMode::S4KBX, false},
         {96, 32, 8, 3, 0, 1, 3, ColorTileMode::RenderTarget, false},
         {96, 32, 8, 3, 1, 1, 3, ColorTileMode::RenderTarget, false},
         {96, 32, 8, 3, 2, 0, 2, ColorTileMode::RenderTarget, false},
@@ -308,10 +312,11 @@ void MipTargets(AgcDriver::VulkanDevice& device) {
         surface.dimension = TextureDimension::k3D;
         surface.format = FindGuestColorTargetFormat(uintExport ? VK_FORMAT_R8G8B8A8_UINT : VK_FORMAT_R8G8B8A8_UNORM, 4u).value();
         const auto geometry = DescribeSurface(surface);
-        const auto thin = ThinBlockLayout(surface.tileMode, 4u);
+        const bool linear = mode == ColorTileMode::Linear;
+        const auto thin = linear ? std::array<std::uint32_t, 3>{} : ThinBlockLayout(surface.tileMode, 4u);
         const auto block = geometry.thick ? ThickBlockExtent(surface.tileMode, 4u) : std::array<std::uint32_t, 3>{thin[1], thin[2], 1u};
-        const auto* equation = FindTextureSwizzleEquation((geometry.thick ? 0x100u : 0u) | static_cast<std::uint32_t>(mode), 4u);
-        Require(equation != nullptr, "missing volume mip swizzle equation");
+        const auto* equation = linear ? nullptr : FindTextureSwizzleEquation((geometry.thick ? 0x100u : 0u) | static_cast<std::uint32_t>(mode), 4u);
+        Require(linear || equation != nullptr, "missing volume mip swizzle equation");
         const GuestVolume volume((geometry.guestBytes + 65535u) & ~std::size_t{65535u});
         const auto address = reinterpret_cast<std::uintptr_t>(volume.Data()) | pipeBankXor;
         AgcDriver::QueueState queue;
@@ -335,8 +340,8 @@ void MipTargets(AgcDriver::VulkanDevice& device) {
                     for (std::uint32_t x = 0u; x < mip.width; ++x) {
                         const auto bandWidth = color.extent.width / layers;
                         const bool drawn = mipLevel == level && slice >= firstSlice && slice < firstSlice + layers && x / bandWidth == slice - firstSlice;
-                        auto offset = BlockOffset(*equation, x + (mip.tail ? mip.tailX : 0u), y + (mip.tail ? mip.tailY : 0u), slice);
-                        if (!mip.tail) offset += (static_cast<std::uint64_t>(y / block[1]) * mip.blocksPerRow + x / block[0]) * thin[0];
+                        auto offset = linear ? static_cast<std::uint64_t>(y) * mip.pitchBytes + x * 4u : BlockOffset(*equation, x + (mip.tail ? mip.tailX : 0u), y + (mip.tail ? mip.tailY : 0u), slice);
+                        if (!linear && !mip.tail) offset += (static_cast<std::uint64_t>(y / block[1]) * mip.blocksPerRow + x / block[0]) * thin[0];
                         offset ^= pipeBankXor;
                         for (std::uint32_t channel = 0u; channel < 4u; ++channel) {
                             Require(std::to_integer<std::uint8_t>(base[offset + channel]) == (drawn ? 255u : Kept), "a volume mip draw lost its selected slice or changed another mip/slice");
