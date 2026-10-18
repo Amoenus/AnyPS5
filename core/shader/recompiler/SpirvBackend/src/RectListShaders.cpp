@@ -42,13 +42,11 @@ public:
         vec4FloatType = type(spv::OpTypeVector, floatType, 4u);
         functionType = type(spv::OpTypeFunction, voidType);
 
+            perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType);
         if (clipDistances != 0u) {
             clipArrayType = array(floatType, clipDistances);
-            perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpMemberDecorate, {1u, spv::DecorationBuiltIn, spv::BuiltInClipDistance}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType, clipArrayType);
             ptrInputClip = pointer(spv::StorageClassInput, clipArrayType);
             ptrOutputClip = pointer(spv::StorageClassOutput, clipArrayType);
-        } else {
-            perVertexType = builder.DecoratedType(spv::OpTypeStruct, {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}}, {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}}, {spv::OpDecorate, {spv::DecorationBlock}}}, vec4FloatType);
         }
 
         ptrInputVec4Float = pointer(spv::StorageClassInput, vec4FloatType);
@@ -126,8 +124,8 @@ public:
         store(access(ptrOutputVec4Float, glOut, invocation, intConstant(0)), position);
         if (clipDistances != 0u) {
             std::array<std::uint32_t, 3> clips {};
-            for (std::uint32_t i = 0; i < clips.size(); i++) clips[i] = load(clipArrayType, access(ptrInputClip, glIn, intConstant(i), intConstant(1)));
-            const auto own = load(clipArrayType, access(ptrInputClip, glIn, index, intConstant(1)));
+            for (std::uint32_t i = 0; i < clips.size(); i++) clips[i] = load(clipArrayType, access(ptrInputClip, clipIn, intConstant(i)));
+            const auto own = load(clipArrayType, access(ptrInputClip, clipIn, index));
             std::vector<std::uint32_t> values;
             for (std::uint32_t k = 0; k < clipDistances; k++) {
                 auto sum = constant(floatType, 0);
@@ -136,7 +134,7 @@ public:
             }
             const auto clip = builder.AllocateId();
             builder.AddFunction(spv::OpCompositeConstruct, clipArrayType, clip, std::span<const std::uint32_t>(values));
-            store(access(ptrOutputClip, glOut, invocation, intConstant(1)), clip);
+            store(access(ptrOutputClip, clipOut, invocation), clip);
         }
 
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
@@ -171,7 +169,7 @@ public:
 
         const auto position = load(vec4FloatType, access(ptrInputVec4Float, glIn, index, intConstant(0)));
         store(access(ptrOutputVec4Float, glOut, intConstant(0)), position);
-        if (clipDistances != 0u) store(access(ptrOutputClip, glOut, intConstant(1)), load(clipArrayType, access(ptrInputClip, glIn, index, intConstant(1))));
+        if (clipDistances != 0u) store(clipOut, load(clipArrayType, access(ptrInputClip, clipIn, index)));
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
             store(outputs[i], load(vec4FloatType, access(ptrInputVec4Float, inputs[i], index)));
         }
@@ -287,6 +285,12 @@ private:
         return variable;
     }
 
+    std::uint32_t clipVariable(spv::StorageClass storage, std::uint32_t type) {
+        const auto variable = addInterface(storage, type);
+        decorate(variable, spv::DecorationBuiltIn, spv::BuiltInClipDistance);
+        return variable;
+    }
+
     void decorate(std::uint32_t target, spv::Decoration decoration, std::uint32_t value) {
         builder.AddAnnotation(spv::OpDecorate, target, decoration, value);
     }
@@ -320,6 +324,7 @@ private:
             decorate(tessCoord, spv::DecorationBuiltIn, spv::BuiltInTessCoord);
         }
         glIn = addInterface(spv::StorageClassInput, array(perVertexType, tessControl ? 3u : 4u));
+        if (clipDistances != 0u) clipIn = clipVariable(spv::StorageClassInput, array(clipArrayType, tessControl ? 3u : 4u));
 
         inputs.resize(parameters.size());
         std::array<std::uint32_t, 32> locations {};
@@ -340,6 +345,7 @@ private:
         const auto tessControl = model == spv::ExecutionModelTessellationControl;
         if (tessControl) {
             glOut = addInterface(spv::StorageClassOutput, array(perVertexType, 4u));
+            if (clipDistances != 0u) clipOut = clipVariable(spv::StorageClassOutput, array(clipArrayType, 4u));
             tessInner = addInterface(spv::StorageClassOutput, array(floatType, 2u));
             decorate(tessInner, spv::DecorationBuiltIn, spv::BuiltInTessLevelInner);
             builder.AddAnnotation(spv::OpDecorate, tessInner, spv::DecorationPatch);
@@ -348,6 +354,7 @@ private:
             builder.AddAnnotation(spv::OpDecorate, tessOuter, spv::DecorationPatch);
         } else {
             glOut = addInterface(spv::StorageClassOutput, perVertexType);
+            if (clipDistances != 0u) clipOut = clipVariable(spv::StorageClassOutput, clipArrayType);
         }
 
         outputs.resize(parameters.size());
@@ -394,6 +401,8 @@ private:
     std::uint32_t ptrOutputVec4Float = 0;
     std::uint32_t glIn = 0;
     std::uint32_t glOut = 0;
+    std::uint32_t clipIn = 0;
+    std::uint32_t clipOut = 0;
     std::uint32_t tessInner = 0;
     std::uint32_t tessOuter = 0;
     std::uint32_t tessCoord = 0;
