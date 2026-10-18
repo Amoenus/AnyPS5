@@ -830,9 +830,9 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
 
 int APS5_VABI scePthreadJoin(Pthread thread, void** retval) {
     if (!thread) return SCE_KERNEL_ERROR_EINVAL;
+    if (thread == CurrentGuestState().current) return SCE_KERNEL_ERROR_EDEADLK;
     if (thread->_detached) return SCE_KERNEL_ERROR_EINVAL;
     if (thread->_joined.load(std::memory_order_acquire)) return SCE_KERNEL_ERROR_ESRCH;
-    if (thread == CurrentGuestState().current) return SCE_KERNEL_ERROR_EDEADLK;
     ThreadCancel::Check();
     {
         std::unique_lock lock(thread->_join_mtx);

@@ -540,6 +540,7 @@ int APS5_VABI sigaltstack_nid_postfix(const GuestStack* stack, GuestStack* previ
     return 0;
 }
 int APS5_VABI _sigprocmask_nid_postfix(int how, const GuestSignalSet* set, GuestSignalSet* previousSet) {
+    if (set != nullptr && (how < 1 || how > 3)) { *__error_nid_postfix() = 22; return -1; }
     {
         std::lock_guard lock(registration);
         if (previousSet != nullptr) {
@@ -560,7 +561,6 @@ int APS5_VABI _sigprocmask_nid_postfix(int how, const GuestSignalSet* set, Guest
                     blockedMask.store(set->bits[0]);
                     for (int word = 1; word < 4; ++word) blockedMaskExtra[word - 1].store(set->bits[word]);
                     break;
-                default: throw std::invalid_argument("_sigprocmask: invalid how");
             }
         }
     }
