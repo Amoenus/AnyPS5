@@ -1398,7 +1398,7 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         // of its (layer, mip) slices (sliceWindows).
         // Technical debt: a surface with levels past its image's is tracked per layer, since a
         // 64 KiB unit may hold nothing but those levels, which no window moves.
-        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && !geometry.thick && descriptor.tileMode != TextureTileMode::kLinear && descriptor.baseAddress % 65536 == 0 && geometry.imageLevels == descriptor.mipCount;
+        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && TracksBlockUnits(descriptor, geometry) && geometry.imageLevels == descriptor.mipCount;
         trackedLayers = blockUnits ? static_cast<std::uint32_t>((guestBytes + 65535) / 65536) : layered && LayerTrackingEnabled() ? geometry.layers : 1u;
         trackedLayerBytes = blockUnits ? 65536 : guestBytes / trackedLayers;
         layerGeneration.assign(trackedLayers, 0);
