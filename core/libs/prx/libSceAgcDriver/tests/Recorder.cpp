@@ -7420,9 +7420,20 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         recorder.Sync();
     }
     std::array<std::byte, 64> texels{};
-    refused([&] { AgcDriver::GuestMemory::Read(address + 256u, texels); }, "a CPU read", "a CPU read");
-    refused([&] { AgcDriver::GuestMemory::ReadCommitted(address + 256u, texels); }, "a CPU read", "a committed CPU read");
-    refused([&] { AgcDriver::GuestMemory::ReadCommittedUnsynced(address + 256u, texels); }, "a CPU read", "a committed CPU read without the flush hook");
+    const auto published = [&](const std::function<void()>& access, const std::string& what) {
+        access();
+        RequireNoMultisampleTarget(address, bytes, what.c_str());
+        const auto* begin = static_cast<const std::byte*>(block);
+        Require(std::all_of(begin, begin + bytes, [](std::byte value) { return value == std::byte{}; }), what + " changed zero samples, padding or neighboring bytes");
+        std::lock_guard gpu(GpuMutex());
+        Require(MultisampleTargetView(context, target) != VK_NULL_HANDLE, what + " could not recreate its published target");
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+    };
+    published([&] { AgcDriver::GuestMemory::Read(address + 256u, texels); }, "a CPU read");
+    published([&] { AgcDriver::GuestMemory::ReadCommitted(address + 256u, texels); }, "a committed CPU read");
+    published([&] { AgcDriver::GuestMemory::ReadCommittedUnsynced(address + 256u, texels); }, "a committed CPU read without the flush hook");
     refused([&] { RequireNoMultisampleTarget(address, 64u, "a DMA copy"); }, "a DMA copy", "a DMA copy");
     const auto captureSrt = [](std::uint64_t srt, AgcDriver::ShaderMemory::PendingWriteQuery pendingWrite) {
         static constexpr std::array<std::uint32_t, 6> code{0xf4080100u, 0xfa000000u, 0xbf8cc07fu, 0xe0700000u, 0x80010000u, 0xbf810000u};
@@ -7441,13 +7452,13 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         AgcDriver::ShaderMemory memory({}, pendingWrite);
         static_cast<void>(memory.Capture(request));
     };
-    refused([&] { captureSrt(address + 256u, nullptr); }, "a CPU read", "a shader capture");
+    published([&] { captureSrt(address + 256u, nullptr); }, "a shader capture");
     captureSrt(address + 4u * 65536u + 256u, nullptr);
-    refused([&] { captureSrt(address + 256u, nullptr); }, "a CPU read", "a shader capture on a pooled page");
+    published([&] { captureSrt(address + 256u, nullptr); }, "a shader capture on a pooled page");
     const auto raw = [](std::uint64_t, std::size_t, std::span<std::byte>) { return AgcDriver::ShaderMemory::PendingWrite::Raw; };
     const auto synced = [](std::uint64_t, std::size_t, std::span<std::byte>) { return AgcDriver::ShaderMemory::PendingWrite::Sync; };
-    refused([&] { captureSrt(address + 256u, raw); }, "a CPU read", "a shader capture's raw word read");
-    refused([&] { captureSrt(address + 256u, synced); }, "a CPU read", "a shader capture's synced word read");
+    published([&] { captureSrt(address + 256u, raw); }, "a shader capture's raw word read");
+    published([&] { captureSrt(address + 256u, synced); }, "a shader capture's synced word read");
     captureSrt(address + 4u * 65536u + 256u, raw);
     ShaderRecompiler::RecompileResult program;
     ShaderRecompiler::DescriptorBinding binding;
@@ -7555,8 +7566,9 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
     } else {
         refusedSample(ShaderRecompiler::DescriptorKind::StorageImage, multisampledWords(side, 2u, address), "as a storage image at its sample count", "storage access to a multisampled target without shaderStorageImageMultisample");
     }
-    refused([&] { AgcDriver::GuestMemory::Read(address + 3u * 65536u + 256u, texels); }, "a CPU read", "a CPU read in the last block of the 4x target");
+    published([&] { AgcDriver::GuestMemory::Read(address + 3u * 65536u + 256u, texels); }, "a CPU read in the last block of the 4x target");
     AgcDriver::GuestMemory::Read(address + 4u * 65536u, texels);
+    refused([&] { RequireNoMultisampleTarget(address, targetBytes, "a DMA copy"); }, "a DMA copy", "a DMA copy after an adjacent CPU read");
     clearTargets();
     target.extent = {side / 2u, side / 2u};
     target.surfaceExtent = target.extent;
@@ -7567,7 +7579,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         device.WaitQueue();
         recorder.Sync();
     }
-    refused([&] { AgcDriver::GuestMemory::Read(address + targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the tiled multisampled target");
+    published([&] { AgcDriver::GuestMemory::Read(address + targetBytes - texels.size(), texels); }, "a CPU read inside the tiled multisampled target");
     AgcDriver::GuestMemory::Read(address + targetBytes, texels);
     clearTargets();
     if ((base.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_2_BIT) != 0) {
@@ -7581,7 +7593,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
             device.WaitQueue();
             recorder.Sync();
         }
-        refused([&] { AgcDriver::GuestMemory::Read(address + 2u * targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the 2x tile-height padding");
+        published([&] { AgcDriver::GuestMemory::Read(address + 2u * targetBytes - texels.size(), texels); }, "a CPU read inside the 2x tile-height padding");
         AgcDriver::GuestMemory::Read(address + 2u * targetBytes, texels);
         clearTargets();
     }
@@ -7596,7 +7608,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
             device.WaitQueue();
             recorder.Sync();
         }
-        refused([&] { AgcDriver::GuestMemory::Read(address + 2u * targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the 8x tile-height padding");
+        published([&] { AgcDriver::GuestMemory::Read(address + 2u * targetBytes - texels.size(), texels); }, "a CPU read inside the 8x tile-height padding");
         AgcDriver::GuestMemory::Read(address + 2u * targetBytes, texels);
         clearTargets();
     }
