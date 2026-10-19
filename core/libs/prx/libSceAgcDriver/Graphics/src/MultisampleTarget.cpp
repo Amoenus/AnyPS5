@@ -734,7 +734,7 @@ std::atomic<bool>& anyGuarded() {
 }
 
 void guardReads(std::uint64_t address, std::size_t bytes) {
-    RequireNoMultisampleTarget(address, bytes, "a CPU read");
+    SynchronizeMultisampleTargetRead_nid_no_patch(address, bytes);
 }
 
 void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
@@ -799,6 +799,11 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
         target->PrepareForColorAttachment(use);
         return *target;
     }
+    const auto bytes = MultisampledColorBytes(use);
+    Require(bytes <= std::numeric_limits<std::size_t>::max(), "initial multisample color exceeds host address space");
+    RequireNoMultisampleTarget(use.address, static_cast<std::size_t>(bytes), "initializing a multisampled color target");
+    if (use.dccAddress != 0) RequireNoMultisampleTarget(use.dccAddress, MultisampledDccBytes(use), "initializing multisampled DCC metadata");
+    if (use.cmaskAddress != 0) RequireNoMultisampleTarget(use.cmaskAddress, use.cmaskBytes, "initializing multisampled CMASK metadata");
     auto target = std::make_shared<MultisampleTarget>(context, use);
     target->Keep();
     targets().push_back(std::move(target));
@@ -1167,6 +1172,34 @@ void PublishMultisampleTargetColor_nid_no_patch(const Context& context, const Co
         anyGuarded().store(!guarded().empty(), std::memory_order_release);
     }
     UpdateResidentImageUnmapObserver_nid_no_patch();
+}
+
+void SynchronizeMultisampleTargetRead_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0u) return;
+    Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "native multisample read range overflows");
+    RequireNoResidentDepthRead_nid_no_patch(address, bytes);
+    if (!anyGuarded().load(std::memory_order_acquire)) return;
+    std::vector<std::shared_ptr<std::atomic<bool>>> overlapping;
+    {
+        std::shared_lock lock(guardedMutex());
+        for (const auto& range : guarded()) {
+            if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
+            overlapping.push_back(range.active);
+        }
+    }
+    if (overlapping.empty()) return;
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    Require(!Recorder::InCompletion(), "native multisample publication during a recorder completion is not implemented");
+    std::vector<std::shared_ptr<MultisampleTarget>> owners;
+    {
+        std::lock_guard lock(targetsMutex());
+        for (const auto& target : targets()) {
+            if (!target->active->load(std::memory_order_acquire)) continue;
+            if (std::find(overlapping.begin(), overlapping.end(), target->active) != overlapping.end()) owners.push_back(target);
+        }
+    }
+    for (const auto& owner : owners) PublishMultisampleTargetColor_nid_no_patch(owner->context, owner->target);
+    RequireNoMultisampleTarget(address, bytes, "a synchronized guest read");
 }
 
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource) {
