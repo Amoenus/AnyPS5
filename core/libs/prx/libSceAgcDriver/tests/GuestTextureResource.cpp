@@ -140,6 +140,18 @@ void RunGuestTextureResourceTests() {
         compressed.*field = true;
         rejectFields(compressed, "FMASK CMASK compression is not implemented");
     }
+    auto compressedFmask = fmaskArray;
+    compressedFmask.metaCompress = true;
+    compressedFmask.metaPipeAligned = true;
+    compressedFmask.metaAddr = 0x123456789ull;
+    const auto compressedFmaskResource = DecodeTextureResource(pack(compressedFmask));
+    Require(compressedFmaskResource.format == 20u && compressedFmaskResource.dccAddress == 0u && compressedFmaskResource.fmaskCmaskAddress == compressedFmask.metaAddr << 8u, "compressed FMASK metadata was decoded as color DCC");
+    Require(compressedFmaskResource.baseArray == 1u && compressedFmaskResource.depthOrLastArray == 2u, "compressed FMASK normalization changed the array view");
+    compressedFmask.metaPipeAligned = false;
+    rejectFields(compressedFmask, "FMASK CMASK metadata must be pipe aligned");
+    compressedFmask.metaPipeAligned = true;
+    compressedFmask.writeCompress = true;
+    rejectFields(compressedFmask, "FMASK CMASK compression is not implemented");
     for (const auto selector : {5u, 6u, 7u}) {
         auto unsupported = fmask;
         unsupported.dstSelX = selector;
