@@ -1251,6 +1251,8 @@ void BufferRefusals(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     const auto state = TargetState(color);
     Draw(*device, state);
     CheckSamples(state, LoadSamples(*device, block), {});
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    RequireColorSnapshotRefused(context, color, "tile mode " + std::to_string(static_cast<unsigned>(color.tileMode)) + ", " + std::to_string(color.samples) + " samples, DCC 0, CMASK 0, " + std::to_string(Side) + "x" + std::to_string(Side) + ", " + std::to_string(color.elementBytes) + " bytes per element");
     const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
     Require(colorBytes != 0 && colorBytes <= block.bytes, "the 4x target's color memory does not fit its block");
     AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(colorBytes), FillOnes);

@@ -378,7 +378,11 @@ public:
     }
 
     MultisampleColorSnapshot ColorSnapshot() {
-        Require(target.tileMode == ColorTileMode::RenderTarget && target.dccAddress == 0 && target.cmaskAddress == 0, "guest color snapshots with unsupported tiling or multisample metadata are not implemented");
+        if (target.tileMode != ColorTileMode::RenderTarget || target.dccAddress != 0 || target.cmaskAddress != 0) {
+            char text[384];
+            std::snprintf(text, sizeof(text), "guest color snapshots with unsupported tiling or multisample metadata are not implemented (tile mode %u, %u samples, DCC %u, CMASK %u, %ux%u, %u bytes per element)", static_cast<unsigned>(target.tileMode), target.samples, unsigned(target.dccAddress != 0), unsigned(target.cmaskAddress != 0), target.extent.width, target.extent.height, target.elementBytes);
+            Require(false, text);
+        }
         Require(!initialColor.empty(), "guest color snapshot has no initial footprint");
         readbackRecorder().Sync();
         Require(active->load(std::memory_order_acquire), "multisampled color target was retired before guest color snapshot");
