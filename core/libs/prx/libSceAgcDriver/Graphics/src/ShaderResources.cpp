@@ -611,6 +611,8 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         const auto geometry = DescribeSurface(resource);
         const CmaskLayout metadata(resource.width, resource.height);
         const auto metadataBytes = FmaskCmaskBytes_nid_no_patch(metadata, geometry.layers);
+        CompletePendingCpuWrites(context, resource.fmaskCmaskAddress, metadataBytes);
+        if (auto native = MultisampleTargetFmaskTexture_nid_no_patch(context, resource, components)) return native;
         RequireNoMultisampleTarget(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes), "an FMASK texture read");
         CompletePendingCpuWrites(context, resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
         CompletePendingCpuWrites(context, resource.fmaskCmaskAddress, metadataBytes);
