@@ -62,6 +62,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -3545,6 +3546,65 @@ void drawSnapshotTableSetTests(const Device& device, Recorder& recorder) {
     }
     ClearCachedTextures(context.device);
     recorder.Activate();
+}
+
+void imageTableFirstLayerRevalidateTests(const Device& device, Recorder& recorder) {
+    namespace Abi = ShaderRecompiler::ImageTableAbi;
+    using ShaderRecompiler::DescriptorKind;
+    using ShaderRecompiler::DescriptorRole;
+    const auto& base = device.GetContext();
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+    if (context.imageTableCapacity < 1u) {
+        std::cout << "image tables unavailable: image table first-layer revalidation not tested\n";
+        return;
+    }
+    constexpr std::uint32_t width = 4;
+    constexpr std::uint32_t height = 4;
+    constexpr std::uint32_t lastSlice = 3;
+    alignas(256) static std::array<float, width * height * (lastSlice + 1u) * 16u> texels{};
+    texels.fill(1.0f);
+    const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texels.data()));
+    const std::array<std::uint32_t, 8> texture{static_cast<std::uint32_t>(address >> 8u), static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (22u << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), 0xfacu | (13u << 28u), lastSlice, 0u, 0u, 0u};
+    const auto whole = DecodeTextureResource(texture);
+    Require(whole.dimension == TextureDimension::k2DArray && whole.depthOrLastArray == lastSlice && DescribeSurface(whole).guestBytes <= sizeof(texels), "the image table test T# is not a 2D array over its texels");
+    constexpr auto bindingCount = static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count);
+    ShaderRecompiler::RecompileResult program;
+    ShaderRecompiler::DescriptorBinding map{};
+    map.kind = DescriptorKind::StorageBuffer;
+    map.role = DescriptorRole::ImageTableMap;
+    map.binding = static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Stage::Main) * bindingCount + static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::ImageTableMap);
+    map.count = 1;
+    map.guestDescriptor.assign(Abi::HeaderWords + 1u, 0u);
+    map.guestDescriptor[Abi::HeaderVersion] = Abi::Version;
+    map.guestDescriptor[Abi::HeaderElementCount] = 1u;
+    map.guestDescriptor[Abi::HeaderElementFaults] = Abi::HeaderWords;
+    map.guestDescriptor[Abi::HeaderSamplerFaults] = Abi::HeaderWords + 1u;
+    program.bindings.push_back(map);
+    ShaderRecompiler::DescriptorBinding images{};
+    images.kind = DescriptorKind::SampledImage;
+    images.role = DescriptorRole::ImageTable;
+    images.binding = ShaderRecompiler::RuntimeAbi::ImageTableBinding;
+    images.count = 1;
+    images.guestDescriptor.assign(texture.begin(), texture.end());
+    images.imageShapes.assign(1, ShaderRecompiler::DescriptorImageShape::Image2D);
+    images.imageDepthCompare.assign(1, false);
+    images.imageSamplers.assign(1, 0u);
+    program.bindings.push_back(std::move(images));
+    const CompiledShader compute{ShaderRecompiler::ShaderStage::Compute, &program, 0};
+    {
+        ShaderResources resources(context, compute);
+        Require(resources.SampledTextures().size() == 1, "a 2D read of a 2D array in an image table bound no texture");
+        const auto bound = resources.SampledTextures().front();
+        ShaderResources::ProofReport report;
+        Require(resources.Revalidate(std::span(&compute, 1), &report), "an image table holding a 2D read of a 2D array did not revalidate");
+        Require(report.path == ShaderResources::ProofPath::Full, "an image table holding a 2D read of a 2D array was not proven on the full path");
+        Require(resources.SampledTextures().front() == bound, "revalidating an image table holding a 2D read of a 2D array changed its texture");
+        Require(resources.Revalidate(std::span(&compute, 1)), "an image table holding a 2D read of a 2D array did not revalidate twice");
+        recorder.Sync();
+    }
+    ClearCachedTextures(context.device);
 }
 
 void drawSnapshotReuseTests(const Device& device, Recorder& recorder) {
@@ -8888,6 +8948,33 @@ int pipelineCacheFileTests(const Device& device) {
         PipelineCache reloaded(context, properties);
         Require(holds(reloaded.Handle(), 1), "an invalid cache file was not replaced by the saving object's pipelines");
     }
+    {
+        PipelineCache busy(context, properties);
+        build(busy.Handle(), 0);
+        std::promise<void> held;
+        std::promise<void> release;
+        std::thread creation([&] {
+            auto use = busy.Synchronization().LockForPipelineUse();
+            held.set_value();
+            release.get_future().wait();
+        });
+        held.get_future().wait();
+        auto saving = std::async(std::launch::async, [&] { busy.SaveUnlessBusy(); });
+        const bool saveReturned = saving.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        bool otherCreationProceeded = false;
+        if (saveReturned) {
+            auto other = std::async(std::launch::async, [&] { auto use = busy.Synchronization().LockForPipelineUse(); });
+            otherCreationProceeded = other.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+            release.set_value();
+            other.wait();
+        } else {
+            release.set_value();
+        }
+        creation.join();
+        saving.wait();
+        Require(saveReturned, "a periodic pipeline cache save waited for a pipeline creation to finish");
+        Require(otherCreationProceeded, "a pipeline creation waited behind a periodic pipeline cache save");
+    }
     std::cout << "Pipeline cache file merge tests passed\n";
     return 0;
 }
@@ -9710,6 +9797,7 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--draw-descriptors-only") {
             drawDescriptorWriteTests(device, recorder);
             drawSnapshotTableSetTests(device, recorder);
+            imageTableFirstLayerRevalidateTests(device, recorder);
             std::cout << "Draw descriptor writes and snapshot overrides passed\n";
             return 0;
         }
@@ -9769,6 +9857,7 @@ int main(int argc, char** argv) {
         drawSnapshotReuseTests(device, recorder);
         drawDescriptorWriteTests(device, recorder);
         drawSnapshotTableSetTests(device, recorder);
+        imageTableFirstLayerRevalidateTests(device, recorder);
         drawSnapshotCapTests(device, recorder);
         drawSnapshotEvictionTests(device);
         unwrittenSnapshotTests(device);

@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
@@ -37,6 +38,16 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#ifndef _WIN32
+namespace AgcDriver {
+
+struct VulkanDeviceTestAccess {
+    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+
+}
+#endif
 
 namespace {
 
@@ -689,6 +700,15 @@ void DccRefillTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSampl
             AgcDriver::Graphics::ClearCachedTextures(device.Device());
         }
     } clearTargets{device};
+#ifndef _WIN32
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    const auto decided = AgcDriver::Graphics::PrepareImportWatch(context);
+    struct Restore {
+        const AgcDriver::Graphics::Context& context;
+        AgcDriver::Graphics::ImportWatch decided;
+        ~Restore() { AgcDriver::Graphics::SetImportWatch(context, decided); }
+    } restore{context, decided};
+#endif
     const auto fill = [](const Block& block, std::size_t bytes, std::uint32_t pattern) {
         for (std::size_t offset = 0; offset + sizeof(pattern) <= bytes; offset += sizeof(pattern)) std::memcpy(block.data + offset, &pattern, sizeof(pattern));
         AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), bytes, pattern);
@@ -696,9 +716,14 @@ void DccRefillTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSampl
     const Color written{0.25f, 0.25f, 0.25f, 0.25f};
     for (const auto samples : {2u, 4u, 8u}) {
         if (selectedSamples != 0 && samples != selectedSamples) continue;
-        for (const auto mode : {0u, 1u, 2u, 3u, 4u, 5u}) {
+        for (const auto mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u}) {
             for (const auto cmasked : {false, true}) {
                 if (mode == 4 && !cmasked) continue;
+#ifdef _WIN32
+                if (mode == 6) continue;
+#else
+                AgcDriver::Graphics::SetImportWatch(context, mode == 5 ? AgcDriver::Graphics::ImportWatch::Watch : mode == 6 ? AgcDriver::Graphics::ImportWatch::Unwatch : decided);
+#endif
                 blocks.push_back(std::make_unique<Block>(layout.Bytes() * samples));
                 auto& source = *blocks.back();
                 std::memset(source.data, 0, source.bytes);
@@ -722,12 +747,13 @@ void DccRefillTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSampl
                 Draw(device, target, false, Float32Export, Program(written, Float32Export, 1u), false, true);
                 const auto dccBytes = AgcDriver::Graphics::MultisampledDccBytes(target);
                 std::string_view expected;
+                bool rewatchable = false;
                 if (mode == 0) {
                     fill(metadata, dccBytes, 0xc0c0c0c0u);
                     if (cmask != nullptr) fill(*cmask, target.cmaskBytes, 0xccccccccu);
                 } else if (mode == 1) {
                     fill(metadata, dccBytes, 0xc0c0c0c0u);
-                } else if (mode == 5) {
+                } else if (mode >= 5) {
                     std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
                     const auto record = [&](const Block& block, std::size_t bytes, std::uint32_t value) {
                         const std::array<std::uint32_t, 4> pattern{value, value, value, value};
@@ -737,6 +763,11 @@ void DccRefillTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSampl
                     record(metadata, dccBytes, 0xc0c0c0c0u);
                     if (cmask != nullptr) record(*cmask, target.cmaskBytes, 0xccccccccu);
                     if (!AgcDriver::GuestMemory::Watched(metadata.Address(), dccBytes) || (cmask != nullptr && !AgcDriver::GuestMemory::Watched(cmask->Address(), target.cmaskBytes))) expected = "requires watched guest memory";
+#ifdef _WIN32
+                    rewatchable = !expected.empty();
+#else
+                    Require(mode == 6 || expected.empty(), "a GPU fill of multisampled DCC metadata left it unwatched although host imports stay watched");
+#endif
                 } else if (mode == 2) {
                     fill(metadata, dccBytes / 2u, 0xc0c0c0c0u);
                     expected = "writes to a resident multisampled DCC";
@@ -747,18 +778,22 @@ void DccRefillTests(AgcDriver::VulkanDevice& device, std::uint32_t selectedSampl
                     fill(*cmask, target.cmaskBytes, 0xccccccccu);
                     expected = "writes to a resident multisampled DCC";
                 }
+                bool drawn = false;
                 if (!expected.empty()) {
                     bool refused = false;
                     try {
                         Draw(device, target, false, Float32Export, Program(written, Float32Export, 1u), false, true);
+                        drawn = true;
                     } catch (const std::runtime_error& error) {
                         refused = std::string_view(error.what()).find(expected) != std::string_view::npos;
                     }
-                    Require(refused, "a write to resident multisampled DCC metadata that is not a full fast-clear fill was not refused");
-                    programCount = 0;
-                    continue;
+                    Require(refused || (drawn && rewatchable), "a write to resident multisampled DCC metadata that is not a full fast-clear fill was not refused");
+                    if (refused) {
+                        programCount = 0;
+                        continue;
+                    }
                 }
-                Draw(device, target, false, Float32Export, Program(written, Float32Export, 1u), false, true);
+                if (!drawn) Draw(device, target, false, Float32Export, Program(written, Float32Export, 1u), false, true);
                 blocks.push_back(std::make_unique<Block>(layout.Bytes()));
                 auto& resolved = *blocks.back();
                 std::memset(resolved.data, 0, resolved.bytes);

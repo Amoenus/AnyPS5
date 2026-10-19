@@ -28,6 +28,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -353,7 +354,7 @@ public:
         ensureGeneralLayout();
         recorder.Sync();
         Require(active->load(std::memory_order_acquire), "multisampled color target was retired during sample readback");
-        checkDccCurrent(target);
+        checkDccCurrent(target, false);
         const auto snapshot = allocate(readUsage, readFlags, format);
         try {
             DeviceBuffer samples(context, static_cast<std::size_t>(alignedBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
@@ -706,7 +707,7 @@ private:
         Require(false, text);
     }
 
-    void checkDccCurrent(const ColorTarget& use, bool metadataRefilled = false) const {
+    void checkDccCurrent(const ColorTarget& use, bool metadataRefilled) const {
         if (dccRanges.empty()) {
             Require(use.dccAddress == 0, "adding DCC to a resident multisampled color target is not implemented");
             return;
@@ -714,8 +715,9 @@ private:
         Require(metadataValid->load(std::memory_order_acquire), "multisampled DCC metadata was released while its color target remains resident");
         static_cast<void>(MultisampledDccBytes(use));
         Require(use.address == target.address && use.dccAddress == target.dccAddress && use.dccControl == target.dccControl && use.dccAlphaOnMsb == target.dccAlphaOnMsb && use.dccPipeAligned == target.dccPipeAligned && use.cmaskAddress == target.cmaskAddress && use.cmaskBytes == target.cmaskBytes && use.tileMode == target.tileMode && use.elementBytes == target.elementBytes && use.pipeBankXor == target.pipeBankXor && use.fmaskAddress == target.fmaskAddress && use.fmaskPipeBankXor == target.fmaskPipeBankXor, "multisampled DCC target layout or metadata changed");
-        for (const auto& range : std::span(dccRanges).first(metadataRefilled ? 1u : dccRanges.size())) {
-            requireDccRange(GuestMemory::Watched(range.address, range.bytes), range, "multisampled DCC target reuse requires watched guest memory");
+        const auto ranges = std::span(dccRanges).first(metadataRefilled ? 1u : dccRanges.size());
+        for (const auto& range : ranges) requireDccRange(GuestMemory::Watched(range.address, range.bytes), range, "multisampled DCC target reuse requires watched guest memory");
+        for (const auto& range : ranges) {
             GuestMemory::CollectWritesUncached(range.address, range.bytes);
             requireDccRange(GuestMemory::UnchangedSince(range.address, range.bytes, range.generation) || !GuestMemory::StoredOver(range.address, range.bytes, range.generation), range, "writes to a resident multisampled DCC target or its metadata are not implemented");
             if (auto* recorder = Recorder::Active(); recorder != nullptr) requireDccRange(!recorder->PendingWriteOverlaps(range.address, range.bytes), range, "pending writes to a resident multisampled DCC target or its metadata are not implemented");
@@ -1372,6 +1374,10 @@ void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
                 std::snprintf(text, sizeof(text), "a fill of 0x%llx+0x%zx with 0x%08x over the HTILE 0x%llx+0x%llx of a sampled multisampled depth-layout texture is not modeled", static_cast<unsigned long long>(address), bytes, pattern, static_cast<unsigned long long>(target->htileAddress), static_cast<unsigned long long>(target->htileBytes));
                 target->htileRefusal = text;
             }
+        }
+        if (target->target.dccAddress != 0) {
+            target->NoteMetadataFill(address, bytes, pattern);
+            continue;
         }
         const auto before = target->cmask.Keys();
         target->cmask.NoteFill(address, bytes, pattern);
