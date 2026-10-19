@@ -44,9 +44,16 @@ struct MockDevice {
     std::uintptr_t next = 0x10000;
     std::map<VkImage, VkImageCreateInfo> images;
     std::vector<std::pair<VkImage, VkImageSubresourceLayers>> copies;
+    std::vector<std::pair<VkImage, VkImageSubresourceLayers>> uploads;
     std::vector<std::pair<VkImage, VkImageSubresourceRange>> barriers;
     std::vector<std::pair<VkImage, VkImageSubresourceRange>> views;
     std::vector<std::pair<VkImage, VkImageSubresourceLayers>> readbacks;
+    struct Blit {
+        VkImage source;
+        VkImage target;
+        VkImageBlit region;
+    };
+    std::vector<Blit> blits;
     std::vector<std::pair<VkImage, VkImageSubresourceRange>> clears;
     std::map<VkBuffer, VkDeviceSize> bufferSizes;
     std::map<VkDeviceMemory, std::vector<std::byte>> memories;
@@ -187,7 +194,10 @@ VKAPI_ATTR void VKAPI_CALL cmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFl
 VKAPI_ATTR void VKAPI_CALL cmdCopyBuffer(VkCommandBuffer, VkBuffer, VkBuffer, std::uint32_t, const VkBufferCopy*) {}
 
 VKAPI_ATTR void VKAPI_CALL cmdCopyBufferToImage(VkCommandBuffer, VkBuffer, VkImage image, VkImageLayout, std::uint32_t count, const VkBufferImageCopy* regions) {
-    for (std::uint32_t index = 0; index < count; ++index) mock.copies.emplace_back(image, regions[index].imageSubresource);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        mock.copies.emplace_back(image, regions[index].imageSubresource);
+        mock.uploads.emplace_back(image, regions[index].imageSubresource);
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL cmdCopyImageToBuffer(VkCommandBuffer, VkImage image, VkImageLayout, VkBuffer, std::uint32_t count, const VkBufferImageCopy* regions) {
@@ -198,6 +208,7 @@ VKAPI_ATTR void VKAPI_CALL cmdBlitImage(VkCommandBuffer, VkImage source, VkImage
     for (std::uint32_t index = 0; index < count; ++index) {
         mock.readbacks.emplace_back(source, regions[index].srcSubresource);
         mock.copies.emplace_back(target, regions[index].dstSubresource);
+        mock.blits.push_back({source, target, regions[index]});
     }
 }
 
@@ -318,9 +329,11 @@ GuestTextureResource arrayTexture(std::uint64_t address, std::uint32_t format, s
 void clearRecords() {
     mock.images.clear();
     mock.copies.clear();
+    mock.uploads.clear();
     mock.barriers.clear();
     mock.views.clear();
     mock.readbacks.clear();
+    mock.blits.clear();
     mock.clears.clear();
 }
 
@@ -342,6 +355,10 @@ void checkInsideImage(VkImage image, const VkImageCreateInfo& info, const std::s
     }
     for (const auto& [target, layers] : mock.readbacks) {
         if (target == image) checkLayers(layers, "a copy read");
+    }
+    for (const auto& blit : mock.blits) {
+        if (blit.source == image) checkLayers(blit.region.srcSubresource, "a blit read");
+        if (blit.target == image) checkLayers(blit.region.dstSubresource, "a blit wrote");
     }
     for (const auto& [target, range] : mock.barriers) {
         if (target == image) checkRange(range, "a barrier");
@@ -588,6 +605,58 @@ void TestStorageFullChainIsUnchanged(const Context& context, TextureDetiler& det
     checkInsideImage(image, info, "64x32 storage upload");
 }
 
+void TestSrgbLevelsPastTheFullChain(const Context& original) {
+    for (const auto format : {ShaderRecompiler::IrBufferFormat::Format8Srgb, ShaderRecompiler::IrBufferFormat::Format8_8Srgb}) {
+        auto context = original;
+        context.srgbDecodeFormats |= ShaderRecompiler::SrgbDecodeBit(format);
+        context.srgbCopyFormats |= ShaderRecompiler::SrgbDecodeBit(format);
+        TextureDetiler detiler(context);
+        for (const auto levels : {5u, 10u}) {
+            auto descriptor = arrayTexture(0x1070000000, static_cast<std::uint32_t>(format), 28, 1, 2, levels);
+            const std::vector<std::byte> snapshot(static_cast<std::size_t>(DescribeSurface(descriptor).guestBytes));
+            clearRecords();
+            {
+                const Texture texture(context, detiler, descriptor, VkComponentMapping{}, snapshot);
+                Require(mock.images.size() == 2, "an sRGB upload needs the source and expanded images");
+                Require(mock.blits.size() == 5, "an sRGB upload must blit each physical level once");
+                for (const auto& [image, info] : mock.images) {
+                    Require(info.mipLevels == 5 && info.arrayLayers == 2, "an sRGB upload lost its physical mip chain or layers");
+                    checkInsideImage(image, info, "sRGB sampled upload");
+                }
+                for (std::uint32_t level = 0; level < 5; ++level) {
+                    const auto& blit = mock.blits[level];
+                    Require(blit.region.srcSubresource.mipLevel == level && blit.region.dstSubresource.mipLevel == level && blit.region.srcSubresource.layerCount == 2 && blit.region.dstSubresource.layerCount == 2, "an sRGB upload skipped a physical mip or layer");
+                    for (const auto& [target, copied] : mock.uploads) Require(target == blit.source, "an sRGB upload copied guest bytes into its expanded image");
+                    Require(blit.source != blit.target, "an sRGB upload blitted its image onto itself");
+                }
+            }
+            descriptor = storageSurface(28, 1, levels);
+            descriptor.format = static_cast<std::uint32_t>(ShaderRecompiler::SrgbUnormFormat(format));
+            GuestSurface memory(static_cast<std::size_t>(DescribeSurface(descriptor).guestBytes));
+            descriptor.baseAddress = memory.Address();
+            clearRecords();
+            {
+                const auto source = StorageTexture::Create(context, detiler, descriptor, 0);
+                descriptor.format = static_cast<std::uint32_t>(format);
+                for (const auto base : {0u, 4u}) {
+                    descriptor.baseLevel = base;
+                    mock.blits.clear();
+                    Texture texture(context, source, descriptor, VkComponentMapping{}, Texture::SrgbExpandTag{});
+                    Require(mock.views.back().second.baseMipLevel == base && mock.views.back().second.levelCount == 5u - base, "an sRGB storage copy view names nonphysical levels");
+                    Require(texture.RefreshDepthCopy(), "an sRGB storage copy did not refresh");
+                    Require(mock.blits.size() == 5, "an sRGB storage copy must blit each physical level once");
+                    for (std::uint32_t level = 0; level < 5; ++level) {
+                        const auto& blit = mock.blits[level];
+                        Require(blit.source == source->Image() && blit.source != blit.target, "an sRGB storage copy read the wrong image");
+                        Require(blit.region.srcSubresource.mipLevel == level && blit.region.dstSubresource.mipLevel == level, "an sRGB storage copy skipped a physical mip");
+                    }
+                    for (const auto& [image, info] : mock.images) checkInsideImage(image, info, "sRGB storage copy");
+                }
+            }
+        }
+    }
+}
+
 ShaderRecompiler::DescriptorValue imageWords(std::uint32_t type, std::uint32_t width, std::uint32_t height, std::uint32_t depth, std::uint32_t base, std::uint32_t last, std::uint32_t maxMip) {
     return {{0x00010000u, (FormatR8G8B8A8Unorm << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), 0xfacu | (base << 12u) | (last << 16u) | (type << 28u), depth - 1u, maxMip << 4u, 0u, 0u}, 8u};
 }
@@ -675,6 +744,7 @@ void RunTextureMipChainTests() {
         TestStorageLevelsPastTheFullChain(context, detiler);
         TestStorageFullChainIsUnchanged(context, detiler);
         TestShaderLevelsPastTheView(context, detiler);
+        TestSrgbLevelsPastTheFullChain(context);
     }
     mock = MockDevice{};
 }
