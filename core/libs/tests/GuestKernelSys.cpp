@@ -1,4 +1,5 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libc/include/RemoveTree.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "SceTypes.hpp"
 #include <array>
@@ -664,16 +665,6 @@ int main() {
         Require(!std::filesystem::exists(std::filesystem::symlink_status(throughLink)));
     }
 #endif
-#ifdef _WIN32
-    // std::filesystem::remove_all loops forever when the tree contains a
-    // dangling symbolic link: fs::remove reports such a link as missing and
-    // clears the error, so recursive_directory_iterator::__erase keeps
-    // retrying it. The fixture always contains dangling links here, so
-    // remove it through the shell instead.
-    const auto cleanup = L"cmd /c rd /s /q \"" + root.wstring() + L"\"";
-    Require(_wsystem(cleanup.c_str()) == 0);
-#else
-    std::filesystem::remove_all(root);
-#endif
+    RemoveTree(root);
     return 0;
 }

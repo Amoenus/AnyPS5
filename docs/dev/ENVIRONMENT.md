@@ -152,7 +152,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_HOOK_FLUSH_CPU_BLOCKS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | set to 0 flushes pending images whose every 64 KiB block the CPU wrote, instead of skipping them |
 | `APS5_HOOK_FULL_SYNC` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | makes the flush hook's recorded-store wait a full Sync under the GpuMutex |
 | `APS5_HOOK_LOCKED_WAIT` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | keeps the flush hook's pending-write wait under the GpuMutex |
-| `APS5_HOST_IMPORT_MIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` | 6144 | budget in MiB for pinned host imports; 6144 is the floor, and an unset or 0 value uses the largest host heap minus 2 GiB |
+| `APS5_HOST_IMPORT_MIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` | 0 | budget in MiB for pinned host imports; `0` selects the larger of 6144 MiB and half the physical memory, at most the largest host heap minus the larger of 2 GiB and half that heap (4055 MiB on a 16 GB Windows PC with an RTX 4060) |
 | `APS5_IGNORE_DEPTH_TEST` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/State.cpp` |  | renders depth- and stencil-tested draws without a depth target as if the tests always passed |
 | `APS5_INDIRECT_VERTEX_MIB` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/IndirectDraw.cpp` | 64 | cap in MiB on a vertex attribute extent, above which a GPU-side indirect draw resolves on the CPU |
 | `APS5_INSERT_COMPARE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/DispatchCache.cpp` |  | compares a fresh capture's regions against the recorder before inserting it into the cache |
@@ -506,6 +506,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `ANYPS5_INPUT_CONFIG` | string | `core/libs/prx/libSceVideoOut/src/InputMapping.cpp` |  | path of the input mapping file that binds host keys and mouse to guest pad actions |
 | `ANYPS5_REQUIRE_DISPLAY` | presence | `core/libs/prx/libSceVideoOut/tests/Flip.cpp` |  | makes video-out tests fail instead of skipping when no display or Vulkan device is available |
 | `APS5_NO_PAD_INPUT` | presence | `core/libs/prx/libSceVideoOut/src/PadInput.cpp` |  | ignores keyboard and mouse input so a measurement run is not advanced by a stray press |
+| `APS5_VIDEOOUT_TELEMETRY_DIR` | string | `core/libs/prx/libSceVideoOut/src/Telemetry.cpp` |  | directory where videoout.jsonl is appended with the pad and present telemetry lines; nothing is opened when unset or empty |
 
 ### libSceVideodec2
 
