@@ -292,6 +292,7 @@ Context mockContext() {
     context.limits.maxImageDimension3D = 2048;
     context.limits.maxImageDimensionCube = 16384;
     context.limits.maxImageArrayLayers = 2048;
+    for (auto& count : context.limits.maxComputeWorkGroupCount) count = 65535u;
     context.textureCompressionBC = true;
     return context;
 }
