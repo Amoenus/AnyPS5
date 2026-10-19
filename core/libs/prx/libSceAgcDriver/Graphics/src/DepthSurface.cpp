@@ -670,7 +670,6 @@ public:
     bool samplingActive = false;
     DepthSamplingState sampling;
     std::uint64_t clearGeneration = 0u;
-    bool clearCompletionSeen = false;
     bool clearCompletionQueued = false;
     std::shared_ptr<OwnedImage> owned;
 
@@ -1659,7 +1658,6 @@ bool NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::siz
             else if (surface->clearGeneration != 0u) surface->sampling.Refuse("overlapping native multisample depth clear transitions are not implemented");
             else {
                 surface->clearGeneration = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
-                surface->clearCompletionSeen = false;
                 surface->clearCompletionQueued = false;
                 completionCandidate = true;
             }
@@ -1691,7 +1689,6 @@ void CompleteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
         if (bytes < metadata.bytes) continue;
         Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, surface->clearGeneration), "CPU writes raced native multisample depth clear");
         GuestMemory::MarkWritten(metadata.address, metadata.bytes);
-        surface->clearCompletionSeen = true;
         surface->clearCompletionQueued = false;
     }
 }
