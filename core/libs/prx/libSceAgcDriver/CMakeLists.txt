@@ -1864,7 +1864,7 @@ if(BUILD_TESTING)
         set_tests_properties(agc_driver_native_msaa_vertex_input PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-    foreach(nativeColorMode IN ITEMS readback snapshot publication cpu_publication)
+    foreach(nativeColorMode IN ITEMS readback snapshot publication cpu_publication buffer_publication buffer_refusal draw_recipe)
         string(REPLACE "_" "-" nativeColorArgument "${nativeColorMode}")
         add_test(NAME agc_driver_native_color_${nativeColorMode} COMMAND agc_driver_sample_multisample_target_tests --${nativeColorArgument})
         set_tests_properties(agc_driver_native_color_${nativeColorMode} PROPERTIES TIMEOUT 30 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

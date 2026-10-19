@@ -7,6 +7,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -123,7 +125,6 @@ constexpr std::array<std::array<float, 4>, 3> Triangle{{
 
 alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
 
-alignas(256) constexpr std::array<std::uint32_t, 7> BufferLoadCode{0x34020082u, 0xe8001000u | (20u << 19u), 0x80000201u, 0xbf8c0000u, 0xe0701000u, 0x80010201u, 0xbf810000u};
 
 struct Block {
     explicit Block(std::size_t bytes) : bytes(bytes) {
@@ -980,44 +981,6 @@ void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics:
     device.WaitIdle();
 }
 
-ShaderRecompiler::RecompileResult CompileBufferLoad(AgcDriver::VulkanDevice& device, std::uint64_t source, std::uint64_t destination) {
-    const std::array<std::uint32_t, 8> userData{
-        static_cast<std::uint32_t>(source), static_cast<std::uint32_t>((source >> 32u) & 0xffffu), Threads * 4u, 0x31016facu,
-        static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>((destination >> 32u) & 0xffffu), Threads * 4u, 0x31016facu
-    };
-    const std::span<const std::uint32_t> code(BufferLoadCode);
-    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
-    const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0u, {false, false, false}, false, 1};
-    ShaderRecompiler::RecompileRequest request{
-        {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
-        {32, 0, userData, compute, std::nullopt, std::nullopt, memory}, device.Target(), {0, 0, 0, 128}
-    };
-    request.useCache = false;
-    return ShaderRecompiler::Recompile(request);
-}
-
-void CheckBufferLoad(AgcDriver::VulkanDevice& device, const ShaderRecompiler::RecompileResult& program, const Block& output, std::shared_ptr<const AgcDriver::Recipe>* recipe = nullptr) {
-    const std::span words(reinterpret_cast<std::uint32_t*>(output.data), Threads * 2u);
-    std::fill(words.begin(), words.end(), 0xdeadbeefu);
-    device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), nullptr, recipe);
-    device.WaitIdle();
-    Require(std::all_of(words.begin(), words.begin() + Threads, [](auto word) { return word == 0; }), "the nonresident typed buffer load did not read zeroes");
-    Require(std::all_of(words.begin() + Threads, words.end(), [](auto word) { return word == 0xdeadbeefu; }), "the typed buffer load overwrote its output boundary");
-}
-
-template<class TAction>
-void CheckBufferRefused(TAction&& action, const char* name, std::vector<std::string>& missing) {
-    std::string refusal;
-    try {
-        action();
-    } catch (const std::runtime_error& error) {
-        refusal = error.what();
-    }
-    const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
-    std::cout << "native buffer " << name << ": " << (refused ? "refused" : "missing refusal") << '\n';
-    if (!refused) missing.emplace_back(std::string(name) + ": " + refusal);
-}
-
 void CheckVertexValues(std::uint64_t address, std::uint32_t stride) {
     std::array<std::uint32_t, 4> expected{};
     for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
@@ -1229,18 +1192,431 @@ void Publication(AgcDriver::VulkanDevice& device, bool automatic = false) {
     std::puts("native color publication: known full fill from a producer completion precedes the publication baseline; recursive publication stays refused");
 }
 
+alignas(256) constexpr std::array<std::uint32_t, 7> BufferLoadCode{0x34020082u, 0xe8001000u | (20u << 19u), 0x80000201u, 0xbf8c0000u, 0xe0701000u, 0x80010201u, 0xbf810000u};
+
+ShaderRecompiler::RecompileResult CompileBufferLoad(AgcDriver::VulkanDevice& device, std::uint64_t source, std::uint64_t destination) {
+    const std::array<std::uint32_t, 8> userData{
+        static_cast<std::uint32_t>(source), static_cast<std::uint32_t>((source >> 32u) & 0xffffu), Threads * 4u, 0x31016facu,
+        static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>((destination >> 32u) & 0xffffu), Threads * 4u, 0x31016facu
+    };
+    const std::span<const std::uint32_t> code(BufferLoadCode);
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0u, {false, false, false}, false, 1};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
+        {32, 0, userData, compute, std::nullopt, std::nullopt, memory}, device.Target(), {0, 0, 0, 128}
+    };
+    request.useCache = false;
+    return ShaderRecompiler::Recompile(request);
+}
+
+void CheckBufferLoad(AgcDriver::VulkanDevice& device, const ShaderRecompiler::RecompileResult& program, const Block& output, std::shared_ptr<const AgcDriver::Recipe>* recipe = nullptr) {
+    const std::span words(reinterpret_cast<std::uint32_t*>(output.data), Threads * 2u);
+    std::fill(words.begin(), words.end(), 0xdeadbeefu);
+    device.Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), nullptr, recipe);
+    device.WaitIdle();
+    Require(std::all_of(words.begin(), words.begin() + Threads, [](auto word) { return word == 0; }), "the nonresident typed buffer load did not read zeroes");
+    Require(std::all_of(words.begin() + Threads, words.end(), [](auto word) { return word == 0xdeadbeefu; }), "the typed buffer load overwrote its output boundary");
+}
+
+template<class TAction>
+void CheckBufferRefused(TAction&& action, const char* name, std::vector<std::string>& missing, std::string_view expected = "guest color snapshots with unsupported tiling or multisample metadata are not implemented") {
+    std::string refusal;
+    try {
+        action();
+    } catch (const std::runtime_error& error) {
+        refusal = error.what();
+    }
+    const bool refused = refusal.find(expected) != std::string::npos;
+    std::cout << "native buffer " << name << ": " << (refused ? "refused" : "missing refusal") << '\n';
+    if (!refused) missing.emplace_back(std::string(name) + ": " + refusal);
+}
+
+
+void BufferRefusals(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+    Block block(4u * BlockBytes);
+    Block output(2u * 1024u * 1024u);
+    struct ReleaseDevice {
+        decltype(device)& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const auto warm = CompileBufferLoad(*device, block.Address(), output.Address());
+    std::shared_ptr<const AgcDriver::Recipe> recipe;
+    CheckBufferLoad(*device, warm, output, &recipe);
+    const auto deferredProgram = CompileBufferLoad(*device, block.Address() + Threads * 4u, output.Address());
+    const auto prepared = device->PrepareDispatch(deferredProgram, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
+    auto color = DecodeTarget(block);
+    color.tileMode = AgcDriver::Graphics::ColorTileMode::Standard4KB;
+    color.bytes = AgcDriver::Graphics::ColorTargetLayout(Side, Side, color.tileMode, color.elementBytes).Bytes();
+    const auto state = TargetState(color);
+    Draw(*device, state);
+    CheckSamples(state, LoadSamples(*device, block), {});
+    const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
+    Require(colorBytes != 0 && colorBytes <= block.bytes, "the 4x target's color memory does not fit its block");
+    AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
+    CheckUniform(LoadSamples(*device, block), Ones, "after a fill of the target's color memory with half-float ones");
+    const auto guardedBytes = std::max(color.bytes * color.samples, static_cast<std::uint64_t>(Side) * Side * color.elementBytes * color.samples);
+    Require(guardedBytes + Threads * 4u <= block.bytes, "the unsupported target guard leaves no adjacent buffer control");
+    std::vector<std::string> missing;
+    const auto dispatch = [&](const auto& program) {
+        device->Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
+        device->WaitIdle();
+    };
+    CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + 4u, output.Address())); }, "fresh read", missing);
+    CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + colorBytes - 4u, output.Address())); }, "edge read", missing);
+    CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + guardedBytes, block.Address())); }, "write", missing, "whose samples are only on the host");
+    CheckBufferRefused([&] { dispatch(warm); }, "warmed dispatch", missing);
+    if (prepared != nullptr) {
+        CheckBufferRefused([&] {
+            device->Dispatch(deferredProgram, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), prepared);
+            device->WaitIdle();
+        }, "deferred dispatch", missing);
+    }
+    bool reused = false;
+    if (recipe != nullptr) {
+        const auto hit = device->PrepareRecipe(recipe, false);
+        Require(hit != nullptr, "the warmed buffer recipe did not retain its template");
+        reused = true;
+        CheckBufferRefused([&] {
+            AgcDriver::VulkanDevice::IndirectOutcome outcome{};
+            device->DispatchRecipe(warm, 1, 1, 1, 0, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), hit, outcome);
+            device->WaitIdle();
+        }, "recipe dispatch", missing);
+    }
+    CheckBufferLoad(*device, CompileBufferLoad(*device, block.Address() + guardedBytes, output.Address()), output);
+    CheckUniform(LoadSamples(*device, block), Ones, "after the native buffer access refusals and adjacent buffer control");
+    std::cout << "native buffer controls: adjacent=passed deferred=" << (prepared != nullptr) << " recipe=" << reused << std::endl;
+    std::string failures;
+    for (const auto& item : missing) failures += " " + item;
+    Require(missing.empty(), "buffer aliases of live native MSAA color memory bypassed the guard:" + failures);
+}
+
+void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+    using namespace AgcDriver::Graphics;
+    Block block(4u * BlockBytes);
+    Block output(2u * 1024u * 1024u);
+    struct ReleaseDevice {
+        std::unique_ptr<AgcDriver::VulkanDevice>& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const auto color = DecodeTarget(block);
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    const auto bytes = static_cast<std::size_t>(MultisampledColorBytes(color));
+    const auto warm = CompileBufferLoad(*device, block.Address(), output.Address());
+    std::shared_ptr<const AgcDriver::Recipe> recipe;
+    const auto check = [&](const auto& action, bool edge, std::uint32_t value) {
+        const std::span words(reinterpret_cast<std::uint32_t*>(output.data), Threads * 2u);
+        std::fill(words.begin(), words.end(), 0xdeadbeefu);
+        action();
+        device->WaitIdle();
+        for (std::size_t index = 0; index < Threads; ++index) Require(words[index] == (edge && index != 0u ? 0u : value), "a native buffer consumer read stale or reordered color words at lane " + std::to_string(index));
+        Require(std::all_of(words.begin() + Threads, words.end(), [](auto word) { return word == 0xdeadbeefu; }), "a native buffer consumer changed its output boundary");
+    };
+    const auto dispatch = [&](const auto& program) { device->Dispatch(program, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data())); };
+    check([&] { device->Dispatch(warm, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), nullptr, &recipe); }, false, 0u);
+    Require(recipe != nullptr, "the buffer publication fixture did not capture a recipe");
+    const auto hit = device->PrepareRecipe(recipe, false);
+    Require(hit != nullptr, "the buffer publication fixture did not prepare a recipe hit");
+    const auto deferredProgram = CompileBufferLoad(*device, block.Address() + Threads * 4u, output.Address());
+    const auto prepared = device->PrepareDispatch(deferredProgram, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
+    Require(prepared != nullptr, "the buffer publication fixture did not prepare a deferred dispatch");
+    const std::vector<std::byte> zeros(bytes);
+    const auto arm = [&] {
+        AgcDriver::GuestMemory::Write(block.Address(), zeros);
+        Draw(*device, TargetState(color));
+        NoteColorMetadataFill(block.Address(), bytes, FillOnes);
+        CheckUniform(LoadSamples(*device, block), Ones, "before a native buffer consumer");
+    };
+    arm();
+    check([&] { dispatch(CompileBufferLoad(*device, block.Address() + bytes, output.Address())); }, false, 0u);
+    Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * Samples * 8u, "a neighboring logical buffer retired the native owner");
+    check([&] { dispatch(warm); }, false, FillOnes);
+    RequireNoMultisampleTarget(block.Address(), bytes, "after warmed buffer publication");
+    std::puts("native buffer publication: adjacent range retains owner; warmed dispatch reads native words");
+    arm();
+    check([&] { dispatch(CompileBufferLoad(*device, block.Address() + 4u, output.Address())); }, false, FillOnes);
+    std::puts("native buffer publication: fresh dispatch reads native words");
+    arm();
+    check([&] { dispatch(CompileBufferLoad(*device, block.Address() + bytes - 4u, output.Address())); }, true, FillOnes);
+    std::puts("native buffer publication: edge range preserves the neighboring words");
+    arm();
+    check([&] { device->Dispatch(deferredProgram, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), prepared); }, false, FillOnes);
+    std::puts("native buffer publication: deferred dispatch refreshes the captured input");
+    arm();
+    check([&] {
+        AgcDriver::VulkanDevice::IndirectOutcome outcome{};
+        device->DispatchRecipe(warm, 1u, 1u, 1u, 0u, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), hit, outcome);
+    }, false, FillOnes);
+    std::puts("native buffer publication: recipe dispatch reads native words");
+    arm();
+    std::string refusal;
+    try {
+        dispatch(CompileBufferLoad(*device, block.Address() + bytes, block.Address()));
+        device->WaitIdle();
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find("a shader buffer write") != std::string::npos, "a writable native buffer alias lost its refusal: " + refusal);
+    CheckUniform(LoadSamples(*device, block), Ones, "after a refused native buffer write");
+    std::puts("native buffer publication: writable aliases remain refused without changing native samples");
+    arm();
+    const auto* beforeBegin = reinterpret_cast<const std::byte*>(block.data);
+    const std::vector<std::byte> before(beforeBegin, beforeBegin + block.bytes);
+    refusal.clear();
+    try {
+        const auto alias = CompileBufferLoad(*device, block.Address() + 4u, block.Address());
+        const auto aliasPrepared = device->PrepareDispatch(alias, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
+        Require(aliasPrepared != nullptr, "the overlapping alias probe did not prepare resources");
+        std::puts("native buffer publication: overlapping alias preparation returned a resource plan without refusal");
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find("a shader buffer write") != std::string::npos, "an overlapping read-only binding allowed a writable native alias during preparation: " + refusal);
+    Require(std::equal(before.begin(), before.end(), beforeBegin), "a rejected writable alias published its overlapping read-only source");
+    Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * Samples * 8u, "a rejected writable alias retired its native owner");
+    CheckUniform(LoadSamples(*device, block), Ones, "after a refused overlapping read-only and writable binding");
+    std::puts("native buffer publication: overlapping read-only and writable bindings are refused before publication, with bytes and native owner retained");
+}
+
+ShaderRecompiler::RecompileResult CompileMovedVertex(AgcDriver::VulkanDevice& device, std::uint64_t address) {
+    const std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (16u << 16u), static_cast<std::uint32_t>(Triangle.size()), 0x01016facu};
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(VertexCode.data()), std::as_bytes(std::span(VertexCode))}}};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Vertex, reinterpret_cast<std::uintptr_t>(VertexCode.data()), VertexCode, 0, {}},
+        {64, 0, userData, std::nullopt, std::nullopt, ShaderRecompiler::ShaderVertexStageInfo{}, memory},
+        device.Target(), {0, 0, 0, 64}
+    };
+    request.useCache = false;
+    return ShaderRecompiler::Recompile(request);
+}
+
+std::vector<std::array<std::uint32_t, 4>> RasterMovedSnapshot(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::State& state, std::span<const AgcDriver::Graphics::CompiledShader> shaders, const AgcDriver::Graphics::ShaderResources& resources, const AgcDriver::Graphics::ShaderResources::DrawBindings& prepared) {
+    using namespace AgcDriver::Graphics;
+    const auto vertexInput = BuildVertexInputLayout(context, shaders.front().program->vertexAttributes);
+    Require(vertexInput.bindings.empty(), "the moved raster shader does not fetch positions through its guest buffer");
+    constexpr auto pixelBytes = sizeof(std::array<std::uint32_t, 4>);
+    constexpr auto resultBytes = Side * Side * pixelBytes;
+    AgcDriver::Graphics::Buffer staging(context, resultBytes + 2u * pixelBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    std::fill(staging.Bytes().begin(), staging.Bytes().end(), std::byte{0xa5});
+    auto target = std::make_shared<RenderTarget>(context, state.color, false);
+    Pipeline pipeline(context, state, vertexInput, resources, shaders, VK_IMAGE_LAYOUT_GENERAL);
+    const std::array views{target->View()};
+    const std::array<std::shared_ptr<void>, 1> owners{target};
+    const auto framebuffer = pipeline.AcquireFramebuffer(views, owners, state.renderExtent);
+    CommandBatch batch(context);
+    const auto commands = batch.Handle();
+    VkImageMemoryBarrier initialize{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    initialize.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    initialize.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    initialize.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    initialize.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    initialize.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    initialize.image = target->Image();
+    initialize.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+    context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &initialize);
+    VkClearColorValue clear{};
+    context.Resolved(&DeviceFunctions::cmdClearColorImage, "vkCmdClearColorImage")(commands, target->Image(), VK_IMAGE_LAYOUT_GENERAL, &clear, 1u, &initialize.subresourceRange);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+    pipeline.Begin(commands, *framebuffer, state.renderExtent, state);
+    auto pushes = AssemblePushConstants(shaders);
+    resources.PatchPushConstants(pushes);
+    pipeline.PushConstants(commands, PushConstantStages(shaders), pushes);
+    if (prepared.allocation.set != VK_NULL_HANDLE) context.Resolved(&DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout(), 0u, 1u, &prepared.allocation.set, 0u, nullptr);
+    if (prepared.fragmentAllocation.set != VK_NULL_HANDLE) context.Resolved(&DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout(), ShaderRecompiler::RuntimeAbi::FragmentDescriptorSet, 1u, &prepared.fragmentAllocation.set, 0u, nullptr);
+    context.Resolved(&DeviceFunctions::cmdDraw, "vkCmdDraw")(commands, static_cast<std::uint32_t>(Triangle.size()), 1u, 0u, 0u);
+    EndRenderPass(context, commands);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = pixelBytes;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+    copy.imageExtent = {Side, Side, 1u};
+    context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, target->Image(), VK_IMAGE_LAYOUT_GENERAL, staging.Handle(), 1u, &copy);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    batch.SubmitAndWait();
+    staging.Invalidate();
+    const auto bytes = staging.Bytes();
+    Require(std::all_of(bytes.begin(), bytes.begin() + pixelBytes, [](auto value) { return value == std::byte{0xa5}; }) && std::all_of(bytes.end() - pixelBytes, bytes.end(), [](auto value) { return value == std::byte{0xa5}; }), "moved raster readback changed its outer sentinels");
+    std::vector<std::array<std::uint32_t, 4>> result(Side * Side);
+    std::memcpy(result.data(), bytes.data() + pixelBytes, resultBytes);
+    return result;
+}
+
+void CheckRecipePixels(AgcDriver::VulkanDevice& device, const Block& destination, const AgcDriver::Graphics::ColorTarget& target, std::uint32_t word) {
+    device.WaitIdle();
+    std::vector<std::byte> tiled(destination.bytes);
+    AgcDriver::GuestMemory::Read(destination.Address(), tiled);
+    const AgcDriver::Graphics::ColorTargetLayout layout(Side, Side, target.tileMode, target.elementBytes);
+    Require(layout.Bytes() == target.bytes && target.bytes <= tiled.size(), "the recipe output footprint is invalid");
+    Require(std::all_of(tiled.begin() + target.bytes, tiled.end(), [](auto value) { return value == std::byte{0xa5}; }), "the recipe output changed its neighboring bytes");
+    std::vector<std::array<std::uint32_t, 4>> pixels(Side * Side);
+    layout.Detile(std::span(tiled).first(target.bytes), std::as_writable_bytes(std::span(pixels)));
+    const std::array<std::uint32_t, 4> drawn{word, 0u, 0u, std::bit_cast<std::uint32_t>(1.0f)};
+    std::uint32_t checked = 0u;
+    std::uint32_t covered = 0u;
+    for (std::uint32_t y = 0; y < Side; ++y) {
+        for (std::uint32_t x = 0; x < Side; ++x) {
+            const auto& pixel = pixels[y * Side + x];
+            Require(pixel == drawn || pixel == std::array<std::uint32_t, 4>{}, "the recipe draw rendered stale or unexpected buffer bits at pixel " + std::to_string(y * Side + x) + ": expected red " + std::to_string(word) + ", got " + std::to_string(pixel[0]) + "," + std::to_string(pixel[1]) + "," + std::to_string(pixel[2]) + "," + std::to_string(pixel[3]));
+            covered += pixel == drawn ? 1u : 0u;
+            const auto distance = std::min({EdgeDistance(x + 0.5, y + 0.5, 0u), EdgeDistance(x + 0.5, y + 0.5, 1u), EdgeDistance(x + 0.5, y + 0.5, 2u)});
+            if (std::fabs(distance) < EdgeMargin) continue;
+            ++checked;
+            Require((pixel == drawn) == (distance > 0.0), "the recipe result disagrees with triangle coverage");
+        }
+    }
+    Require(checked >= Side * Side * 9u / 10u && covered != 0u && covered != pixels.size(), "the recipe fixture did not check covered and clear pixels");
+    std::printf("native draw recipe: word=0x%08x covered=%u checked=%u; pixels and neighboring bytes passed\n", word, covered, checked);
+}
+
+void DrawRecipePublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+    using namespace AgcDriver::Graphics;
+    Block source(4u * BlockBytes);
+    Block movedSource(4u * BlockBytes);
+    Block destination(2u * BlockBytes);
+    Block vertexData(BlockBytes);
+    struct ReleaseDevice {
+        std::unique_ptr<AgcDriver::VulkanDevice>& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    Require(context.recorder != nullptr, "the draw recipe fixture has no recorder");
+    StoreWords(source, source.bytes, FillOnes);
+    StoreWords(movedSource, movedSource.bytes, FillOnes);
+    std::memcpy(vertexData.data, Triangle.data(), sizeof(Triangle));
+    ColorTarget output{};
+    output.address = destination.Address();
+    output.surfaceAddress = output.address;
+    output.extent = {Side, Side};
+    output.surfaceExtent = output.extent;
+    output.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    output.componentMapping = 0xe4u;
+    output.elementBytes = 16u;
+    output.tileMode = ColorTileMode::RenderTarget;
+    output.bytes = ColorTargetLayout(Side, Side, output.tileMode, output.elementBytes).Bytes();
+    Require(output.bytes < destination.bytes, "the recipe target has no neighboring sentinel range");
+    std::fill(destination.data + output.bytes, destination.data + destination.bytes, std::uint8_t{0xa5});
+    const auto state = TargetState(output);
+    auto vertex = CompileMovedVertex(*device, vertexData.Address());
+    alignas(256) static constexpr std::array<std::uint32_t, 9> code{
+        0x7e020280u, 0xe0301000u, 0x80000201u, 0xbf8c3f70u, 0x7e000280u, 0x7e0602f2u, 0xf800180fu, 0x03010002u, 0xbf810000u,
+    };
+    const auto address = source.Address() + 4u;
+    const std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), Threads * 4u, 0x31016facu};
+    const auto codeAddress = reinterpret_cast<std::uintptr_t>(code.data());
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{codeAddress, std::as_bytes(std::span(code))}}};
+    const AgcDriver::Registers registers{{0x1b6, 0x8000}, {0x1b3, 0}, {0x1b4, 0}, {0x203, 0}, {0x1c5, Float32Export}};
+    const auto vertexPush = static_cast<std::uint32_t>(vertex.pushConstants.size());
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Fragment, codeAddress, code, 0, {}},
+        {64, 0, userData, std::nullopt, DecodePixelStageInfo(registers, ExportMappings(state)), std::nullopt, memory},
+        device->Target(), PixelPushLayout(vertexPush, device->Target())
+    };
+    request.useCache = false;
+    auto fragment = ShaderRecompiler::Recompile(request);
+    const auto binding = std::find_if(fragment.bindings.begin(), fragment.bindings.end(), [](const auto& entry) { return entry.role == ShaderRecompiler::DescriptorRole::GuestBuffers; });
+    Require(binding != fragment.bindings.end() && binding->count == 1u && binding->guestDescriptor.size() == 4u && binding->bufferWritten.size() == 1u && !binding->bufferWritten[0], "the recipe fragment shader does not have one read-only guest buffer");
+    const std::array<CompiledShader, 2> shaders{{{ShaderStage::Vertex, &vertex, 0u}, {ShaderStage::Fragment, &fragment, PixelPushOffset(vertexPush, device->Target())}}};
+    const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(Triangle.size()), 0, 1, 0, false};
+    std::shared_ptr<const AgcDriver::DrawRecipe> recipe;
+    device->Draw(state, draw, shaders, {}, &recipe);
+    Require(recipe != nullptr, "the initial buffer draw did not capture a recipe");
+    CheckRecipePixels(*device, destination, output, FillOnes);
+    Require(device->DrawFromRecipe(state, draw, shaders, {}, recipe) == AgcDriver::RecipeOutcome::Recorded, "the ordinary buffer draw recipe did not replay");
+    CheckRecipePixels(*device, destination, output, FillOnes);
+    const auto arm = [&](const Block& block, std::uint32_t fill) {
+        const auto color = DecodeTarget(block);
+        Draw(*device, TargetState(color));
+        NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(MultisampledColorBytes(color)), fill);
+        CheckUniform(LoadSamples(*device, block), fill == FillOnes ? Ones : std::array<float, 4>{}, "before recipe source writes");
+        StoreSamples(*device, TargetDescriptor(block, SampleShift), SampleWrites([](std::uint32_t, std::uint32_t y, std::uint32_t sample) { return y < 2u && sample == 0u; }));
+        const auto loaded = LoadSamples(*device, block);
+        const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, color.elementBytes, Samples, Side, Side, 1u, 0u);
+        std::vector<std::byte> expected(static_cast<std::size_t>(layout.Bytes()));
+        for (std::size_t offset = 0; offset < expected.size(); offset += sizeof(fill)) std::memcpy(expected.data() + offset, &fill, sizeof(fill));
+        layout.Tile(HalfSamples(loaded), expected);
+        for (std::size_t offset = 0; offset < expected.size(); offset += sizeof(FillOnes)) Require(std::memcmp(block.data + offset, &FillOnes, sizeof(FillOnes)) == 0, "the native recipe source was published early");
+        return expected;
+    };
+    const auto checkSource = [&](const Block& block, const std::vector<std::byte>& expected) {
+        RequireNoMultisampleTarget(block.Address(), expected.size(), "after a recipe consumer");
+        Require(std::equal(expected.begin(), expected.end(), reinterpret_cast<const std::byte*>(block.data)), "the recipe consumer published incorrect source bytes or padding");
+    };
+    const auto consume = [&](bool replay) {
+        if (!replay) {
+            device->Draw(state, draw, shaders, {}, &recipe);
+            std::puts("native draw routing: a moved descriptor uses the ordinary draw path");
+            return;
+        }
+        const auto outcome = device->DrawFromRecipe(state, draw, shaders, {}, recipe);
+        Require(outcome == AgcDriver::RecipeOutcome::Recorded, "the unchanged guarded input did not replay from its recipe");
+        std::puts("native draw recipe: guarded input recorded from recipe");
+    };
+    const auto expected = arm(source, FillOnes);
+    std::uint32_t word = 0u;
+    std::memcpy(&word, expected.data() + 4u, sizeof(word));
+    Require(word != FillOnes, "the guarded recipe source did not change its loaded word");
+    consume(true);
+    CheckRecipePixels(*device, destination, output, word);
+    checkSource(source, expected);
+    AgcDriver::GuestMemory::StoreOwnBytes(source.Address(), source.bytes, [&] { StoreWords(source, source.bytes, FillOnes); });
+    device->Draw(state, draw, shaders, {}, &recipe);
+    Require(recipe != nullptr, "the restored ordinary buffer draw did not capture a recipe");
+    CheckRecipePixels(*device, destination, output, FillOnes);
+    auto oldColor = DecodeTarget(source);
+    oldColor.tileMode = ColorTileMode::Standard4KB;
+    oldColor.bytes = ColorTargetLayout(Side, Side, oldColor.tileMode, oldColor.elementBytes).Bytes();
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        MultisampleTargetView(context, oldColor);
+    }
+    const auto retainedRecipe = recipe;
+    const auto retainedTemplate = retainedRecipe->templateRef.lock();
+    Require(retainedTemplate != nullptr, "the moved draw lost its warmed resource template");
+    const auto movedExpected = arm(movedSource, 0u);
+    const auto movedAddress = movedSource.Address() + 8u;
+    binding->guestDescriptor[0] = static_cast<std::uint32_t>(movedAddress);
+    binding->guestDescriptor[1] = (binding->guestDescriptor[1] & 0xffff0000u) | static_cast<std::uint32_t>((movedAddress >> 32u) & 0xffffu);
+    std::uint32_t movedWord = 0u;
+    std::memcpy(&movedWord, movedExpected.data() + 8u, sizeof(movedWord));
+    Require(movedWord != FillOnes && movedWord != word, "the moved recipe source did not distinguish current and old buffers");
+    consume(false);
+    Require(SharedResourceCache().Find(retainedRecipe->key) == retainedTemplate, "the moved draw rebuilt its template instead of rebinding it");
+    CheckRecipePixels(*device, destination, output, movedWord);
+    checkSource(movedSource, movedExpected);
+    std::string refusal;
+    try {
+        RequireNoMultisampleTarget(source.Address(), Threads * 4u, "the unused original recipe buffer");
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find("overlaps multisampled color target") != std::string::npos, "the moved recipe consumed or retired its unused original range");
+    std::puts("native draw recipe: current source, moved source, old guard, complete bytes and output bounds passed");
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
-        if (argc == 2 && std::string_view(argv[1]) == "--publication") {
-            Publication(*device);
+        if (argc == 2 && std::string_view(argv[1]) == "--draw-recipe") {
+            DrawRecipePublication(device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--buffer-refusal") {
+            BufferRefusals(device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--buffer-publication") {
+            BufferPublication(device);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--cpu-publication") {
             Publication(*device, true);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--publication") {
+            Publication(*device);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--readback") {
@@ -1258,18 +1634,12 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--native-vertex-input") return NativeVertexInput(device);
         Block block(4u * BlockBytes);
         Block other(BlockBytes);
-        Block output(2u * 1024u * 1024u);
         Block destination(BlockBytes);
         Block swapped(4u * BlockBytes);
         struct ReleaseDevice {
             decltype(device)& value;
             ~ReleaseDevice() { value.reset(); }
         } releaseDevice{device};
-        const auto warm = CompileBufferLoad(*device, block.Address(), output.Address());
-        std::shared_ptr<const AgcDriver::Recipe> recipe;
-        CheckBufferLoad(*device, warm, output, &recipe);
-        const auto deferredProgram = CompileBufferLoad(*device, block.Address() + Threads * 4u, output.Address());
-        const auto prepared = device->PrepareDispatch(deferredProgram, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
         const auto color = DecodeTarget(block);
         const auto state = TargetState(color);
         if (!AgcDriver::VulkanDeviceTestAccess::ContextOf(*device).storageImageMultisample) {
@@ -1282,38 +1652,6 @@ int main(int argc, char** argv) {
         Require(colorBytes != 0 && colorBytes <= block.bytes, "the 4x target's color memory does not fit its block");
         AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
         CheckUniform(LoadSamples(*device, block), Ones, "after a fill of the target's color memory with half-float ones");
-        std::vector<std::string> missing;
-        const auto dispatch = [&](const auto& program) {
-            device->Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
-            device->WaitIdle();
-        };
-        CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + 4u, output.Address())); }, "fresh read", missing);
-        CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + colorBytes - 4u, output.Address())); }, "edge read", missing);
-        CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + colorBytes, block.Address())); }, "write", missing);
-        CheckBufferRefused([&] { dispatch(warm); }, "warmed dispatch", missing);
-        if (prepared != nullptr) {
-            CheckBufferRefused([&] {
-                device->Dispatch(deferredProgram, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), prepared);
-                device->WaitIdle();
-            }, "deferred dispatch", missing);
-        }
-        bool reused = false;
-        if (recipe != nullptr) {
-            const auto hit = device->PrepareRecipe(recipe, false);
-            Require(hit != nullptr, "the warmed buffer recipe did not retain its template");
-            reused = true;
-            CheckBufferRefused([&] {
-                AgcDriver::VulkanDevice::IndirectOutcome outcome{};
-                device->DispatchRecipe(warm, 1, 1, 1, 0, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), hit, outcome);
-                device->WaitIdle();
-            }, "recipe dispatch", missing);
-        }
-        CheckBufferLoad(*device, CompileBufferLoad(*device, block.Address() + colorBytes, output.Address()), output);
-        CheckUniform(LoadSamples(*device, block), Ones, "after the native buffer access refusals and adjacent buffer control");
-        std::cout << "native buffer controls: adjacent=passed deferred=" << (prepared != nullptr) << " recipe=" << reused << std::endl;
-        std::string failures;
-        for (const auto& item : missing) failures += " " + item;
-        Require(missing.empty(), "buffer aliases of live native MSAA color memory bypassed the guard:" + failures);
         RequireRefused(*device, TargetDescriptor(block, 3u), "texture of 8 samples", "loading a 4x target as an 8x texture");
         Require(colorBytes <= other.bytes, "the 4x target's color memory does not fit one block");
         CheckUniform(LoadSamples(*device, other), {}, "from zeroed color memory no draw rendered to");
