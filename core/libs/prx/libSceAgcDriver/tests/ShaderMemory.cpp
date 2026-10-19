@@ -4794,7 +4794,7 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel->targetOutputType[0] = ColorOutputType::Uint;
     minimal.context.pixel->targetOutputType[3] = ColorOutputType::Sint;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQSUAAAA=", "new requests did not use serialization version 37");
+    require(requestPrefix(encoded, 8u) == "NVNQQSYAAAA=", "new requests did not use serialization version 38");
     require(serializer.Deserialize(encoded).request.context.pixel->targetOutputType == minimal.context.pixel->targetOutputType, "attachment numeric types did not round-trip");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
@@ -5038,11 +5038,11 @@ void verifyVertexInfoVersion19() {
     auto invalidType = typedBytes;
     invalidType.back() = static_cast<std::uint8_t>(ColorOutputType::Sint) + 1u;
     expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalidType))); }, "invalid color output type", "an invalid attachment numeric type was accepted");
-    auto version36Pixel = decodeBase64(encodedPixel);
-    version36Pixel.resize(version36Pixel.size() - 8u);
-    version36Pixel[4] = 36u;
-    const auto replay36 = serializer.Deserialize(encodeBase64(version36Pixel));
-    require(replay36.request.context.pixel.has_value() && replay36.request.context.pixel->targetOutputType == pixel.context.pixel->targetOutputType && serializer.Serialize(replay36.request) == encodedPixel, "a version 36 request read attachment numeric types or misread trailing fields");
+    auto version37Pixel = decodeBase64(encodedPixel);
+    version37Pixel.resize(version37Pixel.size() - 8u);
+    version37Pixel[4] = 37u;
+    const auto replay37Pixel = serializer.Deserialize(encodeBase64(version37Pixel));
+    require(replay37Pixel.request.context.pixel.has_value() && replay37Pixel.request.context.pixel->targetOutputType == pixel.context.pixel->targetOutputType && serializer.Serialize(replay37Pixel.request) == encodedPixel, "a version 37 request read attachment numeric types or misread trailing fields");
     auto exportedPixel = pixel;
     exportedPixel.context.pixel->layerExported = true;
     const auto exportedBytes = decodeBase64(serializer.Serialize(exportedPixel));
@@ -5104,6 +5104,7 @@ void verifyVertexInfoVersion19() {
     version29.pop_back();
     version29.erase(version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes), version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
     auto version36 = sampledBytes;
+    version36.resize(version36.size() - 8u);
     version36.erase(version36.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes - 1u));
     version36[4] = 36u;
     const auto replay36 = serializer.Deserialize(encodeBase64(version36));

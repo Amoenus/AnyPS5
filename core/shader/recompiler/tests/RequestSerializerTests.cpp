@@ -498,17 +498,18 @@ int main() {
                 typed.context.pixel->targetOutputType[0] = ShaderRecompiler::ColorOutputType::Uint;
                 typed.context.pixel->targetOutputType[3] = ShaderRecompiler::ColorOutputType::Sint;
                 typed.context.pixel->reversedBlend = 0x89abcdefu;
+                typed.context.pixel->stencilOperationValueExport = !spanned;
             }
             const auto encoded = serializer.Serialize(typed);
             const auto replay = serializer.Deserialize(encoded);
             Require(replay.request.target.spannedWaves == spanned && replay.request.target.float32FlushToZero == !spanned && replay.request.context.pixel.has_value() == pixel);
-            if (pixel) Require(replay.request.context.pixel->targetOutputType == typed.context.pixel->targetOutputType && replay.request.context.pixel->reversedBlend == 0x89abcdefu);
-            auto legacy36 = DecodeBase64(encoded);
-            if (pixel) legacy36.resize(legacy36.size() - 8u);
-            legacy36[4] = 36u;
-            const auto old = serializer.Deserialize(EncodeBase64(legacy36));
+            if (pixel) Require(replay.request.context.pixel->targetOutputType == typed.context.pixel->targetOutputType && replay.request.context.pixel->reversedBlend == 0x89abcdefu && replay.request.context.pixel->stencilOperationValueExport == !spanned);
+            auto legacy37 = DecodeBase64(encoded);
+            if (pixel) legacy37.resize(legacy37.size() - 8u);
+            legacy37[4] = 37u;
+            const auto old = serializer.Deserialize(EncodeBase64(legacy37));
             Require(old.request.target.spannedWaves == spanned && old.request.target.float32FlushToZero == !spanned && old.request.context.pixel.has_value() == pixel);
-            if (pixel) Require(old.request.context.pixel->targetOutputType == ShaderRecompiler::ShaderPixelStageInfo{}.targetOutputType && old.request.context.pixel->reversedBlend == 0x89abcdefu);
+            if (pixel) Require(old.request.context.pixel->targetOutputType == ShaderRecompiler::ShaderPixelStageInfo{}.targetOutputType && old.request.context.pixel->reversedBlend == 0x89abcdefu && old.request.context.pixel->stencilOperationValueExport == !spanned);
         }
     }
 
