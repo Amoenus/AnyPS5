@@ -1055,7 +1055,7 @@ void RequirePublicationRefused(const AgcDriver::Graphics::Context& context, cons
     Require(refusal.find(expected) != std::string::npos, "native color publication was not refused: " + refusal);
 }
 
-void Publication(AgcDriver::VulkanDevice& device) {
+void Publication(AgcDriver::VulkanDevice& device, bool automatic = false) {
     using namespace AgcDriver::Graphics;
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
     std::uint32_t exercised = 0;
@@ -1129,8 +1129,17 @@ void Publication(AgcDriver::VulkanDevice& device) {
                     MultisampleTargetView(context, color, retained, &oldImage);
                 }
                 std::vector<std::byte> read(block.bytes);
-                PublishMultisampleTargetColor_nid_no_patch(context, color);
-                AgcDriver::GuestMemory::Read(block.Address(), read);
+                if (automatic) {
+                    std::array<std::byte, 128> adjacent{};
+                    AgcDriver::GuestMemory::Read(block.Address() + colorBytes, adjacent);
+                    Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * fragments * 8u, "an adjacent CPU read retired the color owner");
+                    if (profile == 0u) AgcDriver::GuestMemory::Read(block.Address(), read);
+                    else if (profile == 1u) AgcDriver::GuestMemory::ReadCommitted(block.Address(), read);
+                    else AgcDriver::GuestMemory::ReadCommittedUnsynced(block.Address(), read);
+                } else {
+                    PublishMultisampleTargetColor_nid_no_patch(context, color);
+                    AgcDriver::GuestMemory::Read(block.Address(), read);
+                }
                 RequireNoMultisampleTarget(block.Address(), colorBytes, "after explicit publication");
                 RequireReadbackRefused(context, color, "requires an existing resident target");
                 Require(read == expected, "published guest color differs from MIMG samples, padding or neighboring bytes");
@@ -1158,9 +1167,12 @@ void Publication(AgcDriver::VulkanDevice& device) {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
         Require(recorder != nullptr, "the publication fixture has no owning recorder");
-        recorder->OnComplete([completed, color, context, completionRefusal] {
+        recorder->OnComplete([completed, color, context, automatic, completionRefusal] {
             try {
-                PublishMultisampleTargetColor_nid_no_patch(context, color);
+                if (automatic) {
+                    std::array<std::byte, 4> word{};
+                    AgcDriver::GuestMemory::Read(completed->Address(), word);
+                } else PublishMultisampleTargetColor_nid_no_patch(context, color);
             } catch (const std::exception& error) {
                 *completionRefusal = error.what();
             }
@@ -1168,7 +1180,7 @@ void Publication(AgcDriver::VulkanDevice& device) {
             NoteColorMetadataFill(completed->Address(), completed->bytes, FillOnes);
         });
     }
-    PublishMultisampleTargetColor_nid_no_patch(context, color);
+    if (!automatic) PublishMultisampleTargetColor_nid_no_patch(context, color);
     std::vector<std::uint32_t> read(completed->bytes / sizeof(std::uint32_t));
     AgcDriver::GuestMemory::Read(completed->Address(), std::as_writable_bytes(std::span(read)));
     Require(completionRefusal->find("during a recorder completion") != std::string::npos, "recursive publication from a completion was not refused: " + *completionRefusal);
@@ -1184,6 +1196,10 @@ int main(int argc, char** argv) {
         if (!device) return VulkanTestSkipped;
         if (argc == 2 && std::string_view(argv[1]) == "--publication") {
             Publication(*device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--cpu-publication") {
+            Publication(*device, true);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--readback") {
