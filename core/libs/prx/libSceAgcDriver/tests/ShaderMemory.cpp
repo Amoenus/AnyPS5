@@ -4894,7 +4894,7 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel->targetOutputType[0] = ColorOutputType::Uint;
     minimal.context.pixel->targetOutputType[3] = ColorOutputType::Sint;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQSYAAAA=", "new requests did not use serialization version 38");
+    require(requestPrefix(encoded, 8u) == "NVNQQScAAAA=", "new requests did not use serialization version 39");
     require(serializer.Deserialize(encoded).request.context.pixel->targetOutputType == minimal.context.pixel->targetOutputType, "attachment numeric types did not round-trip");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
