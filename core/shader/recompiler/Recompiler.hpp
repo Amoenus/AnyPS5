@@ -295,6 +295,7 @@ struct SpirvTarget {
     bool spannedWaves = false;
     bool robustBufferAccess2 = false;
     bool depthRangeRemap = false;
+    bool float32FlushToZero = false;
 };
 
 struct BindingLayout {

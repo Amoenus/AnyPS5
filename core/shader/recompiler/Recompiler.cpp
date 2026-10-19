@@ -211,6 +211,7 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
     translateOptions.nativeFloat16 = supports(spv::CapabilityFloat16) && supports(spv::CapabilityRoundingModeRTE) && supports(spv::CapabilityDenormPreserve);
     translateOptions.interpolationFunctions = supports(spv::CapabilityInterpolationFunction);
     translateOptions.floatMode = request.context.floatMode;
+    translateOptions.float32FlushToZero = request.target.float32FlushToZero;
     translateOptions.inputInfo = inputInfo;
 
     constexpr InstructionTranslator translator;
@@ -563,6 +564,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     targetOptions.float16DenormPreserve = request.target.float16DenormPreserve;
     targetOptions.spannedWaves = request.target.spannedWaves;
     targetOptions.robustBufferAccess2 = request.target.robustBufferAccess2;
+    targetOptions.float32FlushToZero = request.target.float32FlushToZero;
 
     constexpr SpirvEmitter spirvEmitter;
     CompiledShaderArtifact result;
