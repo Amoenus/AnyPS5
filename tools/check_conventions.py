@@ -32,6 +32,7 @@ RULES = {
     "pr-title": ("error", "docs/dev/CONVENTIONS.md", "Pull request title is not Conventional Commits"),
     "pr-template": ("error", ".github/pull_request_template.md", "Fill in the pull request template"),
     "env-reference": ("error", "docs/dev/ENVIRONMENT.md", "Every APS5_* or ANYPS5_* name a pull request adds to the code has a row in docs/dev/ENVIRONMENT.md, a row whose name the pull request stops reading is removed, and a row the pull request removes is no longer read"),
+    "debt-length": ("warning", "CONTRIBUTING.md#documentation", "Technical debt entry over 1000 characters: state the gap first (what differs from the console, what is unverified, what throws) and keep only the behaviour it needs"),
 }
 
 CPP = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp"}
@@ -44,6 +45,7 @@ AGENT_FILES = {
 DEBT = "docs/dev/TechnicalDebt.md"
 DEBT_DIR = "docs/dev/debt/"
 DEBT_TARGET = re.compile(r"\]\((?:\.\./)+(core/[^)#\s]+)")
+DEBT_ENTRY_LIMIT = 1000
 
 CONVENTIONAL = re.compile(r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: \S")
 STRINGS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
@@ -288,6 +290,12 @@ class Check:
                     if resolved not in self.tree and resolved not in self.dirs:
                         self.report("doc-link", path, number, target)
 
+    def debt_entries(self):
+        for path, lines in self.files(lambda p: is_debt(p.as_posix())):
+            for number, text in lines:
+                if long_debt_entry(text):
+                    self.report("debt-length", path, number, f"{len(text)} characters")
+
     def workflows(self):
         for path in sorted(self.status):
             if self.status[path] == "D" or not re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", path):
@@ -392,6 +400,10 @@ def links(path, text):
 
 def is_debt(path):
     return path == DEBT or (path.startswith(DEBT_DIR) and path.endswith(".md") and "/" not in path[len(DEBT_DIR):])
+
+
+def long_debt_entry(text):
+    return text.startswith("- ") and len(text) > DEBT_ENTRY_LIMIT
 
 
 def debt_name(text):
@@ -592,6 +604,7 @@ if __name__ == "__main__":
     check.shaders()
     check.repository()
     check.docs()
+    check.debt_entries()
     check.workflows()
     check.commits()
     check.env_reference()
