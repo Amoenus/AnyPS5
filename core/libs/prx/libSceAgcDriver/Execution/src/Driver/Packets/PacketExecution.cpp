@@ -41,9 +41,11 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
         case 0x63: case 0x64: case 0x9f:
             return packet.size() >= 5 && !DrawPipeline::Queue0().Overlaps(packet[1] | (static_cast<std::uint64_t>(packet[2]) << 32u), static_cast<std::size_t>(packet[4]) * 8);
         case 0x50: {
-            if (!pipelineDma() || packet.size() < 7) return false;
+            if (packet.size() < 7) return false;
             const auto destination = Pm4::DmaDestination(packet);
-            if (destination == Pm4::DmaSelectGds || destination == Pm4::DmaDestinationNowhere) return true;
+            if (destination == Pm4::DmaDestinationNowhere) return true;
+            if (!pipelineDma()) return false;
+            if (destination == Pm4::DmaSelectGds) return true;
             const auto bytes = Pm4::DmaBytes(packet);
             if (bytes == 0) return true;
             const auto source = Pm4::DmaSource(packet);
@@ -212,7 +214,7 @@ void Driver::execute(const Submission& submission) {
         PerformanceContext timingContext(submission.queue == 0 ? pendingFrameTiming.get() : FrameTiming::Async());
         PerformanceTimer timing("Driver.Packet");
         const bool predicated = Pm4::Predicated(header) && queue.predication.operation != 0;
-        if (pipelined && !predicated && header != FlipPacketHeader && header != RenderingWaitPacketHeader && (enqueueLabelPacket(packet, opcode, submission.queue) || enqueueDmaPacket(packet, opcode, submission.queue, queue))) {
+        if (pipelined && !predicated && header != FlipPacketHeader && header != RenderingWaitPacketHeader && !submission.flips.contains(cursor) && (enqueueLabelPacket(packet, opcode, submission.queue) || enqueueDmaPacket(packet, opcode, submission.queue, queue))) {
             traceLabel(packet, submission.queue);
             recent.Record(cursor);
             cursor = nextCursor;

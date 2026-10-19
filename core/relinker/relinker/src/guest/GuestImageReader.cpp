@@ -181,7 +181,7 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
             image.Symbols.push_back({{}, 0, 0, 0, 0, 0});
             continue;
         }
-        if (offset != 0 && ((info >> 4) > 2 || (visibility & ~3u) != 0 || ((info & 15) != 0 && (info & 15) != 1 && (info & 15) != 2 && (info & 15) != 6))) fail("Unsupported symbol attributes: " + name);
+        if (offset != 0 && ((info >> 4) > 2 || (visibility & ~3u) != 0 || ((info & 15) != 0 && (info & 15) != 1 && (info & 15) != 2 && info != 3 && (info & 15) != 6))) fail("Unsupported symbol attributes: " + name);
         if (section != 0 && (info >> 4) != 0 && visibility != 1 && visibility != 2) {
             const auto [found, inserted] = exports.emplace(name, image.Symbols.size());
             if (name.empty() || (!inserted && (!windows || !IdenticalOrdinaryFunctionExport(image.Symbols[found->second], symbol)))) fail("Duplicate or empty export after stripping #: " + name);
@@ -233,7 +233,18 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
             if ((next != relocationTargets.end() && next->first < target + 8) || (next != relocationTargets.begin() && std::prev(next)->second > target)) fail("Overlapping guest relocations");
             relocationTargets.emplace(target, target + 8);
             if (relocation == 8) {
-                if ((info >> 32) != 0) fail("RELATIVE relocation has a symbol");
+                if ((info >> 32) != 0) {
+                    const auto& symbol = image.Symbols[info >> 32];
+                    if (symbol.Info == 3) {
+                        if (symbol.Value != 0) fail("RELATIVE relocation has a symbol");
+                    } else if (symbol.Section == 0 || addend > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || symbol.Value != addend)
+                        fail("RELATIVE relocation has a symbol");
+                    mapped(addend, 0, 0);
+                    Io::AppendU64(output, target);
+                    Io::AppendU64(output, relocation);
+                    Io::AppendU64(output, addend);
+                    continue;
+                }
                 mapped(addend, 0, 0);
             } else if (relocation == 1 || relocation == 6 || relocation == 7) {
                 const auto& symbol = image.Symbols[info >> 32];
