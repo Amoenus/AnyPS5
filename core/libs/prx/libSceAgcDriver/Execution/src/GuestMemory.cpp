@@ -419,6 +419,7 @@ struct PageSpan {
 
 struct PageStates {
     std::once_flag once;
+    std::atomic<bool> ready{false};
     PageSpan arena;
     PageSpan image;
 
@@ -494,6 +495,7 @@ void ForgetInaccessiblePages(std::uintptr_t address, std::size_t bytes) {
 }
 
 void PageStates::initialize() {
+    if (ready.load(std::memory_order_acquire)) return;
     std::call_once(once, [&] {
         GuestArena::GuestArenaRange_nid_postfix(&arena.base, &arena.size);
         const bool arenaCached = arena.allocate();
@@ -520,6 +522,7 @@ void PageStates::initialize() {
             GuestArena::GuestArenaSetAccessObserver_nid_postfix(&ForgetInaccessiblePages);
         }
     });
+    ready.store(true, std::memory_order_release);
 }
 
 struct PageRun {
@@ -2234,13 +2237,17 @@ void SetReadGuard(void (*guard)(std::uint64_t address, std::size_t bytes)) {
     GuestArena::GuestArenaSetHostReadHook_nid_no_patch(&PrepareHostRead);
 }
 
+void GuardRead(std::uint64_t address, std::size_t bytes) {
+    if (const auto guard = readGuard.load(std::memory_order_acquire)) guard(address, bytes);
+}
+
 void FlushGpuWrites(std::uint64_t address, std::size_t bytes) {
     if (const auto hook = flushHook.load(std::memory_order_acquire)) hook(address, bytes);
 }
 
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment) {
     if (destination.empty()) return;
-    if (const auto guard = readGuard.load(std::memory_order_acquire)) guard(address, destination.size());
+    GuardRead(address, destination.size());
     FlushGpuWrites(address, destination.size());
     const TimedAccess timed(CounterRead, destination.size());
     CountReadCaller(__builtin_return_address(0));
@@ -2287,7 +2294,7 @@ void copyCommitted(std::uint64_t address, std::span<std::byte> destination) {
 
 void ReadCommitted(std::uint64_t address, std::span<std::byte> destination) {
     if (destination.empty()) return;
-    if (const auto guard = readGuard.load(std::memory_order_acquire)) guard(address, destination.size());
+    GuardRead(address, destination.size());
     FlushGpuWrites(address, destination.size());
     const TimedAccess timed(CounterRead, destination.size());
     CountReadCaller(__builtin_return_address(0));
@@ -2296,7 +2303,7 @@ void ReadCommitted(std::uint64_t address, std::span<std::byte> destination) {
 
 void ReadCommittedUnsynced(std::uint64_t address, std::span<std::byte> destination) {
     if (destination.empty()) return;
-    if (const auto guard = readGuard.load(std::memory_order_acquire)) guard(address, destination.size());
+    GuardRead(address, destination.size());
     const TimedAccess timed(CounterRead, destination.size());
     CountReadCaller(__builtin_return_address(0));
     copyCommitted(address, destination);
