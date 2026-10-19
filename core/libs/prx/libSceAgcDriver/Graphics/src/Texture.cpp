@@ -1373,7 +1373,7 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         const bool layered = geometry.layers >= 2 && !geometry.thick && geometry.imageDepth == 1 && geometry.layers == geometry.imageLayers && geometry.layerBytes * geometry.layers == guestBytes && geometry.layerBytes % 65536 == 0 && descriptor.baseAddress % 65536 == 0;
         // Tile blocks divide the stamp blocks, so at an aligned base every unit is whole tile blocks
         // of its (layer, mip) slices (sliceWindows).
-        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && !geometry.thick && descriptor.tileMode != TextureTileMode::kLinear && descriptor.baseAddress % 65536 == 0;
+        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && TracksBlockUnits(descriptor, geometry);
         trackedLayers = blockUnits ? static_cast<std::uint32_t>((guestBytes + 65535) / 65536) : layered && LayerTrackingEnabled() ? geometry.layers : 1u;
         trackedLayerBytes = blockUnits ? 65536 : guestBytes / trackedLayers;
         layerGeneration.assign(trackedLayers, 0);
