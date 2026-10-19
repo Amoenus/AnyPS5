@@ -824,8 +824,12 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                     }
                     const bool completionCandidate = NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
                     if (fault == ClearFault::ImportWindowWrite) {
-                        metadata.Data()[0] ^= std::byte{0x01};
-                        Require(AgcDriver::GuestMemory::ImportWatched(target.htileAddress, static_cast<std::size_t>(metadataBytes), [] { return true; }), "HTILE host import simulation failed");
+                        const auto beforeImport = AgcDriver::GuestMemory::TrackerGeneration();
+                        Require(AgcDriver::GuestMemory::ImportWatched(target.htileAddress, static_cast<std::size_t>(metadataBytes), [&] {
+                            metadata.Data()[0] ^= std::byte{0x01};
+                            return true;
+                        }), "HTILE host import simulation failed");
+                        Require(AgcDriver::GuestMemory::CollectWritesUncached(target.htileAddress, static_cast<std::size_t>(metadataBytes)) > beforeImport, "HTILE import window did not stamp its changed page");
                     }
                     if (completionCandidate) ArmHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes));
                     if (fault == ClearFault::Overlap) NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
