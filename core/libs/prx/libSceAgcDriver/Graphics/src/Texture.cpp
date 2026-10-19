@@ -1849,8 +1849,9 @@ VkImageView StorageTexture::AttachmentView(VkFormat format, std::uint32_t mip, s
     Require(mip < descriptor.mipCount, "attachment mip exceeds the storage image");
     RequireImageLevel(descriptor, geometry, mip, "a color target");
     const bool volume = descriptor.dimension == TextureDimension::k3D;
-    Require((depthSlice == 0 && layers == 1) || (volume && mip == 0 && layers != 0 && depthSlice + layers - 1u <= descriptor.depthOrLastArray), "attachment slice is outside the storage image");
-    Require(layer == 0 || (!volume && descriptor.dimension == TextureDimension::k2DArray && descriptor.baseArray + layer <= descriptor.depthOrLastArray), "attachment layer is outside the storage image");
+    const bool array = !volume && descriptor.dimension == TextureDimension::k2DArray;
+    Require((depthSlice == 0 && layers == 1) || (volume && mip == 0 && layers != 0 && depthSlice + layers - 1u <= descriptor.depthOrLastArray) || (array && depthSlice == 0 && layers != 0), "attachment slice is outside the storage image");
+    Require((layer == 0 && layers == 1) || (volume && layer == 0) || (array && descriptor.baseArray + layer + layers - 1u <= descriptor.depthOrLastArray), "attachment layer is outside the storage image");
     const auto found = attachmentViews.find({format, mip, depthSlice, layers, layer});
     if (found != attachmentViews.end()) return found->second;
     VkImageViewUsageCreateInfo usage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
@@ -2950,7 +2951,7 @@ std::vector<StorageTexture::ImportSegment> StorageTexture::importSegments() cons
         for (const auto& piece : pieces) {
             const auto from = std::max(piece.address, begin);
             const auto to = std::min(piece.address + piece.bytes, end);
-            const auto* import = HostImportFor(context, from, static_cast<std::size_t>(to - from));
+            const auto* import = HostImportFor(context, from, static_cast<std::size_t>(to - from), ImportRequester::Segment);
             if (import == nullptr) return {};
             if (!segments.empty() && segments.back().import == import) segments.back().end = to;
             else if (!segments.empty() && unitAligned && from % 65536 != 0) return {};
@@ -3542,14 +3543,14 @@ void StorageTexture::MarkDirty() {
     markLayersPending(0, trackedLayers);
 }
 
-void StorageTexture::MarkSliceDirty(std::uint32_t slice) {
-    if (geometry.thick || geometry.imageLayers <= 1 || slice >= geometry.imageLayers || geometry.layerBytes == 0 || trackedLayerBytes == 0 || descriptor.dccAddress != 0) {
+void StorageTexture::MarkSliceDirty(std::uint32_t slice, std::uint32_t count) {
+    if (geometry.thick || geometry.imageLayers <= 1 || count == 0 || slice >= geometry.imageLayers || count > geometry.imageLayers - slice || geometry.layerBytes == 0 || trackedLayerBytes == 0 || descriptor.dccAddress != 0) {
         MarkDirty();
         return;
     }
     const auto begin = geometry.GuestLayerOffset(slice);
     const auto first = static_cast<std::uint32_t>(begin / trackedLayerBytes);
-    const auto last = static_cast<std::uint32_t>(std::min<std::uint64_t>((begin + geometry.layerBytes + trackedLayerBytes - 1) / trackedLayerBytes, trackedLayers));
+    const auto last = static_cast<std::uint32_t>(std::min<std::uint64_t>((begin + geometry.layerBytes * count + trackedLayerBytes - 1) / trackedLayerBytes, trackedLayers));
     if (first >= last) {
         MarkDirty();
         return;
