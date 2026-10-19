@@ -218,16 +218,19 @@ TlsScan ScanTls(const std::vector<std::uint8_t>& source, const std::vector<Domai
             scan.Tls = &header;
         }
         if (header.Type != 1 || (header.Flags & 1) == 0) continue;
+        std::uint64_t decodedEnd = 0;
         for (auto instruction = instructions.lower_bound(header.MappedAddress); instruction != instructions.end() && *instruction - header.MappedAddress < header.FileSize; ++instruction) {
             const auto offset = *instruction - header.MappedAddress;
             const auto* bytes = source.data() + header.Offset + offset;
             const auto info = decoder.DecodeInstruction(bytes, header.FileSize - offset);
             const auto rva = image.GetRva(header.MappedAddress + offset, info.Length);
+            const bool insidePrevious = *instruction < decodedEnd;
+            decodedEnd = std::max(decodedEnd, *instruction + info.Length);
             if (info.HasBranchTarget && !info.HasRipRelativeDisp) {
                 const auto target = static_cast<std::int64_t>(rva) + static_cast<std::int64_t>(info.Length) + info.BranchDisp;
                 if (target >= 0 && target <= std::numeric_limits<std::uint32_t>::max()) scan.BranchTargets.insert(static_cast<std::uint32_t>(target));
             }
-            if (info.SegmentPrefix == 0) continue;
+            if (info.SegmentPrefix == 0 || (insidePrevious && info.SegmentPrefix != 0x64)) continue;
             const auto position = info.OpcodeOffset;
             bool hasOperandSizePrefix = false;
             bool supportedPrefixes = info.SegmentPrefix == 0x64;
@@ -534,7 +537,7 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
         input.Binds.push_back({"___cxa_atexit", metaRva + static_cast<std::uint32_t>(MetaCxaAtexitSlot)});
     }
 
-    const bool hasInit = hasTls || !input.TlsImports.empty() || input.InitRva != 0 || !input.InitArrayRvas.empty() || !input.PreInitArrayRvas.empty() || hasFini;
+    const bool hasInit = hasTls || !input.TlsImports.empty() || input.InitRva != 0 || !input.InitArrayRvas.empty() || hasFini;
     std::vector<Section> dataSections{{"__meta", 0, metaSize, 0, 3}};
     if (hasInit) {
         const auto initStub = code.GetRva();
@@ -554,7 +557,6 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
             }
             code.Rip({0x48, 0x89, 0x05}, import.Rva);
         }
-        for (const auto slot : input.PreInitArrayRvas) callSlot(slot);
         if (input.InitRva != 0) {
             code.Rip({0xff, 0x15}, metaRva + static_cast<std::uint32_t>(moduleArgsSlot));
             code.Emit({0x48, 0x8b, 0x38, 0x48, 0x8b, 0x70, 0x08, 0x31, 0xd2});

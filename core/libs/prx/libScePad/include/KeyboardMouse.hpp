@@ -18,6 +18,9 @@ inline constexpr double MouseRateWindowSeconds = 0.25;
 inline constexpr double MouseRateGapSeconds = 0.05;
 inline constexpr double MouseSmoothingReports = 3.0;
 inline constexpr double MouseSmoothingLimitMs = 30.0;
+inline constexpr std::chrono::milliseconds ShakeHalfPeriod{50};
+inline constexpr float ShakeAcceleration = 2.0f * 9.80665f;
+inline constexpr float ShakeAngularVelocity = 6.0f;
 
 class MouseStick {
 public:
@@ -70,12 +73,25 @@ public:
     const InputConfiguration& Configuration() const;
 
 private:
+    struct StickInput {
+        std::array<double, 4> targets{};
+        std::array<bool, 4> held{};
+    };
+
+    StickInput stickInput() const;
+    std::array<double, 2> triggerTargets() const;
+    bool advanceAxes(Clock::time_point now);
+
     InputConfiguration configuration;
     std::vector<bool> pressed;
     std::vector<Clock::time_point> wheelReleaseTimes;
     MouseStick mouse;
     Clock::time_point lastAdvance{};
+    Clock::time_point lastAxisAdvance{};
+    std::array<double, 4> stickAxes{};
+    std::array<double, 2> triggerAxes{};
     bool advanced = false;
+    bool axesAdvanced = false;
     bool mouseMode = false;
     bool titleReadsMouse = false;
 };

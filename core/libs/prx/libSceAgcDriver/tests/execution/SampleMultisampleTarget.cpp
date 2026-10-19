@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
@@ -34,6 +35,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -66,6 +68,9 @@ constexpr std::uint32_t Unorm8x4SwappedInfo = 0x8828u;
 constexpr std::uint32_t Format8888Unorm = 56;
 constexpr std::uint32_t Type2DMsaa = 14;
 constexpr std::uint32_t TileRenderTarget = 0x1b;
+constexpr std::uint32_t TileZ64KBX = 0x18;
+constexpr std::uint32_t TileS64KBX = 0x19;
+constexpr std::uint32_t TileD64KBX = 0x1a;
 constexpr std::uint32_t Threads = 32;
 constexpr std::uint32_t Words = 32;
 constexpr std::uint32_t LoadResult = 12;
@@ -119,6 +124,7 @@ constexpr std::array<std::array<float, 4>, 3> Triangle{{
 }};
 
 alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
+
 
 struct Block {
     explicit Block(std::size_t bytes) : bytes(bytes) {
@@ -263,13 +269,13 @@ void Draw(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& sta
     device.Draw(state, draw, shaders);
 }
 
-std::array<std::uint32_t, 8> TargetDescriptor(const Block& block, std::uint32_t sampleShift, std::uint32_t pipeBankXor = 0, std::uint32_t format = Format16161616Float) {
+std::array<std::uint32_t, 8> TargetDescriptor(const Block& block, std::uint32_t sampleShift, std::uint32_t pipeBankXor = 0, std::uint32_t format = Format16161616Float, std::uint32_t tileMode = TileRenderTarget) {
     const auto address = block.Address() | pipeBankXor;
     return {
         static_cast<std::uint32_t>(address >> 8u),
         static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (format << 20u) | (((Side - 1u) & 3u) << 30u),
         ((Side - 1u) >> 2u) | ((Side - 1u) << 14u),
-        0xfacu | (sampleShift << 16u) | (TileRenderTarget << 20u) | (Type2DMsaa << 28u),
+        0xfacu | (sampleShift << 16u) | (tileMode << 20u) | (Type2DMsaa << 28u),
         0u,
         sampleShift << 4u,
         0u,
@@ -352,9 +358,9 @@ void RequireStoreRefused(AgcDriver::VulkanDevice& device, const std::array<std::
     Require(refusal.find(expected) != std::string::npos, what + " was not refused: " + refusal);
 }
 
-std::vector<std::array<float, 4>> RunLoad(AgcDriver::VulkanDevice& device, const Block& block, bool arrayed, std::uint32_t fragments, std::uint32_t pipeBankXor, std::uint32_t format) {
+std::vector<std::array<float, 4>> RunLoad(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, bool arrayed, std::uint32_t fragments) {
     std::vector<std::uint32_t> userData;
-    const auto program = CompileLoad(device, TargetDescriptor(block, static_cast<std::uint32_t>(std::countr_zero(fragments)), pipeBankXor, format), userData, arrayed);
+    const auto program = CompileLoad(device, texture, userData, arrayed);
     std::vector<std::array<float, 4>> loaded(Side * Side * fragments);
     const auto codeAddress = reinterpret_cast<std::uintptr_t>((arrayed ? ArrayLoadCode : LoadCode).data());
     for (std::uint32_t first = 0; first < loaded.size(); first += Threads) {
@@ -376,11 +382,23 @@ std::vector<std::array<float, 4>> RunLoad(AgcDriver::VulkanDevice& device, const
     return loaded;
 }
 
-std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t fragments = Samples, std::uint32_t pipeBankXor = 0, std::uint32_t format = Format16161616Float) {
-    auto loaded = RunLoad(device, block, false, fragments, pipeBankXor, format);
-    const auto loadedArray = RunLoad(device, block, true, fragments, pipeBankXor, format);
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, std::uint32_t fragments = Samples) {
+    auto loaded = RunLoad(device, texture, false, fragments);
+    const auto loadedArray = RunLoad(device, texture, true, fragments);
     Require(loadedArray == loaded, "Dim2DMsaaArray image_load disagreed with Dim2DMsaa image_load on the multisampled color target");
     return loaded;
+}
+
+std::vector<std::array<float, 4>> LoadSamples(AgcDriver::VulkanDevice& device, const Block& block, std::uint32_t fragments = Samples, std::uint32_t pipeBankXor = 0, std::uint32_t format = Format16161616Float, std::uint32_t tileMode = TileRenderTarget) {
+    return LoadSamples(device, TargetDescriptor(block, static_cast<std::uint32_t>(std::countr_zero(fragments)), pipeBankXor, format, tileMode), fragments);
+}
+
+std::array<std::uint32_t, 8> CompressedDescriptor(const Block& block, std::uint32_t tileMode, std::uint64_t htile) {
+    auto texture = TargetDescriptor(block, SampleShift, 0u, Format16161616Float, tileMode);
+    const auto meta = htile >> 8u;
+    texture[6] = (1u << 20u) | (1u << 21u) | (static_cast<std::uint32_t>(meta & 0xffu) << 24u);
+    texture[7] = static_cast<std::uint32_t>(meta >> 8u);
+    return texture;
 }
 
 double EdgeDistance(double x, double y, std::size_t from) {
@@ -913,6 +931,122 @@ void InitialContents(AgcDriver::VulkanDevice& device, bool snapshots = false) {
         }
     }
     Require(exercised != 0, "no supported native color initial-content case was exercised");
+}
+
+alignas(256) std::array<std::uint32_t, 12> VertexValues{};
+
+void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state, std::uint64_t address, std::uint32_t stride) {
+    alignas(256) static constexpr std::array<std::uint32_t, 7> code{
+        0xbe822100u, 0x34020a84u, 0xe0781000u, 0x80010801u, 0xf80008cfu, 0x0b0a0908u, 0xbf810000u,
+    };
+    VertexValues.fill(0xdeadbeefu);
+    const auto output = reinterpret_cast<std::uintptr_t>(VertexValues.data());
+    std::vector<std::uint32_t> userData(12u, 0u);
+    userData[0] = 0x10000000u;
+    userData[1] = 1u;
+    userData[4] = static_cast<std::uint32_t>(output);
+    userData[5] = static_cast<std::uint32_t>((output >> 32u) & 0xffffu);
+    userData[6] = static_cast<std::uint32_t>(sizeof(VertexValues));
+    userData[7] = 0x31016facu;
+    ShaderRecompiler::ShaderVertexStageInfo info{};
+    info.resourcesNum = 1u;
+    info.resources[0].fields = {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (stride << 16u), stride == 0u ? 16u : 3u, 0x3104dfacu};
+    info.resourcesDst[0] = {8, 4, 0, 0};
+    info.fetchAttribReg = 8u;
+    info.fetchBufferReg = 10u;
+    info.fetchEmbedded = true;
+    const std::array<ShaderRecompiler::MemoryRegion, 1> vertexMemory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(std::span(code))}}};
+    ShaderRecompiler::RecompileRequest vertexRequest{
+        {ShaderStage::Vertex, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
+        {64u, 0, userData, std::nullopt, std::nullopt, info, vertexMemory},
+        device.Target(), {0, 0, 0, 64}
+    };
+    vertexRequest.useCache = false;
+    const auto vertex = ShaderRecompiler::Recompile(vertexRequest);
+    Require(vertex.vertexAttributes.size() == 1u, "the native vertex probe did not create a fixed-function attribute");
+    const auto vertexPush = static_cast<std::uint32_t>(vertex.pushConstants.size());
+    const auto pixelAddress = reinterpret_cast<std::uintptr_t>(PixelCode.data());
+    const std::array<ShaderRecompiler::MemoryRegion, 1> pixelMemory{{{pixelAddress, std::as_bytes(std::span(PixelCode))}}};
+    const AgcDriver::Registers registers{{0x1b6, 0x8000}, {0x1b3, 0}, {0x1b4, 0}, {0x203, 0}, {0x1c5, Float32Export}};
+    ShaderRecompiler::RecompileRequest pixelRequest{
+        {ShaderStage::Fragment, pixelAddress, PixelCode, 0, {}},
+        {64u, 0, {}, std::nullopt, AgcDriver::Graphics::DecodePixelStageInfo(registers, AgcDriver::Graphics::ExportMappings(state)), std::nullopt, pixelMemory},
+        device.Target(), PixelPushLayout(vertexPush, device.Target())
+    };
+    pixelRequest.useCache = false;
+    const auto pixel = ShaderRecompiler::Recompile(pixelRequest);
+    const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderStage::Vertex, &vertex, 0u}, {ShaderStage::Fragment, &pixel, PixelPushOffset(vertexPush, device.Target())}}};
+    const AgcDriver::Pm4::DrawParameters draw{0u, 3u, 0u, 1u, 0u, false};
+    device.Draw(state, draw, shaders);
+    device.WaitIdle();
+}
+
+void CheckVertexValues(std::uint64_t address, std::uint32_t stride) {
+    std::array<std::uint32_t, 4> expected{};
+    for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
+        std::memcpy(expected.data(), reinterpret_cast<const void*>(address + vertex * stride), sizeof(expected));
+        for (std::size_t component = 0; component < expected.size(); ++component) {
+            Require(VertexValues[vertex * 4u + component] == expected[component], "the fixed-function vertex probe did not observe the original guest bytes");
+        }
+    }
+}
+
+int NativeVertexInput(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+    Block source(4u * BlockBytes);
+    Block destination(BlockBytes);
+    struct ReleaseDevice {
+        std::unique_ptr<AgcDriver::VulkanDevice>& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+    if (context.hostImportAlignment == 0u) {
+        std::puts("native vertex input not tested: host imports unavailable");
+        return VulkanTestSkipped;
+    }
+    const auto color = DecodeTarget(source);
+    const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
+    Require(colorBytes >= 48u && colorBytes + 48u <= source.bytes, "the native vertex probe has no neighboring range");
+    constexpr std::array<float, 4> element{0.25f, -2.0f, 7.5f, 1.0f};
+    for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
+        std::memcpy(source.data + vertex * sizeof(element), element.data(), sizeof(element));
+        std::memcpy(source.data + colorBytes + vertex * sizeof(element), element.data(), sizeof(element));
+    }
+    std::memcpy(source.data + colorBytes - 8u, element.data(), 8u);
+    Draw(*device, TargetState(color));
+    AgcDriver::Graphics::NoteColorMetadataFill(source.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
+    CheckUniform(LoadSamples(*device, source), Ones, "before the fixed-function vertex probe");
+    const auto neighbor = source.Address() + colorBytes;
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        const auto* native = AgcDriver::Graphics::HostImportFor(context, source.Address(), 48u);
+        const auto* adjacent = AgcDriver::Graphics::HostImportFor(context, neighbor, 48u);
+        Require(native != nullptr && native == adjacent, "the native and neighboring vertices do not share an import");
+    }
+    AgcDriver::Graphics::RequireNoMultisampleTarget(neighbor, 48u, "the vertex neighbor control");
+    const auto state = TargetState(DecodeTarget(destination));
+    std::uint32_t missed = 0u;
+    for (const auto stride : {0u, 16u}) {
+        for (const bool edge : {false, true}) {
+            DrawVertexInput(*device, state, neighbor, stride);
+            CheckVertexValues(neighbor, stride);
+            const auto address = edge ? neighbor - 8u : source.Address();
+            std::string refusal;
+            try {
+                DrawVertexInput(*device, state, address, stride);
+                CheckVertexValues(address, stride);
+            } catch (const std::exception& error) {
+                refusal = error.what();
+            }
+            const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
+            Require(refusal.empty() || refused, "the native vertex input failed for another reason: " + refusal);
+            std::printf("native vertex stride %u %s: refused=%u neighbor=passed original-guest-values=%u detail=%s\n", stride, edge ? "edge" : "base", refused ? 1u : 0u, refused ? 0u : 12u, refusal.c_str());
+            missed += refused ? 0u : 1u;
+        }
+    }
+    CheckUniform(LoadSamples(*device, source), Ones, "after fixed-function vertex inputs");
+    std::puts("native vertex controls: shared-import=1 source-samples=1024 neighbor-values=passed");
+    Require(missed == 0u, "native vertex inputs missed " + std::to_string(missed) + " resident-image refusals");
+    return 0;
 }
 
 void RequirePublicationRefused(const AgcDriver::Graphics::Context& context, const AgcDriver::Graphics::ColorTarget& color, const std::string& expected) {
@@ -1568,128 +1702,44 @@ void MovedRasterPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     std::printf("native moved raster: word=0x%08x covered=%u checked=%u; adjusted snapshot, old guard, complete bytes and readback sentinels passed\n", word, covered, checked);
 }
 
-alignas(256) std::array<std::uint32_t, 12> VertexValues{};
-
-void DrawVertexInput(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::State& state, std::uint64_t address, std::uint32_t stride) {
-    alignas(256) static constexpr std::array<std::uint32_t, 7> code{
-        0xbe822100u, 0x34020a84u, 0xe0781000u, 0x80010801u, 0xf80008cfu, 0x0b0a0908u, 0xbf810000u,
-    };
-    VertexValues.fill(0xdeadbeefu);
-    const auto output = reinterpret_cast<std::uintptr_t>(VertexValues.data());
-    std::vector<std::uint32_t> userData(12u, 0u);
-    userData[0] = 0x10000000u;
-    userData[1] = 1u;
-    userData[4] = static_cast<std::uint32_t>(output);
-    userData[5] = static_cast<std::uint32_t>((output >> 32u) & 0xffffu);
-    userData[6] = static_cast<std::uint32_t>(sizeof(VertexValues));
-    userData[7] = 0x31016facu;
-    ShaderRecompiler::ShaderVertexStageInfo info{};
-    info.resourcesNum = 1u;
-    info.resources[0].fields = {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (stride << 16u), stride == 0u ? 16u : 3u, 0x3104dfacu};
-    info.resourcesDst[0] = {8, 4, 0, 0};
-    info.fetchAttribReg = 8u;
-    info.fetchBufferReg = 10u;
-    info.fetchEmbedded = true;
-    const std::array<ShaderRecompiler::MemoryRegion, 1> vertexMemory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(std::span(code))}}};
-    ShaderRecompiler::RecompileRequest vertexRequest{
-        {ShaderStage::Vertex, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
-        {64u, 0, userData, std::nullopt, std::nullopt, info, vertexMemory},
-        device.Target(), {0, 0, 0, 64}
-    };
-    vertexRequest.useCache = false;
-    const auto vertex = ShaderRecompiler::Recompile(vertexRequest);
-    Require(vertex.vertexAttributes.size() == 1u, "the native vertex probe did not create a fixed-function attribute");
-    const auto vertexPush = static_cast<std::uint32_t>(vertex.pushConstants.size());
-    const auto pixelAddress = reinterpret_cast<std::uintptr_t>(PixelCode.data());
-    const std::array<ShaderRecompiler::MemoryRegion, 1> pixelMemory{{{pixelAddress, std::as_bytes(std::span(PixelCode))}}};
-    const AgcDriver::Registers registers{{0x1b6, 0x8000}, {0x1b3, 0}, {0x1b4, 0}, {0x203, 0}, {0x1c5, Float32Export}};
-    ShaderRecompiler::RecompileRequest pixelRequest{
-        {ShaderStage::Fragment, pixelAddress, PixelCode, 0, {}},
-        {64u, 0, {}, std::nullopt, AgcDriver::Graphics::DecodePixelStageInfo(registers, AgcDriver::Graphics::ExportMappings(state)), std::nullopt, pixelMemory},
-        device.Target(), PixelPushLayout(vertexPush, device.Target())
-    };
-    pixelRequest.useCache = false;
-    const auto pixel = ShaderRecompiler::Recompile(pixelRequest);
-    const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderStage::Vertex, &vertex, 0u}, {ShaderStage::Fragment, &pixel, PixelPushOffset(vertexPush, device.Target())}}};
-    const AgcDriver::Pm4::DrawParameters draw{0u, 3u, 0u, 1u, 0u, false};
-    device.Draw(state, draw, shaders);
-    device.WaitIdle();
-}
-
-void CheckVertexValues(std::uint64_t address, std::uint32_t stride) {
-    std::array<std::uint32_t, 4> expected{};
-    for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
-        std::memcpy(expected.data(), reinterpret_cast<const void*>(address + vertex * stride), sizeof(expected));
-        for (std::size_t component = 0; component < expected.size(); ++component) {
-            Require(VertexValues[vertex * 4u + component] == expected[component], "the fixed-function vertex probe did not observe the original guest bytes");
-        }
-    }
-}
-
-int NativeVertexInput(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
-    Block source(4u * BlockBytes);
-    Block destination(BlockBytes);
-    struct ReleaseDevice {
-        std::unique_ptr<AgcDriver::VulkanDevice>& value;
-        ~ReleaseDevice() { value.reset(); }
-    } releaseDevice{device};
-    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
-    if (context.hostImportAlignment == 0u) {
-        std::puts("native vertex input not tested: host imports unavailable");
-        return VulkanTestSkipped;
-    }
-    const auto color = DecodeTarget(source);
-    const auto colorBytes = AgcDriver::Graphics::MultisampledColorBytes(color);
-    Require(colorBytes >= 48u && colorBytes + 48u <= source.bytes, "the native vertex probe has no neighboring range");
-    constexpr std::array<float, 4> element{0.25f, -2.0f, 7.5f, 1.0f};
-    for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
-        std::memcpy(source.data + vertex * sizeof(element), element.data(), sizeof(element));
-        std::memcpy(source.data + colorBytes + vertex * sizeof(element), element.data(), sizeof(element));
-    }
-    std::memcpy(source.data + colorBytes - 8u, element.data(), 8u);
-    Draw(*device, TargetState(color));
-    AgcDriver::Graphics::NoteColorMetadataFill(source.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
-    CheckUniform(LoadSamples(*device, source), Ones, "before the fixed-function vertex probe");
-    const auto neighbor = source.Address() + colorBytes;
-    {
-        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-        const auto* native = AgcDriver::Graphics::HostImportFor(context, source.Address(), 48u);
-        const auto* adjacent = AgcDriver::Graphics::HostImportFor(context, neighbor, 48u);
-        Require(native != nullptr && native == adjacent, "the native and neighboring vertices do not share an import");
-    }
-    AgcDriver::Graphics::RequireNoMultisampleTarget(neighbor, 48u, "the vertex neighbor control");
-    const auto state = TargetState(DecodeTarget(destination));
-    std::uint32_t missed = 0u;
-    for (const auto stride : {0u, 16u}) {
-        for (const bool edge : {false, true}) {
-            DrawVertexInput(*device, state, neighbor, stride);
-            CheckVertexValues(neighbor, stride);
-            const auto address = edge ? neighbor - 8u : source.Address();
-            std::string refusal;
-            try {
-                DrawVertexInput(*device, state, address, stride);
-                CheckVertexValues(address, stride);
-            } catch (const std::exception& error) {
-                refusal = error.what();
-            }
-            const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
-            Require(refusal.empty() || refused, "the native vertex input failed for another reason: " + refusal);
-            std::printf("native vertex stride %u %s: refused=%u neighbor=passed original-guest-values=%u detail=%s\n", stride, edge ? "edge" : "base", refused ? 1u : 0u, refused ? 0u : 12u, refusal.c_str());
-            missed += refused ? 0u : 1u;
-        }
-    }
-    CheckUniform(LoadSamples(*device, source), Ones, "after fixed-function vertex inputs");
-    std::puts("native vertex controls: shared-import=1 source-samples=1024 neighbor-values=passed");
-    Require(missed == 0u, "native vertex inputs missed " + std::to_string(missed) + " resident-image refusals");
-    return 0;
-}
-
 }
 
 int main(int argc, char** argv) {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--draw-recipe") {
+            DrawRecipePublication(device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--buffer-refusal") {
+            BufferRefusals(device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--buffer-publication") {
+            BufferPublication(device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--cpu-publication") {
+            Publication(*device, true);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--publication") {
+            Publication(*device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--readback") {
+            Readback(*device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--snapshot") {
+            InitialContents(*device, true);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--initial") {
+            InitialContents(*device);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--native-vertex-input") return NativeVertexInput(device);
         if (argc == 2 && std::string_view(argv[1]) == "--draw-recipe") {
             DrawRecipePublication(device);
@@ -1729,6 +1779,12 @@ int main(int argc, char** argv) {
         }
         Block block(4u * BlockBytes);
         Block other(BlockBytes);
+        Block destination(BlockBytes);
+        Block swapped(4u * BlockBytes);
+        struct ReleaseDevice {
+            decltype(device)& value;
+            ~ReleaseDevice() { value.reset(); }
+        } releaseDevice{device};
         const auto color = DecodeTarget(block);
         const auto state = TargetState(color);
         if (!AgcDriver::VulkanDeviceTestAccess::ContextOf(*device).storageImageMultisample) {
@@ -1768,16 +1824,41 @@ int main(int argc, char** argv) {
         std::memcpy(mixedStore.data + colorBytes - sizeof(odd), &odd, sizeof(odd));
         RequireStoreRefused(*device, TargetDescriptor(mixedStore, SampleShift), "writing the 16x16 multisampled texture", "storing to a multisampled texture no draw rendered to whose color memory is not uniform");
         std::puts("stores to one sample of each pixel of a drawn 4x target and to samples of zeroed color memory no draw rendered to reach exactly those samples, and a store to non-uniform color memory no draw rendered to is refused");
+        for (const auto mode : {TileZ64KBX, TileD64KBX}) {
+            Block swizzled(BlockBytes);
+            StoreWords(swizzled, colorBytes, FillOnes);
+            CheckUniform(LoadSamples(*device, swizzled, Samples, 0u, Format16161616Float, mode), Ones, "from the uniform memory of a " + std::to_string(mode) + " swizzle surface no draw rendered to");
+        }
+        const auto htileBytes = AgcDriver::Graphics::HtileMetadataBytes({Side, Side});
+        Require(htileBytes <= BlockBytes, "the HTILE of the 4x texture does not fit one block");
+        Block cleared(2u * BlockBytes);
+        StoreWords(cleared, colorBytes, FillOnes);
+        cleared.data[0] ^= 1u;
+        const auto clearedHtile = cleared.Address() + BlockBytes;
+        CheckUniform(LoadSamples(*device, CompressedDescriptor(cleared, TileZ64KBX, clearedHtile)), {}, "from a Z swizzle surface whose HTILE is all cleared to 0.0 over nonuniform color memory");
+        AgcDriver::Graphics::NoteColorMetadataFill(clearedHtile, sizeof(std::uint32_t), 0u);
+        RequireRefused(*device, CompressedDescriptor(cleared, TileZ64KBX, clearedHtile), "over the HTILE", "loading a Z swizzle texture after a fill over part of its HTILE");
+        AgcDriver::Graphics::NoteColorMetadataFill(clearedHtile, static_cast<std::size_t>(htileBytes), 0u);
+        CheckUniform(LoadSamples(*device, CompressedDescriptor(cleared, TileZ64KBX, clearedHtile)), {}, "from a Z swizzle surface after a fill of 0 over its whole HTILE");
+        Block expanded(2u * BlockBytes);
+        StoreWords(expanded, colorBytes, FillOnes);
+        std::fill_n(reinterpret_cast<std::uint32_t*>(expanded.data + BlockBytes), htileBytes / sizeof(std::uint32_t), 0xffffffffu);
+        CheckUniform(LoadSamples(*device, CompressedDescriptor(expanded, TileZ64KBX, expanded.Address() + BlockBytes)), Ones, "from the uniform memory of a Z swizzle surface whose HTILE is all expanded");
+        Block partial(2u * BlockBytes);
+        StoreWords(partial, colorBytes, FillOnes);
+        const std::uint32_t expandedTile = 0xfu;
+        std::memcpy(partial.data + BlockBytes + htileBytes - sizeof(expandedTile), &expandedTile, sizeof(expandedTile));
+        RequireRefused(*device, CompressedDescriptor(partial, TileZ64KBX, partial.Address() + BlockBytes), "neither all cleared to 0.0 nor all expanded", "loading a Z swizzle texture whose HTILE mixes cleared and expanded tiles");
+        Block display(2u * BlockBytes);
+        StoreWords(display, colorBytes, FillOnes);
+        RequireRefused(*device, CompressedDescriptor(display, TileD64KBX, display.Address() + BlockBytes), "compression metadata", "loading a D swizzle multisampled texture no draw rendered to with compression metadata");
+        Block standard(BlockBytes);
+        StoreWords(standard, colorBytes, FillOnes);
+        RequireRefused(*device, TargetDescriptor(standard, SampleShift, 0u, Format16161616Float, TileS64KBX), "has no modeled multisampled color footprint", "loading an S swizzle multisampled texture no draw rendered to");
         std::puts("every sample of a 4x color target loaded through its multisampled texture descriptor matches the triangle drawn into it, then the fill of its color memory; a surface no draw rendered to loads the value its color memory repeats and keeps it under a later draw");
-        Block swapped(4u * BlockBytes);
         Draw(*device, TargetState(DecodeSwappedTarget(swapped)), 0, 2u, Unorm8PixelCode);
         CheckSwappedSamples(LoadSamples(*device, swapped, Samples, 0u, Format8888Unorm));
         std::puts("a 4x BGRA8 color target loaded through an RGBA8 texture descriptor reads its drawn color with red and blue swapped");
-        Block destination(BlockBytes);
-        struct ReleaseIndexDevice {
-            std::unique_ptr<AgcDriver::VulkanDevice>& device;
-            ~ReleaseIndexDevice() { device.reset(); }
-        } releaseIndexDevice{device};
         CheckNativeIndices(*device, block, destination);
         return 0;
     } catch (const std::exception& error) {

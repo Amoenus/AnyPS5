@@ -64,6 +64,7 @@ PFN_vkBindImageMemory realBindImageMemory = nullptr;
 PFN_vkCreateImageView realCreateImageView = nullptr;
 PFN_vkDestroyImageView realDestroyImageView = nullptr;
 PFN_vkCmdClearColorImage realClearColorImage = nullptr;
+PFN_vkCmdCopyImage realCopyImage = nullptr;
 
 [[noreturn]] void FailPendingImage() {
     std::fputs("an unsubmitted MSAA image would be destroyed; stopping without submitting it\n", stderr);
@@ -138,6 +139,15 @@ VKAPI_ATTR void VKAPI_CALL CountClearColorImage(VkCommandBuffer commands, VkImag
     realClearColorImage(commands, image, layout, clear, count, ranges);
 }
 
+VKAPI_ATTR void VKAPI_CALL CountCopyImage(VkCommandBuffer commands, VkImage source, VkImageLayout sourceLayout, VkImage destination, VkImageLayout destinationLayout, std::uint32_t count, const VkImageCopy* regions) {
+    {
+        std::lock_guard lock(countsMutex);
+        pendingImages.emplace_back(source, images.at(source).generation);
+        pendingImages.emplace_back(destination, images.at(destination).generation);
+    }
+    realCopyImage(commands, source, sourceLayout, destination, destinationLayout, count, regions);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL CountingDeviceProc(VkDevice device, const char* name) {
     const auto function = realProc(device, name);
     if (function == nullptr) return nullptr;
@@ -149,6 +159,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL CountingDeviceProc(VkDevice device, con
     if (std::strcmp(name, "vkCreateImageView") == 0) return reinterpret_cast<PFN_vkVoidFunction>(CountCreateImageView);
     if (std::strcmp(name, "vkDestroyImageView") == 0) return reinterpret_cast<PFN_vkVoidFunction>(CountDestroyImageView);
     if (std::strcmp(name, "vkCmdClearColorImage") == 0) return reinterpret_cast<PFN_vkVoidFunction>(CountClearColorImage);
+    if (std::strcmp(name, "vkCmdCopyImage") == 0) return reinterpret_cast<PFN_vkVoidFunction>(CountCopyImage);
     return function;
 }
 
@@ -280,6 +291,7 @@ public:
         realCreateImageView = context.Function<PFN_vkCreateImageView>("vkCreateImageView");
         realDestroyImageView = context.Function<PFN_vkDestroyImageView>("vkDestroyImageView");
         realClearColorImage = context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage");
+        realCopyImage = context.Function<PFN_vkCmdCopyImage>("vkCmdCopyImage");
         context.deviceProc = CountingDeviceProc;
         context.functions = nullptr;
     }
@@ -395,6 +407,69 @@ public:
         AwaitImages(0, "sampled MSAA targets were not fully released");
     }
 
+    void StorageRemap() {
+        GuestBlock block;
+        const auto target = Target(block);
+        const auto resource = Resource(block);
+        std::shared_ptr<Texture> held;
+        VkImageView sampledView = VK_NULL_HANDLE, storageView = VK_NULL_HANDLE;
+        VkImage oldImage = VK_NULL_HANDLE, promotedImage = VK_NULL_HANDLE;
+        Image old{}, promoted{};
+        VkDeviceSize totalBytes = 0;
+        {
+            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+            MultisampleTargetView(context, target);
+            held = MultisampleTargetTexture(context, resource, {});
+            sampledView = held->View();
+            old = ImageFor(sampledView, &oldImage);
+        }
+        const std::weak_ptr<Texture> lifetime = held;
+        Sync();
+        {
+            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+            const auto keptBefore = context.recorder->OpenKeptBytes();
+            storageView = MultisampleTargetStorageView(context, resource);
+            promoted = ImageFor(storageView, &promotedImage);
+            Require(promoted.generation != old.generation && Alive(oldImage, old), "MSAA storage promotion did not retain its source image");
+            Require(ImageFor(sampledView).generation == old.generation, "MSAA storage promotion destroyed a held sampled view");
+            Require(held->View() == sampledView, "MSAA storage promotion changed a held sampled alias");
+            totalBytes = AllocationBytesOf(old) + AllocationBytesOf(promoted) + MultisampledColorBytes(target);
+            const auto kept = context.recorder->OpenKeptBytes();
+            std::printf("MSAA storage promotion budget: retained=%llu expected=%llu initial=%llu\n", static_cast<unsigned long long>(kept - keptBefore), static_cast<unsigned long long>(totalBytes), static_cast<unsigned long long>(MultisampledColorBytes(target)));
+            Require(kept == keptBefore + totalBytes, "MSAA storage promotion did not account for both allocations and initial color bytes");
+            Require(MultisampleTargetStorageView(context, resource) == storageView, "a repeated MSAA storage lookup changed its view");
+            Require(context.recorder->OpenKeptBytes() == kept, "a repeated MSAA storage lookup double-counts its allocations");
+        }
+        Sync();
+        {
+            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+            Require(Alive(oldImage, old) && ImageFor(sampledView).generation == old.generation, "a held sampled MSAA view did not survive storage promotion completion");
+            Require(held->View() == sampledView, "a held sampled MSAA alias changed after promotion completion");
+            held.reset();
+            const auto keptBefore = context.recorder->OpenKeptBytes();
+            Require(MultisampleTargetStorageView(context, resource) == storageView, "a later MSAA storage lookup changed its promoted image");
+            const auto kept = context.recorder->OpenKeptBytes();
+            Require(kept == keptBefore + totalBytes, "an already-storable MSAA target is missing retained bytes from the new batch budget");
+            Require(MultisampleTargetStorageView(context, resource) == storageView, "a repeated promoted MSAA lookup changed its view");
+            Require(context.recorder->OpenKeptBytes() == kept, "an already-storable MSAA target double-counts its allocations in one batch");
+        }
+        block.Unmap();
+        block.Map();
+        {
+            std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+            const auto replacement = ImageFor(MultisampleTargetView(context, target));
+            CheckPendingImages();
+            Require(replacement.generation != promoted.generation, "a remapped MSAA target reused its promoted storage owner");
+            Require(!lifetime.expired() && Alive(oldImage, old) && Alive(promotedImage, promoted), "a pending MSAA storage use lost its promoted or retired allocation");
+        }
+        Sync();
+        AwaitImages(1, "the completed promoted MSAA owner was not released");
+        Require(lifetime.expired() && !Alive(oldImage, old) && !Alive(promotedImage, promoted), "a retired MSAA storage owner retained its allocations after completion");
+        block.Unmap();
+        Clear();
+        AwaitImages(0, "promoted MSAA targets were not fully released");
+    }
+
 private:
     AgcDriver::VulkanDevice& device;
     Context context;
@@ -412,7 +487,8 @@ int main() {
         run.IdleRemaps();
         run.RecordedRemap();
         run.SampledRemap();
-        std::puts("retired MSAA allocations stay bounded, recorded clears retain their images, and sampled aliases release their parents after the last batch");
+        run.StorageRemap();
+        std::puts("retired MSAA allocations stay bounded, recorded clears and storage promotions retain their images, and sampled aliases release their parents after the last batch");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

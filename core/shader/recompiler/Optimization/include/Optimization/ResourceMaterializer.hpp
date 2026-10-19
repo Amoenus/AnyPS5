@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,11 @@ struct RuntimeImageModeMatch {
 struct ViewLevelsPastChain {
     std::uint32_t levels = 0;
     bool base = false;
+};
+
+class ConvertedSampleRequired : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
 };
 
 class ResourceMaterializer {

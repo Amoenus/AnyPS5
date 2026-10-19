@@ -59,6 +59,7 @@ static constexpr std::uint64_t KERNEL_MNT_NOSUID = 0x8;
 #include <direct.h>
 #include <sys/stat.h>
 #include "prx/libkernel/File/include/WindowsFileTime.hpp"
+#include "prx/libc/include/WindowsDescriptor.hpp"
 extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
 static void IgnoreDescriptorParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
 template <typename TCall> static auto WithoutParameterHandler(TCall call) {
@@ -116,13 +117,25 @@ static int NativeFchmod(int descriptor, int mode) {
     const auto path = File::WindowsDescriptorPath_nid_no_patch(descriptor);
     return path ? NativeChmod(*path, mode) : -1;
 }
+static int TruncateThroughWriter(HANDLE handle, std::int64_t length) {
+    const auto writer = ReOpenFile(handle, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0);
+    if (writer == INVALID_HANDLE_VALUE) return WindowsOpenError_nid_no_patch(GetLastError());
+    FILE_END_OF_FILE_INFO end{};
+    end.EndOfFile.QuadPart = length;
+    const bool truncated = SetFileInformationByHandle(writer, FileEndOfFileInfo, &end, sizeof(end));
+    const DWORD error = GetLastError();
+    CloseHandle(writer);
+    return truncated ? 0 : WindowsOpenError_nid_no_patch(error);
+}
 static int NativeFtruncate(int descriptor, std::int64_t length) {
     const int result = File::TruncateSharedMemory_nid_no_patch(descriptor, length);
     if (result != -2) return result;
     if (File::IsDirectoryDescriptor(descriptor)) return EINVAL;
+    const auto positioned = File::LockPositionedTransfer(descriptor);
     const auto handle = reinterpret_cast<HANDLE>(WithoutParameterHandler([descriptor] { return ::_get_osfhandle(descriptor); }));
     if (handle == INVALID_HANDLE_VALUE) return EBADF;
     if (::GetFileType(handle) != FILE_TYPE_DISK) return EINVAL;
+    if (WindowsHandleOnlyAppends_nid_no_patch(WindowsHandleAccess_nid_no_patch(handle, descriptor, "ftruncate"))) return TruncateThroughWriter(handle, length);
     return static_cast<int>(WithoutParameterHandler([descriptor, length] { return ::_chsize_s(descriptor, length); }));
 }
 static int NativeTruncate(const std::filesystem::path& path, std::int64_t length) {
@@ -887,6 +900,7 @@ int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_
     if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
     if (offset < 0) return PosixFailure(GUEST_EINVAL);
     if (FailPosixPositionedGuestSocket(d)) return -1;
+    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(buf, nbytes);
     char empty = 0;
     const auto result = NativePwrite(d, buf == nullptr ? &empty : buf, nbytes, offset);
     return result < 0 ? PosixFailure(SceErrorFromErrno(errno) & 0xffff) : result;
@@ -1119,6 +1133,10 @@ static bool OpenIovecs(const KernelIovec* iov, int iovcnt, std::deque<GuestArena
     return true;
 }
 
+static void PrepareWriteIovecs(const KernelIovec* iov, int iovcnt) {
+    for (int i = 0; i < iovcnt; ++i) GuestArena::GuestArenaPrepareHostRead_nid_no_patch(iov[i].base, iov[i].length);
+}
+
 #ifdef _WIN32
 
 int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
@@ -1138,6 +1156,7 @@ int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t
     if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
     if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
+    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(buf, nbytes);
     char empty = 0;
     const auto result = NativePwrite(d, nbytes == 0 && buf == nullptr ? &empty : buf, nbytes, offset);
     return result < 0 ? SceErrorFromErrno(errno) : result;
@@ -1163,6 +1182,7 @@ static std::int64_t TransferIovecs(int d, const KernelIovec* iov, int iovcnt, co
                                   : GuestSockets::Readv(d, reinterpret_cast<const GuestSockets::Iovec*>(iov), iovcnt);
         return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
     }
+    if (write) PrepareWriteIovecs(iov, iovcnt);
     if (!write && File::IsRandomDevice(d)) return ReadRandomIovecs(d, iov, iovcnt);
     if (!write) {
         if (const auto archived = File::ReadArchivedIovecs(d, iov, iovcnt, offset)) return *archived;
@@ -1234,6 +1254,7 @@ int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t
     if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
     if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
+    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(buf, nbytes);
     const auto result = NativePwrite(d, buf, nbytes, offset);
     return result < 0 ? SceErrorFromErrno(errno) : result;
 }
@@ -1258,6 +1279,7 @@ int64_t APS5_VABI sceKernelWritev(int d, const KernelIovec* iov, int iovcnt) {
         const auto result = GuestSockets::Writev(d, reinterpret_cast<const GuestSockets::Iovec*>(iov), iovcnt);
         return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
     }
+    PrepareWriteIovecs(iov, iovcnt);
     const auto sharedResult = File::WritevSharedMemory_nid_no_patch(d, NativeIovecs(iov), iovcnt);
     if (sharedResult != -2) return sharedResult < 0 ? SceErrorFromErrno(errno) : sharedResult;
     const auto result = static_cast<std::int64_t>(::writev(d, NativeIovecs(iov), iovcnt));
@@ -1280,6 +1302,7 @@ int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* iov, int iovcnt, in
     if (const int error = CheckIovecs(iov, iovcnt)) return error;
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
     if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
+    PrepareWriteIovecs(iov, iovcnt);
     const auto sharedResult = File::PwritevSharedMemory_nid_no_patch(d, NativeIovecs(iov), iovcnt, offset);
     if (sharedResult != -2) return sharedResult < 0 ? SceErrorFromErrno(errno) : sharedResult;
     const auto result = static_cast<std::int64_t>(::pwritev(d, NativeIovecs(iov), iovcnt, static_cast<off_t>(offset)));

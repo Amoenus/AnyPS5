@@ -314,6 +314,7 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
         const char empty = 0;
         return sceKernelWrite(d, &empty, 0);
     }
+    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(buf, nbytes);
     auto n = NativeWrite(d, buf, nbytes);
     if (n < 0) return SceIoErrorFromErrno(errno);
     return static_cast<std::int64_t>(n);

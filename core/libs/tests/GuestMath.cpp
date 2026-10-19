@@ -74,6 +74,13 @@ double APS5_VABI fdim_nid_postfix(double, double);
 float APS5_VABI fdimf_nid_postfix(float, float);
 float APS5_VABI fabsf_nid_postfix(float);
 long double APS5_VABI fabsl_nid_postfix(long double);
+double APS5_VABI copysign_nid_postfix(double, double);
+float APS5_VABI copysignf_nid_postfix(float, float);
+double APS5_VABI remquo_nid_postfix(double, double, int*);
+float APS5_VABI remquof_nid_postfix(float, float, int*);
+float APS5_VABI fmaf_nid_postfix(float, float, float);
+long double APS5_VABI ceill_nid_postfix(long double);
+long double APS5_VABI floorl_nid_postfix(long double);
 float APS5_VABI tanf_nid_postfix(float);
 int APS5_VABI rand_nid_postfix();
 void APS5_VABI srand_nid_postfix(unsigned int);
@@ -232,6 +239,10 @@ static void CheckExactOperations() {
     Require(fdimf_nid_postfix(4.0f, 1.0f) == 3.0f && fdimf_nid_postfix(1.0f, 4.0f) == 0.0f);
     Require(fdimf_nid_postfix(4.0f, 4.0f) == 0.0f && !std::signbit(fdimf_nid_postfix(1.0f, 4.0f)));
     Require(std::isnan(fdimf_nid_postfix(std::numeric_limits<float>::quiet_NaN(), 1.0f)));
+    Require(fmaf_nid_postfix(2.f, 3.f, 4.f) == 10.f);
+    volatile float tenthFloat = 0.1f;
+    Require(fmaf_nid_postfix(tenthFloat, 10.f, -1.f) != 0.f);
+    Require(std::isnan(fmaf_nid_postfix(INFINITY, 0.f, 1.f)));
 }
 
 static void CheckNearbyint() {
@@ -398,6 +409,10 @@ static void CheckLongDouble() {
     Require(frexpl_nid_postfix(INFINITY, &exponent) == INFINITY && exponent == 77);
     Require(frexpl_nid_postfix(-INFINITY, &exponent) == -INFINITY && exponent == 77);
     Require(std::isnan(frexpl_nid_postfix(NAN, &exponent)) && exponent == 77);
+    Require(ceill_nid_postfix(2.2L) == 3.0L && ceill_nid_postfix(-2.7L) == -2.0L);
+    Require(floorl_nid_postfix(2.7L) == 2.0L && floorl_nid_postfix(-2.2L) == -3.0L);
+    Require(ceill_nid_postfix(2.0L) == 2.0L && floorl_nid_postfix(-2.0L) == -2.0L);
+    Require(std::isnan(ceill_nid_postfix(NAN)) && std::isnan(floorl_nid_postfix(NAN)));
 }
 
 static void CheckNearbyintl() {
@@ -979,6 +994,12 @@ int main() {
     Require(fmodf_nid_postfix(-5.5f, 2.f) == -1.5f);
     Require(std::signbit(fmodf_nid_postfix(-4.f, 2.f)));
     Require(std::isnan(fmodf_nid_postfix(1.f, 0.f)));
+    int quo = 0;
+    Require(remquo_nid_postfix(7.0, 3.0, &quo) == 1.0 && (quo & 7) == 2);
+    Require(remquo_nid_postfix(-7.0, 3.0, &quo) == -1.0 && (quo & 7) == ((-2) & 7));
+    int quof = 0;
+    Require(remquof_nid_postfix(7.0f, 3.0f, &quof) == 1.0f && (quof & 7) == 2);
+    Require(remquof_nid_postfix(-7.0f, 3.0f, &quof) == -1.0f && (quof & 7) == ((-2) & 7));
     Require(std::bit_cast<std::uint32_t>(nanf_nid_postfix(nullptr)) == 0x7fc00000u);
     Require(std::bit_cast<std::uint32_t>(nanf_nid_postfix("")) == 0x7fc00000u);
     Require(std::bit_cast<std::uint32_t>(nanf_nid_postfix("123")) == 0x7fc00000u);
@@ -1004,6 +1025,16 @@ int main() {
     try { rand_r_nid_postfix(nullptr); } catch (...) { threw = true; }
     Require(threw);
     Require(hypot_nid_postfix(3.0, 4.0) == 5.0 && hypot_nid_postfix(-3.0, -4.0) == 5.0 && hypotf_nid_postfix(3.f, -4.f) == 5.f);
+    Require(copysign_nid_postfix(1.0, 2.0) == 1.0 && copysign_nid_postfix(1.0, -2.0) == -1.0);
+    Require(copysign_nid_postfix(-1.0, 2.0) == 1.0 && copysign_nid_postfix(-1.0, -2.0) == -1.0);
+    Require(std::bit_cast<std::uint64_t>(copysign_nid_postfix(0.0, -1.0)) == 0x8000000000000000ull);
+    Require(std::bit_cast<std::uint64_t>(copysign_nid_postfix(-0.0, 1.0)) == 0);
+    Require(copysign_nid_postfix(INFINITY, -1.0) == -INFINITY && copysign_nid_postfix(-INFINITY, 1.0) == INFINITY);
+    Require(std::isnan(copysign_nid_postfix(std::numeric_limits<double>::quiet_NaN(), -1.0)) && std::signbit(copysign_nid_postfix(std::numeric_limits<double>::quiet_NaN(), -1.0)));
+    Require(std::isnan(copysign_nid_postfix(std::numeric_limits<double>::quiet_NaN(), 1.0)) && !std::signbit(copysign_nid_postfix(std::numeric_limits<double>::quiet_NaN(), 1.0)));
+    Require(copysignf_nid_postfix(1.0f, 2.0f) == 1.0f && copysignf_nid_postfix(1.0f, -2.0f) == -1.0f);
+    Require(std::bit_cast<std::uint32_t>(copysignf_nid_postfix(0.0f, -1.0f)) == 0x80000000u);
+    Require(std::bit_cast<std::uint32_t>(copysignf_nid_postfix(-0.0f, 1.0f)) == 0);
     Require(std::abs(hypot_nid_postfix(1e308, 1e308) / 1.4142135623730951e308 - 1.0) < 1e-15);
     Require(std::abs(hypotf_nid_postfix(2e38f, 2e38f) / 2.8284271e38f - 1.f) < 1e-6f);
     Require(std::isinf(hypot_nid_postfix(std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN())));

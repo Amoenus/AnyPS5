@@ -2630,12 +2630,10 @@ VulkanDevice::CopyOutcome VulkanDevice::CopyBuffer(std::uint64_t destination, st
         }
         outcome.syncMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - syncStart).count();
     }
-    // A whole surface copied into another: a device copy between their images, whose results reach
-    // the destination's memory through the image's deferred write-back (nothing crosses to host
-    // memory for the copy itself).
     if (AliasCopy(context, destination, source, bytes)) {
         noteWriter({}, 0);
         recorder.NotePendingWrite(destination, bytes);
+        Graphics::StorageTexture::FlushPending(destination, bytes, nullptr, "buffer copy destination", Graphics::PublishScope::Whole);
         outcome.path = 3;
         return outcome;
     }
@@ -3062,6 +3060,8 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
             // image first, as a sampled texture of the image would (see cachedTexture). The uncached
             // walk: the collect memo is per worker packet, so on this thread a memoized answer could
             // miss a CPU write that landed after a worker's walk of the same range.
+            static const bool noAdopt = std::getenv("APS5_NO_PRESENT_EPOCH") != nullptr;
+            if (!noAdopt) GuestMemory::AdoptLatestCollectEpoch();
             GuestMemory::CollectWritesUncached(buffer.address, bytes);
             if (!GuestMemory::UnchangedSince(buffer.address, bytes, resident->Generation()) || (buffer.dccAddress != 0 && ResidentKeysMoved(*resident))) {
                 resident->Refresh();
@@ -4739,7 +4739,7 @@ std::shared_ptr<ComputePipelineObjects> VulkanDevice::createComputePipeline(cons
     const Graphics::PipelineSpecialization specialization(shader);
     const auto subgroupSize = computeSubgroupSize(shader);
     const auto stageFlags = computeStageFlags(shader);
-    if (const char* directory = std::getenv("APS5_DUMP_COMPUTE_PIPELINES"); directory != nullptr && *directory != '\0' && CaptureComputePipeline(shader.spirv.size())) {
+    if (const char* directory = std::getenv("APS5_DUMP_COMPUTE_PIPELINES"); directory != nullptr && *directory != '\0' && ComputePipelineCapture::OptionalEnabled() && CaptureComputePipeline(shader.spirv.size())) {
         ComputePipelineCapture capture;
         capture.spirv = shader.spirv.Copy();
         ComputeDescriptorSetLayout resourcesLayout;
@@ -4762,8 +4762,8 @@ std::shared_ptr<ComputePipelineObjects> VulkanDevice::createComputePipeline(cons
         capture.driverVersion = state->properties.driverVersion;
         capture.apiVersion = state->properties.apiVersion;
         std::copy_n(state->properties.pipelineCacheUUID, VK_UUID_SIZE, capture.pipelineCacheUuid.begin());
-        const auto path = capture.Write(directory);
-        std::fprintf(stderr, "[compute-capture] %s\n", path.string().c_str());
+        const auto path = capture.WriteOptional(directory);
+        if (!path.empty()) std::fprintf(stderr, "[compute-capture] %s\n", path.string().c_str());
     }
     if (profile && shader.spirv.size() > 100000) std::fprintf(stderr, "[dispatch] creating a pipeline for %zu SPIR-V words (program 0x%llx)\n", shader.spirv.size(), static_cast<unsigned long long>(programAddress));
     CreateComputePipeline(state->device, state->DeviceFunction<PFN_vkCreateComputePipelines>("vkCreateComputePipelines"), context.pipelineCache, objects->module, objects->layout, pipelineFlags, stageFlags, specialization.Info(), subgroupSize, &objects->pipeline, context.pipelineCacheSynchronization);
