@@ -437,6 +437,7 @@ std::uint32_t QueryDimensions(SpirvValueEmitContext& ctx, const ImageEmitAccess&
     const auto size = state.module.AllocateId();
     std::uint32_t levels = 0u;
     std::uint32_t pastView = 0u;
+    std::uint32_t outsideLevels = 0u;
     if (info.multisampled != 0u) {
         state.module.AddFunction(spv::OpImageQuerySize, ImageViewSizeType(state, dimension), size, image);
     } else {
@@ -444,9 +445,11 @@ std::uint32_t QueryDimensions(SpirvValueEmitContext& ctx, const ImageEmitAccess&
         state.module.AddFunction(spv::OpImageQueryLevels, TypeU32(state), viewLevels, image);
         const auto past = LevelsPastView(state, access.mem.resource);
         const auto lod = AddressU32(ctx, access, 0);
-        pastView = Binary(state, spv::OpLogicalAnd, TypeBool(state), Binary(state, spv::OpUGreaterThanEqual, TypeBool(state), lod, viewLevels), Binary(state, spv::OpINotEqual, TypeBool(state), past, ConstantU32(state, 0u)));
-        state.module.AddFunction(spv::OpImageQuerySizeLod, ImageViewSizeType(state, dimension), size, image, Select(state, TypeU32(state), pastView, ConstantU32(state, 0u), lod));
+        const auto outsideView = Binary(state, spv::OpUGreaterThanEqual, TypeBool(state), lod, viewLevels);
+        pastView = Binary(state, spv::OpLogicalAnd, TypeBool(state), outsideView, Binary(state, spv::OpINotEqual, TypeBool(state), past, ConstantU32(state, 0u)));
+        state.module.AddFunction(spv::OpImageQuerySizeLod, ImageViewSizeType(state, dimension), size, image, Select(state, TypeU32(state), outsideView, ConstantU32(state, 0u), lod));
         levels = Binary(state, spv::OpIAdd, TypeU32(state), viewLevels, past);
+        outsideLevels = Binary(state, spv::OpUGreaterThanEqual, TypeBool(state), lod, levels);
     }
     const auto components = info.coordinateComponents;
     std::uint32_t result[4] = {ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0)};
@@ -465,6 +468,7 @@ std::uint32_t QueryDimensions(SpirvValueEmitContext& ctx, const ImageEmitAccess&
         result[2] = ConstantU32(state, 1);
     }
     if (info.multisampled == 0u) {
+        for (std::uint32_t index = 0; index < 3u; ++index) result[index] = Select(state, TypeU32(state), outsideLevels, ConstantU32(state, 0u), result[index]);
         result[3] = levels;
     }
     const auto vector = state.module.AllocateId();

@@ -84,8 +84,10 @@ std::array<std::uint32_t, 8> TextureDescriptor(const void* data, std::uint32_t f
     };
 }
 
-std::array<std::uint32_t, 8> SampledDescriptor(std::uint32_t type, std::uint32_t layers, std::uint32_t base) {
-    return TextureDescriptor(Texels.data(), Format8888UNorm, TileLinear, type, layers, base, GuestLevels - 1u);
+std::array<std::uint32_t, 8> SampledDescriptor(std::uint32_t type, std::uint32_t layers, std::uint32_t base, std::uint32_t last = GuestLevels - 1u) {
+    auto descriptor = TextureDescriptor(Texels.data(), Format8888UNorm, TileLinear, type, layers, base, last);
+    descriptor[5] = last << 4u;
+    return descriptor;
 }
 
 std::array<std::uint8_t, 4> TexelOf(std::uint32_t level, std::uint32_t x) {
@@ -150,31 +152,33 @@ std::uint32_t ResultWord(std::uint32_t tid, std::uint32_t component) {
     return Buffer[tid * Words + Result + component];
 }
 
-void CheckResinfoAt(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t type, std::uint32_t layers, std::uint32_t base, const std::function<std::uint32_t(std::uint32_t)>& lodOf) {
-    const auto levels = GuestLevels - base;
-    Run(device, code, SampledDescriptor(type, layers, base), [&](std::uint32_t tid) { return std::array<std::uint32_t, 4>{lodOf(tid), 0u, 0u, 0u}; });
-    const std::string name = std::string("image_get_resinfo of a 28x1 ") + (type == Type2DArray ? "2D-array" : "2D") + " T# of levels " + std::to_string(base) + "-9";
+void CheckResinfoAt(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t type, std::uint32_t layers, std::uint32_t base, const std::function<std::uint32_t(std::uint32_t)>& lodOf, std::uint32_t last = GuestLevels - 1u) {
+    const auto levels = last - base + 1u;
+    Run(device, code, SampledDescriptor(type, layers, base, last), [&](std::uint32_t tid) { return std::array<std::uint32_t, 4>{lodOf(tid), 0u, 0u, 0u}; });
+    const std::string name = std::string("image_get_resinfo of a 28x1 ") + (type == Type2DArray ? "2D-array" : "2D") + " T# of levels " + std::to_string(base) + "-" + std::to_string(last);
     for (std::uint32_t tid = 0; tid < Threads; ++tid) {
         const auto lod = lodOf(tid);
         const auto check = [&](std::uint32_t component, std::uint32_t expected, const char* what) {
             const auto value = ResultWord(tid, component);
             Require(value == expected, name + " at LOD " + std::to_string(lod) + ": " + what + " is " + std::to_string(value) + ", expected " + std::to_string(expected));
         };
-        check(0u, LevelWidth(base + lod), "the width");
-        check(1u, 1u, "the height");
-        if (type == Type2DArray) check(2u, layers, "the layer count");
+        const bool inside = lod < levels;
+        check(0u, inside ? LevelWidth(base + lod) : 0u, "the width");
+        check(1u, inside ? 1u : 0u, "the height");
+        check(2u, inside && type == Type2DArray ? layers : 0u, "the layer count");
         check(3u, levels, "the level count");
     }
 }
 
-void CheckResinfo(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t type, std::uint32_t layers, std::uint32_t base) {
-    const auto levels = GuestLevels - base;
-    for (std::uint32_t lod = 0; lod < levels; ++lod) CheckResinfoAt(device, code, type, layers, base, [lod](std::uint32_t) { return lod; });
+void CheckResinfo(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t type, std::uint32_t layers, std::uint32_t base, std::uint32_t last = GuestLevels - 1u) {
+    const auto levels = last - base + 1u;
+    for (std::uint32_t lod = 0; lod <= levels + 1u; ++lod) CheckResinfoAt(device, code, type, layers, base, [lod](std::uint32_t) { return lod; }, last);
+    for (const auto lod : {31u, 0xffffffffu}) CheckResinfoAt(device, code, type, layers, base, [lod](std::uint32_t) { return lod; }, last);
     if (device.DeviceName().starts_with("llvmpipe")) {
         std::puts("skipped the image_get_resinfo dispatches whose LOD differs between invocations: llvmpipe before Mesa 25.3 answers a size query of a vector of invocations at the LOD of its first");
         return;
     }
-    CheckResinfoAt(device, code, type, layers, base, [levels](std::uint32_t tid) { return tid % levels; });
+    CheckResinfoAt(device, code, type, layers, base, [](std::uint32_t tid) { return tid; }, last);
 }
 
 void CheckSampledLevels(AgcDriver::VulkanDevice& device) {
@@ -205,10 +209,10 @@ void CheckBaseLoad(AgcDriver::VulkanDevice& device) {
     }
 }
 
-void RequireRefused(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t base, const std::string& name) {
+void RequireRefused(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t base, const std::string& name, std::uint32_t last = GuestLevels - 1u) {
     std::string refusal;
     try {
-        Run(device, code, SampledDescriptor(Type2D, 1u, base), [](std::uint32_t tid) { return std::array<std::uint32_t, 4>{0u, 0u, tid % GuestLevels, 0u}; });
+        Run(device, code, SampledDescriptor(Type2D, 1u, base, last), [](std::uint32_t tid) { return std::array<std::uint32_t, 4>{0u, 0u, tid % GuestLevels, 0u}; });
     } catch (const std::exception& error) {
         refusal = error.what();
     }
@@ -274,14 +278,20 @@ int main() {
         return 1;
     }
     auto& gpu = *device;
-    const std::array<std::function<void()>, 9> checks{
+    const std::array<std::function<void()>, 15> checks{
         [&] { CheckSampledLevels(gpu); },
         [&] { CheckBaseLoad(gpu); },
         [&] { CheckResinfo(gpu, Resinfo2D, Type2D, 1u, 0u); },
         [&] { CheckResinfo(gpu, Resinfo2DArray, Type2DArray, Layers, 0u); },
         [&] { CheckResinfo(gpu, Resinfo2D, Type2D, 1u, 7u); },
+        [&] { CheckResinfo(gpu, Resinfo2D, Type2D, 1u, 7u, 7u); },
+        [&] { CheckResinfo(gpu, Resinfo2DArray, Type2DArray, Layers, 7u); },
+        [&] { CheckResinfo(gpu, Resinfo2D, Type2D, 1u, 0u, ChainLevels - 1u); },
+        [&] { CheckResinfo(gpu, Resinfo2DArray, Type2DArray, Layers, 0u, ChainLevels - 1u); },
         [&] { RequireRefused(gpu, LoadMip2D, 0u, "image_load_mip"); },
         [&] { RequireRefused(gpu, Load2D, 7u, "image_load at base level 7"); },
+        [&] { RequireRefused(gpu, Load2D, 7u, "image_load at single base level 7", 7u); },
+        [&] { RequireRefused(gpu, LoadMip2D, 7u, "image_load_mip at single base level 7", 7u); },
         [&] { CheckStorageWriteBack(gpu, TileLinear); },
         [&] { CheckStorageWriteBack(gpu, TileR64KBX); },
     };

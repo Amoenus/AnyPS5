@@ -260,7 +260,7 @@ struct ExpandImage {
     VkDeviceSize bytes = 0;
 };
 
-ExpandImage CreateExpandImage(const Context& context, const GuestTextureResource& descriptor, std::uint32_t depth, std::uint32_t layers, std::uint32_t levels) {
+ExpandImage CreateExpandImage(const Context& context, const GuestTextureResource& descriptor, std::uint32_t depth, std::uint32_t levels, std::uint32_t layers) {
     ExpandImage result;
     VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     imageInfo.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | (descriptor.dimension == TextureDimension::kCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u);
@@ -287,7 +287,7 @@ ExpandImage CreateExpandImage(const Context& context, const GuestTextureResource
     return result;
 }
 
-void RecordExpandBlit(const Context& context, VkCommandBuffer commands, VkImage source, VkImageLayout sourceLayout, VkImage target, const GuestTextureResource& descriptor, std::uint32_t depth, std::uint32_t layers, std::uint32_t levels) {
+void RecordExpandBlit(const Context& context, VkCommandBuffer commands, VkImage source, VkImageLayout sourceLayout, VkImage target, const GuestTextureResource& descriptor, std::uint32_t depth, std::uint32_t levels, std::uint32_t layers) {
     std::vector<VkImageBlit> regions;
     for (std::uint32_t level = 0; level < levels; ++level) {
         const VkOffset3D end{static_cast<std::int32_t>(std::max(descriptor.width >> level, 1u)), static_cast<std::int32_t>(std::max(descriptor.height >> level, 1u)), static_cast<std::int32_t>(descriptor.dimension == TextureDimension::k3D ? std::max(depth >> level, 1u) : 1u)};
@@ -300,6 +300,7 @@ void RecordExpandBlit(const Context& context, VkCommandBuffer commands, VkImage 
     }
     context.Function<PFN_vkCmdBlitImage>("vkCmdBlitImage")(commands, source, sourceLayout, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(regions.size()), regions.data(), VK_FILTER_NEAREST);
 }
+
 
 std::atomic<std::uint64_t>& SampledMemoryCounter() {
     static std::atomic<std::uint64_t> bytes{0};
@@ -373,7 +374,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         const VkImage uploadImage = image;
         std::shared_ptr<OwnedImage> uploadOwned;
         if (srgbExpand) {
-            auto expanded = CreateExpandImage(context, descriptor, geometry.imageDepth, geometry.imageLayers, geometry.imageLevels);
+            auto expanded = CreateExpandImage(context, descriptor, geometry.imageDepth, geometry.imageLevels, geometry.imageLayers);
             uploadOwned = std::move(owned);
             owned = std::move(expanded.owned);
             image = expanded.image;
@@ -496,7 +497,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                 toBlit[1] = toTransferDst;
                 toBlit[1].image = image;
                 context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, toBlit.data());
-                RecordExpandBlit(context, commands, uploadImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, descriptor, geometry.imageDepth, geometry.imageLayers, geometry.imageLevels);
+                RecordExpandBlit(context, commands, uploadImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, descriptor, geometry.imageDepth, geometry.imageLevels, geometry.imageLayers);
             }
             std::unique_ptr<Buffer> dump;
             if (dumpWanted) {
@@ -618,7 +619,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         const auto geometry = DescribeSurface(descriptor);
         copyWidth = descriptor.width;
         copyHeight = descriptor.height;
-        copyLevels = descriptor.mipCount;
+        copyLevels = geometry.imageLevels;
         copyLayers = geometry.imageLayers;
         copyElementBytes = BytesPerElement(descriptor.format);
         AGC_LOG_DEFERRED(stdout, "Texture address=0x%llx %ux%u mips=%u layers=%u repacked copy of storage image (guest format %u -> vk %d)", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.mipCount, copyLayers, descriptor.format, static_cast<int>(format));
@@ -646,7 +647,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         owned->memory = AllocateImageMemory(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory repacked copy");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned->memory, 0), "vkBindImageMemory repacked copy");
 
-        const auto viewLevelCount = std::min(descriptor.lastLevel, descriptor.mipCount - 1u) - descriptor.baseLevel + 1u;
+        const auto [viewBaseLevel, viewLevelCount] = ViewLevels(descriptor, copyLevels);
         const auto viewLayerCount = geometry.imageLayers - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
             Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
@@ -657,7 +658,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         viewInfo.format = format;
         viewFormat = format;
         viewInfo.components = components;
-        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
+        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, viewBaseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
         VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
         ChainMinLod(context, descriptor, viewInfo, minLod);
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView repacked copy");
@@ -800,7 +801,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         copyLevels = geometry.imageLevels;
         copyLayers = geometry.imageLayers;
         APS5_LOG_OUT("Texture address=0x%llx %ux%u mips=%u layers=%u sRGB copy of storage image (guest format %u)", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.mipCount, copyLayers, descriptor.format);
-        auto expanded = CreateExpandImage(context, descriptor, 1u, copyLayers, copyLevels);
+        auto expanded = CreateExpandImage(context, descriptor, 1u, copyLevels, copyLayers);
         image = expanded.image;
         owned = std::move(expanded.owned);
         allocationBytes = expanded.bytes;
@@ -856,7 +857,7 @@ bool Texture::refreshSrgbExpand() {
     toTransferDst.image = image;
     toTransferDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, copyLevels, 0, copyLayers};
     barrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &produced, 0, nullptr, 1, &toTransferDst);
-    RecordExpandBlit(context, commands, storageSource->Image(), VK_IMAGE_LAYOUT_GENERAL, image, sourceDescriptor, 1u, copyLayers, copyLevels);
+    RecordExpandBlit(context, commands, storageSource->Image(), VK_IMAGE_LAYOUT_GENERAL, image, sourceDescriptor, 1u, copyLevels, copyLayers);
     VkImageMemoryBarrier toShaderRead = toTransferDst;
     toShaderRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     toShaderRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;

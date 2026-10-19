@@ -204,7 +204,7 @@ ImageDecode inspectImageDescriptor(const DescriptorValue& descriptor, const Imag
     const bool table = base.table != NoTable;
     const auto past = ResourceMaterializer::LevelsPastChain(descriptor);
     const auto uses = base.levelUses;
-    if (!storage && past.levels != 0u && ((uses & (ImageLevelUseMipLoad | ImageLevelUseLodQuery)) != 0u || (past.base && (uses & ImageLevelUseLoad) != 0u) || (table && (uses & ImageLevelUseQuery) != 0u))) {
+    if (!storage && (past.levels != 0u || past.base) && ((uses & (ImageLevelUseMipLoad | ImageLevelUseLodQuery)) != 0u || (past.base && (uses & ImageLevelUseLoad) != 0u) || (past.levels != 0u && table && (uses & ImageLevelUseQuery) != 0u))) {
         return rejectImage(PoisonReason::UnsupportedOperation, "image_load_mip, image_get_lod, an image_load at a base level past the chain or an image_get_resinfo through an image table of a T# whose levels reach " + std::to_string(past.levels) + " past its extent's full mip chain is not implemented");
     }
     decoded.fmask = IsFmaskTextureFormat(format);

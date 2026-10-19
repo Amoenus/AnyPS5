@@ -69,6 +69,11 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+struct ViewLevelsPastChain {
+    std::uint32_t levels = 0;
+    bool base = false;
+};
+
 class ResourceMaterializer {
 public:
     static ViewLevelsPastChain LevelsPastChain(const DescriptorValue& descriptor);
