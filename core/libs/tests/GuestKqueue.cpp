@@ -234,12 +234,12 @@ static void PipeRead() {
     char buffer[4]{};
     Require(read_nid_postfix(pipe[0], buffer, sizeof(buffer)) == 3);
     Require(Poll(kq, events, 4) == 0);
+    const KernelTimespec limit{5, 0};
+    const auto start = std::chrono::steady_clock::now();
     std::thread writer([&pipe] {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         Require(write_nid_postfix(pipe[1], "d", 1) == 1);
     });
-    const KernelTimespec limit{5, 0};
-    const auto start = std::chrono::steady_clock::now();
     Require(kevent_nid_postfix(kq, nullptr, 0, events, 4, &limit) == 1);
     const auto waited = std::chrono::steady_clock::now() - start;
     writer.join();
@@ -710,7 +710,29 @@ static void Timeout() {
     Require(close_nid_postfix(kq) == 0);
 }
 
+static void StandardInput() {
+    const int copy = dup_nid_postfix(0);
+    if (copy < 0) {
+        Require(*__error_nid_postfix() == GuestEbadf);
+        return;
+    }
+    Require(close_nid_postfix(copy) == 0);
+    const int kq = kqueue_nid_postfix();
+    int marker = 0;
+    KernelEvent events[4]{};
+    Require(Apply(kq, Change(0, EvfiltRead, EvAdd, 0, 0, &marker)) == 0);
+    Require(Poll(kq, events, 4) == 0);
+    const KernelTimespec brief{0, 20000000};
+    Require(kevent_nid_postfix(kq, nullptr, 0, events, 4, &brief) == 0);
+    Require(Apply(kq, Change(0, EvfiltRead, EvAdd, 0, 0, &marker)) == 0);
+    Require(Apply(kq, Change(0, EvfiltRead, EvDelete)) == 0);
+    RequireFailure(Apply(kq, Change(0, EvfiltRead, EvDelete)), GuestEnoent);
+    Require(ThrownMessage([kq] { Apply(kq, Change(0, EvfiltWrite, EvAdd)); }).find("EVFILT_WRITE on a non-socket descriptor") != std::string::npos);
+    Require(close_nid_postfix(kq) == 0);
+}
+
 int main() {
+    StandardInput();
     CreateAndClose();
     Timers();
     PipeRead();

@@ -15,6 +15,7 @@
 #include <codegen/x86/X64InstructionRewriter.hpp>
 #include <codegen/IInstructionScanner.hpp>
 #include <elfpatcher/general/EntryStubBuilder.hpp>
+#include <elfpatcher/general/ElfConstants.hpp>
 #include <elfpatcher/general/ProgramHeaderLayoutBuilder.hpp>
 #include <elfpatcher/general/SectionHeaderTableBuilder.hpp>
 #include <elfpatcher/general/SegmentFilter.hpp>
@@ -655,8 +656,8 @@ void rosettaSubstitutions() {
     const auto intel = Codegen::MakeAmd64OnlyInstructionMatcher();
     const auto rosetta = Codegen::MakeAmd64OnlyInstructionMatcher(Codegen::Amd64OnlyTarget::Rosetta);
     const auto match = [](const auto& matcher, const Bytes& bytes) { return matcher->Match(bytes.data(), bytes.size()); };
-    for (const auto& bytes : {Bytes{0x0F, 0xC7, 0xF8}, Bytes{0xF3, 0x0F, 0xC7, 0xF8}, Bytes{0x66, 0x0F, 0xAE, 0x30}})
-        require(!match(intel, bytes).has_value(), "RDSEED, RDPID or CLWB was converted for an Intel host");
+    for (const auto& bytes : {Bytes{0x0F, 0xC7, 0xF8}, Bytes{0xF3, 0x0F, 0xC7, 0xF8}, Bytes{0x66, 0x0F, 0xAE, 0x30}, Bytes{0x0F, 0x01, 0xF9}})
+        require(!match(intel, bytes).has_value(), "RDSEED, RDPID, CLWB or RDTSCP was converted for an Intel host");
     const auto rdseed = match(rosetta, {0x48, 0x0F, 0xC7, 0xF9});
     require(rdseed && rdseed->Lowering == Amd64OnlyLowering::InPlace && rdseed->ReplacementBytes == Bytes{0x48, 0x0F, 0xC7, 0xF1} && rdseed->InstructionName == "RDSEED", "RDSEED was not rewritten to RDRAND");
     const auto rdseed16 = match(rosetta, {0x66, 0x41, 0x0F, 0xC7, 0xFA});
@@ -669,6 +670,11 @@ void rosettaSubstitutions() {
     const auto rdpid = match(rosetta, {0xF3, 0x41, 0x0F, 0xC7, 0xFB});
     require(rdpid && rdpid->Lowering == Amd64OnlyLowering::Trampoline && rdpid->Optional && rdpid->InstructionName == "RDPID", "RDPID was not lowered through an optional stub");
     require(rdpid->ReturnBranchOffset == 6 && Bytes(rdpid->StubBody.begin(), rdpid->StubBody.begin() + 7) == Bytes{0x41, 0xBB, 0, 0, 0, 0, 0xE9}, "RDPID r11 stub does not load 0 before returning");
+    const auto rdtscp = match(rosetta, {0x0F, 0x01, 0xF9});
+    require(rdtscp && rdtscp->Lowering == Amd64OnlyLowering::Trampoline && rdtscp->Optional && rdtscp->InstructionName == "RDTSCP", "RDTSCP was not lowered through an optional stub");
+    require(rdtscp->ReturnBranchOffset == 8 && Bytes(rdtscp->StubBody.begin(), rdtscp->StubBody.begin() + 9) == Bytes{0x0F, 0x01, 0xF9, 0xB9, 0, 0, 0, 0, 0xE9}, "RDTSCP stub does not load 0 into ECX after reading the counter");
+    require(!match(rosetta, {0x0F, 0x01, 0xF8}).has_value(), "SWAPGS (0F 01 F8) was taken for RDTSCP");
+    require(!match(rosetta, {0x66, 0x0F, 0x01, 0xF9}).has_value(), "RDTSCP with an operand size prefix was lowered");
 }
 
 void wideStoreSplit() {
@@ -1250,9 +1256,10 @@ Elfpatcher::Linux::LinuxElfPatcher linuxPatcher() {
 }
 
 std::uint64_t executableFileOffset(const Bytes& output, const std::uint64_t address) {
+    const auto phOff = read<std::uint64_t>(output, 32);
     const auto phNum = read<std::uint16_t>(output, 56);
     for (std::uint16_t index = 0; index < phNum; ++index) {
-        const auto header = 64 + index * 56;
+        const auto header = phOff + index * 56;
         if (read<std::uint32_t>(output, header) != 1) continue;
         const auto vaddr = read<std::uint64_t>(output, header + 16);
         const auto memSize = read<std::uint64_t>(output, header + 40);
@@ -1298,6 +1305,58 @@ void linuxRipRelativePlacement() {
     const auto bodyOffset = executableFileOffset(output, static_cast<std::uint64_t>(stub));
     const auto operand = stub + static_cast<std::int64_t>(relocation.InstructionEnd) + read<std::int32_t>(output, bodyOffset + relocation.DisplacementOffset);
     require(operand == 0x2040, "Relocated RIP-relative operand does not reach the original address");
+}
+
+std::vector<std::array<std::uint64_t, 8>> stackHeaders(const Bytes& output) {
+    const auto phOff = read<std::uint64_t>(output, 32);
+    const auto phNum = read<std::uint16_t>(output, 56);
+    std::vector<std::array<std::uint64_t, 8>> found;
+    for (std::uint16_t index = 0; index < phNum; ++index) {
+        const auto header = static_cast<std::size_t>(phOff) + index * 56;
+        if (read<std::uint32_t>(output, header) != Elfpatcher::PT_GNU_STACK) continue;
+        found.push_back({read<std::uint32_t>(output, header), read<std::uint32_t>(output, header + 4),
+            read<std::uint64_t>(output, header + 8), read<std::uint64_t>(output, header + 16),
+            read<std::uint64_t>(output, header + 24), read<std::uint64_t>(output, header + 32),
+            read<std::uint64_t>(output, header + 40), read<std::uint64_t>(output, header + 48)});
+    }
+    return found;
+}
+
+void linuxStackSynthesis() {
+    const auto patchOutput = [](std::uint16_t slots, std::vector<Domain::ProgramHeader> headers) {
+        auto elf = elfFixture({0xC3});
+        write<std::uint16_t>(elf, 56, slots);
+        auto patcher = linuxPatcher();
+        return patcher.Patch(std::move(elf), std::move(headers), {}, 0, "$ORIGIN/libs", true, false, {});
+    };
+    const Domain::ProgramHeader inputStack{Elfpatcher::PT_GNU_STACK, 6, 0, 0, 0, 0, 0x20000, 16};
+    const std::vector<std::array<std::uint64_t, 8>> synthetic = {{Elfpatcher::PT_GNU_STACK, 6, 0, 0, 0, 0, 0, 16}};
+    const std::vector<std::array<std::uint64_t, 8>> preserved = {{Elfpatcher::PT_GNU_STACK, 6, 0, 0, 0, 0, 0x20000, 16}};
+
+    const auto exactFit = patchOutput(7, elfHeaders());
+    require(read<std::uint64_t>(exactFit, 32) >= 0x400, "a full input table must move to make room for the synthetic stack");
+    require(read<std::uint16_t>(exactFit, 56) == 8, "the output must use the reserved synthetic stack slot");
+    require(stackHeaders(exactFit) == synthetic, "the synthetic stack must be PT_GNU_STACK with PF_R|PF_W and alignment 16");
+
+    const auto spareSlot = patchOutput(8, elfHeaders());
+    require(read<std::uint64_t>(spareSlot, 32) == 64, "the required count must not move a table that has a free slot");
+    require(read<std::uint16_t>(spareSlot, 56) == 8, "the free slot must be filled by the synthetic stack");
+    require(stackHeaders(spareSlot) == synthetic, "the synthetic stack must be PT_GNU_STACK with PF_R|PF_W and alignment 16");
+
+    const auto roomyTable = patchOutput(9, elfHeaders());
+    require(read<std::uint64_t>(roomyTable, 32) == 64, "the required count must not move a table with spare slots");
+    require(read<std::uint16_t>(roomyTable, 56) == 8, "the output count must match the required count");
+    require(stackHeaders(roomyTable) == synthetic, "the synthetic stack must be PT_GNU_STACK with PF_R|PF_W and alignment 16");
+
+    const auto keptStackExact = patchOutput(8, {elfHeaders()[0], elfHeaders()[1], inputStack});
+    require(read<std::uint64_t>(keptStackExact, 32) == 64, "an input stack must not over-reserve a header slot");
+    require(read<std::uint16_t>(keptStackExact, 56) == 8, "an input stack must not grow the output count");
+    require(stackHeaders(keptStackExact) == preserved, "a kept PT_GNU_STACK must stay unchanged");
+
+    const auto keptStackShort = patchOutput(7, {elfHeaders()[0], elfHeaders()[1], inputStack});
+    require(read<std::uint64_t>(keptStackShort, 32) >= 0x400, "a full input table must move when the kept stack does not fit");
+    require(read<std::uint16_t>(keptStackShort, 56) == 8, "the moved table must carry the kept stack");
+    require(stackHeaders(keptStackShort) == preserved, "a kept PT_GNU_STACK must stay unchanged");
 }
 
 }
@@ -1745,6 +1804,40 @@ void immediateFormExecution() {}
 void ripRelativeExecution() {}
 #endif
 
+#if defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))
+void rdtscpExecution() {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher(Codegen::Amd64OnlyTarget::Rosetta);
+    const Bytes site = {0x0F, 0x01, 0xF9};
+    const auto match = matcher->Match(site.data(), site.size());
+    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "RDTSCP stub was not produced");
+    auto body = match->StubBody;
+    body[match->ReturnBranchOffset] = 0xC3;
+    void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(code != MAP_FAILED, "cannot map executable memory for the stub");
+    std::memcpy(code, body.data(), body.size());
+    std::uint64_t low = 0;
+    std::uint64_t high = 0;
+    std::uint64_t processor = 0;
+    std::uint8_t carry = 0;
+    asm volatile(
+        "mov $-1, %%rcx\n\t"
+        "sub $128, %%rsp\n\t"
+        "stc\n\t"
+        "call *%[code]\n\t"
+        "setc %[carry]\n\t"
+        "add $128, %%rsp\n\t"
+        : "=&a"(low), "=&d"(high), "=&c"(processor), [carry] "=&q"(carry)
+        : [code] "r"(code)
+        : "memory", "cc");
+    munmap(code, 4096);
+    require(((high << 32) | low) != 0, "RDTSCP stub did not read the time stamp counter");
+    require(processor == 0, "RDTSCP stub left a value other than processor 0 in RCX");
+    require(carry == 1, "RDTSCP stub changed the flags");
+}
+#else
+void rdtscpExecution() {}
+#endif
+
 void scannerZeroTail() {
     const auto scanner = Codegen::MakeInstructionScanner();
     const Bytes code{0xC3, 0x00, 0x00, 0x00};
@@ -1786,6 +1879,7 @@ int main() {
         converterRosettaScalarCompare();
         rosettaLegacyScalarCompares();
         converterRosettaLegacyScalarCompare();
+        rdtscpExecution();
         wideStoreSplit();
         converterWideStoreWindows();
         converterJumpTableTargets();
@@ -1796,6 +1890,7 @@ int main() {
         converterFailureOffsets();
         linuxPlacement();
         linuxRipRelativePlacement();
+        linuxStackSynthesis();
         scannerZeroTail();
         std::cout << "AMD64-only converter tests passed\n";
     } catch (const std::exception& error) {
