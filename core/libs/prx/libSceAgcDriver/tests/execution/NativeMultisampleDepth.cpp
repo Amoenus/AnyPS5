@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -187,7 +188,7 @@ std::vector<std::uint32_t> DriverPm4Packet(std::uint32_t opcode, std::initialize
     return words;
 }
 
-void SubmitDriverHtileClear(std::uint64_t address) {
+void SubmitDriverHtileClear(std::uint64_t address, std::unique_lock<AgcDriver::GuestMemory::GpuMutexType>& gpuLock) {
     const auto shader = reinterpret_cast<std::uintptr_t>(HtileMaskKernel.data());
     std::vector<std::uint32_t> commands;
     const auto append = [&commands](std::vector<std::uint32_t> packet) { commands.insert(commands.end(), packet.begin(), packet.end()); };
@@ -206,7 +207,10 @@ void SubmitDriverHtileClear(std::uint64_t address) {
     append(DriverPm4Packet(0x15u, {32u, 1u, 1u, 0x41u}));
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0u, {}};
     Require(sceAgcDriverSubmitDcb(&packet) == 0, "native depth HTILE clear: PM4 submission failed");
-    AgcDriverWaitIdle_nid_postfix();
+    gpuLock.unlock();
+    try { AgcDriverWaitIdle_nid_postfix(); }
+    catch (...) { gpuLock.lock(); throw; }
+    gpuLock.lock();
 }
 
 template<typename Action>
@@ -688,7 +692,7 @@ void CheckClearDispatch() {
     }
 }
 
-void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing = false, std::optional<bool> depthOnlyOverride = std::nullopt, ClearFault fault = ClearFault::None, bool iterate256 = true) {
+void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing, std::optional<bool> depthOnlyOverride, ClearFault fault, std::unique_lock<AgcDriver::GuestMemory::GpuMutexType>& gpuLock, bool iterate256 = true) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
     TargetMemory memory(bytes), metadata(65536u, fault == ClearFault::DriverDispatch);
@@ -810,7 +814,9 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 Require(DepthSurfaceView(context, target) == view, "updating the native clear value replaced its attachment");
                 const std::uint32_t clearPattern = clearOne ? (depthOnly ? 0xfffffff0u : 0xfffc00f0u) : 0u;
                 if (fault == ClearFault::DriverDispatch && clearOne) {
-                    SubmitDriverHtileClear(target.htileAddress);
+                    const auto generation = AgcDriver::GuestMemory::TrackerGeneration();
+                    SubmitDriverHtileClear(target.htileAddress, gpuLock);
+                    Require(AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "driver idle returned before recording the completed HTILE dispatch");
                 } else {
                     const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
                     if (fault == ClearFault::PartialStore || fault == ClearFault::PossibleStore || fault == ClearFault::CompletedPossibleStore) {
@@ -1188,7 +1194,7 @@ int main(int argc, char** argv) {
         }
         CheckDrawFeedback();
         const auto context = device->GetContext();
-        const std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        std::unique_lock lock(AgcDriver::GuestMemory::GpuMutex());
         Require(DepthSupported(context, VK_FORMAT_D32_SFLOAT, 4u), "the native depth regression requires sampled D32 with four samples");
         if (argc == 2 && std::string_view(argv[1]) == "--clear-refusals") {
             for (const auto& [fault, expected] : std::array{
@@ -1200,7 +1206,7 @@ int main(int argc, char** argv) {
                      std::pair{ClearFault::UnprovenDispatch, "incomplete or unproven"},
                      std::pair{ClearFault::PendingWrite, "external GPU writes"},
                      std::pair{ClearFault::Overlap, "overlapping native multisample depth"}}) {
-                TargetRefuses([&] { CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, fault); }, expected);
+                TargetRefuses([&] { CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, fault, lock); }, expected);
                 std::printf("Native depth clear fault=%u refused: %s\n", static_cast<std::uint32_t>(fault), expected);
             }
             return 0;
@@ -1212,13 +1218,13 @@ int main(int argc, char** argv) {
                 for (const auto samples : {2u, 4u, 8u}) {
                     if (!DepthSupported(context, format, samples)) { unavailable += 4u; continue; }
                     for (const bool depthOnly : {false, true}) {
-                        for (const bool one : {false, true}) { CheckDepthTarget(context, format, samples, one, true, depthOnly); ++checked; }
+                        for (const bool one : {false, true}) { CheckDepthTarget(context, format, samples, one, true, depthOnly, ClearFault::None, lock); ++checked; }
                     }
                 }
             }
-            CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::CompletedPossibleStore);
+            CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::CompletedPossibleStore, lock);
             ++checked;
-            CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::DriverDispatch);
+            CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::DriverDispatch, lock);
             ++checked;
             std::printf("Native depth completed clear cases checked=%u unavailable=%u\n", checked, unavailable);
             return 0;
@@ -1240,7 +1246,7 @@ int main(int argc, char** argv) {
             for (const auto samples : {2u, 4u, 8u}) {
                 if (!DepthSupported(context, format, samples)) { unavailable += 4u; continue; }
                 for (const bool one : {false, true}) {
-                    for (const bool iterate256 : {true, false}) { CheckDepthTarget(context, format, samples, one, false, std::nullopt, ClearFault::None, iterate256); ++checked; }
+                    for (const bool iterate256 : {true, false}) { CheckDepthTarget(context, format, samples, one, false, std::nullopt, ClearFault::None, lock, iterate256); ++checked; }
                 }
                 CheckHtileRouting(context, format, samples);
             }
