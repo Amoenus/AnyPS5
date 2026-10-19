@@ -30,6 +30,7 @@
 #include "ResidentPresent.hpp"
 #include "ImageTableAbi.hpp"
 #include "HostImportLifetime.hpp"
+#include "ShaderCacheDirectory.hpp"
 #include "SampleLod_spv.h"
 #include "BufferUpdate_spv.h"
 #include "SampleArray_spv.h"
@@ -7025,7 +7026,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         std::cout << "4x color targets or nullDescriptor unavailable: multisampled target guest access not tested\n";
         return;
     }
-    constexpr std::uint32_t side = 64;
+    constexpr std::uint32_t side = 128;
     constexpr std::size_t targetBytes = 65536u;
     constexpr std::size_t bytes = 5u * 65536u;
 #ifdef _WIN32
@@ -7084,6 +7085,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
     target.extent = {side, side};
     target.surfaceExtent = target.extent;
     target.format = VK_FORMAT_R8G8B8A8_UNORM;
+    target.tileMode = ColorTileMode::RenderTarget;
     target.bytes = targetBytes;
     target.samples = 4;
     {
@@ -7095,9 +7097,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         recorder.Sync();
     }
     std::array<std::byte, 64> texels{};
-    refused([&] { AgcDriver::GuestMemory::Read(address + 256u, texels); }, "a CPU read", "a CPU read");
-    refused([&] { AgcDriver::GuestMemory::ReadCommitted(address + 256u, texels); }, "a CPU read", "a committed CPU read");
-    refused([&] { AgcDriver::GuestMemory::ReadCommittedUnsynced(address + 256u, texels); }, "a CPU read", "a committed CPU read without the flush hook");
+    refused([&] { RequireNoMultisampleTarget(address + 256u, texels.size(), "a CPU read"); }, "a CPU read", "the strict guard before CPU publication");
     refused([&] { RequireNoMultisampleTarget(address, 64u, "a DMA copy"); }, "a DMA copy", "a DMA copy");
     const auto captureSrt = [](std::uint64_t srt, AgcDriver::ShaderMemory::PendingWriteQuery pendingWrite) {
         static constexpr std::array<std::uint32_t, 6> code{0xf4080100u, 0xfa000000u, 0xbf8cc07fu, 0xe0700000u, 0x80010000u, 0xbf810000u};
@@ -7200,7 +7200,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         ShaderResources arraySecond(context, sampledArrayCompute);
         ShaderResources combined(context, bothShapesCompute);
         Require(first.SampledTextures().size() == 1 && first.SampledTextures().front() != nullptr, "the multisampled target was not bound as a sampled texture");
-        Require(first.SampledTextures().front()->Layout() == VK_IMAGE_LAYOUT_GENERAL && first.SampledTextures().front()->ViewFormat() == target.format, "the sampled multisampled target is not a view of the target's image in its layout");
+        Require(first.SampledTextures().front()->Layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && first.SampledTextures().front()->ViewFormat() == target.format, "the sampled multisampled target is not a read-only view of the target's image");
         Require(first.SampledTextures().front()->SampledViewRange(false).type == VK_IMAGE_VIEW_TYPE_2D, "Image2DMultisample did not bind a 2D image view");
         Require(second.SampledTextures().front() == first.SampledTextures().front(), "a second lookup of the multisampled target made another texture");
         Require(arrayFirst.SampledTextures().size() == 1 && arrayFirst.SampledTextures().front() != nullptr, "the multisampled array target was not bound as a sampled texture");
@@ -7213,8 +7213,8 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         device.WaitQueue();
         recorder.Sync();
     }
-    refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side, 3u, address), "as a 64x64 texture of 8 samples", "sampling a 4x target as an 8x texture");
-    refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side / 2u, 2u, address), "as a 32x64 texture of 4 samples", "sampling a 4x target as a narrower texture");
+    refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side, 3u, address), "as a 128x128 texture of 8 samples", "sampling a 4x target as an 8x texture");
+    refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side / 2u, 2u, address), "as a 64x128 texture of 4 samples", "sampling a 4x target as a narrower texture");
     refusedSample(ShaderRecompiler::DescriptorKind::SampledImage, multisampledWords(side, 2u, address + 4u * 65536u), "which no draw rendered to and whose tile mode 0 has no modeled multisampled color footprint", "sampling a linear multisampled texture no draw rendered to");
     if (context.storageImageMultisample) {
         const auto stored = sampledProgram(ShaderRecompiler::DescriptorKind::StorageImage, multisampledWords(side, 2u, address));
@@ -7230,10 +7230,11 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
     } else {
         refusedSample(ShaderRecompiler::DescriptorKind::StorageImage, multisampledWords(side, 2u, address), "as a storage image at its sample count", "storage access to a multisampled target without shaderStorageImageMultisample");
     }
-    refused([&] { AgcDriver::GuestMemory::Read(address + 3u * 65536u + 256u, texels); }, "a CPU read", "a CPU read in the padding of a later sample plane");
+    refused([&] { RequireNoMultisampleTarget(address + 3u * 65536u + 256u, texels.size(), "a CPU read"); }, "a CPU read", "the strict guard in the last block of the 4x target");
     AgcDriver::GuestMemory::Read(address + 4u * 65536u, texels);
     clearTargets();
-    target.tileMode = ColorTileMode::RenderTarget;
+    target.extent = {side / 2u, side / 2u};
+    target.surfaceExtent = target.extent;
     {
         std::lock_guard gpu(GpuMutex());
         Require(MultisampleTargetView(context, target) != VK_NULL_HANDLE, "the tiled multisampled target has no view");
@@ -7241,7 +7242,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
         device.WaitQueue();
         recorder.Sync();
     }
-    refused([&] { AgcDriver::GuestMemory::Read(address + targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the tiled multisampled target");
+    refused([&] { RequireNoMultisampleTarget(address + targetBytes - texels.size(), texels.size(), "a CPU read"); }, "a CPU read", "the strict guard inside the tiled multisampled target");
     AgcDriver::GuestMemory::Read(address + targetBytes, texels);
     clearTargets();
     if ((base.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_2_BIT) != 0) {
@@ -7255,7 +7256,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
             device.WaitQueue();
             recorder.Sync();
         }
-        refused([&] { AgcDriver::GuestMemory::Read(address + 2u * targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the 2x tile-height padding");
+        refused([&] { RequireNoMultisampleTarget(address + 2u * targetBytes - texels.size(), texels.size(), "a CPU read"); }, "a CPU read", "the strict guard inside the 2x tile-height padding");
         AgcDriver::GuestMemory::Read(address + 2u * targetBytes, texels);
         clearTargets();
     }
@@ -7270,7 +7271,7 @@ void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
             device.WaitQueue();
             recorder.Sync();
         }
-        refused([&] { AgcDriver::GuestMemory::Read(address + 2u * targetBytes - texels.size(), texels); }, "a CPU read", "a CPU read inside the 8x tile-height padding");
+        refused([&] { RequireNoMultisampleTarget(address + 2u * targetBytes - texels.size(), texels.size(), "a CPU read"); }, "a CPU read", "the strict guard inside the 8x tile-height padding");
         AgcDriver::GuestMemory::Read(address + 2u * targetBytes, texels);
         clearTargets();
     }
@@ -7905,6 +7906,36 @@ void firstLayerViewTests(const Device& device, Recorder& recorder) {
     Texture storageView(context, image, resource, identity);
     Require(storageView.FirstLayerView() != VK_NULL_HANDLE, "a sampled view of a 2D array storage image has no first-layer view");
     expectRed(program.Red(storageView.FirstLayerView(), storageView.Layout(), 0.0f), 0x40 / 255.0f, "a sampled first-layer view of a storage image does not read the BASE_ARRAY layer");
+    static PFN_vkGetDeviceProcAddr deviceProc;
+    static std::uint32_t checkedViews;
+    deviceProc = context.deviceProc;
+    checkedViews = 0;
+    auto checkedContext = context;
+    checkedContext.deviceProc = [](VkDevice device, const char* name) -> PFN_vkVoidFunction {
+        if (std::strcmp(name, "vkCreateImageView") != 0) return deviceProc(device, name);
+        return reinterpret_cast<PFN_vkVoidFunction>(+[](VkDevice device, const VkImageViewCreateInfo* info, const VkAllocationCallbacks* allocator, VkImageView* view) -> VkResult {
+            Require(info->format == VK_FORMAT_R8G8B8A8_SRGB, "the sampled storage view does not use sRGB");
+            const VkImageViewUsageCreateInfo* usage = nullptr;
+            for (auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr; next = next->pNext) {
+                if (next->sType == VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO) usage = reinterpret_cast<const VkImageViewUsageCreateInfo*>(next);
+            }
+            Require(usage != nullptr && (usage->usage & VK_IMAGE_USAGE_STORAGE_BIT) == 0 && (usage->usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0,
+                    "the sRGB sampled view inherits unsupported storage usage");
+            ++checkedViews;
+            return reinterpret_cast<PFN_vkCreateImageView>(deviceProc(device, "vkCreateImageView"))(device, info, allocator, view);
+        });
+    };
+    auto srgb = resource;
+    srgb.format = 130;
+    for (const auto minLod : {0u, 0x100u}) {
+        if (minLod != 0 && !context.imageViewMinLod) continue;
+        srgb.minLod = minLod;
+        Texture srgbView(checkedContext, image, srgb, identity);
+        Require(srgbView.ViewsStorageImage() && srgbView.FirstLayerView() != VK_NULL_HANDLE, "the sRGB array view does not share the storage image");
+        expectRed(program.Red(srgbView.FirstLayerView(), srgbView.Layout(), 0.0f), std::pow((0x40 / 255.0f + 0.055f) / 1.055f, 2.4f),
+                  "the sRGB storage view does not decode the BASE_ARRAY layer");
+    }
+    Require(checkedViews == (context.imageViewMinLod ? 4u : 2u), "not all sRGB storage views were checked");
     auto flat = resource;
     flat.dimension = TextureDimension::k2D;
     flat.depthOrLastArray = 0;
@@ -8298,6 +8329,74 @@ void pipelineCacheTests(const Device& device, bool benchmark) {
     ClearCachedPipelines(context.device);
     Require(lookup(input) != first, "clearing the pipeline cache retained its old entry");
     std::cout << "Pipeline cache key and retained lifetime tests passed\n";
+}
+
+struct PipelineCacheFileProbe {
+    Context& context;
+    PFN_vkGetDeviceProcAddr resolver;
+    std::atomic<std::uint32_t> creations{0};
+    static inline PipelineCacheFileProbe* active = nullptr;
+    explicit PipelineCacheFileProbe(Context& context) : context(context), resolver(context.deviceProc) {
+        Require(active == nullptr, "pipeline cache file probe is already active");
+        active = this;
+        context.deviceProc = resolve;
+    }
+    ~PipelineCacheFileProbe() {
+        context.deviceProc = resolver;
+        active = nullptr;
+    }
+    static VKAPI_ATTR VkResult VKAPI_CALL createCache(VkDevice device, const VkPipelineCacheCreateInfo* info, const VkAllocationCallbacks* callbacks, VkPipelineCache* created) {
+        ++active->creations;
+        return reinterpret_cast<PFN_vkCreatePipelineCache>(active->resolver(device, "vkCreatePipelineCache"))(device, info, callbacks, created);
+    }
+    static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL resolve(VkDevice device, const char* name) {
+        if (std::strcmp(name, "vkCreatePipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(createCache);
+        return active->resolver(device, name);
+    }
+};
+
+void pipelineCacheHeaderTests(const Device& device) {
+    const auto root = std::filesystem::temp_directory_path() / ("aps5-pipeline-header-test-" + std::to_string(std::random_device{}()));
+    Require(root.native().size() < 225, "the pipeline cache header test requires a temporary root shorter than 225 characters");
+#ifdef _WIN32
+    std::error_code cleanupError;
+    const auto cleanupRoot = ShaderRecompiler::NativeCachePath_nid_no_patch(root, cleanupError);
+    Require(!cleanupError, "the pipeline cache header test could not resolve its cleanup directory");
+#else
+    const auto& cleanupRoot = root;
+#endif
+    struct RemoveDirectory {
+        std::filesystem::path directory;
+        ~RemoveDirectory() {
+            std::error_code error;
+            std::filesystem::remove_all(directory, error);
+        }
+    } removeDirectory{cleanupRoot};
+    auto directory = root;
+    while (directory.native().size() < 220) directory /= "long-pipeline-cache-directory";
+#ifdef _WIN32
+    _putenv_s("ANYPS5_NO_SHADER_CACHE", "0");
+    _putenv_s("ANYPS5_SHADER_CACHE_DIR", directory.string().c_str());
+#else
+    setenv("ANYPS5_NO_SHADER_CACHE", "0", 1);
+    setenv("ANYPS5_SHADER_CACHE_DIR", directory.string().c_str(), 1);
+#endif
+    auto context = device.GetContext();
+    PipelineCacheFileProbe probe(context);
+    PipelineCache cache(context, device.Properties());
+    cache.SaveNow();
+    std::vector<std::filesystem::path> files;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) files.push_back(entry.path());
+    Require(files.size() == 1 && files.front().filename().string().starts_with("vk-pipelines-"), "the long pipeline cache directory does not hold exactly one cache file");
+    Require(files.front().native().size() > 260, "the pipeline cache header test did not exceed MAX_PATH");
+    std::vector<std::byte> stored;
+    Require(ShaderRecompiler::ReadWholeFile(files.front(), stored) && !stored.empty(), "the long pipeline cache file was not persisted");
+    const auto creations = probe.creations.load();
+    for (int repeat = 0; repeat < 3; ++repeat) cache.SaveNow();
+    Require(probe.creations.load() == creations, "an unchanged long-path pipeline cache was reloaded for an idle save");
+    std::vector<std::byte> after;
+    Require(ShaderRecompiler::ReadWholeFile(files.front(), after) && after == stored, "an idle save changed the long pipeline cache file");
+    std::cout << "long-path pipeline cache header reused without reloading\n";
 }
 
 int pipelineCacheFileTests(const Device& device) {
@@ -9068,6 +9167,11 @@ int main(int argc, char** argv) {
 
         if (argc == 2 && std::string_view(argv[1]) == "--pipeline-cache-file-only") {
             return pipelineCacheFileTests(device);
+        }
+
+        if (argc == 2 && std::string_view(argv[1]) == "--pipeline-cache-header-only") {
+            pipelineCacheHeaderTests(device);
+            return 0;
         }
 
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-pool-only") {

@@ -281,6 +281,14 @@ void hdrComponentSwapTests() {
         queue.context[0x8e] = 0xf;
         queue.context[0x1e0] = (1u << 30u) | 13u;
         for (std::uint32_t i = 0; i < 4; ++i) queue.context[0x105 + i] = std::bit_cast<std::uint32_t>(float(i + 1) / 8.0f);
+        if (number == 4u) {
+            expectFailure([&] { DecodeState(queue); }, "blending into an unsigned integer target");
+            queue.context[0x1e0] = 0;
+            queue.context[0x31c] &= ~(1u << 11u);
+            state = DecodeState(queue);
+            Require(state.color.componentMapping == 0xe4u && ExportOutputTypes(state)[0] == ShaderRecompiler::ColorOutputType::Uint, "standard integer color mapping or numeric type changed");
+            continue;
+        }
         state = DecodeState(queue);
         Require(state.blendConstants == std::array<float, 4>{0.375f, 0.25f, 0.125f, 0.5f}, "alternate color blend constants were not swizzled with the export");
         queue.context[0x31c] &= ~(1u << 11u);
@@ -1886,7 +1894,7 @@ void ReversedComponentOrderBlendTests() {
         expectFailure([&] { DecodeState(reversedBlendQueue(10u, 6u, swap, 0x65010504u)); }, std::string("reversed component order is not implemented for sRGB targets ") + registers);
         expectFailure([&] { DecodeState(reversedBlendQueue(10u, 1u, swap, 0x65010504u)); }, "reversed component order is not implemented for signed normalized targets");
         expectFailure([&] { DecodeState(reversedBlendQueue(12u, 1u, swap, 0x65010504u)); }, "reversed component order is not implemented for signed normalized targets");
-        expectFailure([&] { DecodeState(reversedBlendQueue(12u, 4u, swap, 0x65010504u)); }, "reversed component order is not implemented for integer targets");
+        expectFailure([&] { DecodeState(reversedBlendQueue(12u, 4u, swap, 0x65010504u)); }, "blending into an unsigned integer target or signed integer target is unsupported");
         auto masked = reversedBlendQueue(10u, 0u, swap, 0x65010504u);
         masked.context[0x8e] = 7u;
         Require(DecodeState(masked).blends.at(0).colorWriteMask == 0xeu, "a reversed target's blend did not keep the export-order write mask of its first three exports");
@@ -2352,9 +2360,14 @@ void DepthStencilTests() {
     Require(volume.color.layers == 1 && volume.renderLayers == 1 && volume.layerExports == 0, "a color view of one 3D depth slice became layered");
     {
         auto mipmapped = queue;
+        alignas(256) std::array<std::byte, 8192> mipMemory{};
+        const auto mipAddress = reinterpret_cast<std::uintptr_t>(mipMemory.data());
+        mipmapped.context[0x318] = static_cast<std::uint32_t>(mipAddress >> 8u);
+        mipmapped.context[0x390] = static_cast<std::uint32_t>(mipAddress >> 40u);
         mipmapped.context[0x3b0] |= 2u << 28u;
         mipmapped.context[0x31b] = (1u << 26u) | (1u << 13u) | 1u;
-        expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(mipmapped.context, 0); }, "slot 0, 64x4x4, viewMip 1, maxMip 2, slices 1..1, CB_COLOR_INFO 0x00028028, ATTRIB2 0x200fc003, ATTRIB3 0x0a000003, VIEW 0x04002001");
+        const auto mip = AgcDriver::Graphics::DecodeColorBuffer(mipmapped.context, 0);
+        Require(mip.extent.width == 32u && mip.extent.height == 2u && mip.depth == 4u && mip.depthSlice == 1u && mip.layers == 1u && mip.mip == 1u && mip.mipCount == 3u, "a 3D mip diagnostic fixture did not select its minified view");
     }
     queue.context[0x31b] = 4u | (4u << 13u);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "outside the 3D surface");
@@ -2384,6 +2397,50 @@ void DepthStencilTests() {
     queue.context[0x325] = static_cast<std::uint32_t>(volumeKeys >> 8u);
     queue.context[0x3a8] = static_cast<std::uint32_t>(volumeKeys >> 40u);
     Require(AgcDriver::Graphics::DecodeState(queue).color.dccAddress == volumeKeys, "a DCC 3D color target lost its keys");
+}
+
+void VolumeColorMipTests() {
+    alignas(256) static std::array<std::byte, (1u << 20u) + 65535u> memory{};
+    const auto address = (reinterpret_cast<std::uintptr_t>(memory.data()) + 65535u) & ~std::uintptr_t{65535u};
+    for (const auto mode : {AgcDriver::Graphics::ColorTileMode::Linear, AgcDriver::Graphics::ColorTileMode::Standard4KB, AgcDriver::Graphics::ColorTileMode::S4KBX, AgcDriver::Graphics::ColorTileMode::RenderTarget}) {
+        for (const auto depth : {1u, 8u}) {
+            for (std::uint32_t level = 0u; level < 3u; ++level) {
+                auto queue = makeState();
+                queue.context[0x318] = static_cast<std::uint32_t>(address >> 8u);
+                queue.context[0x390] = static_cast<std::uint32_t>(address >> 40u);
+                queue.context[0x3b0] = (2u << 28u) | (95u << 14u) | 31u;
+                queue.context[0x3b8] = 0x0a000000u | (static_cast<std::uint32_t>(mode) << 14u) | (depth - 1u);
+                const auto viewDepth = std::max(depth >> level, 1u);
+                const auto slice = viewDepth - 1u;
+                queue.context[0x31b] = (level << 26u) | (slice << 13u) | slice;
+                const auto color = AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0);
+                const auto surface = AgcDriver::Graphics::SurfaceForTarget(color);
+                const auto geometry = AgcDriver::Graphics::DescribeSurface(surface);
+                const auto& mip = geometry.mips.at(level);
+                Require(surface.dimension == AgcDriver::Graphics::TextureDimension::k3D && surface.depthOrLastArray + 1u == depth && surface.mipCount == 3u, "a mipmapped volume lost its base depth or dimension");
+                Require(color.extent.width == (96u >> level) && color.extent.height == (32u >> level) && color.depthSlice == slice && color.layers == 1u, "a volume mip selected the wrong extent or depth slice");
+                Require(color.surfaceAddress == address && color.address == address + mip.tiledOffset && color.mipTail == mip.tail, "a volume mip did not use its volume surface layout");
+                queue.context[0x31b] = (level << 26u) | ((viewDepth + 3u) << 13u);
+                Require(AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0).layers == viewDepth, "a volume mip did not clamp the view to its minified depth");
+                queue.context[0x31b] = (level << 26u) | (viewDepth << 13u) | viewDepth;
+                expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0); }, "outside the 3D surface");
+            }
+        }
+    }
+    auto queue = makeState();
+    queue.context[0x318] = static_cast<std::uint32_t>(address >> 8u);
+    queue.context[0x390] = static_cast<std::uint32_t>(address >> 40u);
+    queue.context[0x31b] = 0x0000e000u;
+    queue.context[0x31c] = 0x00070428u;
+    queue.context[0x31d] = 0u;
+    queue.context[0x3b0] = 0x101fc07fu;
+    queue.context[0x3b8] = 0x0ea54007u;
+    const auto color = AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0u);
+    Require(AgcDriver::Graphics::SurfaceForTarget(color).dimension == AgcDriver::Graphics::TextureDimension::k3D && color.format == VK_FORMAT_R8G8B8A8_UINT && color.extent.width == 128u && color.extent.height == 128u && color.depth == 8u && color.layers == 8u && color.mipCount == 2u && color.mip == 0u && color.bytes == 655360u, "a two-level 128x128x8 UINT SW_4KB_S_X target decoded incorrectly");
+    queue.context[0x31c] |= 0x10000000u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0u); }, "DCC of mipmapped 3D color targets");
+    queue.context[0x31c] = 0x00072428u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0u); }, "CMASK fast clears of mipmapped 3D color targets");
 }
 
 void OneDimensionalColorTests() {
@@ -3003,14 +3060,20 @@ void cmaskTests() {
 }
 
 void uint8x2TargetTests() {
-    auto queue = makeState();
-    queue.context[0x1c5] = 7;
-    queue.context[0x31c] = (queue.context[0x31c] & ~0x1ffcu) | (3u << 2u) | (4u << 8u);
-    const auto state = AgcDriver::Graphics::DecodeState(queue);
-    Require(state.color.format == VK_FORMAT_R8G8_UINT && state.color.elementBytes == 2 && state.color.componentMapping == 0xe4u && state.color.uintExport, "an 8_8 UINT color target was rejected");
-    queue.context[0x31c] = (queue.context[0x31c] & ~0x1800u) | (1u << 11u);
-    const auto alt = AgcDriver::Graphics::DecodeState(queue);
-    Require(alt.color.format == VK_FORMAT_R8G8_UINT && alt.color.componentMapping == 0xecu, "an 8_8 UINT SWAP_ALT color target was rejected");
+    using Type = ShaderRecompiler::ColorOutputType;
+    for (const auto mode : {1u, 2u, 3u, 7u, 9u}) {
+        for (const auto swap : {0u, 1u}) {
+            auto queue = makeState();
+            queue.context[0x1c5] = mode;
+            queue.context[0x31c] = (queue.context[0x31c] & ~0x1ffcu) | (3u << 2u) | (4u << 8u) | (swap << 11u);
+            const auto state = AgcDriver::Graphics::DecodeState(queue);
+            Require(state.color.format == VK_FORMAT_R8G8_UINT && state.color.elementBytes == 2 && state.color.uintExport, "an 8_8 UINT color target was rejected");
+            Require(state.color.componentMapping == (swap == 0u ? 0xe4u : 0xecu), "an 8_8 UINT color target lost its component mapping");
+            Require(AgcDriver::Graphics::ExportOutputTypes(state)[0] == Type::Uint, "an 8_8 UINT color export lost its unsigned interface");
+            queue.context[0x1e0] = 1u << 30u;
+            expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "integer target");
+        }
+    }
 }
 
 void uint8x4TargetTests() {
@@ -3040,6 +3103,26 @@ void uint16ExportTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(blended); }, "blending into an unsigned integer target");
     queue.context[0x1c5] = 8;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "color export format 8");
+}
+
+void raw32IntegerExportTests() {
+    using Type = ShaderRecompiler::ColorOutputType;
+    for (const auto number : {4u, 5u}) {
+        for (const auto mode : {1u, 2u, 3u, 9u}) {
+            auto queue = makeState();
+            queue.context[0x1c5] = mode;
+            queue.context[0x31c] = (queue.context[0x31c] & ~0x77cu) | (4u << 2u) | (number << 8u);
+            const auto state = AgcDriver::Graphics::DecodeState(queue);
+            const auto expected = number == 4u ? Type::Uint : Type::Sint;
+            Require(AgcDriver::Graphics::ExportOutputTypes(state)[0] == expected, "a raw32 export lost its attachment numeric type");
+            auto compacted = state;
+            compacted.colors[0].exportIndex = 3u;
+            const auto types = AgcDriver::Graphics::ExportOutputTypes(compacted);
+            Require(types[0] == Type::Auto && types[3] == expected, "attachment numeric type followed the physical target instead of the export location");
+            queue.context[0x1e0] = 1u << 30u;
+            expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "integer target");
+        }
+    }
 }
 
 VkSampleCountFlags depthSampleCounts = VK_SAMPLE_COUNT_4_BIT;
@@ -6561,55 +6644,6 @@ void pipelineLibrarySetTests() {
     }
 }
 
-void pipelineLibraryClearWaitsForBuildTests() {
-    using namespace AgcDriver::Graphics;
-    mock = MockVulkan{};
-    auto context = mockContext();
-    context.graphicsPipelineLibrary = true;
-    context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
-    State state{};
-    ShaderRecompiler::RecompileResult vertex, fragment;
-    vertex.spirv = makeModule({});
-    fragment.spirv = makeModule({.fragment = true});
-    vertex.variantId = 101;
-    fragment.variantId = 102;
-    const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, PipelinePushSlotBytes}}};
-    std::array<std::uint32_t, 1> mainKey{1}, fragmentKey{2};
-    PipelineSetLayouts resources{};
-    resources.main = makeHandle<VkDescriptorSetLayout>();
-    resources.fragment = makeHandle<VkDescriptorSetLayout>();
-    resources.mainKey = mainKey;
-    resources.fragmentKey = fragmentKey;
-    {
-        std::lock_guard lock(pipelineCreateMutex);
-        blockLibraryCreate = true;
-        libraryCreateEntered = false;
-        releaseLibraryCreate = false;
-    }
-    std::thread build([&] { Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders), "graphics pipeline library prebuild was skipped"); });
-    {
-        std::unique_lock lock(pipelineCreateMutex);
-        pipelineCreateCondition.wait(lock, [] { return libraryCreateEntered; });
-    }
-    std::atomic<bool> cleared{false};
-    std::thread clear([&] {
-        ClearCachedPipelines(context.device);
-        cleared.store(true, std::memory_order_release);
-    });
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    const bool waited = !cleared.load(std::memory_order_acquire);
-    {
-        std::lock_guard lock(pipelineCreateMutex);
-        releaseLibraryCreate = true;
-    }
-    pipelineCreateCondition.notify_all();
-    build.join();
-    clear.join();
-    Require(waited, "clearing pipeline libraries did not wait for an active part build");
-    Require(cleared.load(std::memory_order_acquire), "clearing pipeline libraries did not complete after the part build");
-    Require(mock.live == 0, "clearing during a library build leaked Vulkan objects");
-}
-
 void framebufferOwnerTests() {
     using namespace AgcDriver::Graphics;
     mock = MockVulkan{};
@@ -6670,6 +6704,56 @@ void framebufferOwnerTests() {
     ClearPipelineLibraries(context.device);
     Require(mock.live == 0, "framebuffer owner tests leaked Vulkan objects");
 }
+
+void pipelineLibraryClearWaitsForBuildTests() {
+    using namespace AgcDriver::Graphics;
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.graphicsPipelineLibrary = true;
+    context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    State state{};
+    ShaderRecompiler::RecompileResult vertex, fragment;
+    vertex.spirv = makeModule({});
+    fragment.spirv = makeModule({.fragment = true});
+    vertex.variantId = 101;
+    fragment.variantId = 102;
+    const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, PipelinePushSlotBytes}}};
+    std::array<std::uint32_t, 1> mainKey{1}, fragmentKey{2};
+    PipelineSetLayouts resources{};
+    resources.main = makeHandle<VkDescriptorSetLayout>();
+    resources.fragment = makeHandle<VkDescriptorSetLayout>();
+    resources.mainKey = mainKey;
+    resources.fragmentKey = fragmentKey;
+    {
+        std::lock_guard lock(pipelineCreateMutex);
+        blockLibraryCreate = true;
+        libraryCreateEntered = false;
+        releaseLibraryCreate = false;
+    }
+    std::thread build([&] { Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders), "graphics pipeline library prebuild was skipped"); });
+    {
+        std::unique_lock lock(pipelineCreateMutex);
+        pipelineCreateCondition.wait(lock, [] { return libraryCreateEntered; });
+    }
+    std::atomic<bool> cleared{false};
+    std::thread clear([&] {
+        ClearCachedPipelines(context.device);
+        cleared.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const bool waited = !cleared.load(std::memory_order_acquire);
+    {
+        std::lock_guard lock(pipelineCreateMutex);
+        releaseLibraryCreate = true;
+    }
+    pipelineCreateCondition.notify_all();
+    build.join();
+    clear.join();
+    Require(waited, "clearing pipeline libraries did not wait for an active part build");
+    Require(cleared.load(std::memory_order_acquire), "clearing pipeline libraries did not complete after the part build");
+    Require(mock.live == 0, "clearing during a library build leaked Vulkan objects");
+}
+
 
 void barycentricEmulationTests() {
     using namespace ShaderRecompiler;
@@ -8201,10 +8285,12 @@ void unorm10_11_11TargetTests() {
         return AgcDriver::Graphics::ValidateShaders(shaders, target, subgroup, false);
     };
     Require(validate(packed, state) == std::set<std::uint32_t>{0u}, "the packed export did not reach attachment 0");
-    expectFailure([&] { validate(unpacked, state); }, "uint4 words to its packed color attachments");
+    expectFailure([&] { validate(unpacked, state); }, "expected vertex:u32x4, got vertex:f32x4");
     auto plainState = state;
     plainState.colors[0].packing = ColorExportPacking::None;
-    expectFailure([&] { validate(packed, plainState); }, "float4 colors");
+    Require(validate(packed, plainState) == std::set<std::uint32_t>{0u}, "uint4 outputs did not validate against an ordinary R32_UINT attachment");
+    plainState.colors[0].format = VK_FORMAT_R32_SFLOAT;
+    expectFailure([&] { validate(packed, plainState); }, "expected vertex:f32x4, got vertex:u32x4");
     auto uintExport = request;
     uintExport.context.pixel->targetOutputMode[0] = 7;
     expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(uintExport)); }, "fragment output 0 has no color export packing path");
@@ -9524,6 +9610,12 @@ int main(int argc, char** argv) {
             std::cout << "pipeline library clear waits for active part builds\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--raw32-integer-exports") {
+            uint16ExportTests();
+            raw32IntegerExportTests();
+            std::cout << "raw32 integer attachment state tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--pipeline-store-lazy-buffer-pool") {
             pipelineStoreLazyBufferPoolTests();
             std::cout << "cached pipelines survive lazy buffer pool creation\n";
@@ -9657,6 +9749,7 @@ int main(int argc, char** argv) {
         pipelineStoreLazyBufferPoolTests();
         retainedPixelStageTests();
         pipelineLibrarySetTests();
+        framebufferOwnerTests();
         pipelineLibraryClearWaitsForBuildTests();
         framebufferOwnerTests();
         hdrComponentSwapTests();
@@ -9667,6 +9760,7 @@ int main(int argc, char** argv) {
         DepthRemapTests();
         DepthStencilTests();
         OneDimensionalColorTests();
+        VolumeColorMipTests();
         htileDepthClearTests();
         memoryValueFillTests();
         ZExportTests();
@@ -9699,6 +9793,7 @@ int main(int argc, char** argv) {
         metadataPassTests();
         cmaskTests();
         uint16ExportTests();
+        raw32IntegerExportTests();
         uint8x2TargetTests();
         uint8x4TargetTests();
         msaaEnableClearDepthTests();
@@ -9796,6 +9891,7 @@ int main(int argc, char** argv) {
         RunTextureTilingTests();
         RunGuestTextureResourceTests();
         RunDepthSurfaceReuseTests();
+        RunTextureMipChainTests();
         RunGuestSamplerResourceTests();
         mock = MockVulkan{};
         auto textureDetilerContext = mockContext();

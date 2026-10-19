@@ -303,7 +303,7 @@ bool materializeCmaskClear(const Context& context, const ColorTarget& color, con
     return filled;
 }
 
-void imageBarrier(const Context& context, VkCommandBuffer commands, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkPipelineStageFlags sourceStage, VkPipelineStageFlags destinationStage, VkAccessFlags sourceAccess, VkAccessFlags destinationAccess) {
+void imageBarrier(const Context& context, VkCommandBuffer commands, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkPipelineStageFlags sourceStage, VkPipelineStageFlags destinationStage, VkAccessFlags sourceAccess, VkAccessFlags destinationAccess, VkImageSubresourceRange subresources = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}) {
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask = sourceAccess;
     barrier.dstAccessMask = destinationAccess;
@@ -312,7 +312,7 @@ void imageBarrier(const Context& context, VkCommandBuffer commands, VkImage imag
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.subresourceRange = subresources;
     context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
@@ -2110,7 +2110,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                 }
                 auto resident = CachedStorageSurface(context, SurfaceForTarget(color));
                 Require(resident->Attachable(), "storage format cannot be a color attachment");
-                Require(color.mipCount > 1 || color.depth > 1 || resident->GuestBytes() == colorLayout.Bytes(), "resident image layout differs from the color layout");
+                Require(color.volume || color.mipCount > 1 || color.depth > 1 || resident->GuestBytes() == colorLayout.Bytes(), "resident image layout differs from the color layout");
                 return resident;
             });
         }
@@ -2122,7 +2122,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         }
         materializeCmaskClear(context, color, nullptr);
         Require(!color.mipTail || binding.gpuTiling, "rendering into a packed mip tail requires the GPU tiled fallback");
-        Require(color.depth == 1, "rendering into a 3D color target needs the resident image of its surface");
+        Require(color.depth == 1 && (!color.volume || (color.mipCount == 1 && color.tileMode == ColorTileMode::Linear)), "rendering into a 3D color target needs the resident image of its surface");
         Require(color.arraySlice == 0 || !ColorTileModeIsXor(color.tileMode), "rendering into a slice of a 2D array color target with an XOR tile mode needs the resident image of its array");
         if (binding.gpuTiling) {
             binding.mip = color.mipTail ? ComputeColorTargetMipLayout(color.tileMode, color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount, color.mip) : ColorTargetMip(color, colorLayout);
@@ -2475,7 +2475,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             continue;
         }
         if (binding.resident != nullptr) {
-            imageBarrier(context, commands, binding.resident->Image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+            imageBarrier(context, commands, binding.resident->Image(binding.color.mip), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                {VK_IMAGE_ASPECT_COLOR_BIT, binding.resident->ImageMipLevel(binding.color.mip), 1u, binding.resident->ImageDepth() > 1u ? 0u : binding.resident->Descriptor().baseArray + binding.color.arraySlice, binding.resident->ImageDepth() > 1u ? 1u : binding.color.layers});
             countBarrier();
             continue;
         }
@@ -2528,7 +2529,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             continue;
         }
         if (binding.resident != nullptr) {
-            imageBarrier(context, commands, binding.resident->Image(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+            imageBarrier(context, commands, binding.resident->Image(binding.color.mip), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                {VK_IMAGE_ASPECT_COLOR_BIT, binding.resident->ImageMipLevel(binding.color.mip), 1u, binding.resident->ImageDepth() > 1u ? 0u : binding.resident->Descriptor().baseArray + binding.color.arraySlice, binding.resident->ImageDepth() > 1u ? 1u : binding.color.layers});
             countBarrier();
             continue;
         }

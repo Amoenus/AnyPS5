@@ -140,7 +140,7 @@ constexpr std::size_t fieldCount() {
 
 static_assert(fieldCount<ShaderInfo>() == 23, "ShaderInfo changed: update the info encoder");
 static_assert(fieldCount<BufferResource>() == 12, "BufferResource changed: update the info encoder");
-static_assert(fieldCount<ImageResource>() == 39, "ImageResource changed: update the info encoder");
+static_assert(fieldCount<ImageResource>() == 40, "ImageResource changed: update the info encoder");
 static_assert(fieldCount<SamplerResource>() == 8, "SamplerResource changed: update the info encoder");
 static_assert(fieldCount<SampledResourcePair>() == 3, "SampledResourcePair changed: update the info encoder");
 static_assert(fieldCount<StageInput>() == 5, "StageInput changed: update the info encoder");
@@ -195,7 +195,10 @@ private:
 
 std::shared_ptr<const MappedFile> MapFile(const std::filesystem::path& path) {
 #ifdef _WIN32
-    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    std::error_code error;
+    const auto filename = NativeCachePath_nid_no_patch(path, error);
+    if (error) return nullptr;
+    const HANDLE file = CreateFileW(filename.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return nullptr;
     LARGE_INTEGER length{};
     if (!GetFileSizeEx(file, &length) || length.QuadPart <= 0 || static_cast<unsigned long long>(length.QuadPart) > std::numeric_limits<std::size_t>::max()) {
@@ -721,6 +724,7 @@ void encodeShaderInfo(Writer& writer, const ShaderInfo& info) {
         out.Value(image.emulatedCompare);
         out.Value(image.table);
         out.Value(image.tableOperation);
+        out.Value(image.levelUses);
     });
     writer.Value(!info.runtimeImageModes.empty());
     writer.List(info.samplers, [](Writer& out, const SamplerResource& sampler) {
@@ -784,7 +788,7 @@ void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
         in.Value(buffer.scalar);
         in.Value(buffer.typedAlignment);
     });
-    reader.List(info.images, 77, [](Reader& in, ImageResource& image) {
+    reader.List(info.images, 78, [](Reader& in, ImageResource& image) {
         in.Value(image.source);
         in.Value(image.firstUsePc);
         in.Value(image.resourceClass);
@@ -824,6 +828,7 @@ void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
         in.Value(image.emulatedCompare);
         in.Value(image.table);
         in.Value(image.tableOperation);
+        in.Value(image.levelUses);
     });
     bool preparedImageModes = false;
     reader.Value(preparedImageModes);

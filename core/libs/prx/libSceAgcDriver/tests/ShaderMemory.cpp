@@ -4730,8 +4730,11 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     minimal.context.pixel->layerExported = true;
     minimal.context.pixel->ditheredAlphaToCoverage = true;
+    minimal.context.pixel->targetOutputType[0] = ColorOutputType::Uint;
+    minimal.context.pixel->targetOutputType[3] = ColorOutputType::Sint;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQSMAAAA=", "new requests did not use serialization version 35");
+    require(requestPrefix(encoded, 8u) == "NVNQQSQAAAA=", "new requests did not use serialization version 36");
+    require(serializer.Deserialize(encoded).request.context.pixel->targetOutputType == minimal.context.pixel->targetOutputType, "attachment numeric types did not round-trip");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
     withFallbacks.context.linkedCallFallbacks = fallbacks;
@@ -4849,7 +4852,7 @@ void verifyPixelRequestSerialization() {
     for (std::size_t bytes = 0; bytes < 45u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class, layer export, dither or front-face flag, quad pixel mask or quad sample mask was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQSQAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQSUAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{
@@ -4963,6 +4966,20 @@ void verifyVertexInfoVersion19() {
     pixel.context.pixel = ShaderPixelStageInfo{};
     pixel.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     const auto encodedPixel = serializer.Serialize(pixel);
+    const auto typedBytes = decodeBase64(encodedPixel);
+    for (std::size_t available = 0; available < 8u; ++available) {
+        auto truncated = typedBytes;
+        truncated.resize(truncated.size() - 8u + available);
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(truncated))); }, "truncated data", "a truncated attachment numeric-type array was accepted");
+    }
+    auto invalidType = typedBytes;
+    invalidType.back() = static_cast<std::uint8_t>(ColorOutputType::Sint) + 1u;
+    expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalidType))); }, "invalid color output type", "an invalid attachment numeric type was accepted");
+    auto version32Pixel = decodeBase64(encodedPixel);
+    version32Pixel.resize(version32Pixel.size() - 8u);
+    version32Pixel[4] = 32u;
+    const auto replay32 = serializer.Deserialize(encodeBase64(version32Pixel));
+    require(replay32.request.context.pixel.has_value() && replay32.request.context.pixel->targetOutputType == pixel.context.pixel->targetOutputType && serializer.Serialize(replay32.request) == encodedPixel, "a version 32 request read attachment numeric types or misread trailing fields");
     auto exportedPixel = pixel;
     exportedPixel.context.pixel->layerExported = true;
     const auto exportedBytes = decodeBase64(serializer.Serialize(exportedPixel));
@@ -5014,6 +5031,7 @@ void verifyVertexInfoVersion19() {
     const auto replay32 = serializer.Deserialize(encodeBase64(version32));
     require(replay32.request.context.pixel.has_value() && !replay32.request.context.pixel->iteratesSamples && replay32.request.context.pixel->sampleLocations == std::array<std::uint8_t, 32>{} && replay32.request.target.spannedWaves && serializer.Serialize(replay32.request) == serializer.Serialize(spanned), "a version 32 request read pixel iteration or sample locations, or lost its spanned-waves flag");
     auto version29 = sampledBytes;
+    version29.resize(version29.size() - 8u);
     version29.pop_back();
     version29.pop_back();
     version29.erase(version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes), version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
@@ -5021,6 +5039,7 @@ void verifyVertexInfoVersion19() {
     const auto replay29 = serializer.Deserialize(encodeBase64(version29));
     require(replay29.request.context.pixel.has_value() && replay29.request.context.pixel->quadSampleMask == std::array<std::uint16_t, 4>{0x1u, 0x2u, 0x4u, 0x8u} && replay29.request.context.pixel->reversedBlend == 0u && decodeBase64(serializer.Serialize(replay29.request)) == sampledBytes, "a version 29 request read a reversed-order blend code or misread the fields after the quad sample masks");
     auto version28 = sampledBytes;
+    version28.resize(version28.size() - 8u);
     version28.pop_back();
     version28.pop_back();
     version28.erase(version28.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u), version28.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
@@ -5028,6 +5047,7 @@ void verifyVertexInfoVersion19() {
     const auto replay28 = serializer.Deserialize(encodeBase64(version28));
     require(replay28.request.context.pixel.has_value() && replay28.request.context.pixel->quadPixelMask == 0x2u && replay28.request.context.pixel->quadSampleMask == std::array<std::uint16_t, 4>{0xffffu, 0xffffu, 0xffffu, 0xffffu} && replay28.request.context.pixel->reversedBlend == 0u && decodeBase64(serializer.Serialize(replay28.request)) == maskedBytes, "a version 28 request read quad sample masks or a reversed-order blend code, or misread the fields after them");
     auto version27 = maskedBytes;
+    version27.resize(version27.size() - 8u);
     version27.pop_back();
     version27.pop_back();
     version27.erase(version27.begin() + static_cast<std::ptrdiff_t>(maskOffset), version27.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
@@ -5035,6 +5055,7 @@ void verifyVertexInfoVersion19() {
     const auto replay27 = serializer.Deserialize(encodeBase64(version27));
     require(replay27.request.context.pixel.has_value() && replay27.request.context.pixel->quadPixelMask == 0xfu && replay27.request.context.pixel->reversedBlend == 0u && serializer.Serialize(replay27.request) == encodedPixel, "a version 27 request read a quad pixel mask or reversed-order blend code, or misread the fields after it");
     auto legacyPixel = plainPixel;
+    legacyPixel.resize(legacyPixel.size() - 8u);
     legacyPixel.pop_back();
     legacyPixel.pop_back();
     legacyPixel.erase(legacyPixel.begin() + static_cast<std::ptrdiff_t>(allBitsOffset), legacyPixel.begin() + static_cast<std::ptrdiff_t>(allBitsOffset + 2u + sampleMaskBytes + 4u + iterationBytes));

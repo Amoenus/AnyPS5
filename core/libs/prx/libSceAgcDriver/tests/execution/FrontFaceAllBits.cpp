@@ -68,6 +68,7 @@ void Draw(AgcDriver::VulkanDevice& device, bool allBits) {
     pixel.frontFace = true;
     pixel.frontFaceAllBits = allBits;
     pixel.targetOutputMode[0] = 1;
+    pixel.targetOutputType[0] = ShaderRecompiler::ColorOutputType::Uint;
     pixel.targetExportMapping.fill(0xe4u);
     const std::vector<std::uint32_t> pixelUserData(8, 0u);
     const std::array<ShaderRecompiler::MemoryRegion, 1> pixelMemory{{{reinterpret_cast<std::uintptr_t>(PixelCode.data()), std::as_bytes(std::span(PixelCode))}}};

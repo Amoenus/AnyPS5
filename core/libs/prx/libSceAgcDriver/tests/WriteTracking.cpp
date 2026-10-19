@@ -146,6 +146,37 @@ void CheckStoredAllSince() {
     Require(StoredAllSince_nid_no_patch(base, 64, before), "a complete non-block-aligned range store is absent");
 
     before = TrackerGeneration();
+    MarkPossiblyWritten(base + 2048, 16);
+    Require(StoredOver(base + 2048, 16, before), "a possible driver write did not invalidate its exact range");
+    Require(!StoredOver(base + 2064, 16, before), "a possible driver write invalidated an adjacent range");
+    Require(!StoredAllSince_nid_no_patch(base + 2048, 16, before), "a possible driver write proved complete byte coverage");
+    for (unsigned repeat = 0; repeat < 6; ++repeat) MarkPossiblyWritten(base + 2048, 16);
+    Require(StoredOver(base + 2048, 16, before), "repeated possible writes lost their overlap evidence");
+    Require(!StoredOver(base + 2064, 16, before), "repeated possible writes invalidated an adjacent range");
+    Require(!StoredAllSince_nid_no_patch(base + 2048, 16, before), "repeated possible writes proved complete byte coverage");
+
+    before = TrackerGeneration();
+    constexpr unsigned PossibleIntervals = 8;
+    auto beforeNewest = before;
+    for (unsigned interval = 0; interval < PossibleIntervals; ++interval) {
+        beforeNewest = TrackerGeneration();
+        MarkPossiblyWritten(base + 4096 + static_cast<std::uint64_t>(interval) * 32, 16);
+    }
+    Require(StoredOver(base + 4096, 16, before), "an evicted possible-write interval was forgotten instead of marking its block");
+    Require(StoredOver(base + 4096 + 16, 16, before), "an evicted possible write did not mark the rest of its block");
+    Require(StoredOver(base + 4096 + (PossibleIntervals - 1) * 32, 16, beforeNewest), "the newest possible-write interval was evicted");
+    const auto beforeRecord = TrackerGeneration();
+    MarkPossiblyWritten(base + 4096, 16);
+    Require(StoredOver(base + 4096, 16, beforeRecord), "a possible-write interval was not retained after being re-recorded");
+    Require(!StoredAllSince_nid_no_patch(base + 4096, 16, before), "possible-write eviction or re-recording proved complete byte coverage");
+
+    before = TrackerGeneration();
+    MarkWritten(base + 2560, 16);
+    MarkPossiblyWritten(base, Block);
+    Require(StoredAllSince_nid_no_patch(base + 2560, 16, before), "a possible whole-block range erased an exact partial-store proof");
+    Require(!StoredAllSince_nid_no_patch(base, Block, before), "a possible whole-block range proved complete block coverage");
+
+    before = TrackerGeneration();
     MarkWritten(base + 512, 16);
     MarkWritten(base + 544, 16);
     Require(!StoredAllSince_nid_no_patch(base + 512, 48, before), "split driver stores prove coverage across a hole");
@@ -196,6 +227,42 @@ void CheckStoredAllSince() {
         MarkWritten(outsideAddress, outside.size());
         Require(!StoredAllSince_nid_no_patch(outsideAddress, outside.size(), before), "an outside untracked range has complete coverage");
     }
+}
+
+void CheckRepeatedPossibleStores() {
+    void* memory = AllocateWatched(3 * Block);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    const auto boundary = base + 2 * Block - 0x9000;
+    std::memset(memory, 0x11, 3 * Block);
+
+    const auto synced = CollectWrites(base, 3 * Block);
+    Require(synced != 0, "the test block is not collected");
+
+    const auto exact = TrackerGeneration();
+    MarkWritten(base + Block, 0x100);
+    for (std::uint64_t store = 0; store < 5; ++store) MarkPossiblyWritten(boundary + store * 0x1000, 0x100);
+    Require(StoredAllSince_nid_no_patch(base + Block, 0x100, exact), "possible writes beyond the ring forgot an exact store's coverage");
+
+    void* fresh = AllocateWatched(2 * Block);
+    const auto freshBase = reinterpret_cast<std::uint64_t>(fresh);
+    std::memset(fresh, 0x11, 2 * Block);
+    const auto freshSynced = CollectWrites(freshBase, 2 * Block);
+    const auto neighbour = freshBase + Block - 0x9000;
+    MarkPossiblyWritten(neighbour, 0x100);
+    const auto secondStored = MarkPossiblyWritten(neighbour + 0x1000, 0x100);
+    const auto thirdStored = MarkPossiblyWritten(neighbour + 0x2000, 0x100);
+    MarkPossiblyWritten(neighbour + 0x3000, 0x100);
+    const auto settled = TrackerGeneration();
+    MarkPossiblyWritten(neighbour, 0x100);
+    MarkPossiblyWritten(neighbour, 0x100);
+    MarkPossiblyWritten(neighbour + 0x5000, 0x100);
+    Require(!StoredOver(freshBase, static_cast<std::size_t>(neighbour - freshBase), secondStored), "a full possible ring evicted a newer piece instead of its oldest");
+    Require(StoredOver(freshBase, static_cast<std::size_t>(neighbour - freshBase), freshSynced), "an evicted possible write is not taken as a store over the rest of the block");
+
+    const auto partial = TrackerGeneration();
+    MarkPossiblyWritten(neighbour + 0x5080, 0x100);
+    Require(StoredOver(neighbour + 0x5000, 0x10, settled) && StoredOver(neighbour + 0x5100, 0x10, partial), "a possible write that overlaps an earlier piece without containing it replaced it");
+    Require(!StoredOver(freshBase, static_cast<std::size_t>(neighbour - freshBase), thirdStored), "a possible write that overlaps without containing evicted a newer piece instead of the oldest");
 }
 
 void CheckSharedBlockProofs() {
@@ -1198,6 +1265,7 @@ int main() {
 #endif
         CheckSharedBlock();
         CheckStoredAllSince();
+        CheckRepeatedPossibleStores();
         CheckSharedBlockProofs();
         CheckOwnStore();
         CheckUnwatch();

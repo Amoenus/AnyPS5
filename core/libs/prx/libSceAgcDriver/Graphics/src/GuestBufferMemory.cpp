@@ -4750,7 +4750,7 @@ void GuestBufferMemory::MarkDirectWrites() const {
         const auto* found = owner(begin, end);
         if (found == nullptr) continue;
         const auto& region = *found;
-        if (region.direct != nullptr || (region.gpuCopy && region.copiedBack)) GuestMemory::MarkWritten(begin, static_cast<std::size_t>(end - begin));
+        if (region.direct != nullptr || (region.gpuCopy && region.copiedBack)) GuestMemory::MarkPossiblyWritten(begin, static_cast<std::size_t>(end - begin));
     }
 }
 
@@ -4838,7 +4838,7 @@ void GuestBufferMemory::WriteBack() {
         if (region.direct == nullptr && !(region.gpuCopy && (region.copiedBack || region.deviceLocal)) && !(region.mirror != nullptr && !region.mirror->writable)) Recorder::NoteWrittenBack(begin, static_cast<std::size_t>(end - begin));
         if (region.direct != nullptr) {
             // The GPU wrote imported guest memory directly; page write watching did not see it.
-            GuestMemory::MarkWritten(begin, static_cast<std::size_t>(end - begin));
+            GuestMemory::MarkPossiblyWritten(begin, static_cast<std::size_t>(end - begin));
             continue;
         }
         if (region.mirror != nullptr) {
@@ -4868,7 +4868,7 @@ void GuestBufferMemory::WriteBack() {
             if (region.copiedBack) {
                 // The GPU copied the written sub-range back into the import; page write watching
                 // did not see it.
-                GuestMemory::MarkWritten(begin, static_cast<std::size_t>(end - begin));
+                GuestMemory::MarkPossiblyWritten(begin, static_cast<std::size_t>(end - begin));
                 continue;
             }
             static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;

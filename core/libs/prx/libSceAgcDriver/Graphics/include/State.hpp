@@ -65,6 +65,7 @@ struct ColorTarget {
     std::uint32_t layers = 1;
     std::uint32_t exportIndex = 0;
     bool uintExport = false;
+    bool volume = false;
     std::uint32_t pipeBankXor = 0;
     std::uint32_t samples = 1;
     std::uint32_t dccControl = 0;
@@ -167,6 +168,8 @@ std::array<std::uint8_t, 32> PixelSampleLocations(const State& state, const Shad
 VkExtent2D SampleLocationGrid(const State& state);
 std::array<std::uint8_t, 8> ExportMappings(const State& state);
 std::array<ShaderRecompiler::ColorExportPacking, 8> ExportPackings(const State& state);
+ShaderRecompiler::ColorOutputType ColorOutputTypeOf(const ColorTarget& color);
+std::array<ShaderRecompiler::ColorOutputType, 8> ExportOutputTypes(const State& state);
 ShaderRecompiler::RasterPrimitive RasterPrimitiveOf(const State& state);
 bool PartialSampleMask(const State& state);
 bool UniformSampleMask(const State& state);

@@ -1272,7 +1272,10 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         auto color = DecodeColorBuffer(cx, slot);
         if (slotExport == 7 && ((read(cx, 0x31c + slot * 0xfu) >> 8u) & 7u) != 4u) throw std::runtime_error("AGC graphics: color export format 7 (UINT16_ABGR) into a target that is not unsigned integer is unsupported");
         color.exportIndex = index;
-        color.uintExport = slotExport == 7;
+        const auto outputType = ColorOutputTypeOf(color);
+        const bool integerOutput = outputType == ShaderRecompiler::ColorOutputType::Uint || outputType == ShaderRecompiler::ColorOutputType::Sint;
+        Require(!integerOutput || slotExport == 1 || slotExport == 2 || slotExport == 3 || slotExport == 7 || slotExport == 9, "integer attachment needs a raw32 or UINT16 color export");
+        color.uintExport = outputType == ShaderRecompiler::ColorOutputType::Uint;
         if (color.samples == 1 && result.samples > 1 && result.colors.empty() && !result.depth && (read(cx, 0x292) & 1u) == 0) {
             const auto sampleInputs = read(cx, 0x1b3) & read(cx, 0x1b4) & (ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::Ancillary) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::SampleCoverage));
             Require(!result.perSampleShading && sampleInputs == 0 && (read(cx, 0x203) & 0x100u) == 0, "a one-sample color target under a multisampled rasterizer without MSAA_ENABLE is unsupported with PS_ITER_SAMPLE, a sample index or coverage input, or a sample-mask export");
@@ -1374,7 +1377,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             if (((exportedMask >> ((mapping >> (2u * component)) & 3u)) & 1u) != 0) state.colorWriteMask |= 1u << component;
         }
         state.blendEnable = ((blend >> 30u) & 1u) != 0 && (read(cx, 0x31c + slot * 0xfu) & 0x10000u) == 0;
-        Require(!state.blendEnable || !color.uintExport, "blending into an unsigned integer target is unsupported");
+        Require(!state.blendEnable || ColorOutputTypeOf(color) == ShaderRecompiler::ColorOutputType::Float, "blending into an unsigned integer target or signed integer target is unsupported");
         const bool reversed = mapping == 0x1bu || mapping == 0x93u;
         if (state.blendEnable) {
             const bool opaqueDestination = (read(cx, 0x31d + slot * 0xfu) & 0x20000u) != 0;
@@ -1457,6 +1460,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     if (result.alphaToCoverage) {
         const auto mrt0 = std::find_if(result.colors.begin(), result.colors.end(), [](const ColorTarget& color) { return color.exportIndex == 0; });
+        Require(mrt0 == result.colors.end() || ColorOutputTypeOf(*mrt0) == ShaderRecompiler::ColorOutputType::Float, "alpha-to-coverage into an integer target is unsupported");
         const auto format = read(cx, 0x1c5) & 0xfu;
         Require(format == 3u || format == 4u || format == 5u || format == 6u || format == 9u, "alpha-to-coverage needs an MRT0 export format with a floating-point alpha");
         Require(!result.ditheredAlphaToCoverage || format == 4u || format == 9u, "dithered alpha-to-coverage needs an FP16_ABGR or 32_ABGR export");
@@ -1472,6 +1476,27 @@ std::array<ShaderRecompiler::ColorExportPacking, 8> ExportPackings(const State& 
         if (color.exportIndex < packings.size()) packings[color.exportIndex] = color.packing;
     }
     return packings;
+}
+
+ShaderRecompiler::ColorOutputType ColorOutputTypeOf(const ColorTarget& color) {
+    using Type = ShaderRecompiler::ColorOutputType;
+    if (color.packing != ShaderRecompiler::ColorExportPacking::None) return Type::Float;
+    switch (color.format) {
+        case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R32_UINT:
+        case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R8G8B8A8_UINT:
+        case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R16G16B16A16_UINT:
+        case VK_FORMAT_R32G32B32A32_UINT: return Type::Uint;
+        case VK_FORMAT_R32_SINT: return Type::Sint;
+        default: return Type::Float;
+    }
+}
+
+std::array<ShaderRecompiler::ColorOutputType, 8> ExportOutputTypes(const State& state) {
+    std::array<ShaderRecompiler::ColorOutputType, 8> types{};
+    for (const auto& color : state.colors) {
+        if (color.exportIndex < types.size()) types[color.exportIndex] = ColorOutputTypeOf(color);
+    }
+    return types;
 }
 
 bool PartialSampleMask(const State& state) {
@@ -1571,7 +1596,7 @@ GuestTextureResource SurfaceForTarget(const ColorTarget& color) {
     surface.baseLevel = 0;
     surface.lastLevel = color.mipCount - 1;
     surface.tileMode = ColorTextureTileMode(color.tileMode);
-    surface.dimension = color.depth > 1 ? TextureDimension::k3D : TextureDimension::k2D;
+    surface.dimension = color.volume || color.depth > 1 ? TextureDimension::k3D : TextureDimension::k2D;
     surface.format = GuestFormatFor(color.format, color.elementBytes);
     surface.dstSelX = 4;
     surface.dstSelY = 5;
@@ -1615,17 +1640,16 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
     const auto attrib3 = read(cx, 0x3b8 + slot);
     color.tileMode = DecodeColorTileMode(attrib3);
     const bool volume = ((attrib3 >> 24u) & 3u) == 2u;
+    color.volume = volume;
     Require(((attrib3 >> 24u) & 3u) != 0u || (attrib2 & 0x3fffu) == 0u, "1D color targets taller than one row are unsupported");
     if (volume) {
+        Require(maxMip == 0 || (info & 0x10000000u) == 0, "DCC of mipmapped 3D color targets is unsupported");
+        Require(maxMip == 0 || (info & 0x2000u) == 0, "CMASK fast clears of mipmapped 3D color targets are unsupported");
         color.depth = (attrib3 & 0x1fffu) + 1u;
-        if (maxMip != 0) {
-            char message[384];
-            std::snprintf(message, sizeof(message), "mipmapped 3D color targets are unsupported (slot %u, %ux%ux%u, viewMip %u, maxMip %u, slices %u..%u, CB_COLOR_INFO 0x%08x, ATTRIB2 0x%08x, ATTRIB3 0x%08x, VIEW 0x%08x)", slot, ((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u, color.depth, viewMip, maxMip, slice, lastSlice, info, attrib2, attrib3, view);
-            Require(false, message);
-        }
-        Require(slice < color.depth && lastSlice >= slice, "the color view slices are outside the 3D surface");
+        const auto viewDepth = std::max(color.depth >> viewMip, 1u);
+        Require(slice < viewDepth && lastSlice >= slice, "the color view slices are outside the 3D surface");
         color.depthSlice = slice;
-        color.layers = std::min(lastSlice + 1u, color.depth) - slice;
+        color.layers = std::min(lastSlice + 1u, viewDepth) - slice;
     } else if ((attrib3 & 0x1fffu) != 0) {
         Require(lastSlice <= (attrib3 & 0x1fffu), "the color view slice is beyond the array surface");
         color.arrayLastSlice = attrib3 & 0x1fffu;
@@ -1643,7 +1667,18 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
     color.mip = viewMip;
     std::uint32_t firstTailLevel = maxMip + 1u;
     if (maxMip != 0) {
-        const auto mips = ComputeElementMipLayout(ColorTextureTileMode(color.tileMode), color.elementBytes, color.extent.width, color.extent.height, maxMip + 1u);
+        const auto mips = [&] {
+            if (!volume) return ComputeElementMipLayout(ColorTextureTileMode(color.tileMode), color.elementBytes, color.extent.width, color.extent.height, maxMip + 1u);
+            GuestTextureResource surface{};
+            surface.width = color.extent.width;
+            surface.height = color.extent.height;
+            surface.depthOrLastArray = color.depth - 1u;
+            surface.mipCount = maxMip + 1u;
+            surface.tileMode = ColorTextureTileMode(color.tileMode);
+            surface.dimension = TextureDimension::k3D;
+            surface.format = GuestFormatFor(decoded.format, color.elementBytes);
+            return DescribeSurface(surface).mips;
+        }();
         const auto& mip = mips.at(viewMip);
         mipOffset = mip.tiledOffset;
         color.mipTail = mip.tail;
@@ -1742,9 +1777,9 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
             }
         }
     }
-    if (volume && (color.tileMode == ColorTileMode::RenderTarget || color.tileMode == ColorTileMode::Standard4KB)) {
+    if (volume) {
         color.bytes = DescribeSurface(SurfaceForTarget(color)).guestBytes;
-        GuestMemory::CheckRange(reinterpret_cast<const void*>(color.address), color.bytes, colorLayout.Alignment(), true);
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(color.surfaceAddress), color.bytes, colorLayout.Alignment(), true);
     }
     return color;
 }

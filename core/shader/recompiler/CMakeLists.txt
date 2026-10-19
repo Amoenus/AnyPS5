@@ -244,6 +244,7 @@ function(add_shader_recompiler target runtimeTarget)
             RayTracingStrict
             RayTracingMiss
             ReadWholeFile
+            NativeCachePath_nid_no_patch
             Recompile
             RecompileCacheKey::ContextHash
             RecompileResult
