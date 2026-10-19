@@ -7136,7 +7136,11 @@ void verifyFmaskImageMode() {
         descriptor.dwords[6] = compression;
         expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, descriptor, modes)); }, "FMASK CMASK compression is not implemented", "compressed FMASK was accepted without decoding its metadata");
     }
+    descriptor.dwords[6] = (1u << 19u) | (1u << 21u);
+    descriptor.dwords[7] = 0x1234u;
+    require(ResourceMaterializer::RuntimeImageMode(image, descriptor, modes) == selected, "compressed FMASK did not retain the bound integer image mode");
     descriptor.dwords[6] = 0u;
+    descriptor.dwords[7] = 0u;
     image.packed = true;
     expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, descriptor, modes)); }, "packed FMASK image reads are not implemented", "packed FMASK was accepted");
     image.packed = false;
