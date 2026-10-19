@@ -247,7 +247,7 @@ AgcDriver::Graphics::State TargetState(const AgcDriver::Graphics::ColorTarget& c
     state.blends = {blend};
     state.blend = blend;
     state.blendConstants = {};
-    state.samples = Samples;
+    state.samples = color.samples;
     return state;
 }
 
