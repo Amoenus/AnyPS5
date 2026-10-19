@@ -143,6 +143,7 @@ struct SpirvEmitterState {
     bool f16DenormPreserveEmitted = false;
     std::uint32_t dot2F32F16Function = 0;
     std::map<std::pair<bool, std::uint32_t>, std::uint32_t> interpolateFunctions;
+    bool integerInterpolation = false;
     std::array<std::array<std::uint32_t, 2>, 2> bdaDwordReadFunctions {};
     std::array<std::array<std::uint32_t, 2>, 2> bdaSpanReadFunctions {};
     std::unordered_map<const IrValue*, std::pair<std::uint32_t, std::uint32_t>> bdaGroupedLoads;
@@ -163,6 +164,7 @@ struct SpirvEmitterState {
     // Execution scope of the barriers that keep one guest wave's LDS accesses in program order across
     // host invocations (see WaveLdsScope); 0 when none are emitted.
     std::uint32_t waveLdsScope = 0;
+    bool insideLdsLock = false;
     // Debug aid (APS5_LOOP_GUARD=<exits>): after that many evaluated loop exits an invocation leaves its
     // loops, and the first loop that ran out is reported as a LoopLimit fault instead of hanging the GPU.
     std::uint32_t loopGuardLimit = 0;
