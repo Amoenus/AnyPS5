@@ -59,11 +59,6 @@ struct RuntimeImageModeMatch {
     std::string detail;
 };
 
-struct ViewLevelsPastChain {
-    std::uint32_t levels = 0;
-    bool base = false;
-};
-
 class ConvertedSampleRequired : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
