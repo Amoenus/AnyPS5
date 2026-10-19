@@ -43,6 +43,10 @@ int APS5_VABI sceVrSetupDialogUpdateStatus(void) {
  return g_status.load();
 }
 
+int APS5_VABI sceVrSetupDialogGetStatus(void) {
+ return g_status.load();
+}
+
 int APS5_VABI sceVrSetupDialogGetResult(void* result) {
  const int status = g_status.load();
  if (status == COMMON_DIALOG_STATUS_NONE) return COMMON_DIALOG_ERROR_NOT_INITIALIZED;
