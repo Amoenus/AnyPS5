@@ -491,10 +491,10 @@ int main() {
             const auto replay = serializer.Deserialize(encoded);
             Require(replay.request.target.spannedWaves == spanned && replay.request.context.pixel.has_value() == pixel);
             if (pixel) Require(replay.request.context.pixel->targetOutputType == typed.context.pixel->targetOutputType && replay.request.context.pixel->reversedBlend == 0x89abcdefu);
-            auto legacy32 = DecodeBase64(encoded);
-            if (pixel) legacy32.resize(legacy32.size() - 8u);
-            legacy32[4] = 32u;
-            const auto old = serializer.Deserialize(EncodeBase64(legacy32));
+            auto legacy35 = DecodeBase64(encoded);
+            if (pixel) legacy35.resize(legacy35.size() - 8u);
+            legacy35[4] = 35u;
+            const auto old = serializer.Deserialize(EncodeBase64(legacy35));
             Require(old.request.target.spannedWaves == spanned && old.request.context.pixel.has_value() == pixel);
             if (pixel) Require(old.request.context.pixel->targetOutputType == ShaderRecompiler::ShaderPixelStageInfo{}.targetOutputType && old.request.context.pixel->reversedBlend == 0x89abcdefu);
         }
