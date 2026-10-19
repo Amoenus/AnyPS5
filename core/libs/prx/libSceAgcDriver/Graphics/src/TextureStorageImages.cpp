@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -27,7 +28,7 @@ void StorageTexture::allocateExtraMipImages(VkImageCreateInfo info) {
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
         allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "extra storage mip");
-        Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &extra->memory), "vkAllocateMemory extra storage mip");
+        extra->memory = AllocateImageMemory(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory extra storage mip");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, extra->image, extra->memory, 0u), "vkBindImageMemory extra storage mip");
         Require(memoryBytes <= std::numeric_limits<VkDeviceSize>::max() - requirements.size, "storage image memory accounting overflows");
         memoryBytes += requirements.size;
