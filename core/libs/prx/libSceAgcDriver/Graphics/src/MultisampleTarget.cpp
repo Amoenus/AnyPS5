@@ -606,25 +606,6 @@ private:
         return std::nullopt;
     }
 
-    Recorder& readbackRecorder() const {
-        Require(!Recorder::InCompletion(), "native color readback during a recorder completion is not implemented");
-        auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
-        Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires a recorder for its device");
-        const auto* recording = Recorder::Active();
-        Require(recording == nullptr || recording->Device() != context.device || recording == recorder, "native color readback with another active recorder on the same device is not implemented");
-        return *recorder;
-    }
-
-    std::vector<std::byte> currentGuestColor() const {
-        if (GuestMemory::CompareMapped(target.address, initialColor) == GuestMemory::Compare::Equal) return initialColor;
-        if (paddingFill) {
-            auto filled = initialColor;
-            for (std::size_t offset = 0; offset < filled.size(); offset += sizeof(*paddingFill)) std::memcpy(filled.data() + offset, &*paddingFill, sizeof(*paddingFill));
-            if (GuestMemory::CompareMapped(target.address, filled) == GuestMemory::Compare::Equal) return filled;
-        }
-        throw std::runtime_error("AGC graphics: guest color no longer matches its initial contents or a known full fill");
-    }
-
     std::optional<GuestMemory::UnchangedQuery> fmaskRange;
     std::map<std::array<std::uint32_t, 5>, std::unique_ptr<Texture>> fmaskTextures;
     std::optional<std::uint32_t> dccFill;
@@ -654,6 +635,25 @@ private:
         clear = MultisampledDccClear(use, std::vector<std::byte>(dccRanges[1].bytes, std::byte{*keys}), std::vector<std::byte>(use.cmaskBytes, std::byte{cmaskKeys}));
         std::copy(metadata.begin(), metadata.end(), dccRanges.begin() + 1);
         return true;
+    }
+
+    Recorder& readbackRecorder() const {
+        Require(!Recorder::InCompletion(), "native color readback during a recorder completion is not implemented");
+        auto* recorder = context.recorder != nullptr ? context.recorder : Recorder::Active();
+        Require(recorder != nullptr && recorder->Device() == context.device, "multisample color sample readback requires a recorder for its device");
+        const auto* recording = Recorder::Active();
+        Require(recording == nullptr || recording->Device() != context.device || recording == recorder, "native color readback with another active recorder on the same device is not implemented");
+        return *recorder;
+    }
+
+    std::vector<std::byte> currentGuestColor() const {
+        if (GuestMemory::CompareMapped(target.address, initialColor) == GuestMemory::Compare::Equal) return initialColor;
+        if (paddingFill) {
+            auto filled = initialColor;
+            for (std::size_t offset = 0; offset < filled.size(); offset += sizeof(*paddingFill)) std::memcpy(filled.data() + offset, &*paddingFill, sizeof(*paddingFill));
+            if (GuestMemory::CompareMapped(target.address, filled) == GuestMemory::Compare::Equal) return filled;
+        }
+        throw std::runtime_error("AGC graphics: guest color no longer matches its initial contents or a known full fill");
     }
 
     VkClearColorValue initialDccClear(const ColorTarget& use) {
@@ -1360,11 +1360,6 @@ void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
     for (const auto& target : targets()) {
         if (!target->active->load(std::memory_order_acquire)) continue;
         target->NoteFill(address, bytes, pattern);
-        if (target->target.dccAddress != 0) {
-            target->NoteMetadataFill(address, bytes, pattern);
-            continue;
-        }
-
         if (target->htileBytes != 0 && address < target->htileAddress + target->htileBytes && target->htileAddress < address + bytes) {
             if (pattern == 0u && address <= target->htileAddress && address + bytes >= target->htileAddress + target->htileBytes) {
                 target->htileRefusal.clear();
