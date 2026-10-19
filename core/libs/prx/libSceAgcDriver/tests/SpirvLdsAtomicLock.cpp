@@ -34,8 +34,6 @@ struct Usage {
     bool fenceBetweenLock = false;
     bool releaseWithoutReleaseSemantics = false;
     bool lockInitIsLaneZero = false;
-    bool fenceBetweenLock = false;
-    bool releaseWithoutReleaseSemantics = false;
 };
 
 void Require(bool condition, const std::string& message) {
@@ -79,7 +77,6 @@ Usage Scan(std::span<const std::uint32_t> words) {
     std::uint32_t laneZeroCondition = 0u;
     std::uint32_t laneZeroBody = 0u;
     std::uint32_t lockPointer = 0u;
-    std::map<std::uint32_t, std::uint32_t> constants;
     for (std::size_t cursor = 5; cursor < words.size();) {
         const auto count = words[cursor] >> spv::WordCountShift;
         const auto op = static_cast<spv::Op>(words[cursor] & spv::OpCodeMask);
@@ -95,7 +92,6 @@ Usage Scan(std::span<const std::uint32_t> words) {
             laneZeroCondition = words[cursor + 2u];
         }
         if (op == spv::OpBranchConditional && count >= 4u && words[cursor + 1u] == laneZeroCondition) laneZeroBody = words[cursor + 2u];
-        if (op == spv::OpConstant && count == 4) constants[words[cursor + 2]] = words[cursor + 3];
         if (op == spv::OpGroupNonUniformElect) ++usage.elects;
         if (op == spv::OpAtomicCompareExchange) {
             ++usage.exchanges;
