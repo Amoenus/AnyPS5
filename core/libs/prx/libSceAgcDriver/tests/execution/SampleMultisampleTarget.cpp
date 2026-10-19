@@ -1705,12 +1705,138 @@ void MovedRasterPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     std::printf("native moved raster: word=0x%08x covered=%u checked=%u; adjusted snapshot, old guard, complete bytes and readback sentinels passed\n", word, covered, checked);
 }
 
+
+alignas(256) constexpr std::array<std::uint32_t, 10> NativeFmaskCode{0x34020084u, 0xe0381000u, 0x80000201u, 0xbf8c3f70u, 0xf0001f08u, 0x00020602u, 0xbf8c3f70u, 0xe0781000u, 0x80010601u, 0xbf810000u};
+alignas(256) std::array<std::uint32_t, Threads * 4u> NativeFmaskInput{};
+alignas(256) std::array<std::uint32_t, Threads * 4u + 4u> NativeFmaskOutput{};
+
+std::array<std::uint32_t, 8> NativeFmaskDescriptor(const Block& fmask, const Block& cmask, std::uint32_t pipeXor) {
+    const auto address = fmask.Address() | pipeXor;
+    const auto metadata = cmask.Address();
+    return {static_cast<std::uint32_t>(address >> 8u), static_cast<std::uint32_t>(address >> 40u) | (166u << 20u) | (((Side - 1u) & 3u) << 30u), ((Side - 1u) >> 2u) | ((Side - 1u) << 14u), 4u | (1u << 3u) | (4u << 6u) | (24u << 20u) | (9u << 28u), 0u, 0u, (1u << 19u) | (1u << 21u) | (static_cast<std::uint32_t>(metadata >> 8u) << 24u), static_cast<std::uint32_t>(metadata >> 16u)};
+}
+
+void DispatchNativeFmask(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& image, bool registration) {
+    std::vector<std::uint32_t> userData(16u);
+    const auto buffer = [](const void* data, std::uint32_t bytes) {
+        const auto address = reinterpret_cast<std::uintptr_t>(data);
+        return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u) & 0xffffu, bytes, 0x31016facu};
+    };
+    const auto input = buffer(NativeFmaskInput.data(), sizeof(NativeFmaskInput));
+    const auto output = buffer(NativeFmaskOutput.data(), Threads * 16u);
+    std::copy(input.begin(), input.end(), userData.begin());
+    std::copy(output.begin(), output.end(), userData.begin() + 4u);
+    std::copy(image.begin(), image.end(), userData.begin() + 8u);
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(NativeFmaskCode.data()), std::as_bytes(std::span(NativeFmaskCode))}}};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    auto target = device.Target();
+    target.registrationModules = registration;
+    ShaderRecompiler::RecompileRequest request{{ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(NativeFmaskCode.data()), NativeFmaskCode, 0u, {}}, {32u, 0u, userData, compute, std::nullopt, std::nullopt, memory}, target, {0u, 0u, 0u, 128u}};
+    request.useCache = false;
+    device.Dispatch(ShaderRecompiler::Recompile(request), 1u, 1u, 1u);
+    device.WaitIdle();
+}
+
+void NativeFmask(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+    using namespace AgcDriver::Graphics;
+    Block colorMemory(4u * BlockBytes);
+    Block dcc(BlockBytes);
+    Block cmask(BlockBytes);
+    Block fmask(BlockBytes);
+    Block unrelated(BlockBytes);
+    struct ReleaseDevice {
+        std::unique_ptr<AgcDriver::VulkanDevice>& value;
+        ~ReleaseDevice() { value.reset(); }
+    } releaseDevice{device};
+    constexpr std::uint32_t sentinel = 0xdeadbeefu;
+    for (const auto pipeXor : {0u, 0xf00u}) {
+        std::memset(colorMemory.data, 0, colorMemory.bytes);
+        std::memset(dcc.data, 0, dcc.bytes);
+        std::memset(cmask.data, 0xcc, cmask.bytes);
+        std::memset(fmask.data, 0x11, fmask.bytes);
+        AgcDriver::Registers cx{{0x318, static_cast<std::uint32_t>(colorMemory.Address() >> 8u)}, {0x31b, 0u}, {0x31c, Float16x4Info | 0x10006000u}, {0x31d, (3u << 12u) | (3u << 15u)}, {0x31e, 0u}, {0x31f, static_cast<std::uint32_t>(cmask.Address() >> 8u)}, {0x321, static_cast<std::uint32_t>((fmask.Address() | pipeXor) >> 8u)}, {0x325, static_cast<std::uint32_t>(dcc.Address() >> 8u)}, {0x390, static_cast<std::uint32_t>(colorMemory.Address() >> 40u)}, {0x398, static_cast<std::uint32_t>(cmask.Address() >> 40u)}, {0x3a0, static_cast<std::uint32_t>(fmask.Address() >> 40u)}, {0x3a8, static_cast<std::uint32_t>(dcc.Address() >> 40u)}, {0x3b0, ((Side - 1u) << 14u) | (Side - 1u)}, {0x3b8, TiledAttrib3}};
+        const auto color = DecodeColorBuffer(cx, 0u);
+        Require(color.samples == 8u && color.cmaskAddress == cmask.Address(), "native FMASK fixture lost its decoded target association");
+        std::array<std::array<float, 4>, 8> expected{};
+        for (std::uint32_t sample = 0u; sample < 8u; ++sample) {
+            expected[sample] = {static_cast<float>(sample + 1u) / 8.0f, 0.25f, 0.5f, 1.0f};
+            auto pixel = PixelCode;
+            pixel[1] = std::bit_cast<std::uint32_t>(expected[sample][0]);
+            pixel[3] = std::bit_cast<std::uint32_t>(expected[sample][1]);
+            pixel[5] = std::bit_cast<std::uint32_t>(expected[sample][2]);
+            pixel[7] = std::bit_cast<std::uint32_t>(expected[sample][3]);
+            auto state = TargetState(color);
+            state.quadSampleMask.fill(static_cast<std::uint16_t>(1u << sample));
+            Draw(*device, state, 0u, 2u, pixel);
+        }
+        const auto native = LoadSamples(*device, colorMemory, 8u);
+        std::size_t covered = 0u;
+        for (std::size_t pixel = 0; pixel < Side * Side; ++pixel) {
+            bool all = true;
+            for (std::size_t sample = 0; sample < 8u; ++sample) all = all && native[pixel * 8u + sample] == expected[sample];
+            covered += all;
+        }
+        Require(covered != 0u, "native FMASK fixture did not render eight distinct sample colors");
+        for (std::uint32_t lane = 0; lane < Threads; ++lane) {
+            NativeFmaskInput[lane * 4u] = lane % Side;
+            NativeFmaskInput[lane * 4u + 1u] = lane / Side;
+            NativeFmaskInput[lane * 4u + 2u] = 0u;
+            NativeFmaskInput[lane * 4u + 3u] = 0u;
+        }
+        const auto image = NativeFmaskDescriptor(fmask, cmask, pipeXor);
+        for (const auto registration : {false, true}) {
+            for (std::uint32_t repeat = 0; repeat < 2u; ++repeat) {
+                NativeFmaskOutput.fill(sentinel);
+                DispatchNativeFmask(*device, image, registration);
+                for (std::uint32_t lane = 0; lane < Threads; ++lane) {
+                    const std::array<std::uint32_t, 4> mapping{0x76543210u, 1u, 0x76543210u, 0u};
+                    for (std::size_t component = 0; component < 4u; ++component) Require(NativeFmaskOutput[lane * 4u + component] == mapping[component], "native FMASK load did not preserve its expanded sample indices and selectors");
+                    for (std::uint32_t sample = 0; sample < 8u; ++sample) {
+                        const auto fragment = NativeFmaskOutput[lane * 4u] >> (4u * sample) & 15u;
+                        const auto pixel = NativeFmaskInput[lane * 4u + 1u] * Side + NativeFmaskInput[lane * 4u];
+                        Require(native[pixel * 8u + fragment] == native[pixel * 8u + sample], "native FMASK remapped a sampled color to another fragment");
+                    }
+                }
+                Require(std::all_of(NativeFmaskOutput.begin() + Threads * 4u, NativeFmaskOutput.end(), [](auto word) { return word == sentinel; }), "native FMASK wrote beyond its output");
+            }
+        }
+        Require(LoadSamples(*device, colorMemory, 8u) == native, "FMASK sampling changed the native samples");
+        Require(std::all_of(fmask.data, fmask.data + fmask.bytes, [](auto byte) { return byte == 0x11u; }) && std::all_of(cmask.data, cmask.data + cmask.bytes, [](auto byte) { return byte == 0xccu; }), "native FMASK sampling published or changed guest metadata");
+        const auto refused = [&](const auto& descriptor, std::string_view reason) {
+            NativeFmaskOutput.fill(sentinel);
+            std::string error;
+            try { DispatchNativeFmask(*device, descriptor, false); } catch (const std::runtime_error& e) { error = e.what(); }
+            Require(error.find(reason) != std::string::npos, "native FMASK missing refusal: " + error);
+            Require(std::all_of(NativeFmaskOutput.begin(), NativeFmaskOutput.end(), [](auto word) { return word == sentinel; }), "rejected native FMASK wrote output");
+        };
+        refused(NativeFmaskDescriptor(unrelated, cmask, pipeXor), "descriptor does not match");
+        refused(NativeFmaskDescriptor(fmask, unrelated, pipeXor), "descriptor does not match");
+        refused(NativeFmaskDescriptor(fmask, cmask, pipeXor ^ 0x100u), "descriptor does not match");
+        auto resized = image;
+        resized[2] += 1u;
+        refused(resized, "extent or subresource does not match");
+        std::array<std::byte, 4> same{};
+        same.fill(std::byte{0x11});
+        AgcDriver::GuestMemory::Write(fmask.Address(), same);
+        refused(image, "writes to a resident native FMASK");
+        device->SubmitRecorded(true);
+        device->WaitIdle();
+        ClearMultisampleTargets(device->Device());
+        ClearCachedTextures(device->Device());
+        std::printf("native FMASK: XOR=0x%x, eight distinct samples, both registration modes, cached reuse, association/extent/write refusals and unchanged guest metadata passed\n", pipeXor);
+    }
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--native-fmask") {
+            NativeFmask(device);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--draw-recipe") {
             DrawRecipePublication(device);
             return 0;
