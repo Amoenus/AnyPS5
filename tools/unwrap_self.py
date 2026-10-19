@@ -195,8 +195,12 @@ def place_segments(data, headers, records):
                     header["source"] = 0
                     continue
                 raise Refused("segment %d vaddr %#x is in no PT_LOAD" % (header["index"], header["vaddr"]))
+            offset = header["vaddr"] - host["vaddr"]
+            if header["size"] and (offset > host["size"] or header["size"] > host["size"] - offset):
+                raise Refused("segment %d does not fit the file-backed range of PT_LOAD %d"
+                              % (header["index"], host["index"]))
             header["host"] = host
-            header["source"] = host["source"] + (header["vaddr"] - host["vaddr"])
+            header["source"] = host["source"] + offset
             if tail is None or header["offset"] > tail[0]:
                 tail = (header["offset"], header["source"] - header["offset"])
         elif header["size"]:

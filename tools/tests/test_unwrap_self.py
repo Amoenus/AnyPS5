@@ -351,6 +351,54 @@ class UnwrapTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse(output.exists())
 
+    def test_segments_outside_the_file_backed_load_range_preserve_existing_output(self):
+        output = Path(self.directory) / "output.elf"
+        for address, size, memory_size in ((0x1078, 0x10, 0x80), (0x1078, 0x10, 0x100),
+                                            (0x1080, 0x10, 0x100)):
+            for kind in (PT_DYNAMIC, PT_TLS):
+                with self.subTest(address=address, size=size, memory_size=memory_size, kind=kind):
+                    segments = default_segments()
+                    segments[2] = (kind, 4, 0x1580, address, size, 8)
+                    payloads = default_payloads()
+                    payloads[0xA80] = pattern(23, 0x100)
+                    container = bytearray(build_container(segments, default_records(), payloads))
+                    struct.pack_into("<Q", container, ELF_HEADER_OFFSET + PROGRAM_TABLE_OFFSET + 56 + 40,
+                                     memory_size)
+                    output.write_bytes(b"previous output")
+                    result, output = self.convert(container)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("file-backed range of PT_LOAD 1", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(output.read_bytes(), b"previous output")
+                    self.assertEqual((Path(self.directory) / "input.self").read_bytes(), container)
+
+    def test_file_empty_load_cannot_supply_segment_bytes_from_container_padding(self):
+        segments = default_segments() + [(PT_LOAD, 6, 0x1900, 0x4000, 0, PAGE),
+                                         (PT_TLS, 4, 0x1900, 0x4000, 0x10, 8)]
+        payloads = default_payloads()
+        payloads[0x1900] = pattern(23, 0x10)
+        container = bytearray(build_container(segments, default_records(), payloads))
+        struct.pack_into("<Q", container, ELF_HEADER_OFFSET + PROGRAM_TABLE_OFFSET + 3 * 56 + 40, 0x2000)
+        result, output = self.convert(container)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("file-backed range of PT_LOAD 3", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(output.exists())
+        self.assertEqual((Path(self.directory) / "input.self").read_bytes(), container)
+
+    def test_segment_ending_at_the_file_backed_load_boundary_is_preserved(self):
+        for kind in (PT_DYNAMIC, PT_TLS):
+            with self.subTest(kind=kind):
+                segments = default_segments()
+                segments[2] = (kind, 4, 0x1570, 0x1070, 0x10, 8)
+                container = build_container(segments, default_records(), default_payloads())
+                result, output = self.convert(container)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data, headers = read_program_headers(output)
+                load, segment = headers[1:3]
+                self.assertEqual(segment[2], load[2] + 0x70)
+                self.assertEqual(data[segment[2]:segment[2] + segment[5]], pattern(9, 0x80)[0x70:])
+
     def test_zero_size_segment_outside_pt_load_is_accepted(self):
         segments = default_segments() + [(PT_TLS, 4, 0x1900, 0x2000, 0, 8)]
         container = build_container(segments, default_records(), default_payloads())

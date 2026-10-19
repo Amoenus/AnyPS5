@@ -8779,10 +8779,22 @@ int pipelineCacheFileTests(const Device& device) {
         Check(context.Function<PFN_vkGetPipelineCacheData>("vkGetPipelineCacheData")(context.device, cache, &size, nullptr), "vkGetPipelineCacheData");
         return size;
     };
+    const auto footprint = [&](std::size_t index) {
+        VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        VkPipelineCache fresh = VK_NULL_HANDLE;
+        Check(context.Function<PFN_vkCreatePipelineCache>("vkCreatePipelineCache")(context.device, &info, nullptr, &fresh), "vkCreatePipelineCache");
+        const auto before = bytes(fresh);
+        build(fresh, index);
+        const auto after = bytes(fresh);
+        context.Function<PFN_vkDestroyPipelineCache>("vkDestroyPipelineCache")(context.device, fresh, nullptr);
+        return after > before ? after - before : 0;
+    };
+    const std::array<std::size_t, 2> footprints{footprint(0), footprint(1)};
     const auto holds = [&](VkPipelineCache cache, std::size_t index) {
         const auto before = bytes(cache);
         build(cache, index);
-        return bytes(cache) == before;
+        const auto after = bytes(cache);
+        return after < before + footprints[index] / 2;
     };
     const auto cacheFile = [&] {
         std::vector<std::filesystem::path> found;
@@ -8794,16 +8806,9 @@ int pipelineCacheFileTests(const Device& device) {
         std::ifstream stream(path, std::ios::binary);
         return std::vector<char>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     };
-    {
-        VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-        VkPipelineCache probe = VK_NULL_HANDLE;
-        Check(context.Function<PFN_vkCreatePipelineCache>("vkCreatePipelineCache")(context.device, &info, nullptr, &probe), "vkCreatePipelineCache");
-        const bool stored = !holds(probe, 0);
-        context.Function<PFN_vkDestroyPipelineCache>("vkDestroyPipelineCache")(context.device, probe, nullptr);
-        if (!stored) {
-            std::cout << "skipped, the device does not keep pipelines in a pipeline cache\n";
-            return 77;
-        }
+    if (footprints[0] == 0 || footprints[1] == 0) {
+        std::cout << "skipped, the device does not keep pipelines in a pipeline cache\n";
+        return 77;
     }
     for (const bool firstSavesFirst : {true, false}) {
         std::filesystem::remove_all(directory);
