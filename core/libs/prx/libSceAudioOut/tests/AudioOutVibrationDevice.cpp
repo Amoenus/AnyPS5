@@ -140,6 +140,57 @@ void RunTiming() {
     Require(sceAudioOutClose(split) == 0, "split port close failed");
     Require(opened == 0 && queued == 0, "virtual vibration opened a speaker device");
 }
+
+void RunCadence() {
+    available = false;
+    const std::array<int, 2> ports{
+        sceAudioOutOpen(0x10000000, 10, 0, frames, frequency, 1),
+        sceAudioOutOpen(0x10000000, 10, 0, frames, frequency, 1)
+    };
+    Require(ports[0] > 0 && ports[1] > 0 && ports[0] != ports[1], "repeated vibration ports did not open independently");
+    constexpr std::array<std::array<std::int16_t, 2>, 4> patterns{{{8192, -16384}, {0, 0}, {-16384, 8192}, {16384, -8192}}};
+    constexpr std::array<std::array<std::uint8_t, 2>, 4> expected{{{128, 255}, {0, 0}, {255, 128}, {255, 128}}};
+    std::array<std::uint64_t, 2> ends{};
+    std::array<std::int16_t, frames * 2> samples{};
+    std::vector<std::uint64_t> boundaries;
+    for (std::size_t call = 0; call < 32; ++call) {
+        for (std::size_t port = 0; port < ports.size(); ++port) {
+            const auto pattern = (call + port) % patterns.size();
+            for (std::size_t frame = 0; frame < frames; ++frame) {
+                samples[frame * 2] = patterns[pattern][0];
+                samples[frame * 2 + 1] = patterns[pattern][1];
+            }
+            const auto count = blocks.size();
+            Require(sceAudioOutOutput(ports[port], samples.data()) == static_cast<int>(frames), "repeated vibration output rejected 256 frames");
+            Require(blocks.size() == count + 1, "repeated vibration output did not queue one grain per call");
+            const auto& block = blocks.back();
+            Require(block.source == ports[port] && block.rumble == expected[pattern], "repeated vibration output used the wrong source or PCM energy");
+            Require(block.end - block.begin == 5333 && block.begin >= ends[port], "repeated vibration interval has the wrong duration or overlaps its preceding call");
+            ends[port] = block.end;
+            boundaries.insert(boundaries.end(), {block.begin, block.end - 1, block.end});
+        }
+    }
+    Require(blocks.size() == 64 && clears.empty() && opened == 0 && queued == 0, "repeated virtual output changed routes or cleared a live port");
+    std::sort(boundaries.begin(), boundaries.end());
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+    const auto check = [&](PadAudioHapticQueue model, int removed) {
+        for (const auto time : boundaries) {
+            std::array<std::uint8_t, 2> value{};
+            for (const auto& block : blocks) {
+                if (block.source == removed || time < block.begin || time >= block.end) continue;
+                for (std::size_t channel = 0; channel < value.size(); ++channel) value[channel] = std::max(value[channel], block.rumble[channel]);
+            }
+            Require(model.Read(time) == value, "repeated vibration timeline lost a grain, silence, boundary or independent source");
+        }
+    };
+    check(timeline, 0);
+    Require(sceAudioOutOutput(ports[0], nullptr) == static_cast<int>(frames) && clears == std::vector<int>{ports[0]}, "repeated vibration drain cleared the wrong source");
+    check(timeline, ports[0]);
+    Require(sceAudioOutClose(ports[0]) == 0 && sceAudioOutClose(ports[1]) == 0, "repeated vibration port close failed");
+    Require(clears == std::vector<int>{ports[0], ports[0], ports[1]}, "repeated vibration close did not clear only its source");
+    Require(timeline.Read(ends[0]) == std::array<std::uint8_t, 2>{}, "repeated vibration close retained queued output");
+    std::puts("64 repeated legacy stereo S16/48 kHz outputs: 256 frames per call, 32 calls per port; PCM, interval boundaries, source mixing and drain isolation passed");
+}
 }
 
 int InitializeSdlAudio_nid_no_patch() { return failInitialize ? -1 : 0; }
@@ -182,13 +233,17 @@ int main(int argc, char** argv) {
     try {
         Require(argc == 2, "invalid test arguments");
         const std::string_view mode = argv[1];
-        Require(mode == "quad" || mode == "pulse" || mode == "open_failure" || mode == "timing" || mode == "discovery_failure", "invalid device mode");
+        Require(mode == "quad" || mode == "pulse" || mode == "open_failure" || mode == "timing" || mode == "cadence" || mode == "discovery_failure", "invalid device mode");
         pulse = mode == "pulse";
         Pad::Initialize();
         Pad::SetVibrationMode(1);
         std::uint32_t seen = 0;
         PadOutputState state{};
         static_cast<void>(PadFetchOutput_nid_postfix(&seen, &state));
+        if (mode == "cadence") {
+            RunCadence();
+            return 0;
+        }
         if (mode == "timing") {
             RunTiming();
             std::puts("legacy vibration device tests passed");
