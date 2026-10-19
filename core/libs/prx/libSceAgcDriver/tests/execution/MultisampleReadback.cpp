@@ -276,7 +276,7 @@ struct Surface {
             const auto layer = pixel / (width * height);
             const auto value = x + y * width + layer * width * height + sample * 31u;
             std::array<std::uint32_t, 4> words{0x91352700u ^ value, 0x45219b00u ^ (value * 3u), 0xc7391d00u ^ (value * 5u), 0x6b43e100u ^ (value * 7u)};
-            if (format == VK_FORMAT_D32_SFLOAT) words[0] = std::bit_cast<std::uint32_t>(0.125f + static_cast<float>(element + 1u) / 65536.0f);
+            if (format == VK_FORMAT_D32_SFLOAT) words[0] = std::bit_cast<std::uint32_t>(0.125f + static_cast<float>(element + 1u) / 1048576.0f);
             std::memcpy(result.data() + static_cast<std::size_t>(index) * elementBytes, words.data(), elementBytes);
         }
         return result;
@@ -306,6 +306,60 @@ std::vector<std::byte> CheckReadback(TextureDetiler& reader, const Surface& surf
     Require(std::equal(expected.begin(), expected.end(), data.begin() + offset), "multisample readback changed a rendered sample, component, layer or pixel");
     for (std::size_t index = 0u; index < data.size(); ++index) Require((index >= offset && index < offset + expected.size()) || data[index] == std::byte{0xa5}, "multisample readback changed a buffer sentinel or packed tail");
     return {data.begin() + offset, data.begin() + offset + expected.size()};
+}
+
+void CheckRetile(TextureDetiler& reader, const Surface& surface) {
+    const auto elements = surface.width * surface.height * surface.layers * surface.samples;
+    const auto linear = CheckReadback(reader, surface, 0u, elements, 1u);
+    const auto expected = surface.Expected(0u, elements);
+    constexpr std::array<std::array<std::uint32_t, 3>, 7> coordinates{{
+        {0u, 0u, 0u}, {128u, 66u, 16u}, {64u, 32u, 1u}, {32u, 64u, 2u},
+        {63u, 31u, 7u}, {127u, 65u, 15u}, {1u, 1u, 3u}
+    }};
+    constexpr std::array<TextureTileMode, 2> modes{TextureTileMode::kR64KBX, TextureTileMode::kZ64KBX};
+    constexpr std::array<std::array<std::uint64_t, 7>, 2> references{{
+        {0ull, 6621216ull, 493568ull, 1016832ull, 2766588ull, 6170780ull, 1215508ull},
+        {0ull, 6637700ull, 460808ull, 1000460ull, 2815728ull, 6219892ull, 1182776ull}
+    }};
+    for (std::size_t mode = 0u; mode < modes.size(); ++mode) {
+        for (const auto pipeBankXor : {0u, 0x8100u}) {
+            const MultisampleTextureLayout layout(modes[mode], surface.elementBytes, surface.samples, surface.width, surface.height, surface.layers, pipeBankXor);
+            std::vector<std::byte> tiled(static_cast<std::size_t>(layout.Bytes()) + 32u, std::byte{0xa5});
+            auto payload = std::span(tiled).subspan(16u, layout.Bytes());
+            layout.Tile(linear, payload);
+            std::vector<bool> covered(payload.size());
+            std::size_t position = 0u;
+            for (std::uint32_t layer = 0u; layer < surface.layers; ++layer) {
+                for (std::uint32_t y = 0u; y < surface.height; ++y) {
+                    for (std::uint32_t x = 0u; x < surface.width; ++x) {
+                        for (std::uint32_t fragment = 0u; fragment < surface.samples; ++fragment) {
+                            const auto address = layout.Offset(x, y, layer, fragment);
+                            Require(address + surface.elementBytes <= payload.size(), "readback retile exceeds its allocation");
+                            for (std::uint32_t byte = 0u; byte < surface.elementBytes; ++byte) {
+                                Require(!covered[address + byte], "readback retile elements overlap");
+                                covered[address + byte] = true;
+                                Require(payload[address + byte] == expected[position++], "readback and retile disagree on layer, pixel or fragment order");
+                            }
+                        }
+                    }
+                }
+            }
+            for (std::size_t index = 0u; index < covered.size(); ++index) Require(covered[index] || payload[index] == std::byte{0xa5}, "readback retile changed tile padding");
+            for (std::size_t index = 0u; index < coordinates.size(); ++index) {
+                const auto& coordinate = coordinates[index];
+                const auto fragment = static_cast<std::uint32_t>(index) % surface.samples;
+                const auto source = (((coordinate[2] * surface.height + coordinate[1]) * surface.width + coordinate[0]) * surface.samples + fragment) * surface.elementBytes;
+                const auto reference = references[mode][index];
+                const auto address = (reference & ~65535ull) | ((reference & 65535ull) ^ pipeBankXor);
+                Require(address + surface.elementBytes <= payload.size() && std::equal(expected.begin() + source, expected.begin() + source + surface.elementBytes, payload.begin() + address), "rendered readback differs at an AMD reference fragment address");
+            }
+            std::vector<std::byte> restored(expected.size());
+            layout.Detile(payload, restored);
+            Require(restored == expected && linear == expected, "readback retile roundtrip changed rendered element bits");
+            for (std::size_t index = 0u; index < tiled.size(); ++index) Require((index >= 16u && index < 16u + payload.size()) || tiled[index] == std::byte{0xa5}, "readback retile changed an allocation sentinel");
+            std::printf("multisample readback retile: format=%u mode=%s xor=0x%x samples=%u layers=%u elements=%u reference-points=7 padding/sentinels/roundtrip=passed\n", static_cast<std::uint32_t>(surface.format), mode == 0u ? "R_X" : "Z_X", pipeBankXor, surface.samples, surface.layers, elements);
+        }
+    }
 }
 
 template<typename TAction>
@@ -445,8 +499,8 @@ int main(int argc, char** argv) {
         else if (mode == "uint16") { format = VK_FORMAT_R16_UINT; bytes = 2u; }
         else if (mode == "uint64") { format = VK_FORMAT_R32G32_UINT; bytes = 8u; }
         else if (mode == "uint128") { format = VK_FORMAT_R32G32B32A32_UINT; bytes = 16u; }
-        else Require(mode == "uint32" || mode == "depth" || mode == "upload", "unknown multisample readback test mode");
-        if (mode == "depth") format = VK_FORMAT_D32_SFLOAT;
+        else Require(mode == "uint32" || mode == "depth" || mode == "upload" || mode == "retile" || mode == "depth_retile", "unknown multisample readback test mode");
+        if (mode == "depth" || mode == "depth_retile") format = VK_FORMAT_D32_SFLOAT;
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
@@ -472,6 +526,15 @@ int main(int argc, char** argv) {
         auto limited = context;
         limited.limits.maxComputeWorkGroupCount[0] = 1u;
         TextureDetiler reader(limited);
+        if (mode == "retile" || mode == "depth_retile") {
+            if (!SurfaceSupported(context, format, 4u, 129u, 67u, 17u)) return VulkanTestSkipped;
+            Surface surface(context, format, bytes, 4u, 129u, 67u, 17u);
+            surface.Render();
+            CheckRetile(reader, surface);
+            Require(checkedPipelineCacheUses != 0u, "retile fixture did not check pipeline cache use");
+            std::printf("multisample retile guarded pipeline creation checks=%u passed\n", checkedPipelineCacheUses);
+            return 0;
+        }
         std::uint32_t checked = 0u;
         for (const auto samples : {2u, 4u, 8u}) {
             if (!SurfaceSupported(context, format, samples)) continue;
