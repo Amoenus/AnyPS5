@@ -606,4 +606,14 @@ if(BUILD_TESTING)
         set_tests_properties(guest_voice_chat PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceVoiceChat>")
     endif()
+
+    add_test_executable(guest_np_game_intent_tests tests/GuestNpGameIntent.cpp)
+    target_include_directories(guest_np_game_intent_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_np_game_intent_tests PRIVATE libSceNpGameIntent libc)
+    configure_windows_unwind(guest_np_game_intent_tests)
+    add_test(NAME guest_np_game_intent COMMAND guest_np_game_intent_tests)
+    if(WIN32)
+        set_tests_properties(guest_np_game_intent PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNpGameIntent>")
+    endif()
 endif()
