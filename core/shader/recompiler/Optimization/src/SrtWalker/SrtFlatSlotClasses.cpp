@@ -7,6 +7,82 @@
 
 namespace ShaderRecompiler::Detail {
 
+namespace {
+
+std::vector<std::uint32_t> ResourceFrontier(const IrResourcePlan& plan, std::uint32_t start) {
+    std::vector<std::uint32_t> frontier;
+    std::vector<std::uint8_t> seen(plan.controlFlow.size(), 0u);
+    std::vector<std::uint32_t> pending{start};
+    while (!pending.empty()) {
+        const auto block = pending.back();
+        pending.pop_back();
+        if (block >= plan.controlFlow.size()) {
+            frontier.push_back(block);
+            continue;
+        }
+        if (seen[block] != 0u) continue;
+        seen[block] = 1u;
+        const auto& entry = plan.controlFlow[block];
+        if (entry.condition != nullptr || !entry.sources.empty() || !entry.images.empty()) {
+            frontier.push_back(block);
+            continue;
+        }
+        pending.insert(pending.end(), entry.successors.begin(), entry.successors.end());
+    }
+    std::sort(frontier.begin(), frontier.end());
+    frontier.erase(std::unique(frontier.begin(), frontier.end()), frontier.end());
+    return frontier;
+}
+
+std::vector<std::uint8_t> ReachableBlocks(const IrResourcePlan& plan, std::uint32_t start) {
+    std::vector<std::uint8_t> seen(plan.controlFlow.size(), 0u);
+    std::vector<std::uint32_t> pending{start};
+    while (!pending.empty()) {
+        const auto block = pending.back();
+        pending.pop_back();
+        if (block >= plan.controlFlow.size() || seen[block] != 0u) continue;
+        seen[block] = 1u;
+        const auto& successors = plan.controlFlow[block].successors;
+        pending.insert(pending.end(), successors.begin(), successors.end());
+    }
+    return seen;
+}
+
+bool SourceNeedsExactCondition(const IrResourcePlan& plan, std::uint32_t source) {
+    if (plan.info.bdaWrites) return true;
+    if (std::any_of(plan.info.images.begin(), plan.info.images.end(), [&](const ImageResource& image) { return image.source == source; })) return true;
+    return std::any_of(plan.info.buffers.begin(), plan.info.buffers.end(), [&](const BufferResource& buffer) { return buffer.source == source && (buffer.written || buffer.atomic); });
+}
+
+bool BlockNeedsExactCondition(const IrResourcePlan& plan, const ResourceBlock& entry) {
+    return !entry.images.empty() || std::any_of(entry.sources.begin(), entry.sources.end(), [&](std::uint32_t source) { return SourceNeedsExactCondition(plan, source); });
+}
+
+}
+
+bool ConditionGuardsImagesOrWrites(const IrResourcePlan& plan, std::uint32_t block) {
+    if (block >= plan.controlFlow.size()) return true;
+    const auto& successors = plan.controlFlow[block].successors;
+    if (successors.empty()) return false;
+    std::vector<std::vector<std::uint8_t>> reached;
+    reached.reserve(successors.size());
+    for (const auto successor : successors) reached.push_back(ReachableBlocks(plan, successor));
+    for (std::size_t index = 0; index < plan.controlFlow.size(); ++index) {
+        const bool any = std::any_of(reached.begin(), reached.end(), [&](const std::vector<std::uint8_t>& seen) { return seen[index] != 0u; });
+        const bool all = std::all_of(reached.begin(), reached.end(), [&](const std::vector<std::uint8_t>& seen) { return seen[index] != 0u; });
+        if (any && !all && BlockNeedsExactCondition(plan, plan.controlFlow[index])) return true;
+    }
+    return false;
+}
+
+bool ConditionSelectsResources(const IrResourcePlan& plan, std::uint32_t block) {
+    if (block >= plan.controlFlow.size()) return true;
+    const auto& successors = plan.controlFlow[block].successors;
+    if (successors.size() < 2u) return true;
+    const auto frontier = ResourceFrontier(plan, successors.front());
+    return std::any_of(successors.begin() + 1, successors.end(), [&](std::uint32_t successor) { return ResourceFrontier(plan, successor) != frontier; });
+}
+
 std::vector<std::uint8_t> ComputePureFlatSlots(const IrResourcePlan& plan) {
     std::vector<std::uint8_t> pure(plan.srtReads.size(), 1u);
     if (pure.empty()) return pure;

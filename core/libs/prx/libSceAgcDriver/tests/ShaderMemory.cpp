@@ -1002,6 +1002,45 @@ void verifyGuardedDescriptorSources() {
         require(capture->snapshot.images.size() == 1u && std::ranges::all_of(capture->snapshot.images[0].dwords, [](std::uint32_t word) { return word == 0u; }), "guarded sources: a valid T# behind a skipped branch was read");
     }
 
+    static std::uint64_t pendingMode = 0;
+    pendingMode = srtAddress + 20u * sizeof(std::uint32_t);
+    const AgcDriver::ShaderMemory::PendingWriteQuery modePending = [](std::uint64_t address, std::size_t bytes, std::span<std::byte>) {
+        return address < pendingMode + sizeof(std::uint32_t) && pendingMode < address + bytes ? AgcDriver::ShaderMemory::PendingWrite::Sync : AgcDriver::ShaderMemory::PendingWrite::None;
+    };
+    fill(invalid, 0u);
+    {
+        AgcDriver::ShaderMemory memory({}, modePending);
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::ranges::all_of(capture->snapshot.images[0].dwords, [](std::uint32_t word) { return word == 0u; }), "guarded sources: an image behind a branch on a word the GPU still writes was bound before the word was read");
+    }
+    fill(valid, 1u);
+    {
+        AgcDriver::ShaderMemory memory({}, modePending);
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::equal(valid.begin(), valid.end(), capture->snapshot.images[0].dwords.begin()), "guarded sources: the T# behind a taken branch on a word the GPU still writes was not read");
+    }
+
+    std::array<std::uint32_t, 4> input{};
+    const auto inputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(input.data()));
+    const std::array<std::uint32_t, 4> inputV{static_cast<std::uint32_t>(inputAddress), static_cast<std::uint32_t>((inputAddress >> 32u) & 0xffffu), 16u, 0xfacu};
+    const std::vector<std::uint32_t> loadCode{0xf4000400u, 0xfa000050u, 0xf4080600u, 0xfa000040u, 0xbf8cc07fu, 0xbf068010u, 0xbf850006u, 0xf4080200u, 0xfa000000u, 0xbf8cc07fu, 0xe0300000u, 0x80020000u, 0xbf8c3f70u, 0xe0700000u, 0x80060000u, 0xbf810000u};
+    auto loadRequest = request;
+    loadRequest.shader = {ShaderStage::Compute, 0x24000u, loadCode, 0, {}};
+    const auto holdsInput = [&](const ResourceCapture& capture) {
+        return std::ranges::any_of(capture.snapshot.buffers, [&](const DescriptorValue& value) { return std::equal(inputV.begin(), inputV.end(), value.dwords.begin()); });
+    };
+    const auto captureLoad = [&](std::uint32_t mode, AgcDriver::ShaderMemory::PendingWriteQuery query) {
+        std::copy(inputV.begin(), inputV.end(), srt.begin());
+        std::copy(outputV.begin(), outputV.end(), srt.begin() + 16);
+        srt[20] = mode;
+        AgcDriver::ShaderMemory memory({}, query);
+        return memory.Capture(loadRequest);
+    };
+    require(GetResourcePlan(loadRequest)->info.buffers.size() == 2u && !GetResourcePlan(loadRequest)->controlFlow.empty(), "guarded buffers: the load and the store were not planned as two buffers around a branch");
+    require(!holdsInput(*captureLoad(0u, nullptr)), "guarded buffers: a V# behind a skipped branch was read");
+    require(holdsInput(*captureLoad(1u, nullptr)), "guarded buffers: the V# behind a taken branch was not read");
+    require(holdsInput(*captureLoad(0u, modePending)), "guarded buffers: a read-only V# behind a branch on a word the GPU still writes waited for the word instead of being bound");
+
     const std::vector<std::uint32_t> storeCode{0xf4000400u, 0xfa000050u, 0xbf8cc07fu, 0xbf068010u, 0xbf850006u, 0xf40c0100u, 0xfa000000u, 0xbf8cc07fu, 0xf0200f08u, 0x00010004u, 0xbf820005u, 0xf40c0100u, 0xfa000000u, 0xbf8cc07fu, 0xf0200f10u, 0x00010004u, 0xbf810000u};
     auto storeRequest = request;
     storeRequest.shader = {ShaderStage::Compute, 0x23000u, storeCode, 0, {}};

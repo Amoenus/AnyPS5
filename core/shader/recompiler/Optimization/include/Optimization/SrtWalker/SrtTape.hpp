@@ -52,6 +52,7 @@ private:
     std::vector<std::array<std::uint32_t, 8>> sourceDwords;
     std::vector<std::uint32_t> flatRoots;
     std::vector<std::uint32_t> conditionRoots;
+    std::vector<std::uint8_t> conditionWaits;
 };
 
 }
