@@ -1260,6 +1260,7 @@ void BufferRefusals(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     const auto guardedBytes = std::max(color.bytes * color.samples, static_cast<std::uint64_t>(Side) * Side * color.elementBytes * color.samples);
     Require(guardedBytes + Threads * 4u <= block.bytes, "the unsupported target guard leaves no adjacent buffer control");
     std::vector<std::string> missing;
+    CheckBufferRefused([&] { AgcDriver::Graphics::SynchronizeMultisampleTargetRead_nid_no_patch(block.Address() + 4u, 4u); }, "read range diagnostic", missing, "synchronized guest read (4 bytes; color 1, DCC 0, CMASK 0)");
     const auto dispatch = [&](const auto& program) {
         device->Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
         device->WaitIdle();

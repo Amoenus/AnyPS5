@@ -1202,7 +1202,17 @@ void SynchronizeMultisampleTargetRead_nid_no_patch(std::uint64_t address, std::s
             if (std::find(overlapping.begin(), overlapping.end(), target->active) != overlapping.end()) owners.push_back(target);
         }
     }
-    for (const auto& owner : owners) PublishMultisampleTargetColor_nid_no_patch(owner->context, owner->target);
+    for (const auto& owner : owners) {
+        try {
+            PublishMultisampleTargetColor_nid_no_patch(owner->context, owner->target);
+        } catch (const std::runtime_error& error) {
+            const auto overlaps = [&](std::uint64_t start, std::size_t size) { return size != 0u && address < start + size && start < address + bytes; };
+            const auto& target = owner->target;
+            char text[768];
+            std::snprintf(text, sizeof(text), "synchronized guest read (%zu bytes; color %u, DCC %u, CMASK %u): %s", bytes, unsigned(overlaps(target.address, static_cast<std::size_t>(MultisampledColorBytes(target)))), unsigned(target.dccAddress != 0 && overlaps(target.dccAddress, MultisampledDccBytes(target))), unsigned(overlaps(target.cmaskAddress, target.cmaskBytes)), error.what());
+            Require(false, text);
+        }
+    }
     RequireNoMultisampleTarget(address, bytes, "a synchronized guest read");
 }
 
