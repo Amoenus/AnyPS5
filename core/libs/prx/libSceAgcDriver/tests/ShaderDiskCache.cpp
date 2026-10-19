@@ -84,7 +84,7 @@ void removeCacheDirectory(const std::filesystem::path& directory) {
 }
 
 bool sameBinding(const DescriptorBinding& left, const DescriptorBinding& right) {
-    return left.kind == right.kind && left.role == right.role && left.descriptorSet == right.descriptorSet && left.binding == right.binding && left.count == right.count && left.guestDescriptor == right.guestDescriptor && left.readOnly == right.readOnly && left.imageShape == right.imageShape && left.samplerDepthCompare == right.samplerDepthCompare && left.imageWritten == right.imageWritten && left.imageDepthCompare == right.imageDepthCompare && left.imageAtomic == right.imageAtomic && left.imageShapes == right.imageShapes && left.bufferAtomic == right.bufferAtomic && left.bufferWritten == right.bufferWritten && left.bufferRead == right.bufferRead && left.samplerUnnormalized == right.samplerUnnormalized && left.samplerIntegerBorder == right.samplerIntegerBorder && left.samplerCoordinatesIgnored == right.samplerCoordinatesIgnored && left.imageUnnormalized == right.imageUnnormalized && left.imageUnnormalizedBaseLevel == right.imageUnnormalizedBaseLevel && left.imageSamplers == right.imageSamplers;
+    return left.kind == right.kind && left.role == right.role && left.descriptorSet == right.descriptorSet && left.binding == right.binding && left.count == right.count && left.guestDescriptor == right.guestDescriptor && left.readOnly == right.readOnly && left.imageShape == right.imageShape && left.samplerDepthCompare == right.samplerDepthCompare && left.imageWritten == right.imageWritten && left.imageDepthCompare == right.imageDepthCompare && left.imageAtomic == right.imageAtomic && left.imageShapes == right.imageShapes && left.bufferAtomic == right.bufferAtomic && left.bufferWritten == right.bufferWritten && left.bufferRead == right.bufferRead && left.bufferExtent == right.bufferExtent && left.samplerUnnormalized == right.samplerUnnormalized && left.samplerIntegerBorder == right.samplerIntegerBorder && left.samplerCoordinatesIgnored == right.samplerCoordinatesIgnored && left.imageUnnormalized == right.imageUnnormalized && left.imageUnnormalizedBaseLevel == right.imageUnnormalizedBaseLevel && left.imageSamplers == right.imageSamplers;
 }
 
 bool sameBindings(const std::vector<DescriptorBinding>& left, const std::vector<DescriptorBinding>& right) {
@@ -125,6 +125,7 @@ void requireSameResult(const RecompileResult& left, const RecompileResult& right
     const std::string prefix = std::string(what) + ": ";
     require(sameBindings(left.bindings, right.bindings), prefix + "bindings differ");
     require(left.pushConstants == right.pushConstants, prefix + "push constants differ");
+    require(left.readsDepthRemapPush == right.readsDepthRemapPush, prefix + "depth remap push reads differ");
     require(left.specialization == right.specialization, prefix + "specialization constants differ");
     require(left.workgroupMemoryDwords == right.workgroupMemoryDwords, prefix + "workgroup memory stride differs");
     require(left.poisonedSrtReads == right.poisonedSrtReads, prefix + "poisoned SRT read counts differ");
@@ -181,6 +182,7 @@ DescriptorBinding sampleBinding(std::uint32_t seed) {
     binding.imageUnnormalizedBaseLevel = {false, true, seed % 3 == 0};
     binding.imageSamplers = {0x5u, 0u, 0x80000000u};
     binding.bufferRead = {true, false, false, true, true, false};
+    binding.bufferExtent = {32, 0, 16, 4096, 8, 0};
     return binding;
 }
 
@@ -195,6 +197,7 @@ RecompileResult sampleResult() {
     result.bindings[1].role = DescriptorRole::GuestBuffers;
     result.bindings[1].imageShape.reset();
     result.pushConstants = {std::byte{1}, std::byte{0xff}, std::byte{0}, std::byte{0x80}, std::byte{7}};
+    result.readsDepthRemapPush = true;
     result.bdaAbiVersion = 3;
     result.memoryOffsetDword = 7;
     result.hostSubgroupSize = 32;
@@ -2141,6 +2144,10 @@ std::filesystem::path planEntryPath(PlanFixture& fixture) {
 int runPlanLoadingProcess(std::string_view mode) {
     if (mode == "--load-plan-switch") setEnvironment("APS5_TRACE_IMAGE_TABLE", "1");
     if (mode == "--load-plan-off") setEnvironment("APS5_NO_PERF_DISK_PLANS", "1");
+    if (mode == "--load-plan-reuse-off") {
+        setEnvironment("APS5_NO_TABLE_SNAPSHOT_REUSE", "1");
+        setEnvironment("APS5_NO_TABLE_RESOLUTION_REUSE", "1");
+    }
     auto fixtures = planFixtures();
     const auto count = fixtures.size();
     std::vector<std::shared_ptr<const IrResourcePlan>> plans;
@@ -2156,6 +2163,8 @@ int runPlanLoadingProcess(std::string_view mode) {
     }
     if (mode == "--load-plan") {
         require(builds == 0u && totals.planHits == count && totals.planMisses == 0u && totals.planLoadFailures == 0u && totals.hits == count && totals.misses == 0u, "the second process ran the front end" + counts);
+    } else if (mode == "--load-plan-reuse-off") {
+        require(builds == 0u && totals.planHits == count && totals.planMisses == 0u && totals.planLoadFailures == 0u && totals.hits == count && totals.misses == 0u, "turning the image table reuse off changed the stored plan or variant keys" + counts);
     } else if (mode == "--load-plan-off") {
         require(builds == count && totals.planHits == 0u && totals.planMisses == 0u && totals.planWrites == 0u && totals.hits == count && totals.misses == 0u, "APS5_NO_PERF_DISK_PLANS=1 used the stored plans or missed the stored variants" + counts);
     } else {
@@ -2175,6 +2184,8 @@ int runPlanLoadingProcess(std::string_view mode) {
         const auto after = ShaderDiskCache::Totals();
         require(FrontEndBuilds() == 1u && after.planHits == count && after.planMisses == 1u, "a changed code word reused a stored plan");
         std::cout << "second process prepared " << count << " shaders from stored plans without running the front end\n";
+    } else if (mode == "--load-plan-reuse-off") {
+        std::cout << "with the image table reuse off, a process loaded all " << count << " stored plans and variants with the same output\n";
     } else if (mode == "--load-plan-off") {
         std::cout << "APS5_NO_PERF_DISK_PLANS=1 ran the front end for all " << count << " shaders with the same output\n";
     } else {
@@ -2218,6 +2229,7 @@ void verifyPlanAcrossProcesses(const char* self) {
     };
     run("--load-plan");
     run("--load-plan-off");
+    run("--load-plan-reuse-off");
     std::vector<std::byte> entry;
     const auto damaged = planEntryPath(fixtures.front());
     require(ReadWholeFile(damaged, entry), "cannot read a stored plan entry");

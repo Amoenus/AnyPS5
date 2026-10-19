@@ -19,7 +19,7 @@
 #define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
 #endif
 #endif
-#ifdef __linux__
+#ifndef _WIN32
 #include <cerrno>
 #include <unistd.h>
 #endif
@@ -53,6 +53,7 @@ std::int64_t APS5_VABI readlinkat_nid_postfix(int, const char*, char*, std::size
 int APS5_VABI mkdirat_nid_postfix(int, const char*, std::uint16_t);
 int APS5_VABI renameat_nid_postfix(int, const char*, int, const char*);
 int APS5_VABI fchmodat_nid_postfix(int, const char*, int, int);
+int APS5_VABI fchown_nid_postfix(int, std::uint32_t, std::uint32_t);
 std::int64_t APS5_VABI sceKernelRead(int, void*, std::size_t);
 std::uint16_t APS5_VABI umask_nid_postfix(std::uint16_t);
 int* APS5_VABI __error_nid_postfix();
@@ -85,6 +86,44 @@ bool ChrootThrows(const std::string& path) {
         return std::strstr(error.what(), path.c_str()) != nullptr;
     }
     return false;
+}
+
+bool SymlinkTargetThrows(const char* target, const std::string& created) {
+    try {
+        symlink_nid_postfix(target, created.c_str());
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+void CheckSymlinkTargetRestrictions(const std::filesystem::path& root) {
+    const auto created = (root / "rejected").string();
+    for (const auto& target : {std::string(".."), std::string("../x"), std::string("a/../b"), std::string("a/../../x"), std::string("/abs")})
+        Require(SymlinkTargetThrows(target.c_str(), created));
+#ifdef _WIN32
+    for (const auto& target : {std::string("C:/"), std::string("\\\\server\\share")})
+        Require(SymlinkTargetThrows(target.c_str(), created));
+#endif
+    const auto links = [](const std::string& created, const char* target) {
+        char buffer[16];
+        const auto length = std::strlen(target);
+        return readlink_nid_postfix(created.c_str(), buffer, sizeof(buffer)) == static_cast<std::int64_t>(length) &&
+            std::memcmp(buffer, target, length) == 0;
+    };
+    const auto nested = (root / "accepted-nested").string();
+    const int link = symlink_nid_postfix("sub/dir", nested.c_str());
+    if (link == 0) {
+        Require(links(nested, "sub/dir"));
+        const auto dots = (root / "accepted-dots").string();
+        Require(symlink_nid_postfix("a..b", dots.c_str()) == 0 && links(dots, "a..b"));
+        const auto ellipsis = (root / "accepted-ellipsis").string();
+        Require(symlink_nid_postfix("...", ellipsis.c_str()) == 0 && links(ellipsis, "..."));
+        Require(std::filesystem::remove(nested) && std::filesystem::remove(dots) && std::filesystem::remove(ellipsis));
+    } else {
+        Require(link == -1 && Error() == 1);
+        std::fprintf(stderr, "symbolic links unavailable: the symlink target success cases not tested\n");
+    }
 }
 
 void CheckPathconf(const std::filesystem::path& root, const std::string& file) {
@@ -305,7 +344,7 @@ int main() {
     char directoryPath[1024];
     Require(getcwd_nid_postfix(directoryPath, sizeof(directoryPath)) == directoryPath);
     Require(std::strcmp(directoryPath, ("/" + root.filename().string()).c_str()) == 0);
-#ifdef __linux__
+#ifndef _WIN32
     Require(chdir_nid_postfix("/") == 0);
     const auto originalPermissions = std::filesystem::status(root).permissions();
     std::filesystem::permissions(root, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
@@ -414,6 +453,7 @@ int main() {
     Require(symlink_nid_postfix("original.bin", (root / "missing" / "symbolic").string().c_str()) == -1 && Error() == 2);
     Require(symlink_nid_postfix(nullptr, symbolic.c_str()) == -1 && Error() == 14);
     Require(symlink_nid_postfix("original.bin", "") == -1 && Error() == 2);
+    CheckSymlinkTargetRestrictions(root);
     const int base = sceKernelOpen(root.string().c_str(), SCE_KERNEL_O_RDONLY | SCE_KERNEL_O_DIRECTORY, 0);
     Require(base >= 0);
     const int relative = openat_nid_postfix(base, "file.txt", SCE_KERNEL_O_RDONLY);
@@ -566,6 +606,15 @@ int main() {
     Require(fchmodat_nid_postfix(base, "loop/x", 0600, 0) == -1 && Error() == 62);
     Require(fchmodat_nid_postfix(base, longName.c_str(), 0600, 0) == -1 && Error() == 63);
 #endif
+    Require(fchown_nid_postfix(base, 0, 0) == 0);
+    Require(fchown_nid_postfix(base, 0xFFFFFFFFu, 0xFFFFFFFFu) == 0);
+    Require(fchown_nid_postfix(-1, 0, 0) == -1 && Error() == 9);
+    bool fchownThrew = false;
+    try { fchown_nid_postfix(base, 1, 0); } catch (const std::exception&) { fchownThrew = true; }
+    Require(fchownThrew);
+    fchownThrew = false;
+    try { fchown_nid_postfix(base, 0, 1); } catch (const std::exception&) { fchownThrew = true; }
+    Require(fchownThrew);
     Require(sceKernelClose(base) == 0);
 #ifdef _WIN32
     const auto junctionTarget = root / "junction-target";
