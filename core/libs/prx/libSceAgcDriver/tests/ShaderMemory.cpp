@@ -740,6 +740,49 @@ void verifySignedSrtComparison() {
     }
 }
 
+void verifyInvalidImageDescriptorDiagnostics() {
+    using namespace ShaderRecompiler;
+    const auto check = [](std::uint32_t word3, std::uint32_t word5, bool r128, const char* expected) {
+        IrResourcePlan plan;
+        plan.srtPlanComplete = true;
+        plan.resourceTrackingComplete = true;
+        plan.userDataCount = 0u;
+        plan.materializationSources = {0u, 1u};
+        std::vector<std::unique_ptr<IrValue>> values;
+        const std::array<std::array<std::uint32_t, 8>, 2> descriptors{{{}, {0x12345678u, (56u << 20u) | 0x100u, 0x0000c000u, word3, 1u, word5, 0u, 0u}}};
+        for (std::uint32_t index = 0u; index < descriptors.size(); ++index) {
+            DescriptorSource source;
+            source.dwordCount = 8u;
+            for (std::uint32_t word = 0u; word < descriptors[index].size(); ++word) {
+                auto value = std::make_unique<IrValue>(IrOpcode::Void, IrType::U32, static_cast<std::uint32_t>(values.size()));
+                value->SetImmediateU32(descriptors[index][word]);
+                source.dwords[word] = value.get();
+                values.push_back(std::move(value));
+            }
+            plan.descriptorSources.push_back(source);
+            ImageResource image;
+            image.source = index;
+            image.resourceClass = ImageResourceClass::Sampled;
+            image.dimension = RdnaImageDimension::Dim2D;
+            image.read = true;
+            image.r128 = index != 0u && r128;
+            plan.info.images.push_back(image);
+            plan.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(image));
+        }
+        ResourceSnapshot snapshot;
+        expectFailure([&] { ResourceMaterializer{}.Materialize(plan, SrtRuntime{}, snapshot); }, expected,
+                      "invalid image descriptor refusal did not identify the failing image and descriptor fields");
+    };
+    check(0x20000facu, 0u, false,
+          "runtime image descriptor is invalid (image 1, type 2, format 56, r128 0, read 1, written 0, atomic 0)");
+    check(0xe0021facu, 0x20u, false,
+          "runtime image descriptor is invalid (image 1, type 14, format 56, r128 0, read 1, written 0, atomic 0, baseLevel 1, fragmentsLog2 2, maxMip 2)");
+    check(0xe0020facu, 0x30u, false,
+          "runtime image descriptor is invalid (image 1, type 14, format 56, r128 0, read 1, written 0, atomic 0, baseLevel 0, fragmentsLog2 2, maxMip 3)");
+    check(0xf0020facu, 0x20u, true,
+          "runtime image descriptor is invalid (image 1, type 15, format 56, r128 1, read 1, written 0, atomic 0, baseLevel 0, fragmentsLog2 2, maxMip 2)");
+}
+
 void verifyTypeZeroImageMaterialization() {
     using namespace ShaderRecompiler;
     for (const std::uint32_t type : {0u, 1u}) {
@@ -785,6 +828,7 @@ void verifyTypeZeroImageMaterialization() {
                           atomic ? "TYPE=0 or 1 atomic image descriptor was accepted without hardware evidence" : "TYPE=0 or 1 writable image descriptor was accepted without hardware evidence");
         }
     }
+    verifyInvalidImageDescriptorDiagnostics();
 }
 
 void verifyOutOfRangeConstantReads() {
