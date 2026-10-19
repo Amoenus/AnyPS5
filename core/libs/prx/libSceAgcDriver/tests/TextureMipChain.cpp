@@ -482,6 +482,17 @@ std::pair<VkImage, VkImageCreateInfo> storageImage(const std::string& what) {
     return *mock.images.begin();
 }
 
+void checkStorageCopyImages(const StorageTexture& source, const std::string& what) {
+    const auto geometry = DescribeSurface(source.Descriptor());
+    Require(mock.images.size() == 2u + source.Descriptor().mipCount - geometry.imageLevels, what + ": the storage source and copy have an unexpected image count");
+    for (const auto& [image, info] : mock.images) {
+        bool extra = false;
+        for (auto level = geometry.imageLevels; level < source.Descriptor().mipCount; ++level) extra = extra || source.Image(level) == image;
+        Require(info.mipLevels == (extra ? 1u : geometry.imageLevels), what + ": the source or copy recreated the overlong mip chain");
+        checkInsideImage(image, info, what);
+    }
+}
+
 void TestSrgbExpansionLevels(const Context& context, TextureDetiler& detiler) {
     auto expanded = context;
     const auto format = ShaderRecompiler::IrBufferFormat::Format8Srgb;
@@ -512,11 +523,8 @@ void TestSrgbExpansionLevels(const Context& context, TextureDetiler& detiler) {
     Require(Texture::CanSrgbExpandFrom(expanded, *source, descriptor), "sRGB storage expansion fixture is not eligible");
     const auto texture = std::make_shared<Texture>(expanded, source, descriptor, VkComponentMapping{}, Texture::SrgbExpandTag{});
     Require(texture->RefreshDepthCopy(), "sRGB storage expansion did not refresh");
-    Require(mock.images.size() == 2u && !mock.readbacks.empty(), "sRGB storage expansion did not create and blit its copy");
-    for (const auto& [image, info] : mock.images) {
-        Require(info.mipLevels == 5u, "sRGB storage expansion recreated the overlong mip chain");
-        checkInsideImage(image, info, "sRGB storage expansion");
-    }
+    Require(!mock.readbacks.empty(), "sRGB storage expansion did not blit its copy");
+    checkStorageCopyImages(*source, "sRGB storage expansion");
 }
 
 void TestRepackCopyLevels(const Context& context, TextureDetiler& detiler) {
@@ -534,11 +542,8 @@ void TestRepackCopyLevels(const Context& context, TextureDetiler& detiler) {
         Require(Texture::CanRepackCopyFrom(*source, descriptor), "repacked storage copy fixture is not eligible");
         const auto texture = std::make_shared<Texture>(copied, source, descriptor, VkComponentMapping{}, Texture::RepackCopyTag{});
         Require(texture->RefreshDepthCopy(), "repacked storage copy did not refresh");
-        Require(mock.images.size() == 2u && !mock.readbacks.empty(), "repacked storage copy did not read its source");
-        for (const auto& [image, info] : mock.images) {
-            Require(info.mipLevels == 5u, "repacked storage copy recreated the overlong mip chain");
-            checkInsideImage(image, info, "repacked storage copy");
-        }
+        Require(!mock.readbacks.empty(), "repacked storage copy did not read its source");
+        checkStorageCopyImages(*source, "repacked storage copy");
     }
 }
 
