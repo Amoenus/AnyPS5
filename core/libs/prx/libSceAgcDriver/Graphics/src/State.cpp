@@ -1759,6 +1759,14 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
             if (color.samples == 1) GuestMemory::CheckRange(reinterpret_cast<const void*>(cmask), totalCmaskBytes, CmaskLayout::Alignment, true);
         }
         color.cmaskFastClear = (info & 0x2000u) != 0;
+        if (const auto fmask = find(cx, 0x321 + stride); color.samples > 1u && fmask != cx.end()) {
+            const auto high = find(cx, 0x3a0 + slot);
+            const auto fmaskHigh = high == cx.end() ? 0u : high->second;
+            Require((fmaskHigh & ~0xffu) == 0u, "invalid FMASK address extension");
+            const auto address = (static_cast<std::uint64_t>(fmaskHigh) << 40u) | (static_cast<std::uint64_t>(fmask->second) << 8u);
+            color.fmaskPipeBankXor = static_cast<std::uint32_t>(address & 0xffffu);
+            color.fmaskAddress = address - color.fmaskPipeBankXor;
+        }
     }
     if ((info & 0x10000000u) != 0) {
         if (maxMip == 0) {
