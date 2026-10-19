@@ -319,7 +319,7 @@ public:
             Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
             if (!GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration)) {
                 char detail[384];
-                std::snprintf(detail, sizeof(detail), "native multisample depth clear has no complete tracked HTILE store (range 0x%llx+0x%zx, since %llu, completion %u, overlap %u)", static_cast<unsigned long long>(metadata.address), metadata.bytes, static_cast<unsigned long long>(clearGeneration), clearCompletionSeen ? 1u : 0u, GuestMemory::StoredOver(metadata.address, metadata.bytes, clearGeneration) ? 1u : 0u);
+                std::snprintf(detail, sizeof(detail), "native multisample depth clear has no complete tracked HTILE store (range 0x%llx+0x%zx, since %llu, queued %u, overlap %u)", static_cast<unsigned long long>(metadata.address), metadata.bytes, static_cast<unsigned long long>(clearGeneration), clearCompletionQueued ? 1u : 0u, GuestMemory::StoredOver(metadata.address, metadata.bytes, clearGeneration) ? 1u : 0u);
                 Require(false, detail);
             }
             Require(clearDepth == 0.0f || clearDepth == 1.0f, "native multisample depth clear value is not implemented");

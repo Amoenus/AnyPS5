@@ -4975,11 +4975,11 @@ void verifyVertexInfoVersion19() {
     auto invalidType = typedBytes;
     invalidType.back() = static_cast<std::uint8_t>(ColorOutputType::Sint) + 1u;
     expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalidType))); }, "invalid color output type", "an invalid attachment numeric type was accepted");
-    auto version32Pixel = decodeBase64(encodedPixel);
-    version32Pixel.resize(version32Pixel.size() - 8u);
-    version32Pixel[4] = 32u;
-    const auto replay32 = serializer.Deserialize(encodeBase64(version32Pixel));
-    require(replay32.request.context.pixel.has_value() && replay32.request.context.pixel->targetOutputType == pixel.context.pixel->targetOutputType && serializer.Serialize(replay32.request) == encodedPixel, "a version 32 request read attachment numeric types or misread trailing fields");
+    auto version35Pixel = decodeBase64(encodedPixel);
+    version35Pixel.resize(version35Pixel.size() - 8u);
+    version35Pixel[4] = 35u;
+    const auto replay35 = serializer.Deserialize(encodeBase64(version35Pixel));
+    require(replay35.request.context.pixel.has_value() && replay35.request.context.pixel->targetOutputType == pixel.context.pixel->targetOutputType && serializer.Serialize(replay35.request) == encodedPixel, "a version 35 request read attachment numeric types or misread trailing fields");
     auto exportedPixel = pixel;
     exportedPixel.context.pixel->layerExported = true;
     const auto exportedBytes = decodeBase64(serializer.Serialize(exportedPixel));
@@ -5015,6 +5015,7 @@ void verifyVertexInfoVersion19() {
     const auto sampledBytes = decodeBase64(serializer.Serialize(sampledPixel));
     require(std::equal(maskedBytes.begin(), maskedBytes.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u), sampledBytes.begin()) && sampledBytes[maskOffset + 1u] == 0x1u && sampledBytes[maskOffset + 5u] == 0x2u && sampledBytes[maskOffset + 9u] == 0x4u && sampledBytes[maskOffset + 13u] == 0x8u, "the quad sample masks are not the four words after the quad pixel mask");
     auto version30 = sampledBytes;
+    version30.resize(version30.size() - 8u);
     version30.pop_back();
     version30.pop_back();
     version30.erase(version30.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u), version30.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
@@ -5024,6 +5025,7 @@ void verifyVertexInfoVersion19() {
     auto spanned = sampledPixel;
     spanned.target.spannedWaves = true;
     auto version32 = decodeBase64(serializer.Serialize(spanned));
+    version32.resize(version32.size() - 8u);
     require(version32.size() > 1u && version32.back() == 0u && version32[version32.size() - 2u] == 1u, "the spanned-waves flag is not the byte before the depth remap flag");
     version32.pop_back();
     version32.erase(version32.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u), version32.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
