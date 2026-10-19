@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTextureLayout.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "IntermediateRepresentation/IrMetadata/BufferFormat.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
