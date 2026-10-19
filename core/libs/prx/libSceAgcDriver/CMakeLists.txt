@@ -1725,6 +1725,17 @@ target_link_libraries(agc_driver_bda_device_tests PRIVATE libSceAgcDriver SDL2-s
 set_target_properties(agc_driver_bda_device_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_bda_device_tests)
 
+if(BUILD_TESTING)
+    add_test(NAME agc_driver_bda_device_selection COMMAND agc_driver_bda_device_tests --device-selection)
+    add_test(NAME agc_driver_bda_device_selection_cpu COMMAND agc_driver_bda_device_tests --device-selection-cpu)
+    set_tests_properties(agc_driver_bda_device_selection PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(agc_driver_bda_device_selection_cpu PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(agc_driver_bda_device_selection agc_driver_bda_device_selection_cpu PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 add_test_executable(agc_driver_mesh_tests EXCLUDE_FROM_ALL tests/Mesh.cpp)
 target_include_directories(agc_driver_mesh_tests PRIVATE
         ${LIBS_INCLUDE_DIR}
