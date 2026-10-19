@@ -209,7 +209,9 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
     translateOptions.fragmentShaderBarycentricEnabled = request.target.fragmentShaderBarycentricEnabled;
     const auto supports = [&](spv::Capability capability) { return std::ranges::find(request.target.supportedCapabilities, static_cast<std::uint32_t>(capability)) != request.target.supportedCapabilities.end(); };
     translateOptions.nativeFloat16 = supports(spv::CapabilityFloat16) && supports(spv::CapabilityRoundingModeRTE) && supports(spv::CapabilityDenormPreserve);
+    translateOptions.interpolationFunctions = supports(spv::CapabilityInterpolationFunction);
     translateOptions.floatMode = request.context.floatMode;
+    translateOptions.float32FlushToZero = request.target.float32FlushToZero;
     translateOptions.inputInfo = inputInfo;
 
     constexpr InstructionTranslator translator;
@@ -556,11 +558,13 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     targetOptions.nonConstantImageOffsets = request.target.nonConstantImageOffsets;
     targetOptions.narrowSubgroupClock = request.target.narrowSubgroupClock;
     targetOptions.float64DenormPreserve = request.target.float64DenormPreserve;
+    targetOptions.depthRangeRemap = request.target.depthRangeRemap;
     targetOptions.registrationModules = registration;
     targetOptions.fragmentDescriptorSet = request.target.registrationModules;
     targetOptions.float16DenormPreserve = request.target.float16DenormPreserve;
     targetOptions.spannedWaves = request.target.spannedWaves;
     targetOptions.robustBufferAccess2 = request.target.robustBufferAccess2;
+    targetOptions.float32FlushToZero = request.target.float32FlushToZero;
 
     constexpr SpirvEmitter spirvEmitter;
     CompiledShaderArtifact result;
@@ -665,6 +669,7 @@ std::shared_ptr<const SpecializedModule> buildSpecializedModule(const CompiledSh
         if (!supplied.emplace(constant.id, constant.value).second) throw std::runtime_error("duplicate prepared specialization ID");
     }
     std::map<std::uint32_t, std::uint32_t> values;
+    std::set<std::uint32_t> retained;
     std::set<std::uint32_t> specializedIds;
     std::set<std::uint32_t> pushTypes;
     std::optional<std::uint32_t> replaySlotBytes;
@@ -676,6 +681,12 @@ std::shared_ptr<const SpecializedModule> buildSpecializedModule(const CompiledSh
         if (count == 0u || count > words.size() - cursor) throw std::runtime_error("truncated prepared specialization instruction");
         if (!artifact.stencilReferences.empty() && op == spv::OpTypePointer && count == 4u && words[cursor + 2u] == spv::StorageClassPushConstant) pushTypes.insert(words[cursor + 3u]);
         if (op == spv::OpDecorate && count == 4u && words[cursor + 2u] == spv::DecorationSpecId) {
+            if (PipelineSpecialization::IsWorkgroupOffset(words[cursor + 3u])) {
+                if (supplied.contains(words[cursor + 3u])) throw std::runtime_error("a workgroup offset is supplied at dispatch, not prepared");
+                if (!retained.insert(words[cursor + 1u]).second) throw std::runtime_error("duplicate workgroup offset specialization");
+                cursor += count;
+                continue;
+            }
             const auto found = supplied.find(words[cursor + 3u]);
             if (found == supplied.end()) throw std::runtime_error("missing prepared specialization value");
             auto value = found->second;
@@ -692,7 +703,11 @@ std::shared_ptr<const SpecializedModule> buildSpecializedModule(const CompiledSh
     for (std::size_t cursor = 5; cursor < words.size();) {
         const auto count = words[cursor] >> 16u;
         const auto op = static_cast<spv::Op>(words[cursor] & 0xffffu);
-        if (op == spv::OpSpecConstant) {
+        if (op == spv::OpSpecConstant && count == 4u && retained.contains(words[cursor + 2u])) {
+            materialized.insert(materialized.end(), words.begin() + cursor, words.begin() + cursor + count);
+        } else if (op == spv::OpDecorate && count == 4u && words[cursor + 2u] == spv::DecorationSpecId && retained.contains(words[cursor + 1u])) {
+            materialized.insert(materialized.end(), words.begin() + cursor, words.begin() + cursor + count);
+        } else if (op == spv::OpSpecConstant) {
             if (count != 4u || !values.contains(words[cursor + 2u])) throw std::runtime_error("invalid prepared specialization constant");
             materialized.insert(materialized.end(), {(4u << 16u) | spv::OpConstant, words[cursor + 1u], words[cursor + 2u], values.at(words[cursor + 2u])});
         } else if (op == spv::OpMemberDecorate && count == 5u && words[cursor + 3u] == spv::DecorationOffset && pushTypes.contains(words[cursor + 1u])) {
@@ -934,6 +949,13 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         if (variant.info.info.rasterPrimitive) moduleKey.push_back(static_cast<std::uint32_t>(request.context.pixel->rasterPrimitive));
         if (variant.info.info.layerExported) moduleKey.push_back(request.context.pixel->layerExported ? 1u : 0u);
     }
+    const bool depthRemap = request.target.depthRangeRemap && request.shader.stage == ShaderStage::Vertex && request.context.vertex.has_value();
+    if (depthRemap) {
+        if (request.context.vertex->depthRemapMode != 0u && request.layout.pushConstantOffsetBytes % (RuntimeAbi::PushConstantDwords * 4u) + request.layout.pushConstantSizeBytes > DepthRemapPushOffsetBytes) {
+            throw std::runtime_error("a remapped vertex shader's push data must end before the depth remap words");
+        }
+        moduleKey.push_back(request.context.vertex->depthRemapMode);
+    }
     result.vertexAttributes.reserve(result.vertexInputs.size());
     std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources> vertexClasses{};
     std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources / RuntimeAbi::VertexSelectorsPerDword> runtimeSelectors{};
@@ -962,7 +984,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             if (artifact.registrationModule) runtimeSelectors.at(input.location / RuntimeAbi::VertexSelectorsPerDword) |= (selectors & 0xfffu) << (input.location % RuntimeAbi::VertexSelectorsPerDword * 16u);
         }
     }
-    if (!plan->bindings.specialization.empty() || variant.bindings.layout.UsesPushData() || !artifact.vertexInputPatches.empty() || request.context.pixel) {
+    if (!plan->bindings.specialization.empty() || variant.bindings.layout.UsesPushData() || !artifact.vertexInputPatches.empty() || request.context.pixel || depthRemap) {
         {
             std::shared_lock lock(plan->mutex);
             if (const auto found = plan->modules.find(moduleKey); found != plan->modules.end()) entry = found->second;
@@ -983,6 +1005,9 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
                 constants.push_back({PipelineSpecialization::ReversedBlend, moduleKey[index++]});
                 if (variant.info.info.rasterPrimitive) constants.push_back({PipelineSpecialization::RasterPrimitive, moduleKey[index++]});
                 if (variant.info.info.layerExported) constants.push_back({PipelineSpecialization::LayerExported, moduleKey[index++]});
+            }
+            if (depthRemap) {
+                for (std::uint32_t word = 0; word < PipelineSpecialization::DepthRemapWords; ++word) constants.push_back({PipelineSpecialization::DepthRemapBase + word, moduleKey[index++]});
             }
             if (!artifact.vertexInputPatches.empty()) {
                 for (const auto& input : result.vertexInputs) {
@@ -1015,12 +1040,17 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     } else {
         result.spirv = artifact.spirv;
     }
-    const auto tables = ResourceMaterializer::ResolveImageTables(variant.info.info, snapshot, artifact.variantId);
+    const auto resolved = ResourceMaterializer::ResolveImageTablesShared(variant.info.info, snapshot, artifact.variantId);
+    const auto& tables = *resolved;
     BindingAllocationResult bindings;
     DescriptorBindingBuilder{}.Populate(bindings, variant.bindings, *bindingPlan, variant.info.userDataBase, snapshot, partialThreads(request), &tables);
     result.workgroupMemoryDwords = WorkgroupMemoryStrideDwords(variant.info.info);
     result.bindings = std::move(bindings.bindings);
     result.pushConstants = std::move(bindings.pushConstants);
+    result.readsDepthRemapPush = depthRemap;
+    if (request.shader.stage == ShaderStage::Compute) {
+        for (std::uint32_t component = 0; component < PipelineSpecialization::WorkgroupOffsetWords; ++component) result.specialization.push_back({PipelineSpecialization::WorkgroupOffsetBase + component, 0u});
+    }
     if (!artifact.stencilReferences.empty()) {
         if (artifact.stencilReferenceDword * sizeof(std::uint32_t) != result.pushConstants.size() || result.pushConstants.size() + sizeof(std::uint32_t) > request.layout.pushConstantSizeBytes) throw std::runtime_error("stencil replay push constant lies outside the stage range");
         result.pushConstants.resize(result.pushConstants.size() + sizeof(std::uint32_t));
@@ -1045,7 +1075,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         for (const auto& poison : tables.poison) result.imageTablePoison.push_back({poison.words, poison.dwordCount, poison.resource, static_cast<std::uint32_t>(poison.reason)});
         result.imageTableRanges = snapshot.tables.ranges;
         result.imageTableReadRanges.reserve(snapshot.tables.tables.size());
-        for (const auto& table : snapshot.tables.tables) result.imageTableReadRanges.push_back(table.readRanges);
+        for (const auto& table : snapshot.tables.tables) result.imageTableReadRanges.push_back(table.readRanges.Copy());
         result.imageTableShader = snapshot.tables.shader;
         result.imageTableFaults = tables.faults;
     }
@@ -1245,14 +1275,10 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
         mix(table.keys);
         mix(table.fault);
         mix(table.outside ? 1u : 0u);
-        mixWords(table.codes);
-        mix(table.readRanges.size());
-        for (const auto& [base, size] : table.readRanges) {
-            mix(base);
-            mix(size);
-        }
+        mix(table.codes.Hash());
+        mix(table.words.Hash());
+        mix(table.readRanges.Hash());
     }
-    mixDescriptors(tables.words);
     mix(tables.ranges.size());
     for (const auto& [base, size] : tables.ranges) {
         mix(base);
