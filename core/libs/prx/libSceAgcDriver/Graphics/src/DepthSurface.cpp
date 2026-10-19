@@ -321,6 +321,7 @@ public:
         const auto clearLease = clearGeneration == 0u ? GuestAllocations::Lease{} : GuestAllocations::GuestAllocationsAcquireAll_nid_postfix();
         Require(active->load(std::memory_order_acquire), "the native multisample depth owner was released");
         Require(sampling.refusal.empty(), sampling.refusal);
+        Require(!clearPending, "native multisample depth clear has not been recorded");
         for (const auto& range : sampling.initial) {
             Require(GuestMemory::Accessible(reinterpret_cast<const void*>(range.address), range.bytes) && GuestMemory::Watched(range.address, range.bytes), "native multisample depth requires watched accessible guest memory");
             if (const auto* recorder = RecorderFor(context)) Require(!recorder->PendingWriteOverlaps(range.address, range.bytes), "external GPU writes over native multisample depth are not implemented");
@@ -707,6 +708,7 @@ public:
     bool sampleable = true;
     bool samplingActive = false;
     DepthSamplingState sampling;
+    bool clearPending = false;
     std::uint64_t clearGeneration = 0u;
     std::shared_ptr<OwnedImage> owned;
     std::shared_ptr<OwnedImage> sampleShadow;
@@ -1749,9 +1751,9 @@ bool NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::siz
         if (surface->samplingActive && surface->target.htileAddress == htileAddress) {
             const auto& metadata = surface->sampling.initial[1];
             if (nativeBytes != bytes || nativeBytes < metadata.bytes || !GuestMemory::Accessible(reinterpret_cast<const void*>(metadata.address), metadata.bytes) || !GuestMemory::Watched(metadata.address, metadata.bytes)) surface->sampling.Refuse("native multisample depth incomplete or unproven fast-clear transition is not implemented");
-            else if (surface->clearGeneration != 0u) surface->sampling.Refuse("overlapping native multisample depth clear transitions are not implemented");
+            else if (surface->clearPending || surface->clearGeneration != 0u) surface->sampling.Refuse("overlapping native multisample depth clear transitions are not implemented");
             else {
-                surface->clearGeneration = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
+                surface->clearPending = true;
                 completionCandidate = true;
             }
             existing = true;
@@ -1764,6 +1766,18 @@ bool NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::siz
     }
     if (!existing) clearedHtiles()[htileAddress] = bytes;
     return completionCandidate;
+}
+
+void ArmHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
+    std::lock_guard lock(surfacesMutex());
+    for (const auto& surface : surfaces()) {
+        if (!surface->active->load(std::memory_order_acquire) || !surface->samplingActive || surface->target.htileAddress != htileAddress || !surface->clearPending) continue;
+        const auto& metadata = surface->sampling.initial[1];
+        if (bytes < metadata.bytes) continue;
+        surface->clearGeneration = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
+        surface->clearPending = false;
+        if (surface->clearGeneration == 0u) surface->sampling.Refuse("native multisample depth clear requires tracked HTILE generations");
+    }
 }
 
 void CompleteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
