@@ -47,7 +47,7 @@ void Require(bool condition) {
 
 void InsertPixelDefaultsAfterFrontFace(std::vector<std::uint8_t>& bytes) {
     bytes.insert(bytes.begin() + 261u, {0x0fu, 0xffu, 0xffu, 0u, 0u, 0xffu, 0xffu, 0u, 0u, 0xffu, 0xffu, 0u, 0u, 0xffu, 0xffu, 0u, 0u, 0u, 0u, 0u, 0u});
-    bytes.insert(bytes.begin() + 282u, 34u, 0u);
+    bytes.insert(bytes.begin() + 282u, 35u, 0u);
 }
 
 std::vector<std::uint8_t> DecodeBase64(std::string_view text) {
@@ -478,6 +478,9 @@ int main() {
         Require(serializer.Deserialize(serializer.Serialize(request)).request.target.spannedWaves == spanned);
         request.target.float32FlushToZero = true;
         auto version35 = DecodeBase64(serializer.Serialize(request));
+        const auto stencilOperationValue = std::search(version35.begin(), version35.end(), pixel.sampleLocations.begin(), pixel.sampleLocations.begin() + 4) + pixel.sampleLocations.size();
+        Require(stencilOperationValue < version35.end() && *stencilOperationValue == 0u);
+        version35.erase(stencilOperationValue);
         version35[4] = 35u;
         version35.resize(version35.size() - 8u);
         version35.pop_back();

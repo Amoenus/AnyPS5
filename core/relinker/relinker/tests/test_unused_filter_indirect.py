@@ -17,16 +17,16 @@ def rel(next_address, target):
     return struct.pack("<i", target - next_address)
 
 
-def build(code, relative=(), data=()):
+def build(code, relative=(), data=(), code_vaddr=CODE, slot_vaddr=SLOT):
     image = bytearray(0x1200)
     image[:16] = b"\x7fELF\x02\x01\x01" + bytes(9)
-    struct.pack_into("<HHIQQQIHHHHHH", image, 16, 3, 62, 1, CODE, 64, 0, 0, 64, 56, 8, 64, 0, 0)
+    struct.pack_into("<HHIQQQIHHHHHH", image, 16, 3, 62, 1, code_vaddr, 64, 0, 0, 64, 56, 8, 64, 0, 0)
     struct.pack_into("<IIQQQQQQ", image, 64, 1, 6, 0, 0, 0, 0x1000, 0x1000, 0x1000)
     struct.pack_into("<IIQQQQQQ", image, 120, 2, 6, 0x400, 0x400, 0x400, 0xb0, 0xb0, 8)
-    struct.pack_into("<IIQQQQQQ", image, 176, 1, 5, CODE, CODE, CODE, 0x200, 0x200, 0x1000)
+    struct.pack_into("<IIQQQQQQ", image, 176, 1, 5, 0x1000, code_vaddr, code_vaddr, 0x200, 0x200, 0x1000)
     for slot in range(3, 8):
         struct.pack_into("<IIQQQQQQ", image, 64 + slot * 56, 0x6fffff01, 0, 0, 0, 0, 0, 0, 1)
-    relocations = [(SLOT, (1 << 32) | 6, 0)] + [(slot, 8, target) for slot, target in relative]
+    relocations = [(slot_vaddr, (1 << 32) | 6, 0)] + [(slot, 8, target) for slot, target in relative]
     tags = [(1, 4), (5, 0x600), (10, 12), (6, 0x620), (11, 24), (7, 0x700), (8, 24 * len(relocations)),
             (9, 24), (0x6100003f, 48), (0, 0)]
     for index, tag in enumerate(tags):
@@ -36,7 +36,7 @@ def build(code, relative=(), data=()):
         struct.pack_into("<QQq", image, 0x700 + index * 24, *relocation)
     for offset, value in data:
         image[offset:offset + len(value)] = value
-    image[CODE:CODE + len(code)] = code
+    image[0x1000:0x1000 + len(code)] = code
     return image
 
 
@@ -105,6 +105,12 @@ def cases():
     yield "got-slot-push", True, build(at_offset([(0, b"\xff\x35" + rel(CODE + 6, SLOT) + b"\x58\xc3")]))
     yield "got-slot-compare", True, build(
         at_offset([(0, b"\x48\x83\x3d" + rel(CODE + 8, SLOT) + b"\x00\xc3")]))
+    yield "got-slot-address-size", True, build(
+        at_offset([(0, b"\x67\x48\x8d\x05" + struct.pack("<i", -2056) + b"\xc3")]),
+        code_vaddr=0x100001000)
+    yield "got-slot-underflow-discard", False, build(
+        at_offset([(0, b"\x48\x8d\x05\x00\xe0\xff\xff\xc3")]),
+        slot_vaddr=(CODE + 7 - 0x2000) & 0xffffffffffffffff)
     yield "unreachable-user", False, build(at_offset([(0, b"\xc3"), (0x40, load_slot(FUNCTION))]))
     yield "unreferenced-pointer-target", False, build(
         at_offset([(0, b"\xc3"), (0x40, b"\xc3"), (0x60, load_slot(SECOND_FUNCTION))]),
