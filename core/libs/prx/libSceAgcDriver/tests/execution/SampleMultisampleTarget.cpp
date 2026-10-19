@@ -13,6 +13,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include "Recompiler.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include "VulkanTestDevice.hpp"
@@ -21,6 +23,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <sys/mman.h>
 #endif
 #include <algorithm>
 #include <array>
@@ -127,14 +131,30 @@ alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
 
 
 struct Block {
-    explicit Block(std::size_t bytes) : bytes(bytes) {
+    explicit Block(std::size_t bytes, bool watched = false) : bytes(bytes), watched(watched) {
 #ifdef _WIN32
-        data = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (watched) {
+            data = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, BlockBytes));
+            GuestArena::GuestArenaCommit_nid_postfix(data, bytes, PAGE_READWRITE, bytes);
+        } else {
+            data = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        }
 #else
-        data = static_cast<std::uint8_t*>(std::aligned_alloc(BlockBytes, bytes));
+        if (watched) {
+            void* raw = mmap(nullptr, bytes + BlockBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            Require(raw != MAP_FAILED, "cannot map the color target");
+            const auto begin = reinterpret_cast<std::uintptr_t>(raw);
+            const auto aligned = (begin + BlockBytes - 1) & ~(static_cast<std::uintptr_t>(BlockBytes) - 1);
+            if (aligned != begin) munmap(raw, aligned - begin);
+            if (aligned + bytes != begin + bytes + BlockBytes) munmap(reinterpret_cast<void*>(aligned + bytes), begin + BlockBytes - aligned);
+            data = reinterpret_cast<std::uint8_t*>(aligned);
+            GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(data, bytes);
+        } else {
+            data = static_cast<std::uint8_t*>(std::aligned_alloc(BlockBytes, bytes));
+        }
 #endif
-        Require(data != nullptr, "cannot allocate the multisampled color target");
-        std::memset(data, 0, bytes);
+        Require(data != nullptr, "cannot allocate the color target");
+        Require(!watched || AgcDriver::GuestMemory::Watched(Address(), bytes), "the color target is not write-watched");
         GuestAllocations::Mutation mutation;
         mutation.Add(data, bytes, true, true, true);
     }
@@ -144,15 +164,26 @@ struct Block {
             mutation.Remove(data);
         }
 #ifdef _WIN32
-        VirtualFree(data, 0, MEM_RELEASE);
+        if (watched) {
+            GuestArena::GuestArenaReset_nid_postfix(data, bytes);
+            GuestArena::GuestArenaRelease_nid_postfix(data, bytes);
+        } else {
+            VirtualFree(data, 0, MEM_RELEASE);
+        }
 #else
-        std::free(data);
+        if (watched) {
+            munmap(data, bytes);
+            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(data, bytes);
+        } else {
+            std::free(data);
+        }
 #endif
     }
     Block(const Block&) = delete;
     Block& operator=(const Block&) = delete;
     std::uint64_t Address() const { return reinterpret_cast<std::uintptr_t>(data); }
     std::size_t bytes;
+    bool watched;
     std::uint8_t* data = nullptr;
 };
 
@@ -1739,11 +1770,11 @@ void DispatchNativeFmask(AgcDriver::VulkanDevice& device, const std::array<std::
 
 void NativeFmask(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     using namespace AgcDriver::Graphics;
-    Block colorMemory(4u * BlockBytes);
-    Block dcc(BlockBytes);
-    Block cmask(BlockBytes);
-    Block fmask(BlockBytes);
-    Block unrelated(BlockBytes);
+    Block colorMemory(4u * BlockBytes, true);
+    Block dcc(BlockBytes, true);
+    Block cmask(BlockBytes, true);
+    Block fmask(BlockBytes, true);
+    Block unrelated(BlockBytes, true);
     struct ReleaseDevice {
         std::unique_ptr<AgcDriver::VulkanDevice>& value;
         ~ReleaseDevice() { value.reset(); }
@@ -1834,6 +1865,7 @@ int main(int argc, char** argv) {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         if (argc == 2 && std::string_view(argv[1]) == "--native-fmask") {
+            if (!AgcDriver::GuestMemory::WriteWatched()) return VulkanTestSkipped;
             NativeFmask(device);
             return 0;
         }
