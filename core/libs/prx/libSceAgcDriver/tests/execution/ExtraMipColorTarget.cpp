@@ -145,6 +145,7 @@ void CheckCase(AgcDriver::VulkanDevice& device, std::uint32_t width, std::uint32
     Require(offsets[0] != offsets[1] && offsets[0] != offsets[2] && offsets[1] != offsets[2], "extra-mip fixture siblings alias the same guest texel");
     std::printf("extra-mip geometry: %ux%u levels=%u physical=%u tile=%u format=%u layer=%u offsets=0x%zx/0x%zx/0x%zx\n", width, height, levels, geometry.imageLevels, static_cast<unsigned>(tile), format, layer, offsets[0], offsets[1], offsets[2]);
     std::shared_ptr<StorageTexture> texture;
+    const auto singlePassBefore = StorageTexture::SinglePassMoves();
     {
         std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         texture = StorageTexture::Create(context, *context.detiler, descriptor, 0u);
@@ -162,6 +163,24 @@ void CheckCase(AgcDriver::VulkanDevice& device, std::uint32_t width, std::uint32
         std::memcpy(expected.data() + 65536u + offsets[index], value.data(), BytesPerElement(format));
         Require(std::equal(expected.begin(), expected.end(), block.registered), "extra-mip rendering changed a sibling, another layer, padding or an allocation boundary");
     }
+    const std::array<std::uint32_t, 4> cpuValue{0x10293847u, 0x56473829u, 0xabcdef01u, 0x12345678u};
+    AgcDriver::GuestMemory::Write(descriptor.baseAddress + offsets[0], std::as_bytes(std::span(cpuValue)).first(BytesPerElement(format)));
+    std::memcpy(expected.data() + 65536u + offsets[0], cpuValue.data(), BytesPerElement(format));
+    const std::array<std::uint32_t, 4> laterValue{0x78654321u, 0xfedcba98u, 0x83920123u, 0x45901234u};
+    {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        static_cast<void>(texture->Refresh());
+        if (auto* recorder = Recorder::Active()) recorder->Sync();
+        ClearAttachment(context, texture->AttachmentView(StorageFormatForGuest(context, format), selected[2], 0u, 1u, layer), StorageFormatForGuest(context, format), laterValue);
+        texture->MarkDirty();
+        texture->WriteBack();
+        if (auto* recorder = Recorder::Active()) recorder->Sync();
+    }
+    std::memcpy(expected.data() + 65536u + offsets[2], laterValue.data(), BytesPerElement(format));
+    Require(std::equal(expected.begin(), expected.end(), block.registered), "extra-mip refresh or the next writeback lost a CPU-written sibling or changed guest bounds");
+    const auto singlePassMoves = StorageTexture::SinglePassMoves() - singlePassBefore;
+    Require(singlePass || singlePassMoves == 0u, "the linear-copy fixture used the disabled direct-image path");
+    std::printf("extra-mip transfer profile: direct-enabled=%u direct-image-moves=%llu\n", singlePass ? 1u : 0u, static_cast<unsigned long long>(singlePassMoves));
     {
         std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
         texture.reset();
