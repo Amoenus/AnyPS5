@@ -1801,16 +1801,17 @@ void NativeFmask(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
             Draw(*device, state, 0u, 2u, pixel);
         }
         const auto native = LoadSamples(*device, colorMemory, 8u);
-        std::size_t covered = 0u;
-        for (std::size_t pixel = 0; pixel < Side * Side; ++pixel) {
+        std::vector<std::uint32_t> covered;
+        for (std::uint32_t pixel = 0; pixel < Side * Side; ++pixel) {
             bool all = true;
             for (std::size_t sample = 0; sample < 8u; ++sample) all = all && native[pixel * 8u + sample] == expected[sample];
-            covered += all;
+            if (all) covered.push_back(pixel);
         }
-        Require(covered != 0u, "native FMASK fixture did not render eight distinct sample colors");
+        Require(!covered.empty(), "native FMASK fixture did not render eight distinct sample colors");
         for (std::uint32_t lane = 0; lane < Threads; ++lane) {
-            NativeFmaskInput[lane * 4u] = lane % Side;
-            NativeFmaskInput[lane * 4u + 1u] = lane / Side;
+            const auto pixel = covered[lane % covered.size()];
+            NativeFmaskInput[lane * 4u] = pixel % Side;
+            NativeFmaskInput[lane * 4u + 1u] = pixel / Side;
             NativeFmaskInput[lane * 4u + 2u] = 0u;
             NativeFmaskInput[lane * 4u + 3u] = 0u;
         }
@@ -1825,7 +1826,7 @@ void NativeFmask(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
                     for (std::uint32_t sample = 0; sample < 8u; ++sample) {
                         const auto fragment = NativeFmaskOutput[lane * 4u] >> (4u * sample) & 15u;
                         const auto pixel = NativeFmaskInput[lane * 4u + 1u] * Side + NativeFmaskInput[lane * 4u];
-                        Require(native[pixel * 8u + fragment] == native[pixel * 8u + sample], "native FMASK remapped a sampled color to another fragment");
+                        Require(native[pixel * 8u + fragment] == expected[sample], "native FMASK remapped a sampled color to another fragment");
                     }
                 }
                 Require(std::all_of(NativeFmaskOutput.begin() + Threads * 4u, NativeFmaskOutput.end(), [](auto word) { return word == sentinel; }), "native FMASK wrote beyond its output");
@@ -1850,6 +1851,18 @@ void NativeFmask(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
         same.fill(std::byte{0x11});
         AgcDriver::GuestMemory::Write(fmask.Address(), same);
         refused(image, "writes to a resident native FMASK");
+        device->SubmitRecorded(true);
+        device->WaitIdle();
+        ClearMultisampleTargets(device->Device());
+        ClearCachedTextures(device->Device());
+        cx[0x31c] &= ~0x2000u;
+        cx[0x31f] = 0u;
+        cx[0x398] = 0u;
+        const auto withoutCmask = DecodeColorBuffer(cx, 0u);
+        Require(withoutCmask.cmaskAddress == 0u, "the no-CMASK control retained metadata");
+        Draw(*device, TargetState(withoutCmask));
+        const auto uncompressed = LoadSamples(*device, colorMemory, 8u);
+        Require(std::find(uncompressed.begin(), uncompressed.end(), Drawn) != uncompressed.end(), "tracking native FMASK broke ordinary DCC rendering without CMASK");
         device->SubmitRecorded(true);
         device->WaitIdle();
         ClearMultisampleTargets(device->Device());

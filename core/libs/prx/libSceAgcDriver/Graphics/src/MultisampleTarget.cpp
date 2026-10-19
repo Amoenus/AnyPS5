@@ -678,7 +678,7 @@ private:
                 Require(a.address >= b.address + b.bytes || b.address >= a.address + a.bytes, "overlapping multisampled DCC color or metadata ranges are not implemented");
             }
         }
-        if (use.samples == 8u && use.fmaskAddress != 0u) {
+        if (use.samples == 8u && use.fmaskAddress != 0u && use.cmaskAddress != 0u) {
             const auto resource = fmaskResource(use);
             static_cast<void>(FmaskSnapshotResource_nid_no_patch(resource));
             fmaskRange = GuestMemory::UnchangedQuery{use.fmaskAddress, static_cast<std::size_t>(DescribeSurface(resource).guestBytes), 0};
