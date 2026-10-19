@@ -83,6 +83,10 @@ private:
     std::size_t bytes;
 };
 
+extern "C" std::size_t FmaskCmaskBytes_nid_no_patch(const CmaskLayout& layout, std::uint32_t layerCount);
+extern "C" std::size_t FmaskCmaskNibble_nid_no_patch(const CmaskLayout& layout, std::uint32_t tileX, std::uint32_t tileY, std::uint32_t layer, std::uint32_t layerCount, std::uint32_t pipeBankXor);
+
+
 }
 
 #endif

@@ -8,6 +8,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/FmaskTexture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include <algorithm>
@@ -603,6 +605,27 @@ std::array<std::uint64_t, 4> untrackedKey(std::uint64_t address, std::size_t byt
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false, VkImageViewType multisampleViewType = VK_IMAGE_VIEW_TYPE_2D) {
+    if (resource.fmaskCmaskAddress != 0u) {
+        Require(!depthCompare, "FMASK comparison sampling is not implemented");
+        const auto snapshotResource = FmaskSnapshotResource_nid_no_patch(resource);
+        const auto geometry = DescribeSurface(resource);
+        const CmaskLayout metadata(resource.width, resource.height);
+        const auto metadataBytes = FmaskCmaskBytes_nid_no_patch(metadata, geometry.layers);
+        RequireNoMultisampleTarget(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes), "an FMASK texture read");
+        CompletePendingCpuWrites(context, resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+        CompletePendingCpuWrites(context, resource.fmaskCmaskAddress, metadataBytes);
+        if (auto* recorder = Recorder::Active()) {
+            recorder->BoundKeptBytes();
+            recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+            recorder->SyncThrough(resource.fmaskCmaskAddress, metadataBytes);
+        }
+        std::vector<std::byte> fmask(geometry.guestBytes);
+        std::vector<std::byte> cmask(metadataBytes);
+        GuestMemory::Read(resource.baseAddress, fmask);
+        GuestMemory::Read(resource.fmaskCmaskAddress, cmask);
+        const auto snapshot = FmaskSnapshot_nid_no_patch(resource, fmask, cmask);
+        return std::make_shared<Texture>(context, *context.detiler, snapshotResource, components, snapshot);
+    }
     if (resource.dimension == TextureDimension::k2DMsaa) {
         Require(!depthCompare, "native multisampled depth comparison sampling is not implemented");
         if (auto depth = DepthSurfaceTexture(context, words, resource, components, multisampleViewType)) {

@@ -218,4 +218,22 @@ std::size_t CmaskLayout::Nibble(std::uint32_t tileX, std::uint32_t tileY) const 
     return block * Alignment * 2u + offset;
 }
 
+extern "C" std::size_t FmaskCmaskBytes_nid_no_patch(const CmaskLayout& layout, std::uint32_t layerCount) {
+    require(layerCount != 0u && layerCount <= 8192u, "AGC graphics: invalid FMASK CMASK layer count");
+    require(layout.Bytes() <= std::numeric_limits<std::size_t>::max() / layerCount / 2u, "AGC graphics: FMASK CMASK nibble extent overflows");
+    return layout.Bytes() * layerCount;
+}
+
+extern "C" std::size_t FmaskCmaskNibble_nid_no_patch(const CmaskLayout& layout, std::uint32_t tileX, std::uint32_t tileY, std::uint32_t layer, std::uint32_t layerCount, std::uint32_t pipeBankXor) {
+    const auto bytes = FmaskCmaskBytes_nid_no_patch(layout, layerCount);
+    require(layer < layerCount, "AGC graphics: FMASK CMASK layer out of range");
+    require(pipeBankXor < 65536u && pipeBankXor % 256u == 0u, "AGC graphics: invalid FMASK CMASK pipe/bank XOR");
+    const auto layerXor = ((layer & 8u) << 6u) | ((layer & 4u) << 8u) | ((layer & 2u) << 10u) | ((layer & 1u) << 12u);
+    const auto pipeXor = ((pipeBankXor >> 8u) & 15u) << 9u;
+    const auto nibble = static_cast<std::size_t>(layer) * layout.Bytes() * 2u + (layout.Nibble(tileX, tileY) ^ layerXor ^ pipeXor);
+    require(nibble / 2u < bytes, "AGC graphics: FMASK CMASK nibble exceeds its allocation");
+    return nibble;
+}
+
+
 }

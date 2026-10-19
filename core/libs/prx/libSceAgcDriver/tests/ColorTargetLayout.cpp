@@ -115,6 +115,35 @@ void RunColorTargetLayoutTests() {
             }
         }
     }
+    const CmaskLayout fmaskCmask(1025u, 513u);
+    Require(FmaskCmaskBytes_nid_no_patch(fmaskCmask, 3u) == 49152u, "FMASK CMASK array extent is incorrect");
+    Require(FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 0u, 3u, 0u) == 0u, "FMASK CMASK origin is incorrect");
+    Require(FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 1u, 3u, 0u) == 36864u, "FMASK CMASK first array layer omitted its swizzle");
+    Require(FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 2u, 3u, 0u) == 67584u, "FMASK CMASK second array layer omitted its swizzle");
+    Require(FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 8u, 9u, 0x100u) == 262144u, "FMASK CMASK array and pipe XOR did not cancel");
+    Require(FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 0u, 1u, 0x100u) == 512u, "FMASK CMASK pipe XOR uses incorrect units");
+    Require(FmaskCmaskNibble_nid_no_patch(fmaskCmask, 128u, 64u, 0u, 1u, 0u) == 24576u, "FMASK CMASK meta blocks are not in raster order");
+    Require(FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 17u, 18u, 0x1000u) == 561152u, "FMASK CMASK high array or bank bits changed the pipe swizzle");
+    for (std::uint32_t layer = 0u; layer < 3u; ++layer) {
+        for (std::uint32_t pipe = 0u; pipe < 16u; ++pipe) {
+            std::vector<bool> seen(fmaskCmask.Bytes() * 2u);
+            for (std::uint32_t y = 0u; y < fmaskCmask.TilesY(); ++y) {
+                for (std::uint32_t x = 0u; x < fmaskCmask.TilesX(); ++x) {
+                    const auto nibble = FmaskCmaskNibble_nid_no_patch(fmaskCmask, x, y, layer, 3u, pipe << 8u) - layer * fmaskCmask.Bytes() * 2u;
+                    Require(nibble < seen.size() && !seen[nibble], "FMASK CMASK tiles alias or leave their array layer");
+                    seen[nibble] = true;
+                }
+            }
+        }
+    }
+    reject([&] { FmaskCmaskBytes_nid_no_patch(fmaskCmask, 0u); });
+    reject([&] { FmaskCmaskBytes_nid_no_patch(fmaskCmask, 8193u); });
+    reject([&] { FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 3u, 3u, 0u); });
+    reject([&] { FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 0u, 1u, 0x80u); });
+    reject([&] { FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, 0u, 0u, 1u, 0x10000u); });
+    reject([&] { FmaskCmaskNibble_nid_no_patch(fmaskCmask, fmaskCmask.TilesX(), 0u, 0u, 1u, 0u); });
+    reject([&] { FmaskCmaskNibble_nid_no_patch(fmaskCmask, 0u, fmaskCmask.TilesY(), 0u, 1u, 0u); });
+
     reject([] { CmaskLayout(0, 1); });
     reject([] { CmaskLayout(61, 13).Nibble(8, 0); });
     reject([] { CmaskLayout(61, 13).Nibble(0, 2); });
