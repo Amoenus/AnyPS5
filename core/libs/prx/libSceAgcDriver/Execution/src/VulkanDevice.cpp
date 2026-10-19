@@ -4831,6 +4831,7 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     recorder.EndGpuTiming(trailingTiming);
     recorder.MarkCovered(dispatchedAccess);
     recordStep(PhaseRecordBind);
+    if (record.htileClear.has_value()) Graphics::ArmHtileDepthClear(record.htileClear->first, record.htileClear->second);
     resources.MarkGpuWrites(recorder);
     recordStep(PhaseRecordMarks);
     // Only copied written buffers (and BDA fault checks) need work once the GPU is done; without them
