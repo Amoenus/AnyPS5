@@ -220,9 +220,9 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
                 if ((index != 0 && !zeroSectionSymbol && !matchingDefinedSymbol) || !pointers.Values.emplace(slot, addend).second) throw Domain::RelinkerException("Code analysis: invalid relative relocation", slot);
                 addRoot(addend);
             } else if (type == 1 || type == 6 || type == 7) {
-                if (index == 0 || index >= symbolCount) throw Domain::RelinkerException("Code analysis: invalid relocation symbol", slot);
+                if (index != 0 && index >= symbolCount) throw Domain::RelinkerException("Code analysis: invalid relocation symbol", slot);
                 const auto symbol = symbols + index * 24;
-                if (Io::ReadU16(bytes, symbol + 6) == 0) importSlots.insert(slot);
+                if (index == 0 || Io::ReadU16(bytes, symbol + 6) == 0) importSlots.insert(slot);
                 else {
                     const auto target = Io::ReadU64(bytes, symbol + 8) + addend;
                     if (!pointers.Values.emplace(slot, target).second) throw Domain::RelinkerException("Code analysis: duplicate pointer relocation", slot);
