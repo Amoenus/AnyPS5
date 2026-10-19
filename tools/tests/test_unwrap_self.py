@@ -14,6 +14,9 @@ PROGRAM_TABLE_OFFSET = 0x40
 PT_LOAD = 1
 PT_DYNAMIC = 2
 PT_TLS = 7
+PT_NOTE = 4
+SCE_COMMENT = 0x6FFFFF00
+SCE_VERSION = 0x6FFFFF01
 FIRST_REGION = 0x400
 
 HEADER = b"\x7fELF\x02\x01\x01\x09" + b"\x00" * 56
@@ -146,6 +149,49 @@ class UnwrapTest(unittest.TestCase):
         tls = [header for header in headers if header[0] == PT_TLS][0]
         self.assertEqual(tls[2], read_only[2] + 0x80)
         self.assertEqual(tls[5], 0)
+
+    def test_segments_after_the_recorded_comment_are_read_from_the_container(self):
+        segments = default_segments() + [(SCE_COMMENT, 4, 0x15A0, 0x0, 0x20, 0x10), (PT_NOTE, 4, 0x15C0, 0x0, 0x18, 4),
+                                         (SCE_VERSION, 4, 0x15D8, 0x0, 0x10, 1)]
+        records = default_records() + [(0x410004, 0xA80, 0x20), (0x302804, 0xAA0, 0x20)]
+        payloads = dict(default_payloads())
+        payloads[0xAA0] = pattern(11, 0x20)
+        payloads[0xAC0] = pattern(13, 0x10)
+        result, output = self.convert(build_container(segments, records, payloads))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data, headers = read_program_headers(output)
+        comment = [header for header in headers if header[0] == SCE_COMMENT][0]
+        version = [header for header in headers if header[0] == SCE_VERSION][0]
+        note = [header for header in headers if header[0] == PT_NOTE][0]
+        self.assertEqual(data[comment[2]:comment[2] + comment[5]], pattern(11, 0x20))
+        self.assertEqual(version[5], 0x10)
+        self.assertEqual(data[version[2]:version[2] + version[5]], pattern(13, 0x10))
+        self.assertEqual(note[5], 0)
+
+    def test_a_version_segment_the_container_does_not_store_is_emitted_without_file_bytes(self):
+        segments = default_segments() + [(SCE_COMMENT, 4, 0x15A0, 0x0, 0x20, 0x10), (PT_NOTE, 4, 0x15C0, 0x0, 0x18, 4),
+                                         (SCE_VERSION, 4, 0x15D8, 0x0, 0x10, 0x10)]
+        records = default_records() + [(0x410004, 0xA80, 0x20), (0x302804, 0xAA0, 0x20)]
+        for stored in (0, 8):
+            with self.subTest(stored=stored):
+                payloads = dict(default_payloads())
+                payloads[0xAA0] = pattern(11, 0x20)
+                if stored:
+                    payloads[0xAC0] = pattern(13, stored)
+                container = build_container(segments, records, payloads)
+                self.assertEqual(len(container), 0xAC0 + stored)
+                result, output = self.convert(container)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data, headers = read_program_headers(output)
+                loads = [header for header in headers if header[0] == PT_LOAD]
+                self.assertEqual(data[loads[0][2]:loads[0][2] + loads[0][5]], pattern(1, 0x100))
+                self.assertEqual(data[loads[1][2]:loads[1][2] + loads[1][5]], pattern(9, 0x80))
+                comment = [header for header in headers if header[0] == SCE_COMMENT][0]
+                self.assertEqual(data[comment[2]:comment[2] + comment[5]], pattern(11, 0x20))
+                version = [header for header in headers if header[0] == SCE_VERSION][0]
+                self.assertEqual((version[2], version[5]), (0, 0))
+                for header in headers:
+                    self.assertLessEqual(header[2] + header[5], len(data))
 
     def test_declared_offsets_are_used_when_the_container_has_no_records(self):
         segments = [(PT_LOAD, 1, 0x800, 0x0, 0x40, 0x1000), (PT_LOAD, 4, 0x900, 0x1000, 0x40, 0x1000)]

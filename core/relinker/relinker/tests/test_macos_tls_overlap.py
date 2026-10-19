@@ -30,19 +30,22 @@ def check_split_function(relinker, directory):
         raise SystemExit("function-begins-inside-instruction: the instruction around the GS-prefixed decoding changed")
 
 
-def check_gs_access_refused(relinker, directory):
-    image = make_image("register", "unwind", body=bytes.fromhex("65 48 8b 04 25 28 00 00 00") + b"\xc3")
-    result, output = convert(relinker, directory, "gs-access", image)
-    message = result.stdout + result.stderr
-    if result.returncode != 2 or "Unsupported macOS guest TLS instruction" not in message or output.exists():
-        raise SystemExit(f"gs-access: a GS access at an instruction start was not refused: {message}")
+def check_gs_access_trapped(relinker, directory):
+    instruction = bytes.fromhex("65 48 8b 04 25 28 00 00 00")
+    result, output = convert(relinker, directory, "gs-access", make_image("register", "unwind", body=instruction + b"\xc3"))
+    if result.returncode != 0:
+        raise SystemExit(f"gs-access: relinker failed: {result.stdout}{result.stderr}")
+    data = output.read_bytes()
+    code = b"".join(data[lo:hi] for lo, hi in MachO(data).executable_ranges())
+    if b"\x0f\x0b" + b"\x90" * (len(instruction) - 2) + b"\xc3" not in code:
+        raise SystemExit("gs-access: a GS access at an instruction start was not trapped")
 
 
 def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="anyps5-macos-tls-overlap-") as directory:
         check_split_function(relinker, directory)
-        check_gs_access_refused(relinker, directory)
+        check_gs_access_trapped(relinker, directory)
     print("macOS TLS overlap checks passed")
 
 

@@ -692,11 +692,24 @@ std::uint32_t colourTargetBlock(const void* root) {
 }
 
 void testDefaultsTypes() {
-    check(sceAgcGetRegisterDefaults() == sceAgcGetRegisterDefaults2(13), "legacy register defaults are not the newest public table");
-    check(colourTargetBlock(sceAgcGetRegisterDefaults()) == 78, "MRT0 defaults are not block 78 of the 137-entry table");
-    check(colourTargetBlock(sceAgcGetRegisterDefaults2(10)) == 73, "MRT0 defaults are not block 73 of the 128-entry table");
-    for (std::uint32_t version = 4; version < 14; ++version)
-        colourTargetBlock(sceAgcGetRegisterDefaults2(version));
+    const auto* legacy = sceAgcGetRegisterDefaults();
+    check(legacy != sceAgcGetRegisterDefaults2(13), "legacy register defaults reused the compact versioned table");
+    check(colourTargetBlock(legacy) == 78, "MRT0 defaults are not block 78 of the 137-entry table");
+
+    const auto checkCompactTypes = [](const void* root, std::uint32_t count, std::uint32_t key,
+                                      std::uint32_t packedType, std::uint32_t extra) {
+        const auto* bytes = static_cast<const unsigned char*>(root);
+        const std::uint32_t* types = nullptr;
+        std::uint32_t actualCount = 0;
+        std::memcpy(&types, bytes + 0x30, sizeof(types));
+        std::memcpy(&actualCount, bytes + 0x38, sizeof(actualCount));
+        check(types != nullptr && actualCount == count, "versioned register defaults have an invalid compact type table");
+        check(types[0] == key && types[1] == packedType && types[2] == extra,
+              "versioned register defaults did not preserve their compact type entry");
+    };
+    checkCompactTypes(sceAgcGetRegisterDefaults2(0), 150, 0xe24f806du, 0x00040400u, 0);
+    checkCompactTypes(sceAgcGetRegisterDefaults2(10), 128, 0xe24f806du, 0x00040400u, 0);
+    checkCompactTypes(sceAgcGetRegisterDefaults2Internal(0), 15, 0xf58fea31u, 0x00040400u, 0);
 }
 
 void testEventWrite() {
