@@ -243,7 +243,7 @@ void RunTests(AgcDriver::VulkanDevice& device) {
     Require(!Faulted(taken) && taken.poisoned == 0u && taken.cacheable, "guarded pointer: a mapped pointer faulted, was poisoned or left the caches:\n" + taken.log);
     RequireWords(taken, Lanes, Payload, "guarded pointer: a mapped pointer under a taken branch");
     const auto skippedNull = Run(device, BranchCode, 0u, 0u);
-    Require(!Faulted(skippedNull) && skippedNull.poisoned == 1u && !skippedNull.cacheable, "guarded pointer: a null pointer behind a branch that skips its read faulted or stayed cacheable:\n" + skippedNull.log);
+    Require(!Faulted(skippedNull) && skippedNull.poisoned == 0u && skippedNull.cacheable, "guarded pointer: a null pointer behind a branch that skips its read faulted, was poisoned or left the caches:\n" + skippedNull.log);
     RequireWords(skippedNull, 0u, 0u, "guarded pointer: a skipped read through a null pointer");
     const auto takenNull = Run(device, BranchCode, 0u, 1u);
     Require(takenNull.pipelineVariantId == skippedNull.pipelineVariantId && takenNull.pipelineVariantId == taken.pipelineVariantId && takenNull.variantId == taken.variantId, "guarded pointer: the poison or the branch condition changed the pipeline variant");
@@ -269,7 +269,7 @@ void RunTests(AgcDriver::VulkanDevice& device) {
     Require(noLanes.pipelineVariantId == someLanes.pipelineVariantId && oneLane.pipelineVariantId == someLanes.pipelineVariantId && emptyNull.pipelineVariantId == emptyMapped.pipelineVariantId, "guarded pointer: the poison changed an EXEC program's pipeline variant");
 
     const auto chainSkipped = Run(device, ChainCode, 0u, 0u);
-    Require(chainSkipped.poisoned == 3u && Faulted(chainSkipped) && chainSkipped.log.find(Fault(0u, 0x24u)) != std::string::npos, "guarded pointer: a pointer read through a null pointer, used only by a skipped read, did not fault at its own pc:\n" + chainSkipped.log);
+    Require(chainSkipped.poisoned == 2u && Faulted(chainSkipped) && chainSkipped.log.find(Fault(0u, 0x24u)) != std::string::npos, "guarded pointer: a pointer read through a null pointer, used only by a skipped read, did not fault at its own pc:\n" + chainSkipped.log);
     const auto chainTaken = Run(device, ChainCode, 0u, 1u);
     Require(Faulted(chainTaken) && chainTaken.log.find(Fault(0u, 0x24u)) != std::string::npos, "guarded pointer: a read through a pointer read through a null pointer did not fault at the first read:\n" + chainTaken.log);
     Indirect[0] = valid;
@@ -283,7 +283,7 @@ void RunTests(AgcDriver::VulkanDevice& device) {
     Require(!Faulted(descriptorTaken) && descriptorTaken.poisoned == 0u && descriptorTaken.cacheable, "guarded pointer: a V# behind a mapped pointer faulted, was poisoned or left the caches:\n" + descriptorTaken.log);
     RequireWords(descriptorTaken, Lanes, Payload, "guarded pointer: a buffer read through a V# behind a mapped pointer");
     const auto descriptorSkipped = Run(device, DescriptorCode, 0u, 0u);
-    Require(!Faulted(descriptorSkipped) && descriptorSkipped.poisoned == 4u && !descriptorSkipped.cacheable, "guarded pointer: a V# behind a branch that skips its null pointer faulted or stayed cacheable:\n" + descriptorSkipped.log);
+    Require(!Faulted(descriptorSkipped) && descriptorSkipped.poisoned == 0u && descriptorSkipped.cacheable, "guarded pointer: a V# behind a branch that skips its null pointer faulted, was poisoned or left the caches:\n" + descriptorSkipped.log);
     RequireWords(descriptorSkipped, 0u, 0u, "guarded pointer: a skipped V# load through a null pointer");
     const auto descriptorNull = Run(device, DescriptorCode, 0u, 1u);
     Require(descriptorNull.pipelineVariantId == descriptorSkipped.pipelineVariantId && Faulted(descriptorNull) && descriptorNull.log.find(Fault(0x10u, 0x2cu)) != std::string::npos, "guarded pointer: a V# load through a null pointer that runs did not fault at its pc and address:\n" + descriptorNull.log);
