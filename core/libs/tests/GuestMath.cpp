@@ -973,11 +973,11 @@ static void CheckLongDoubleFunctions() {
     Require(hypot3_nid_postfix(0x1p1000, 0x1p1000, 0x1p1000) == std::hypot(0x1p1000, std::hypot(0x1p1000, 0x1p1000)));
 
     Require(j0f_nid_postfix(0.0f) == 1.0f && j1f_nid_postfix(0.0f) == 0.0f && jnf_nid_postfix(2, 0.0f) == 0.0f);
-    Require(std::fabs(j0f_nid_postfix(2.5f) - static_cast<float>(std::cyl_bessel_j(0.0, 2.5))) < 1e-6f);
-    Require(std::fabs(jnf_nid_postfix(3, 4.0f) - static_cast<float>(std::cyl_bessel_j(3.0, 4.0))) < 1e-6f);
+    Require(std::fabs(j0f_nid_postfix(2.5f) - static_cast<float>(-0.048383776468198)) < 1e-6f);
+    Require(std::fabs(jnf_nid_postfix(3, 4.0f) - static_cast<float>(0.430171473875622)) < 1e-6f);
     Require(y0f_nid_postfix(0.0f) == -std::numeric_limits<float>::infinity() && y1f_nid_postfix(0.0f) == -std::numeric_limits<float>::infinity());
     Require(ynf_nid_postfix(2, 0.0f) == -std::numeric_limits<float>::infinity());
-    Require(std::fabs(ynf_nid_postfix(2, 3.0f) - static_cast<float>(std::cyl_neumann(2.0, 3.0))) < 1e-6f);
+    Require(std::fabs(ynf_nid_postfix(2, 3.0f) - static_cast<float>(-0.160400393484924)) < 1e-6f);
     Require(std::isnan(y0f_nid_postfix(-1.0f)));
 }
 

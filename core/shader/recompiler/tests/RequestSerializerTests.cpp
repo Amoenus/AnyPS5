@@ -214,14 +214,16 @@ int main() {
             Require(request.graphics->draw.indexAddress == 0xabcdef3400u && request.graphics->draw.indexCount == 57u && request.graphics->draw.indexElementBytes == 4u && request.graphics->draw.instanceCount == 9u);
             Require(request.target.float16DenormPreserve == preserve);
             auto upgraded = bytes;
-            upgraded[4] = 39u;
+            upgraded[4] = 40u;
             InsertMeshBarycentricFlag(upgraded);
             if (fixture.pixel) upgraded.insert(upgraded.begin() + 258u, {0u, 0u, 0u});
             if (fixture.pixel) InsertPixelDefaultsAfterFrontFace(upgraded);
             if (fixture.tessellation) upgraded.insert(upgraded.end() - 35u, 5u, 0u);
-            upgraded.insert(upgraded.end(), sizeof(std::uint64_t) + 1u + 5u + 1u, 0u);
             auto main38 = upgraded;
             main38[4] = 38u;
+            if (fixture.tessellation) upgraded.insert(upgraded.end() - 35u, 1u, 0u);
+            upgraded.insert(upgraded.end(), sizeof(std::uint64_t) + 1u + 5u + 1u, 0u);
+            main38.insert(main38.end(), sizeof(std::uint64_t) + 1u + 5u + 1u, 0u);
             Require(serializer.Serialize(serializer.Deserialize(EncodeBase64(main38)).request) == serializer.Serialize(request));
             if (fixture.pixel) upgraded.insert(upgraded.end(), 8u, 0u);
             Require(serializer.Serialize(request) == EncodeBase64(upgraded));
@@ -258,11 +260,11 @@ int main() {
                     layerRejected = std::string_view(error.what()) == "RequestSerializer: truncated data";
                 }
                 Require(layerRejected);
-                layered[4] = 39u;
+                layered[4] = 40u;
                 InsertMeshBarycentricFlag(layered);
                 layered.insert(layered.begin() + 259u, {0u, 0u});
                 InsertPixelDefaultsAfterFrontFace(layered);
-                if (fixture.tessellation) layered.insert(layered.end() - 35u, 5u, 0u);
+                if (fixture.tessellation) layered.insert(layered.end() - 35u, 6u, 0u);
                 layered.insert(layered.end(), sizeof(std::uint64_t) + 1u + 5u + 1u, 0u);
                 layered.insert(layered.end(), 8u, 0u);
                 Require(serializer.Serialize(layerReplay.request) == EncodeBase64(layered));
@@ -285,7 +287,7 @@ int main() {
             Require(replay.request.context.pixel->rasterPrimitive == ShaderRecompiler::RasterPrimitive::Rectangle);
             Require(replay.request.context.vertex->paClVsOutCntl == 0x00050a05u);
             Require(replay.request.target.float16DenormPreserve == preserve);
-            bytes[4] = 39u;
+            bytes[4] = 40u;
             InsertMeshBarycentricFlag(bytes);
             bytes.insert(bytes.begin() + 259u, {0u, 0u});
             InsertPixelDefaultsAfterFrontFace(bytes);
@@ -410,14 +412,24 @@ int main() {
                 Require(!fixture.tessellation || (request.graphics->tessellation->patchesPerGroup == 63u && request.graphics->tessellation->primitiveGroupSize == 37u && request.graphics->tessellation->breakAtInstance));
                 Require(request.graphics->draw.indexAddress == 0xabcdef3400u && request.graphics->draw.indexCount == 57u && request.graphics->draw.indexElementBytes == 4u && request.graphics->draw.instanceCount == 9u);
                 Require(request.target.float16DenormPreserve == preserve);
-                auto upgraded = bytes;
-                upgraded[4] = 39u;
-                InsertMeshBarycentricFlag(upgraded);
-                if (fixture.pixel) upgraded.insert(upgraded.begin() + 259u, {0u, 0u});
-                if (fixture.pixel) InsertPixelDefaultsAfterFrontFace(upgraded);
+                auto main38 = bytes;
+                main38[4] = 38u;
+                InsertMeshBarycentricFlag(main38);
+                if (fixture.pixel) main38.insert(main38.begin() + 259u, {0u, 0u});
+                if (fixture.pixel) InsertPixelDefaultsAfterFrontFace(main38);
+                auto upgraded = main38;
+                upgraded[4] = 40u;
+                if (fixture.tessellation) upgraded.insert(upgraded.end() - 35u, 1u, 0u);
+                main38.insert(main38.end(), sizeof(std::uint64_t) + 1u + 5u + 1u, 0u);
                 upgraded.insert(upgraded.end(), sizeof(std::uint64_t) + 1u + 5u + 1u, 0u);
                 if (fixture.pixel) upgraded.insert(upgraded.end(), 8u, 0u);
                 Require(serializer.Serialize(request) == EncodeBase64(upgraded));
+                const auto replay38 = serializer.Deserialize(EncodeBase64(main38));
+                Require(replay38.request.graphics.has_value() && replay38.request.graphics->tessellation.has_value() == fixture.tessellation);
+                Require(!fixture.tessellation || (!replay38.request.graphics->tessellation->mergedHull && replay38.request.graphics->tessellation->primitiveGroupSize == 37u && replay38.request.graphics->tessellation->breakAtInstance));
+                Require(replay38.request.graphics->draw.indexAddress == 0xabcdef3400u && replay38.request.graphics->draw.indexCount == 57u && replay38.request.graphics->draw.indexElementBytes == 4u && replay38.request.graphics->draw.instanceCount == 9u);
+                Require(replay38.request.target.float16DenormPreserve == preserve);
+                Require(serializer.Serialize(replay38.request) == EncodeBase64(upgraded));
                 for (const bool dither : {false, true}) {
                     if (!fixture.pixel && dither) continue;
                     auto main25 = bytes;
@@ -426,12 +438,13 @@ int main() {
                     const auto replay25 = serializer.Deserialize(EncodeBase64(main25));
                     Require(!fixture.pixel || (replay25.request.context.pixel->layerExported == layer && replay25.request.context.pixel->ditheredAlphaToCoverage == dither && replay25.request.context.pixel->reversedBlend == 0u));
                     Require(replay25.request.target.float16DenormPreserve == preserve && (!fixture.tessellation || replay25.request.graphics->tessellation->primitiveGroupSize == 37u));
-                    main25[4] = 39u;
+                    main25[4] = 40u;
                     InsertMeshBarycentricFlag(main25);
                     if (fixture.pixel) {
                         main25.insert(main25.begin() + 260u, 0u);
                         InsertPixelDefaultsAfterFrontFace(main25);
                     }
+                    if (fixture.tessellation) main25.insert(main25.end() - 35u, 1u, 0u);
                     main25.insert(main25.end(), sizeof(std::uint64_t) + 1u + 5u + 1u, 0u);
                     if (fixture.pixel) main25.insert(main25.end(), 8u, 0u);
                     Require(serializer.Serialize(replay25.request) == EncodeBase64(main25));
@@ -448,9 +461,9 @@ int main() {
         const auto replay = serializer.Deserialize(encoded);
         Require(replay.request.target.float16DenormPreserve == preserve && replay.request.target.float32FlushToZero == !preserve);
         auto bytes = DecodeBase64(encoded);
-        Require(bytes.size() >= 8u && bytes[4] == 39u && bytes[5] == 0u && bytes[6] == 0u && bytes[7] == 0u);
+        Require(bytes.size() >= 8u && bytes[4] == 40u && bytes[5] == 0u && bytes[6] == 0u && bytes[7] == 0u);
         auto future = bytes;
-        future[4] = 40u;
+        future[4] = 41u;
         bool futureRejected = false;
         try {
             static_cast<void>(serializer.Deserialize(EncodeBase64(future)));
@@ -519,13 +532,38 @@ int main() {
             const auto replay = serializer.Deserialize(encoded);
             Require(replay.request.target.spannedWaves == spanned && replay.request.target.float32FlushToZero == !spanned && replay.request.context.pixel.has_value() == pixel);
             if (pixel) Require(replay.request.context.pixel->targetOutputType == typed.context.pixel->targetOutputType && replay.request.context.pixel->reversedBlend == 0x89abcdefu && replay.request.context.pixel->stencilOperationValueExport == !spanned);
-            for (const auto version : {37u, 38u}) {
+            for (const auto version : {37u, 38u, 39u}) {
                 auto legacy = DecodeBase64(encoded);
                 if (pixel) legacy.resize(legacy.size() - 8u);
                 legacy[4] = version;
                 const auto old = serializer.Deserialize(EncodeBase64(legacy));
                 Require(old.request.target.spannedWaves == spanned && old.request.target.float32FlushToZero == !spanned && old.request.context.pixel.has_value() == pixel);
                 if (pixel) Require(old.request.context.pixel->targetOutputType == ShaderRecompiler::ShaderPixelStageInfo{}.targetOutputType && old.request.context.pixel->reversedBlend == 0x89abcdefu && old.request.context.pixel->stencilOperationValueExport == !spanned);
+            }
+            auto hull = typed;
+            hull.context.vertex = ShaderRecompiler::ShaderVertexStageInfo{};
+            hull.graphics = ShaderRecompiler::GraphicsCompileContext{0u, {}, std::nullopt, ShaderRecompiler::TessellationConfiguration{3u, 3u, 1u, 2u, 2u}, {}};
+            hull.graphics->tessellation->mergedHull = true;
+            const auto merged = serializer.Serialize(hull);
+            const auto mergedReplay = serializer.Deserialize(merged);
+            Require(mergedReplay.request.graphics->tessellation->mergedHull);
+            if (pixel) Require(mergedReplay.request.context.pixel->targetOutputType == typed.context.pixel->targetOutputType);
+            auto version39 = DecodeBase64(merged);
+            version39[4] = 39u;
+            if (pixel) version39.resize(version39.size() - 8u);
+            const auto oldHull = serializer.Deserialize(EncodeBase64(version39));
+            Require(oldHull.request.graphics->tessellation->mergedHull);
+            if (pixel) Require(oldHull.request.context.pixel->targetOutputType == ShaderRecompiler::ShaderPixelStageInfo{}.targetOutputType);
+            if (pixel) {
+                auto invalid = DecodeBase64(encoded);
+                invalid.back() = 4u;
+                bool rejected = false;
+                try {
+                    static_cast<void>(serializer.Deserialize(EncodeBase64(invalid)));
+                } catch (const std::runtime_error& error) {
+                    rejected = std::string_view(error.what()) == "RequestSerializer: invalid color output type";
+                }
+                Require(rejected);
             }
         }
     }
