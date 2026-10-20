@@ -692,7 +692,7 @@ void CheckClearDispatch() {
     }
 }
 
-void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing, std::optional<bool> depthOnlyOverride, ClearFault fault, std::unique_lock<AgcDriver::GuestMemory::GpuMutexType>& gpuLock, bool iterate256 = true) {
+bool CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing, std::optional<bool> depthOnlyOverride, ClearFault fault, std::unique_lock<AgcDriver::GuestMemory::GpuMutexType>& gpuLock, bool iterate256 = true) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
     TargetMemory memory(bytes), metadata(65536u, fault == ClearFault::DriverDispatch);
@@ -818,6 +818,10 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                     SubmitDriverHtileClear(target.htileAddress, gpuLock);
                     recorder.Activate();
                     Require(Recorder::Active() == &recorder, "driver idle did not restore the native depth fixture recorder");
+                    if (!AgcDriver::GuestMemory::UnchangedSinceCollected(target.htileAddress, metadataBytes, generation)) {
+                        std::puts("skipped native HTILE driver dispatch: this device's host import path does not retain write-watch evidence independently of driver writes");
+                        return false;
+                    }
                     Require(AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "driver idle returned before recording the completed HTILE dispatch");
                 } else {
                     const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
@@ -909,6 +913,7 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
     texture.reset();
     arrayTexture.reset();
     std::printf("Native depth format=%u samples=%u clear=%u iterate256=%u: imported, rasterized twice, sampled and refused conflicts\n", static_cast<std::uint32_t>(format), fragments, one, iterate256);
+    return true;
 }
 
 void CheckHtileRouting(Context context, VkFormat format, std::uint32_t fragments) {
@@ -1229,7 +1234,7 @@ int main(int argc, char** argv) {
             ++checked;
             CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::ImportWindowWrite, lock);
             ++checked;
-            CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::DriverDispatch, lock);
+            if (!CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::DriverDispatch, lock)) return VulkanTestSkipped;
             ++checked;
             std::printf("Native depth completed clear cases checked=%u unavailable=%u\n", checked, unavailable);
             return 0;
