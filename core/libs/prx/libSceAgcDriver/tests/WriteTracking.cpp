@@ -171,6 +171,21 @@ void CheckSharedBlock() {
     if (!Watched(outside, unwatched.size())) Require(StoredOver(outside, unwatched.size(), TrackerGeneration()), "an unwatched range reads as not stored over");
 }
 
+void CheckStoredOverUsesPageEvidence() {
+    constexpr std::size_t Page = 4096;
+    auto* memory = static_cast<std::uint8_t*>(AllocateWatched(2 * Block));
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    std::memset(memory, 0x11, 2 * Block);
+    const auto before = CollectWritesUncached(base, 2 * Block);
+    Require(before != 0, "the stored-over page fixture was not collected");
+
+    static_cast<volatile std::uint8_t*>(memory)[0] = 0x22;
+    const auto after = CollectWritesUncached(base, Block);
+    Require(after > before, "the page-local CPU write was not collected");
+    Require(StoredOver(base, Page, before), "a collected CPU write on a page was not reported as stored over");
+    Require(!StoredOver(base + Page, Page, before), "a page-local CPU write made an untouched page in the same block count as stored over");
+}
+
 void CheckStoredAllSince() {
     constexpr std::size_t bytes = 4 * Block;
     auto* memory = static_cast<std::uint8_t*>(AllocateWatched(bytes));
@@ -1484,6 +1499,7 @@ int main() {
         }
 #endif
         CheckSharedBlock();
+        CheckStoredOverUsesPageEvidence();
         CheckStoredAllSince();
         CheckSharedBlockProofs();
         CheckRepeatedPossibleStores();
