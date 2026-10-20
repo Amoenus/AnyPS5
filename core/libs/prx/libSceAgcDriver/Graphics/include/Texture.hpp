@@ -46,13 +46,13 @@ struct OwnedImage {
     OwnedImage(const Context& context, VkImage image, VkDeviceMemory memory) : context(context), image(image), memory(memory) {}
     OwnedImage(const OwnedImage&) = delete;
     OwnedImage& operator=(const OwnedImage&) = delete;
-    ~OwnedImage() {
-        if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
-        if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
-    }
+    ~OwnedImage();
+    void Allocate(const Context& device, const VkMemoryAllocateInfo& allocation, std::uint32_t mask, const char* operation);
     Context context;
     VkImage image;
     VkDeviceMemory memory;
+    VkDeviceSize memoryBytes = 0;
+    std::uint32_t memoryType = 0;
 };
 
 class Texture {
@@ -197,6 +197,7 @@ public:
     void WriteBack();
     // Deferred write-back (APS5_EAGER_WRITEBACK=1 stores at once instead).
     void MarkDirty();
+    void MarkWholeWritten();
     void MarkSliceDirty(std::uint32_t slice, std::uint32_t count = 1);
     void Flush();
     bool Dirty() const;
@@ -339,6 +340,7 @@ public:
     // may carry DCC metadata, and this surface must be host-imported (the write-back is GPU-direct).
     // False, naming why, when the copy must be a transfer.
     bool CopyFrom(StorageTexture& source, const char*& refusal);
+    static const char* CopyRefusal(const Context& context, const StorageTexture* destination, const StorageTexture& source, std::uint64_t address);
     VkImage Image() const { return image; }
     const GuestTextureResource& Descriptor() const { return descriptor; }
     std::uint32_t ImageLayers() const { return geometry.imageLayers; }
@@ -591,6 +593,7 @@ private:
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize memoryBytes = 0;
+    std::uint32_t memoryType = 0;
     VkImageView view = VK_NULL_HANDLE;
     std::uint32_t defaultMip = 0;
     std::map<std::uint32_t, VkImageView> extraViews;
