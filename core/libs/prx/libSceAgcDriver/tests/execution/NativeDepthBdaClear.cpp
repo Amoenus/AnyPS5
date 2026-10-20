@@ -25,7 +25,9 @@
 #include <cstring>
 #include <exception>
 #include <mutex>
+#include <optional>
 #include <span>
+#include <utility>
 
 namespace AgcDriver {
 
@@ -155,10 +157,12 @@ int RunNativeClear(AgcDriver::VulkanDevice& device, ClearConsumer consumer) {
     device.WaitIdle();
     target.clearDepth = 1.0f;
     Require(DepthSurfaceView(context, target) == view, "changing the native clear value replaced its attachment");
-    Require(NoteHtileDepthClear(target.htileAddress, metadataBytes, metadataBytes), "the recognized native clear did not request completion evidence");
+    std::optional<std::pair<std::uint64_t, std::size_t>> htileClear;
+    if (NoteHtileDepthClear(target.htileAddress, metadataBytes, metadataBytes)) htileClear.emplace(target.htileAddress, metadataBytes);
+    Require(htileClear.has_value(), "the full BDA clear was not registered for completion");
     const auto generation = Memory::TrackerGeneration();
     userData[4] = 0xfffffff0u;
-    device.Dispatch(compile(), groups, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(code.data()), nullptr, nullptr, std::pair{target.htileAddress, metadataBytes});
+    device.Dispatch(compile(), groups, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(code.data()), nullptr, nullptr, htileClear);
     std::puts("Native full BDA clear: checking sampled owner before explicit WaitIdle");
     Require(context.recorder->PendingWriteOverlaps(target.htileAddress, metadataBytes), "the recognized HTILE clear is missing its pending write range");
     switch (consumer) {
