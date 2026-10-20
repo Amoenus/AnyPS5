@@ -442,4 +442,64 @@ int APS5_VABI sceAudio3dAudioOutOutputs(AudioOutOutputParam* param, uint32_t num
     return 0;
 }
 
+int APS5_VABI sceAudio3dStrError(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dPortOpenEx(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dPortCreate(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dPortDestroy(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dPortGetStatus(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dReportRegisterHandler(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dReportUnregisterHandler(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dGetSpeakerArrayMemorySize(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dCreateSpeakerArray(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dDeleteSpeakerArray(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dGetSpeakerArrayMixCoefficients(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceAudio3dGetSpeakerArrayMixCoefficients2(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }
