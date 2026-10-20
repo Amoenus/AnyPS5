@@ -3397,6 +3397,11 @@ bool Recorder::writtenBackSince(std::uint64_t sequence, std::uint64_t begin, std
     return false;
 }
 
+void Recorder::HoldNextSubmit(VkSemaphore semaphore, std::uint64_t value) {
+    submitHold = semaphore;
+    submitHoldValue = value;
+}
+
 void Recorder::Submit() {
     PerformanceTimer frameTiming("Recorder.Submit");
     // The work count is cleared even when nothing is open: the driver counts a dispatch after its
@@ -3446,13 +3451,23 @@ void Recorder::Submit() {
     const std::uint64_t serial = submissions + 1;
     CaptureTrace::Log("submit batch=%llu reads=%zu writes=%zu", static_cast<unsigned long long>(serial), batch->reads.size(), batch->writes.size());
     VkTimelineSemaphoreSubmitInfoKHR timelineInfo{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO_KHR};
-    timelineInfo.signalSemaphoreValueCount = 1;
-    timelineInfo.pSignalSemaphoreValues = &serial;
+    const VkSemaphore hold = std::exchange(submitHold, VK_NULL_HANDLE);
+    const std::uint64_t holdValue = submitHoldValue;
+    VkPipelineStageFlags holdStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    if (hold != VK_NULL_HANDLE) {
+        submission.waitSemaphoreCount = 1;
+        submission.pWaitSemaphores = &hold;
+        submission.pWaitDstStageMask = &holdStage;
+        timelineInfo.waitSemaphoreValueCount = 1;
+        timelineInfo.pWaitSemaphoreValues = &holdValue;
+    }
     if (timeline != VK_NULL_HANDLE) {
-        submission.pNext = &timelineInfo;
+        timelineInfo.signalSemaphoreValueCount = 1;
+        timelineInfo.pSignalSemaphoreValues = &serial;
         submission.signalSemaphoreCount = 1;
         submission.pSignalSemaphores = &timeline;
     }
+    if (hold != VK_NULL_HANDLE || timeline != VK_NULL_HANDLE) submission.pNext = &timelineInfo;
     const auto submitStart = std::chrono::steady_clock::now();
     const auto result = function(queueSubmit, "vkQueueSubmit")(context.queue, 1, &submission, batch->fence);
     if (result == VK_ERROR_DEVICE_LOST) {
