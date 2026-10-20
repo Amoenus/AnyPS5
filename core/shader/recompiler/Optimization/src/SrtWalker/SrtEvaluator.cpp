@@ -242,9 +242,17 @@ bool BasicEvaluator<TNode>::EvaluateRawRead(const TNode& inst, std::uint64_t& re
         return true;
     }
     if (_runtime.userDataUse != nullptr) _runtime.userDataUse->reads.emplace_back(address, origin);
-    if (_inaccessible != nullptr && _runtime.accessible != nullptr && !_runtime.accessible(_runtime.userContext, address, sizeof(std::uint32_t)) && LoadedFromMemory(*handle.Value())) {
-        *_inaccessible = {inst.Value(), address};
-        return false;
+    int probe = -1;
+    if (_inaccessible != nullptr && _runtime.accessible != nullptr) {
+        try {
+            probe = _runtime.accessible(_runtime.userContext, address, sizeof(std::uint32_t)) ? 1 : 0;
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string(error.what()) + DescribeSrtReadFailure(*inst.Value(), -2, "generic-probe"));
+        }
+        if (probe == 0 && LoadedFromMemory(*handle.Value())) {
+            *_inaccessible = {inst.Value(), address};
+            return false;
+        }
     }
     if (auto* trace = _runtime.readTrace; trace != nullptr) {
         if (inst.Value() == trace->leaf) trace->leaves.emplace_back(trace->leafSlot, address);
@@ -252,8 +260,10 @@ bool BasicEvaluator<TNode>::EvaluateRawRead(const TNode& inst, std::uint64_t& re
     }
     std::uint32_t word = 0;
     if (_runtime.readMemory != nullptr) {
-        if (!_runtime.readMemory(_runtime.userContext, address, &word)) {
-            return false;
+        try {
+            if (!_runtime.readMemory(_runtime.userContext, address, &word)) return false;
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string(error.what()) + DescribeSrtReadFailure(*inst.Value(), probe, "generic"));
         }
     } else {
         std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));

@@ -392,7 +392,15 @@ bool SrtTape::compute(Frame& frame, const Node& node, std::uint64_t& result) con
                 return false;
             }
             if (frame.runtime.userDataUse != nullptr) frame.runtime.userDataUse->reads.emplace_back(address, origin);
-            if (node.loaded && frame.runtime.accessible != nullptr && !frame.runtime.accessible(frame.runtime.userContext, address, sizeof(std::uint32_t))) return false;
+            int probe = -1;
+            if (node.loaded && frame.runtime.accessible != nullptr) {
+                try {
+                    probe = frame.runtime.accessible(frame.runtime.userContext, address, sizeof(std::uint32_t)) ? 1 : 0;
+                } catch (const std::exception& error) {
+                    throw std::runtime_error(std::string(error.what()) + DescribeSrtReadFailure(*node.source, -2, "tape-probe"));
+                }
+                if (probe == 0) return false;
+            }
             if (auto* trace = frame.runtime.readTrace; trace != nullptr) {
                 if (node.source == trace->leaf) trace->leaves.emplace_back(trace->leafSlot, address);
                 else trace->otherReads.push_back(address);
@@ -400,7 +408,11 @@ bool SrtTape::compute(Frame& frame, const Node& node, std::uint64_t& result) con
             const auto reader = node.clean ? frame.runtime.readSpecializationMemory : frame.runtime.readMemory;
             std::uint32_t word = 0;
             if (reader != nullptr) {
-                if (!reader(frame.runtime.userContext, address, &word)) return false;
+                try {
+                    if (!reader(frame.runtime.userContext, address, &word)) return false;
+                } catch (const std::exception& error) {
+                    throw std::runtime_error(std::string(error.what()) + DescribeSrtReadFailure(*node.source, probe, "tape"));
+                }
             } else {
                 std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
             }

@@ -756,6 +756,108 @@ void verifySignedSrtComparison() {
     }
 }
 
+void verifySrtReadFailureDiagnostics() {
+    using namespace ShaderRecompiler;
+    for (std::uint32_t kind = 0; kind < 4u; ++kind) {
+        IrProgram program;
+        IrResourcePlan plan;
+        plan.srtPlanComplete = true;
+        plan.resourceTrackingComplete = true;
+        plan.userDataCount = 1u;
+        plan.materializationSources = {0u};
+        MemoryInfo info;
+        info.kind = ResourceKind::ScalarAddress;
+        plan.memoryInfo.push_back(info);
+        const auto make = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments = {}, std::uint64_t flags = 0u) -> IrValue& {
+            auto& value = program.CreateValue(opcode, type, flags);
+            for (auto* argument : arguments) value.AddArgument(argument);
+            return value;
+        };
+        const auto constant = [&](std::uint32_t bits) -> IrValue& {
+            auto& value = make(IrOpcode::Void, IrType::U32);
+            value.SetImmediateU32(bits);
+            return value;
+        };
+        const auto memoryFlags = [](std::uint32_t pc) {
+            const MemoryFlags flags{0u, pc};
+            std::uint64_t bits = 0;
+            std::memcpy(&bits, &flags, sizeof(flags));
+            return bits;
+        };
+        auto& zero = constant(0u);
+        auto& active = make(IrOpcode::Void, IrType::U1);
+        active.SetImmediateBool(true);
+        auto& reg = make(IrOpcode::Void, IrType::ScalarReg);
+        reg.SetRegister({RegisterBank::Scalar, 0u});
+        auto& userData = make(IrOpcode::GetUserData, IrType::U32, {&reg});
+        IrValue* low = &constant(0x1000u);
+        if (kind == 1u || kind == 3u) low = &userData;
+        if (kind == 2u) {
+            auto& shaderBase = make(IrOpcode::GetShaderBase, IrType::U64);
+            low = &make(IrOpcode::CompositeExtractU64, IrType::U32, {&shaderBase, &zero});
+        }
+        auto* address = &make(IrOpcode::GetAddressResource, IrType::AddressResource, {low, &zero});
+        if (kind == 3u) {
+            auto& loaded = make(IrOpcode::LoadAddressU32, IrType::U32, {address, &zero, &zero, &active}, memoryFlags(0x40u));
+            address = &make(IrOpcode::GetAddressResource, IrType::AddressResource, {&loaded, &zero});
+        }
+        auto& read = make(IrOpcode::LoadAddressU32, IrType::U32, {address, &zero, &zero, &active}, memoryFlags(0x44u));
+        DescriptorSource source;
+        source.dwordCount = 1u;
+        source.dwords[0] = &read;
+        plan.descriptorSources.push_back(source);
+        const std::array<std::uint32_t, 1> words{0x1000u};
+        for (const auto& [tapePath, failProbe] : std::array<std::pair<bool, bool>, 4>{{{false, false}, {true, false}, {false, true}, {true, true}}}) {
+            if (failProbe && kind != 3u) continue;
+            struct Context {
+                bool loaded;
+                bool failProbe;
+                std::uint32_t probes = 0u;
+                std::uint32_t reads = 0u;
+            } context{kind == 3u, failProbe};
+            SrtRuntime runtime{words};
+            runtime.shaderBase = 0x1000u;
+            runtime.userContext = &context;
+            runtime.accessible = [](void* opaque, std::uint64_t address, std::uint64_t) {
+                auto& state = *static_cast<Context*>(opaque);
+                ++state.probes;
+                if (state.failProbe && address == 0x2000u) throw std::runtime_error("injected SRT probe failure");
+                return state.loaded;
+            };
+            runtime.readMemory = [](void* opaque, std::uint64_t address, std::uint32_t* value) {
+                auto& state = *static_cast<Context*>(opaque);
+                ++state.reads;
+                if (state.loaded && address == 0x1000u) {
+                    *value = 0x2000u;
+                    return true;
+                }
+                throw std::runtime_error("injected SRT reader failure");
+            };
+            runtime.readSpecializationMemory = runtime.readMemory;
+            const auto expectedProbe = failProbe ? -2 : kind == 3u ? 1 : tapePath ? -1 : 0;
+            const auto expected = std::string(failProbe ? "injected SRT probe failure" : "injected SRT reader failure") + " [SRT read pc 0x44, rootMemory " +
+                (kind == 3u ? "1" : "0") + ", rootUserData " + (kind == 1u || kind == 3u ? "1" : "0") +
+                ", rootShaderBase " + (kind == 2u ? "1" : "0") + ", probe " + std::to_string(expectedProbe) +
+                ", path " + (tapePath ? "tape" : "generic") + (failProbe ? "-probe" : "") + "]";
+            expectFailure([&] {
+                std::vector<DescriptorValue> results;
+                std::vector<std::uint32_t> flat;
+                std::vector<std::uint8_t> activeSources;
+                if (tapePath) {
+                    const auto* tape = Detail::SrtTape::For(plan);
+                    require(tape != nullptr, "SRT read diagnostics: the valid plan did not compile to a tape");
+                    static_cast<void>(tape->Run(plan, runtime, results, flat, activeSources));
+                } else {
+                    std::vector<SrtReadPoison> poison;
+                    static_cast<void>(Detail::EvaluateRuntimeSourcesImpl(plan, plan.materializationSources, runtime, results, flat, true, {}, activeSources, &poison));
+                }
+            }, expected.c_str(), "SRT read diagnostics: failure origin or original reason changed");
+            require(context.probes == (kind == 3u ? tapePath ? 1u : 2u : tapePath ? 0u : 1u) && context.reads == (failProbe ? 1u : kind == 3u ? 2u : 1u),
+                    "SRT read diagnostics: probe ordering or number of reads changed");
+        }
+    }
+}
+
 void verifyInvalidImageDescriptorDiagnostics() {
     using namespace ShaderRecompiler;
     const auto check = [](std::uint32_t word3, std::uint32_t word5, bool r128, const char* expected) {
@@ -7477,6 +7579,7 @@ int main(int argc, char** argv) {
         verifyFrontendPair();
         verifyLayoutPair();
         verifySignedSrtComparison();
+        verifySrtReadFailureDiagnostics();
         verifyTypeZeroImageMaterialization();
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
