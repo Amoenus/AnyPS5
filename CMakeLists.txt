@@ -44,6 +44,9 @@ if(BUILD_TESTING)
         get_filename_component(testCompilerDirectory "${CMAKE_CXX_COMPILER}" DIRECTORY)
         foreach(runtimeName IN ITEMS libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
             if(NOT EXISTS "${testCompilerDirectory}/${runtimeName}")
+                if(ANYPS5_RELINKER_ONLY)
+                    continue()
+                endif()
                 message(FATAL_ERROR "Cannot locate MinGW runtime: ${runtimeName}")
             endif()
             file(COPY "${testCompilerDirectory}/${runtimeName}" DESTINATION "${ANYPS5_TEST_OUTPUT_DIRECTORY}")
@@ -202,6 +205,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_wrapped_exports.py)
         add_test(NAME pr_overlap_own_branch COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_own_branch.py)
+        add_test(NAME pr_overlap_errors COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_errors.py)
         add_test(NAME nid_database_cache COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_nid_names.py)
         add_test(NAME release_package COMMAND ${Python3_EXECUTABLE}

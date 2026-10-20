@@ -1084,6 +1084,11 @@ int APS5_VABI socketpair_nid_postfix(int family, int type, int protocol, int* de
             GuestSockets::Close(firstDescriptor);
             return Fail(error);
         }
+        if ((type & GuestCloseOnExec) != 0) {
+            std::lock_guard registry(socketsMutex);
+            closeOnExecDescriptors.insert(firstDescriptor);
+            closeOnExecDescriptors.insert(secondDescriptor);
+        }
         descriptors[0] = firstDescriptor;
         descriptors[1] = secondDescriptor;
         return 0;

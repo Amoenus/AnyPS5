@@ -12,8 +12,8 @@
 #endif
 
 extern "C" int APS5_VABI access_nid_postfix(const char* path, int mode) {
-    if (!path) { errno = 14; return -1; }
     if (mode < 0 || (mode & ~7)) { errno = 22; return -1; }
+    if (!path) { errno = 14; return -1; }
     if (!*path) { errno = 2; return -1; }
     try {
         const auto resolved = ResolvePath_nid_no_patch(path);

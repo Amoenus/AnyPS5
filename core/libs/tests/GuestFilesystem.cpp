@@ -736,7 +736,7 @@ int main() {
     Require(std::filesystem::file_size(sized) == 6);
     { std::ifstream stream(sized); std::string contents; std::getline(stream, contents);
       Require(contents == "012345"); }
-    Require(sceKernelTruncate_nid_postfix((sized / "missing").string().c_str(), 6) == static_cast<int>(0x80020002u));
+    Require(sceKernelTruncate_nid_postfix((sized / "missing").string().c_str(), 6) == static_cast<int>(0x80020014u));
     Require(sceKernelUtimes_nid_postfix(sized.string().c_str(), nullptr) == 0);
     std::FILE* native = std::fopen(sized.string().c_str(), "r+b");
     Require(native != nullptr);
@@ -1155,6 +1155,11 @@ int main() {
         Require(lstat_nid_postfix(blocked->c_str(), &blockedStatus) == -1 && *__error_nid_postfix() == expected);
         Require(access_nid_postfix(blocked->c_str(), 0) == -1 && *__error_nid_postfix() == expected);
         Require(unlink_nid_postfix(blocked->c_str()) == -1 && *__error_nid_postfix() == expected);
+        Require(chmod_nid_postfix(blocked->c_str(), 0644) == -1 && *__error_nid_postfix() == expected);
+        Require(sceKernelTruncate_nid_postfix(blocked->c_str(), 0) == static_cast<int>(0x80020000u | static_cast<unsigned>(expected)));
+        Require(sceKernelUtimes_nid_postfix(blocked->c_str(), nullptr) == static_cast<int>(0x80020000u | static_cast<unsigned>(expected)));
+        Require(rename_nid_postfix(blocked->c_str(), (root / "renamed-target").string().c_str()) == -1 && *__error_nid_postfix() == expected);
+        if (blocked != &missingChild) Require(rename_nid_postfix(presentName.c_str(), blocked->c_str()) == -1 && *__error_nid_postfix() == expected);
     }
 #ifndef _WIN32
     const auto linkedDirectory = root / "linked-directory";
