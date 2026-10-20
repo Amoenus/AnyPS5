@@ -1320,7 +1320,13 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
                     ", fragmentsLog2 " + std::to_string((descriptor.dwords[3] >> 16u) & 0xfu) +
                     ", maxMip " + std::to_string((descriptor.dwords[5] >> 4u) & 0xfu);
             }
-            throw std::runtime_error(message + ")");
+            message += ") [source " + std::to_string(image.source) +
+                ", firstUsePc " + std::to_string(image.firstUsePc) +
+                ", plannedDimension " + std::to_string(static_cast<std::uint32_t>(image.dimension)) +
+                ", activeSource " + (image.source < activeSources.size() ? std::to_string(activeSources[image.source]) : "unknown") +
+                ", activeImage " + (activity < activeSources.size() ? std::to_string(activeSources[activity]) : "unknown") +
+                ", controlFlowBlocks " + std::to_string(plan.controlFlow.size()) + "]";
+            throw std::runtime_error(message);
         }
         snapshot.images[i] = descriptor;
     }

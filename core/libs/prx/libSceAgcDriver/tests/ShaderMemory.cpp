@@ -778,6 +778,7 @@ void verifyInvalidImageDescriptorDiagnostics() {
             plan.descriptorSources.push_back(source);
             ImageResource image;
             image.source = index;
+            image.firstUsePc = 64u + index;
             image.resourceClass = ImageResourceClass::Sampled;
             image.dimension = RdnaImageDimension::Dim2D;
             image.read = true;
@@ -786,7 +787,10 @@ void verifyInvalidImageDescriptorDiagnostics() {
             plan.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(image));
         }
         ResourceSnapshot snapshot;
-        expectFailure([&] { ResourceMaterializer{}.Materialize(plan, SrtRuntime{}, snapshot); }, expected,
+        const auto context = std::string(expected) + " [source 1, firstUsePc 65, plannedDimension " +
+            std::to_string(static_cast<std::uint32_t>(RdnaImageDimension::Dim2D)) +
+            ", activeSource 1, activeImage 1, controlFlowBlocks 0]";
+        expectFailure([&] { ResourceMaterializer{}.Materialize(plan, SrtRuntime{}, snapshot); }, context.c_str(),
                       "invalid image descriptor refusal did not identify the failing image and descriptor fields");
     };
     check(0x20000facu, 0u, false,
