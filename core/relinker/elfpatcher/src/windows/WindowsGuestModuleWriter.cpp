@@ -13,7 +13,7 @@
 
 namespace Elfpatcher {
 
-std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestImage& guest, Domain::GuestRuntime& runtime) const {
+std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestImage& guest, Domain::GuestRuntime& runtime, const std::function<void(std::string_view)>& message) const {
     using namespace Windows;
     if (guest.Symbolic) throw Domain::RelinkerException("DF_SYMBOLIC guest modules are not supported by the Windows writer");
     WindowsLoadImage image(guest.Bytes, guest.Headers, false);
@@ -84,7 +84,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     std::array<PeDirectory, 16> directories{};
     std::uint32_t tlsIndex = 0;
     try {
-        directories[9] = WindowsTlsBuilder().Build(guest.Bytes, guest.Headers, image, sections, relocations, nextRva, &tlsIndex);
+        directories[9] = WindowsTlsBuilder().Build(guest.Bytes, guest.Headers, image, sections, relocations, nextRva, &tlsIndex, {}, message);
     } catch (Domain::RelinkerException& error) {
         if (error.InputPath.empty()) error.InputPath = Io::Utf8Path(guest.SourcePath);
         throw;
