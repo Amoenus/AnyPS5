@@ -841,6 +841,24 @@ void NativeFmask(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
         device->WaitIdle();
         ClearMultisampleTargets(device->Device());
         ClearCachedTextures(device->Device());
+        Draw(*device, TargetState(color));
+        auto recreated = color;
+        recreated.pipeBankXor ^= 0x4000u;
+        recreated.fmaskAddress = 0u;
+        recreated.fmaskPipeBankXor = 0u;
+        Draw(*device, TargetState(recreated));
+        std::array<std::byte, 4> formerFmask{};
+        formerFmask.fill(std::byte{0x22});
+        AgcDriver::GuestMemory::Write(fmask.Address(), formerFmask);
+        Draw(*device, TargetState(recreated));
+        auto recreatedDescriptor = TargetDescriptor(colorMemory, 3u);
+        recreatedDescriptor[0] |= recreated.pipeBankXor >> 8u;
+        const auto recreatedSamples = LoadSamples(*device, recreatedDescriptor, 8u);
+        Require(std::find(recreatedSamples.begin(), recreatedSamples.end(), Drawn) != recreatedSamples.end(), "former FMASK metadata affected the recreated native target");
+        device->SubmitRecorded(true);
+        device->WaitIdle();
+        ClearMultisampleTargets(device->Device());
+        ClearCachedTextures(device->Device());
         std::printf("native FMASK: XOR=0x%x, eight distinct samples, both registration modes, cached reuse, association/extent/write refusals and unchanged guest metadata passed\n", pipeXor);
     }
 }
