@@ -943,6 +943,77 @@ void verifyPureFlatSlots() {
     require(Detail::ComputePureFlatSlots(plan) == Pure{0, 0, 0, 0}, "pure flat slots: an incomplete plan was classified");
 }
 
+void verifyResourceFrontierConditions(bool tapeOnly) {
+    using namespace ShaderRecompiler;
+    std::vector<std::unique_ptr<IrValue>> values;
+    std::uint32_t ids = 0;
+    const auto make = [&](IrOpcode opcode, IrType type) -> IrValue& {
+        values.push_back(std::make_unique<IrValue>(opcode, type, ids++));
+        return *values.back();
+    };
+    const auto constant = [&](std::uint32_t value) -> IrValue& {
+        auto& immediate = make(IrOpcode::Void, IrType::U32);
+        immediate.SetImmediateU32(value);
+        return immediate;
+    };
+    auto& address = make(IrOpcode::GetAddressResource, IrType::AddressResource);
+    address.AddArgument(&constant(0x10000u));
+    address.AddArgument(&constant(0u));
+    auto& condition = make(IrOpcode::LoadAddressU32, IrType::U32);
+    condition.AddArgument(&address);
+    condition.AddArgument(&constant(0u));
+    IrResourcePlan plan;
+    plan.srtPlanComplete = true;
+    plan.resourceTrackingComplete = true;
+    MemoryInfo memory;
+    memory.kind = ResourceKind::ScalarAddress;
+    plan.memoryInfo.push_back(memory);
+    DescriptorSource source;
+    source.dwordCount = 1u;
+    source.dwords[0] = &constant(0x89abcdefu);
+    plan.descriptorSources.push_back(source);
+    plan.materializationSources = {0u};
+    plan.controlFlow = {{&condition, {1u, 2u}, {}, {}}, {nullptr, {3u}, {}, {}}, {nullptr, {3u}, {}, {}}, {nullptr, {}, {0u}, {}}};
+    require(SrtWalker{}.ValidateRuntimeValue(plan, &condition), "resource frontier: the condition is not runtime-evaluable");
+    const auto* tape = Detail::SrtTape::For(plan);
+    require(tape != nullptr, "resource frontier: the complete plan has no tape");
+    struct Reads {
+        std::uint32_t words = 0;
+        std::uint32_t probes = 0;
+        bool pending = false;
+    };
+    for (const bool pending : {false, true}) {
+        for (const bool useTape : {false, true}) {
+            if (tapeOnly && !useTape) continue;
+            Reads reads{0u, 0u, pending};
+            SrtReadTrace trace;
+            SrtUserDataUse use;
+            SrtRuntime runtime;
+            runtime.userContext = &reads;
+            runtime.readMemory = runtime.readSpecializationMemory = [](void* context, std::uint64_t, std::uint32_t*) {
+                ++static_cast<Reads*>(context)->words;
+                return false;
+            };
+            runtime.pendingWrite = [](void* context, std::uint64_t, std::uint64_t) {
+                auto& reads = *static_cast<Reads*>(context);
+                ++reads.probes;
+                return reads.pending;
+            };
+            runtime.readTrace = &trace;
+            runtime.userDataUse = &use;
+            std::vector<DescriptorValue> results;
+            std::vector<std::uint32_t> flat;
+            std::vector<std::uint8_t> active;
+            const std::vector<std::uint32_t> sources(plan.materializationSources);
+            const bool ok = useTape ? tape->Run(plan, runtime, results, flat, active) : Detail::EvaluateRuntimeSourcesImpl(plan, sources, runtime, results, flat, true, {}, active);
+            require(ok, "resource frontier: a shared resource could not be captured");
+            require(reads.words == 0u && reads.probes == 0u, "resource frontier: an irrelevant condition was read or probed");
+            require(results.size() == 1u && results[0].dwordCount == 1u && results[0].dwords[0] == 0x89abcdefu && active == std::vector<std::uint8_t>{1u} && flat.empty(), "resource frontier: the shared resource differs");
+            require(trace.leaves.empty() && trace.otherReads.empty() && use.asBase == 0u && use.asValue == 0u && use.reads.empty(), "resource frontier: an irrelevant condition entered the read trace or user-data use");
+        }
+    }
+}
+
 void verifyGuardedDescriptorSources() {
     using namespace ShaderRecompiler;
     constexpr std::uint32_t Format8888UNorm = 56;
@@ -7331,6 +7402,16 @@ int main(int argc, char** argv) {
         setenv("ANYPS5_NO_SHADER_CACHE", "1", 1);
 #endif
         using namespace ShaderRecompiler;
+        if (argc == 2 && (std::string_view(argv[1]) == "--resource-frontier" || std::string_view(argv[1]) == "--resource-frontier-tape")) {
+            verifyResourceFrontierConditions(std::string_view(argv[1]) == "--resource-frontier-tape");
+            std::cout << "Equivalent resource frontiers skip irrelevant condition reads\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--guarded-sources") {
+            verifyGuardedDescriptorSources();
+            std::cout << "Guarded descriptors preserve exact image and writable-buffer selection\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--quad-mask-no-demote") {
             verifyQuadMaskNeighbourReads();
             std::cout << "Quad masks preserve neighbour-lane helpers or refuse without demote\n";
