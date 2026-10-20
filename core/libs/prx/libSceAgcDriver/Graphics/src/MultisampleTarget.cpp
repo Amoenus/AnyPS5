@@ -278,6 +278,7 @@ public:
         dccRanges.clear();
         metadataValid = std::make_shared<std::atomic<bool>>(true);
         const auto initial = initialDccClear(use);
+        ensureGeneralLayout();
         recordCommands(context, [&](VkCommandBuffer commands, Recorder* recorder) {
             RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -680,7 +681,7 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& use) {
             }
             target->Recreate(use);
             guard(context, use, target->active, target->metadataValid);
-            target->ApplyFastClear(use);
+            target->PrepareForColorAttachment(use);
             return *target;
         }
         if (target->fromTexture && use.cmaskAddress != 0) {
