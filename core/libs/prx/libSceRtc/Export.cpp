@@ -156,16 +156,22 @@ int addTicks(RtcTick* dst, const RtcTick* src, std::int64_t count, std::int64_t 
     return 0;
 }
 
-int addMonths(RtcTick* dst, const RtcTick* src, std::int64_t months) {
+int addTicksWrapping(RtcTick* dst, const RtcTick* src, std::int64_t count, std::int64_t unit) {
     if (!dst || !src) return SCE_RTC_ERROR_INVALID_POINTER;
-    if (src->tick > MAX_TICK) return SCE_RTC_ERROR_INVALID_VALUE;
+    dst->tick = src->tick + static_cast<std::uint64_t>(count) * static_cast<std::uint64_t>(unit);
+    return 0;
+}
+
+int addMonths(RtcTick* dst, const RtcTick* src, std::int32_t months) {
+    if (!dst || !src) return SCE_RTC_ERROR_INVALID_POINTER;
     RtcDateTime time = fromTick(src->tick);
-    const std::int64_t monthIndex = time.year * 12 + (time.month - 1) + months;
-    const std::int64_t year = monthIndex / 12;
-    if (monthIndex < 12 || year > 9999) return SCE_RTC_ERROR_INVALID_VALUE;
-    time.year = static_cast<std::uint16_t>(year);
-    time.month = static_cast<std::uint16_t>(monthIndex % 12 + 1);
-    const int lastDay = daysInMonth(time.year, time.month);
+    const auto index = static_cast<std::int32_t>(static_cast<std::uint32_t>(time.year) * 12u + time.month + static_cast<std::uint32_t>(months) - 1u);
+    const auto year = static_cast<std::uint16_t>(index / 12);
+    const std::int32_t month = index % 12;
+    if (year < 1 || year > 9999 || month < 0) return 0;
+    time.year = year;
+    time.month = static_cast<std::uint16_t>(month + 1);
+    const int lastDay = daysInMonth(year, time.month);
     if (time.day > lastDay) time.day = static_cast<std::uint16_t>(lastDay);
     dst->tick = toTick(time);
     return 0;
@@ -627,31 +633,31 @@ int APS5_VABI sceRtcParseDateTime(RtcTick* utc, const char* date_time) {
 }
 
 int APS5_VABI sceRtcTickAddTicks(RtcTick* dst, const RtcTick* src, int64_t ticks) {
-    return addTicks(dst, src, ticks, 1);
+    return addTicksWrapping(dst, src, ticks, 1);
 }
 
 int APS5_VABI sceRtcTickAddMicroseconds(RtcTick* dst, const RtcTick* src, int64_t usec) {
-    return addTicks(dst, src, usec, 1);
+    return addTicksWrapping(dst, src, usec, 1);
 }
 
 int APS5_VABI sceRtcTickAddSeconds(RtcTick* dst, const RtcTick* src, int64_t seconds) {
-    return addTicks(dst, src, seconds, TICKS_PER_SECOND);
+    return addTicksWrapping(dst, src, seconds, TICKS_PER_SECOND);
 }
 
 int APS5_VABI sceRtcTickAddMinutes(RtcTick* dst, const RtcTick* src, int64_t minutes) {
-    return addTicks(dst, src, minutes, TICKS_PER_MINUTE);
+    return addTicksWrapping(dst, src, minutes, TICKS_PER_MINUTE);
 }
 
 int APS5_VABI sceRtcTickAddHours(RtcTick* dst, const RtcTick* src, int32_t hours) {
-    return addTicks(dst, src, hours, TICKS_PER_HOUR);
+    return addTicksWrapping(dst, src, hours, TICKS_PER_HOUR);
 }
 
 int APS5_VABI sceRtcTickAddDays(RtcTick* dst, const RtcTick* src, int32_t days) {
-    return addTicks(dst, src, days, TICKS_PER_DAY);
+    return addTicksWrapping(dst, src, days, TICKS_PER_DAY);
 }
 
 int APS5_VABI sceRtcTickAddWeeks(RtcTick* dst, const RtcTick* src, int32_t weeks) {
-    return addTicks(dst, src, weeks, 7 * TICKS_PER_DAY);
+    return addTicksWrapping(dst, src, weeks, 7 * TICKS_PER_DAY);
 }
 
 int APS5_VABI sceRtcTickAddMonths(RtcTick* dst, const RtcTick* src, int32_t months) {
@@ -659,7 +665,7 @@ int APS5_VABI sceRtcTickAddMonths(RtcTick* dst, const RtcTick* src, int32_t mont
 }
 
 int APS5_VABI sceRtcTickAddYears(RtcTick* dst, const RtcTick* src, int16_t years) {
-    return addMonths(dst, src, static_cast<std::int64_t>(years) * 12);
+    return addMonths(dst, src, static_cast<std::int32_t>(years) * 12);
 }
 
 int APS5_VABI sceRtcInit(void) {

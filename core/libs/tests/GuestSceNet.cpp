@@ -795,6 +795,48 @@ static void CheckInetPtonWhitespace() {
     }
 }
 
+struct AtonCase {
+    const char* text;
+    std::uint32_t address;
+};
+
+static void CheckInetPtonExParts() {
+    for (const AtonCase& c : {AtonCase{"0", 0}, AtonCase{"1", 1}, AtonCase{"4294967295", 0xffffffff}, AtonCase{"4294967296", 0},
+                              AtonCase{"0xffffffff", 0xffffffff}, AtonCase{"0x100000000", 0}, AtonCase{"1.16777215", 0x01ffffff},
+                              AtonCase{"1.2.65535", 0x0102ffff}, AtonCase{"1.2.3.255", 0x010203ff}, AtonCase{"0x7F.1", 0x7f000001},
+                              AtonCase{"0X7f.1", 0x7f000001}, AtonCase{"0x", 0}, AtonCase{"0x.1.2.3", 0x00010203}, AtonCase{"0x8.1", 0x08000001}, AtonCase{"0x9", 9}, AtonCase{"1.2.3", 0x01020003},
+                              AtonCase{"127.1", 0x7f000001}, AtonCase{"010.0.0.1", 0x08000001}, AtonCase{"0377.1", 0xff000001},
+                              AtonCase{"00000000001.2.3.4", 0x01020304}, AtonCase{"1.2.3.4 x", 0x01020304}, AtonCase{"1.2.3.4\tx", 0x01020304},
+                              AtonCase{"1.2.3.4\v", 0x01020304}, AtonCase{"1 .2.3.4", 1}, AtonCase{"0.8", 8}, AtonCase{"00.1", 1},
+                              AtonCase{"09", 9}, AtonCase{"09.1", 0x09000001}, AtonCase{"1.09", 0x01000009}, AtonCase{"0.09", 9},
+                              AtonCase{"09.09", 0x09000009}, AtonCase{"0919", 919}, AtonCase{"0989", 989}, AtonCase{"0998", 998},
+                              AtonCase{"1.4294967296", 0x01000000}, AtonCase{"4294967297.1", 0x01000001}, AtonCase{"1.2.3.4294967297", 0x01020301},
+                              AtonCase{"18446744073709551617", 1}, AtonCase{"0x1ffffffff", 0xffffffff}, AtonCase{"0x100000001.1", 0x01000001},
+                              AtonCase{"1.0xffffff", 0x01ffffff}, AtonCase{"1.2.0xffff", 0x0102ffff}}) {
+        std::array<std::uint8_t, 16> address{};
+        address.fill(0xaa);
+        *sceNetErrnoLoc() = 123;
+        Require(sceNetInetPtonEx(2, c.text, address.data(), 0) == 1 && *sceNetErrnoLoc() == 123);
+        Require(address[0] == (c.address >> 24) && address[1] == ((c.address >> 16) & 0xff) && address[2] == ((c.address >> 8) & 0xff) &&
+                address[3] == (c.address & 0xff) && address[4] == 0xaa);
+    }
+    for (const char* text : {"", "1.16777216", "1.2.65536", "1.2.3.256", "256.1", "0400.1", "0xg.1", "08", "018", "019", "0199", "00919",
+                             "080", "08.1.2.3", "1.08", "0.08", "0919.1", "09x", "1.0x1000000", "1.2.0x10000", "1.2.3.4.5", "1..2.3",
+                             ".1.2.3", "1.2.3.", "1.2.3.4x", " 1.2.3.4", "1.2.3.4\x01", "1.2.3.4\xa0", "+1.2.3.4", "-1.2.3.4"}) {
+        std::array<std::uint8_t, 16> address{};
+        address.fill(0xaa);
+        *sceNetErrnoLoc() = 123;
+        Require(sceNetInetPtonEx(2, text, address.data(), 0) == 0 && *sceNetErrnoLoc() == 123);
+        Require(std::all_of(address.begin(), address.end(), [](std::uint8_t byte) { return byte == 0xaa; }));
+    }
+    for (const char* text : {"::1 ", "::1x", " ::1", "1.2.3.4", "::1.2.3", "1:2:3:4:5:6:7:8:9"}) {
+        std::array<std::uint8_t, 16> address{};
+        address.fill(0xaa);
+        Require(sceNetInetPtonEx(28, text, address.data(), 0) == 0);
+        Require(std::all_of(address.begin(), address.end(), [](std::uint8_t byte) { return byte == 0xaa; }));
+    }
+}
+
 static void CheckInetPtonEx() {
     std::array<std::uint8_t, 16> address{};
     Require(sceNetInetPtonEx(2, "192.168.1.20", address.data(), 0) == 1);
@@ -807,10 +849,10 @@ static void CheckInetPtonEx() {
     Require(Failed(sceNetInetPtonEx(99, "127.0.0.1", address.data(), 0), 47));
     Require(Failed(sceNetInetPtonEx(2, nullptr, address.data(), 0), 22));
     Require(Failed(sceNetInetPtonEx(2, "127.0.0.1", nullptr, 0), 22));
-    for (const int flags : {1, -1}) {
-        bool threw = false;
-        try { sceNetInetPtonEx(2, "127.0.0.1", address.data(), flags); } catch (const std::runtime_error&) { threw = true; }
-        Require(threw);
+    for (const int flags : {1, 0x100, -1}) {
+        address.fill(0);
+        Require(sceNetInetPtonEx(2, "1.2.3", address.data(), flags) == 1);
+        Require(address[0] == 1 && address[1] == 2 && address[2] == 0 && address[3] == 3);
     }
 }
 
@@ -1293,6 +1335,7 @@ int main() {
     CheckAddressText(28, "::1");
     CheckAddressText(28, "1234:5678:9abc:def0:1234:5678:9abc:def0");
     CheckInetPtonWhitespace();
+    CheckInetPtonExParts();
     CheckInetPtonEx();
     CheckUsleep();
     CheckSystemTime();

@@ -111,6 +111,7 @@ extern "C" int APS5_VABI remove_nid_postfix(const char* path) {
 #endif
         if (error || !removed) {
             errno = error ? FilesystemError(error) : 2;
+            if (errno == 2) errno = NotFoundError_nid_no_patch(resolved);
             return -1;
         }
         RecordWrittenPath_nid_no_patch(resolved);

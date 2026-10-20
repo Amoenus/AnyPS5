@@ -1160,6 +1160,12 @@ int main() {
         Require(sceKernelUtimes_nid_postfix(blocked->c_str(), nullptr) == static_cast<int>(0x80020000u | static_cast<unsigned>(expected)));
         Require(rename_nid_postfix(blocked->c_str(), (root / "renamed-target").string().c_str()) == -1 && *__error_nid_postfix() == expected);
         if (blocked != &missingChild) Require(rename_nid_postfix(presentName.c_str(), blocked->c_str()) == -1 && *__error_nid_postfix() == expected);
+        Require(remove_nid_postfix(blocked->c_str()) == -1 && *__error_nid_postfix() == expected);
+        Require(opendir_nid_postfix(blocked->c_str()) == nullptr && *__error_nid_postfix() == expected);
+        Require(chdir_nid_postfix(blocked->c_str()) == -1 && *__error_nid_postfix() == expected);
+        for (const char* openMode : {"r", "w"}) {
+            Require(fopen_nid_postfix(blocked->c_str(), openMode) == nullptr && *__error_nid_postfix() == expected);
+        }
     }
 #ifndef _WIN32
     const auto linkedDirectory = root / "linked-directory";

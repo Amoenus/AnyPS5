@@ -112,6 +112,13 @@ static std::filesystem::path NativeMetadataPath(const std::filesystem::path& pat
     return native.starts_with(L"\\\\") ? std::filesystem::path(L"\\\\?\\UNC\\" + native.substr(2))
                                             : std::filesystem::path(L"\\\\?\\" + native);
 }
+static bool NativeSymbolicLinkLoop(const std::filesystem::path& path) {
+    const auto handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_CANT_RESOLVE_FILENAME;
+    CloseHandle(handle);
+    return false;
+}
 static int MapFlags(int sceFlags) {
     int f = 0;
     const int acc = sceFlags & SCE_KERNEL_O_ACCMODE;
@@ -370,6 +377,9 @@ int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
     if (error == std::errc::not_a_directory) return SceErrorFromErrno(GuestEnotdir);
     if (error == std::errc::filename_too_long || error == std::errc::too_many_symbolic_link_levels) return SceKernelError(FilesystemError(error));
     if (!std::filesystem::exists(status)) {
+#ifdef _WIN32
+        if (NativeSymbolicLinkLoop(metadataPath)) return SCE_KERNEL_ERROR_ELOOP;
+#endif
         return SceErrorFromErrno(NotFoundError_nid_no_patch(native));
     }
     const std::string_view guestPath(path);
