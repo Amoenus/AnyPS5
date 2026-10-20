@@ -317,7 +317,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
             addHost(dependency, windows || !deferred(index));
             if (findGuest(dependency) == guestNames.end()) hosts.push_back(dependency);
         }
-        if (!windows && !macos && images[index].Init != 0) {
+        if (!windows && !macos && images[index].HasInit) {
             if (std::find(hosts.begin(), hosts.end(), "libkernel.prx") == hosts.end()) hosts.push_back("libkernel.prx");
             if (!deferred(index) && uniqueHosts.insert("libkernel.prx").second) hostLibraries.push_back("libkernel.prx");
         }
