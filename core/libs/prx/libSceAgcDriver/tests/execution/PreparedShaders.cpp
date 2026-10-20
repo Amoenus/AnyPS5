@@ -219,7 +219,7 @@ void FailureCapture(AgcDriver::VulkanDevice& device) {
     Require(unsetenv("APS5_DUMP_SHADERS") == 0, "cannot disable shader capture");
 #endif
     std::ostringstream prefix;
-    prefix << "shader 0x" << std::hex << request.shader.codeAddress << " stage " << static_cast<unsigned>(request.shader.stage) << ": ";
+    prefix << "shader 0x" << std::hex << request.shader.codeAddress << " stage " << static_cast<unsigned>(request.shader.stage) << " [prepare]: ";
     const auto diagnosed = failure([&] { static_cast<void>(AgcDriver::DriverDetail::PrepareShaderWithDiagnostics(request)); });
     Require(diagnosed.rfind(prefix.str(), 0) == 0, "diagnosed failure names no shader address and stage");
     Require(diagnosed.substr(prefix.str().size()) == expected, "diagnosed failure changed the reason");
@@ -231,7 +231,7 @@ void FailureCapture(AgcDriver::VulkanDevice& device) {
 #endif
     const auto actual = failure([&] { static_cast<void>(AgcDriver::DriverDetail::PrepareShaderWithDiagnostics(request)); });
     std::ostringstream dumpedPrefix;
-    dumpedPrefix << "shader 0x" << std::hex << request.shader.codeAddress << " stage " << static_cast<unsigned>(request.shader.stage) << " (" << path << "): ";
+    dumpedPrefix << "shader 0x" << std::hex << request.shader.codeAddress << " stage " << static_cast<unsigned>(request.shader.stage) << " (" << path << ") [prepare]: ";
     Require(actual == dumpedPrefix.str() + expected, "enabled shader capture changed the diagnosed failure");
     Require(!std::ifstream(capturePath, std::ios::binary).is_open(), "a preparation failure was dumped as a dispatch request");
     Require(AgcDriver::DriverDetail::Driver::dumpRequest(request.shader.codeAddress, request) == capturePath, "a dispatch request dump has the wrong name");

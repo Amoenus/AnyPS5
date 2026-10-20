@@ -64,7 +64,7 @@ std::shared_ptr<const ShaderRecompiler::SourceHandle> PrepareShaderWithDiagnosti
         std::ostringstream where;
         where << "shader 0x" << std::hex << request.shader.codeAddress << " stage " << static_cast<unsigned>(request.shader.stage);
         if (!dump.empty()) where << " (" << dump << ")";
-        where << ": ";
+        where << " [prepare]: ";
         throw std::runtime_error(where.str() + error.what());
     }
 }

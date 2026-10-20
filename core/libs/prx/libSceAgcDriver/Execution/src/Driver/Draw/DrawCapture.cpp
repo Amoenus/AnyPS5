@@ -32,7 +32,7 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     auto& stageCapture = stageCaptures[i];
     stageCapture.forgetSerial = GuestMemory::ForgetSerial();
     stageCapture.pushOffset = pushOffset;
-    const auto named = [&](const std::exception& error) {
+    const auto named = [&](const std::exception& error, const char* phase) {
         static const bool dumpShaders = std::getenv("APS5_DUMP_SHADERS") != nullptr;
         std::string dump;
         if (dumpShaders) {
@@ -43,7 +43,7 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
         std::ostringstream where;
         where << "shader 0x" << std::hex << program.binary.codeAddress << " stage " << std::dec << static_cast<unsigned>(program.binary.stage);
         if (!dump.empty()) where << " (" << dump << ")";
-        where << ": ";
+        where << " [" << phase << "]: ";
         return std::runtime_error(where.str() + error.what());
     };
     const auto capture = [&] {
@@ -51,7 +51,7 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
         try {
             return CaptureInvocation(shaderMemory, *program.snapshot, program.codeOffset, request, invocation);
         } catch (const std::exception& error) {
-            throw named(error);
+            throw named(error, "capture");
         }
     }();
 
@@ -99,7 +99,7 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     try {
         stageCapture.compiled = invocation.Materialize(*capture);
     } catch (const std::exception& error) {
-        throw named(error);
+        throw named(error, "materialize");
     }
     stageCapture.capture = capture;
     timing.Mark("materialize");
