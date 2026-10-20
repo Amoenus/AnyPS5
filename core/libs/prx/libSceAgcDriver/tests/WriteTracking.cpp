@@ -218,6 +218,8 @@ void CheckStoredAllSince() {
     MarkPossiblyWritten(base + 2048, 16);
     Require(StoredOver(base + 2048, 16, before), "a possible driver write did not invalidate its exact range");
     Require(!StoredOver(base + 2064, 16, before), "a possible driver write invalidated an adjacent range");
+    Require(!UnchangedSince(base + 2048, 16, before), "a possible driver write left its exact range unchanged");
+    Require(UnchangedSince(base + 2064, 16, before), "a possible driver write changed an adjacent range");
     Require(!StoredAllSince_nid_no_patch(base + 2048, 16, before), "a possible driver write proved complete byte coverage");
     for (unsigned repeat = 0; repeat < 6; ++repeat) MarkPossiblyWritten(base + 2048, 16);
     Require(StoredOver(base + 2048, 16, before), "repeated possible writes lost their overlap evidence");
