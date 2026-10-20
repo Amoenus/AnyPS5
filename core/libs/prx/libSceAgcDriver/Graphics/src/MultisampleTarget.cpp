@@ -296,6 +296,7 @@ public:
         colorFill = MultisampledColorFill(use);
         fromTexture = false;
         dccRanges.clear();
+        fmaskRange.reset();
         metadataValid = std::make_shared<std::atomic<bool>>(true);
         const auto initial = initialDccClear(use);
         recordCommands(context, [&](VkCommandBuffer commands, Recorder* recorder) {
