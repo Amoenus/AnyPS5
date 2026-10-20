@@ -340,6 +340,7 @@ public:
     // may carry DCC metadata, and this surface must be host-imported (the write-back is GPU-direct).
     // False, naming why, when the copy must be a transfer.
     bool CopyFrom(StorageTexture& source, const char*& refusal);
+    static const char* CopyRefusal(const Context& context, const StorageTexture* destination, const StorageTexture& source, std::uint64_t address);
     VkImage Image() const { return image; }
     VkImage Image(std::uint32_t mip) const;
     std::uint32_t ImageMipLevel(std::uint32_t mip) const;
