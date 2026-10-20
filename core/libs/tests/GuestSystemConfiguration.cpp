@@ -269,6 +269,49 @@ static void CheckLeafWithTrailingComponent() {
         Require(length == sizeof(buffer));
     }
 }
+static void CheckMeasuredAbsentSysctlMibs() {
+    static constexpr struct {
+        int mib[3];
+        std::uint32_t length;
+    } cases[] = {
+        {{1, 2147482816, 2147482814}, 3},
+        {{1, 2147483151}, 2},
+        {{1, 2147483182, 2147483181}, 3},
+        {{1, 2147482838, 2147482834}, 3},
+    };
+    for (const auto& entry : cases) {
+        unsigned char buffer[64];
+        std::memset(buffer, 0xaa, sizeof(buffer));
+        std::size_t length = sizeof(buffer);
+        *__error_nid_postfix() = 77;
+        Require(sysctl_nid_postfix(entry.mib, entry.length, buffer, &length, nullptr, 0) == -1);
+        Require(*__error_nid_postfix() == 2 && length == sizeof(buffer));
+        for (const auto byte : buffer) Require(byte == 0xaa);
+
+        length = 77;
+        *__error_nid_postfix() = 77;
+        Require(sysctl_nid_postfix(entry.mib, entry.length, nullptr, &length, nullptr, 0) == -1);
+        Require(*__error_nid_postfix() == 2 && length == 77);
+
+        std::memset(buffer, 0xaa, sizeof(buffer));
+        *__error_nid_postfix() = 77;
+        Require(sysctl_nid_postfix(entry.mib, entry.length, buffer, nullptr, nullptr, 0) == -1);
+        Require(*__error_nid_postfix() == 2);
+        for (const auto byte : buffer) Require(byte == 0xaa);
+
+        *__error_nid_postfix() = 77;
+        Require(sysctl_nid_postfix(entry.mib, entry.length, nullptr, nullptr, nullptr, 0) == -1);
+        Require(*__error_nid_postfix() == 2);
+
+        bool threw = false;
+        try {
+            sysctl_nid_postfix(entry.mib, entry.length, buffer, &length, buffer, sizeof(buffer));
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        Require(threw);
+    }
+}
 static void CheckSystemSwVersion() {
     *__error_nid_postfix() = 13;
     Require(sceKernelGetSystemSwVersion_nid_postfix(nullptr) == SCE_KERNEL_ERROR_EFAULT && *__error_nid_postfix() == 13);
@@ -625,6 +668,7 @@ int main() {
     CheckSystemStringSysctl();
     CheckSystemStringNames();
     CheckLeafWithTrailingComponent();
+    CheckMeasuredAbsentSysctlMibs();
     CheckSystemSwVersion();
     CheckPseudoRandomSysctl();
     CheckSdkVersionSysctl();

@@ -3874,6 +3874,10 @@ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParamete
     if (trace) APS5_LOG_CHARS_OUT("VulkanDevice::Draw complete");
 }
 
+bool VulkanDevice::DrawInputsInPlace() const {
+    return state->drawInputsInPlace;
+}
+
 namespace {
 
 // The resource cache serves dispatches unless disabled; Revalidate proves a hit by texture identity,

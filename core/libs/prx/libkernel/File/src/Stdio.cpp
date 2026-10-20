@@ -56,6 +56,7 @@ static constexpr std::uint64_t KERNEL_MNT_NOSUID = 0x8;
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#include <cstdio>
 #include <fcntl.h>
 #include <direct.h>
 #include <sys/stat.h>
@@ -709,22 +710,34 @@ int APS5_VABI _close_nid_postfix(int descriptor) {
 
 namespace {
 std::atomic<int> g_hostStandardError{-1};
+std::atomic<int> g_hostStandardOutput{-1};
 
-void PreserveHostStandardError() {
-    if (g_hostStandardError.load() >= 0) return;
+void PreserveHostStream(int standard, std::atomic<int>& slot) {
+    if (slot.load() >= 0) return;
 #ifdef _WIN32
-    const int saved = WithoutParameterHandler([] { return ::_dup(2); });
+    const int saved = WithoutParameterHandler([standard] { return ::_dup(standard); });
 #else
-    const int saved = KeepHostStandardError_nid_no_patch();
+    const int saved = standard == 1 ? KeepHostStandardOutput_nid_no_patch() : KeepHostStandardError_nid_no_patch();
 #endif
-    if (saved < 0) throw std::runtime_error("dup2: cannot keep the host standard error");
+    if (saved < 0) throw std::runtime_error(standard == 1 ? "dup2: cannot keep the host standard output" : "dup2: cannot keep the host standard error");
     int expected = -1;
-    if (!g_hostStandardError.compare_exchange_strong(expected, saved)) {
+    if (!slot.compare_exchange_strong(expected, saved)) {
 #ifdef _WIN32
         _close(saved);
 #endif
+        return;
     }
+#ifdef _WIN32
+    if (!AdoptHostStandardStream_nid_no_patch(standard, saved)) {
+        slot.store(-1);
+        _close(saved);
+        throw std::runtime_error(standard == 1 ? "dup2: cannot keep the host standard output" : "dup2: cannot keep the host standard error");
+    }
+#endif
 }
+
+void PreserveHostStandardError() { PreserveHostStream(2, g_hostStandardError); }
+void PreserveHostStandardOutput() { PreserveHostStream(1, g_hostStandardOutput); }
 }
 
 int File::HostStandardError() {
@@ -770,6 +783,7 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
 #ifdef _WIN32
     if (WithoutParameterHandler([from] { return ::_get_osfhandle(from) == -1 ? -1 : 0; }) != 0) return PosixFailure(GUEST_EBADF);
     if (from == to) return to;
+    if (to == 1) PreserveHostStandardOutput();
     if (to == 2) PreserveHostStandardError();
     auto* const standard = HostStandardHandle_nid_no_patch(to);
     const int duplicated = WithoutParameterHandler([from, to] { return ::_dup2(from, to); });
@@ -790,6 +804,7 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
         if (::fcntl(from, F_GETFL) < 0) return PosixFailure(GUEST_EBADF);
         return to;
     }
+    if (to == 1) PreserveHostStandardOutput();
     if (to == 2) PreserveHostStandardError();
     const int result = ::dup2(from, to);
     if (result < 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
