@@ -69,13 +69,8 @@ int Fail(int error) { *__error_nid_postfix() = error; return -1; }
 constexpr int GuestPeek = 0x2;
 constexpr int GuestDontWait = 0x80;
 constexpr int GuestNoSignal = 0x20000;
-#ifdef _WIN32
-constexpr int GuestSendFlags = GuestNoSignal;
-constexpr int GuestReceiveFlags = GuestPeek;
-#else
 constexpr int GuestSendFlags = GuestNoSignal | GuestDontWait;
 constexpr int GuestReceiveFlags = GuestPeek | GuestDontWait;
-#endif
 int NativeSendFlags(int flags) {
 #ifdef _WIN32
     static_cast<void>(flags);
@@ -634,7 +629,16 @@ int SocketSendFlags(Socket& socket, int flags) {
     return NativeSendFlags(socket.options.noSignal ? flags | GuestNoSignal : flags);
 }
 int WaitForTransfer(Socket& socket, bool send, int flags) {
-    if ((flags & GuestDontWait) != 0) return 0;
+    if ((flags & GuestDontWait) != 0) {
+#ifdef _WIN32
+        NativePollDescriptor entry{};
+        entry.fd = socket.value;
+        entry.events = static_cast<short>(send ? POLLWRNORM : POLLRDNORM);
+        return WSAPoll(&entry, 1, 0) == 0 ? 35 : 0;
+#else
+        return 0;
+#endif
+    }
     std::int64_t timeout;
     {
         std::lock_guard lock(socket.modeMutex);
@@ -1112,7 +1116,9 @@ int APS5_VABI listen_nid_postfix(int descriptor, int backlog) {
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
     if (socket->type != 1) return Fail(45);
-    return ::listen(socket->value, backlog) ? Fail(NativeError()) : 0;
+    if (::listen(socket->value, backlog) == 0) return 0;
+    const int error = NativeError();
+    return Fail(error == 56 ? 22 : error);
 }
 int APS5_VABI accept_nid_postfix(int descriptor, void* address, std::uint32_t* length) {
     const auto listener = Lookup(descriptor);

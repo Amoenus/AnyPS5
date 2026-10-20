@@ -544,6 +544,9 @@ int main() {
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Require(mkdir_nid_postfix(root.string().c_str(), 0700) == 0);
     Require(mkdir_nid_postfix(root.string().c_str(), 0700) == -1 && *__error_nid_postfix() == 17);
+    for (const char* openMode : {"w", "wb", "r+", "a"}) {
+        Require(fopen_nid_postfix(root.string().c_str(), openMode) == nullptr && *__error_nid_postfix() == 21);
+    }
     Require(mkdir_nid_postfix((root / "missing" / "child").string().c_str(), 0700) == -1 && *__error_nid_postfix() == 2);
     Require(mkdir_nid_postfix(nullptr, 0700) == -1 && *__error_nid_postfix() == 14);
     const auto file = root / "file.txt";
@@ -781,6 +784,14 @@ int main() {
     Require(sceKernelFdatasync(socket) == static_cast<int>(0x80020016u));
     Require(fsync_nid_postfix(socket) == -1 && *__error_nid_postfix() == 22);
     Require(sceKernelFsync(socket) == static_cast<int>(0x80020016u));
+    int syncPipe[2] = {-1, -1};
+    Require(pipe_nid_postfix(syncPipe) == 0);
+    for (const int end : syncPipe) {
+        Require(fsync_nid_postfix(end) == -1 && *__error_nid_postfix() == 22);
+        Require(fdatasync_nid_postfix(end) == -1 && *__error_nid_postfix() == 22);
+        Require(sceKernelFsync(end) == static_cast<int>(0x80020016u) && sceKernelFdatasync(end) == static_cast<int>(0x80020016u));
+    }
+    Require(close_nid_postfix(syncPipe[0]) == 0 && close_nid_postfix(syncPipe[1]) == 0);
     Require(close_nid_postfix(socket) == 0);
     Require(fchmod_nid_postfix(socket, 0600) == -1 && *__error_nid_postfix() == 9);
     Require(futimes_nid_postfix(socket, nullptr) == -1 && *__error_nid_postfix() == 9);
@@ -978,6 +989,13 @@ int main() {
     Require(flock_nid_postfix(other, 2 | 4) == 0);
     Require(flock_nid_postfix(other, 8) == 0);
     Require(flock_nid_postfix(locked, 2 | 4) == 0);
+    Require(flock_nid_postfix(-1, 2 | 4) == -1 && *__error_nid_postfix() == 9);
+    Require(flock_nid_postfix(0x7fffffff, 1) == -1 && *__error_nid_postfix() == 9);
+    int flockPipe[2] = {-1, -1};
+    Require(pipe_nid_postfix(flockPipe) == 0);
+    Require(flock_nid_postfix(flockPipe[0], 2 | 4) == -1 && *__error_nid_postfix() == 45);
+    Require(flock_nid_postfix(flockPipe[1], 8) == -1 && *__error_nid_postfix() == 45);
+    Require(close_nid_postfix(flockPipe[0]) == 0 && close_nid_postfix(flockPipe[1]) == 0);
     Require(close_nid_postfix(locked) == 0);
     const int recycled = open_nid_postfix(presentName.c_str(), 0, 0);
     Require(recycled >= 0 && flock_nid_postfix(recycled, 8) == 0);
