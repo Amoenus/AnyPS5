@@ -821,7 +821,7 @@ bool CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                     const bool unchangedSinceSubmit = AgcDriver::GuestMemory::UnchangedSinceCollected(target.htileAddress, metadataBytes, generation);
                     const bool storedAll = AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation);
                     if (!unchangedSinceSubmit && !storedAll) {
-                        std::puts("skipped native HTILE driver dispatch: this device's host import path does not retain write-watch evidence independently of driver writes");
+                        std::puts("skipped, the device does not retain write-watch evidence independently of driver writes for native HTILE driver dispatch");
                         return false;
                     }
                     Require(storedAll, "driver idle returned before recording the completed HTILE dispatch");
