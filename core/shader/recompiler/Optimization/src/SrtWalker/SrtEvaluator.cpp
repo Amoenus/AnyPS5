@@ -247,7 +247,8 @@ bool BasicEvaluator<TNode>::EvaluateRawRead(const TNode& inst, std::uint64_t& re
         try {
             probe = _runtime.accessible(_runtime.userContext, address, sizeof(std::uint32_t)) ? 1 : 0;
         } catch (const std::exception& error) {
-            throw std::runtime_error(std::string(error.what()) + DescribeSrtReadFailure(*inst.Value(), -2, "generic-probe"));
+            ReportSrtReadFailure(error, *inst.Value(), -2, "generic-probe");
+            throw;
         }
         if (probe == 0 && LoadedFromMemory(*handle.Value())) {
             *_inaccessible = {inst.Value(), address};
@@ -263,7 +264,8 @@ bool BasicEvaluator<TNode>::EvaluateRawRead(const TNode& inst, std::uint64_t& re
         try {
             if (!_runtime.readMemory(_runtime.userContext, address, &word)) return false;
         } catch (const std::exception& error) {
-            throw std::runtime_error(std::string(error.what()) + DescribeSrtReadFailure(*inst.Value(), probe, "generic"));
+            ReportSrtReadFailure(error, *inst.Value(), probe, "generic");
+            throw;
         }
     } else {
         std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));

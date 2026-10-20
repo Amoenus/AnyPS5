@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
@@ -58,8 +59,10 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <io.h>
 #else
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -756,6 +759,59 @@ void verifySignedSrtComparison() {
     }
 }
 
+class SrtStderrCapture {
+public:
+    SrtStderrCapture() {
+        std::fflush(stderr);
+        file = std::tmpfile();
+        require(file != nullptr, "SRT read diagnostics: cannot open temporary stderr capture");
+#ifdef _WIN32
+        saved = _dup(_fileno(stderr));
+        _dup2(_fileno(file), _fileno(stderr));
+#else
+        saved = dup(fileno(stderr));
+        dup2(fileno(file), fileno(stderr));
+#endif
+    }
+    std::string Finish() {
+        std::fflush(stderr);
+#ifdef _WIN32
+        _dup2(saved, _fileno(stderr));
+        _close(saved);
+#else
+        dup2(saved, fileno(stderr));
+        close(saved);
+#endif
+        std::rewind(file);
+        std::string text;
+        char buffer[4096];
+        for (std::size_t bytes = 0; (bytes = std::fread(buffer, 1, sizeof(buffer), file)) != 0;) text.append(buffer, bytes);
+        std::fclose(file);
+        return text;
+    }
+
+private:
+    std::FILE* file = nullptr;
+    int saved = -1;
+};
+
+template<typename TAction>
+std::string loggedSrtFailure(TAction action) {
+    SrtStderrCapture capture;
+    try {
+        action();
+    } catch (...) {
+        static_cast<void>(capture.Finish());
+        throw;
+    }
+    return capture.Finish();
+}
+
+class InjectedSrtFailure : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 void verifySrtReadFailureDiagnostics() {
     using namespace ShaderRecompiler;
     for (std::uint32_t kind = 0; kind < 4u; ++kind) {
@@ -821,7 +877,7 @@ void verifySrtReadFailureDiagnostics() {
             runtime.accessible = [](void* opaque, std::uint64_t address, std::uint64_t) {
                 auto& state = *static_cast<Context*>(opaque);
                 ++state.probes;
-                if (state.failProbe && address == 0x2000u) throw std::runtime_error("injected SRT probe failure");
+                if (state.failProbe && address == 0x2000u) throw InjectedSrtFailure("injected SRT probe failure");
                 return state.loaded;
             };
             runtime.readMemory = [](void* opaque, std::uint64_t address, std::uint32_t* value) {
@@ -831,7 +887,7 @@ void verifySrtReadFailureDiagnostics() {
                     *value = 0x2000u;
                     return true;
                 }
-                throw std::runtime_error("injected SRT reader failure");
+                throw InjectedSrtFailure("injected SRT reader failure");
             };
             runtime.readSpecializationMemory = runtime.readMemory;
             const auto expectedProbe = failProbe ? -2 : kind == 3u ? 1 : tapePath ? -1 : 0;
@@ -839,20 +895,29 @@ void verifySrtReadFailureDiagnostics() {
                 (kind == 3u ? "1" : "0") + ", rootUserData " + (kind == 1u || kind == 3u ? "1" : "0") +
                 ", rootShaderBase " + (kind == 2u ? "1" : "0") + ", probe " + std::to_string(expectedProbe) +
                 ", path " + (tapePath ? "tape" : "generic") + (failProbe ? "-probe" : "") + "]";
-            expectFailure([&] {
-                std::vector<DescriptorValue> results;
-                std::vector<std::uint32_t> flat;
-                std::vector<std::uint8_t> activeSources;
-                if (tapePath) {
-                    const auto* tape = Detail::SrtTape::For(plan);
-                    require(tape != nullptr, "SRT read diagnostics: the valid plan did not compile to a tape");
-                    static_cast<void>(tape->Run(plan, runtime, results, flat, activeSources));
-                } else {
-                    std::vector<SrtReadPoison> poison;
-                    const std::array<std::uint32_t, 1> sources{0u};
-                    static_cast<void>(Detail::EvaluateRuntimeSourcesImpl(plan, sources, runtime, results, flat, true, {}, activeSources, &poison));
+            const auto logged = loggedSrtFailure([&] {
+                bool failed = false;
+                try {
+                    std::vector<DescriptorValue> results;
+                    std::vector<std::uint32_t> flat;
+                    std::vector<std::uint8_t> activeSources;
+                    if (tapePath) {
+                        const auto* tape = Detail::SrtTape::For(plan);
+                        require(tape != nullptr, "SRT read diagnostics: the valid plan did not compile to a tape");
+                        static_cast<void>(tape->Run(plan, runtime, results, flat, activeSources));
+                    } else {
+                        std::vector<SrtReadPoison> poison;
+                        const std::array<std::uint32_t, 1> sources{0u};
+                        static_cast<void>(Detail::EvaluateRuntimeSourcesImpl(plan, sources, runtime, results, flat, true, {}, activeSources, &poison));
+                    }
+                } catch (const InjectedSrtFailure& error) {
+                    require(std::string(error.what()) == (failProbe ? "injected SRT probe failure" : "injected SRT reader failure"),
+                            "SRT read diagnostics: original callback reason changed");
+                    failed = true;
                 }
-            }, expected.c_str(), "SRT read diagnostics: failure origin or original reason changed");
+                require(failed, "SRT read diagnostics: original callback exception type was not preserved");
+            });
+            require(logged == expected + "\n", "SRT read diagnostics: logged root or reader path changed");
             require(context.probes == (kind == 3u ? tapePath ? 1u : 2u : tapePath ? 0u : 1u) && context.reads == (failProbe ? 1u : kind == 3u ? 2u : 1u),
                     "SRT read diagnostics: probe ordering or number of reads changed");
         }

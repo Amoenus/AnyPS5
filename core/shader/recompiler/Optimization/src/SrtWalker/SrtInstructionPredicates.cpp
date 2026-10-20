@@ -39,28 +39,28 @@ bool LoadedFromMemory(const IrValue& handle) {
     return false;
 }
 
-std::string DescribeSrtReadFailure(const IrValue& read, int probe, const char* path) {
-    bool memory = false;
-    bool userData = false;
-    bool shaderBase = false;
-    std::vector<const IrValue*> pending{read.Argument(0)};
-    std::vector<const IrValue*> visited;
-    while (!pending.empty()) {
-        const IrValue* value = pending.back();
-        pending.pop_back();
-        if (value == nullptr) continue;
-        value = value->Resolve();
-        if (value->HasImmediate() || std::find(visited.begin(), visited.end(), value) != visited.end()) continue;
-        visited.push_back(value);
-        const auto opcode = value->Opcode();
-        memory = memory || opcode == IrOpcode::ReadConst || opcode == IrOpcode::LoadAddressU32 || opcode == IrOpcode::ReadConstBuffer;
-        userData = userData || opcode == IrOpcode::GetUserData;
-        shaderBase = shaderBase || opcode == IrOpcode::GetShaderBase;
-        for (std::size_t index = 0; index < value->ArgumentCount(); ++index) pending.push_back(value->Argument(index));
-    }
-    char context[256];
-    std::snprintf(context, sizeof(context), " [SRT read pc 0x%x, rootMemory %d, rootUserData %d, rootShaderBase %d, probe %d, path %s]", read.Flags<MemoryFlags>().pc, memory ? 1 : 0, userData ? 1 : 0, shaderBase ? 1 : 0, probe, path);
-    return context;
+void ReportSrtReadFailure(const std::exception& error, const IrValue& read, int probe, const char* path) noexcept {
+    try {
+        bool memory = false;
+        bool userData = false;
+        bool shaderBase = false;
+        std::vector<const IrValue*> pending{read.Argument(0)};
+        std::vector<const IrValue*> visited;
+        while (!pending.empty()) {
+            const IrValue* value = pending.back();
+            pending.pop_back();
+            if (value == nullptr) continue;
+            value = value->Resolve();
+            if (value->HasImmediate() || std::find(visited.begin(), visited.end(), value) != visited.end()) continue;
+            visited.push_back(value);
+            const auto opcode = value->Opcode();
+            memory = memory || opcode == IrOpcode::ReadConst || opcode == IrOpcode::LoadAddressU32 || opcode == IrOpcode::ReadConstBuffer;
+            userData = userData || opcode == IrOpcode::GetUserData;
+            shaderBase = shaderBase || opcode == IrOpcode::GetShaderBase;
+            for (std::size_t index = 0; index < value->ArgumentCount(); ++index) pending.push_back(value->Argument(index));
+        }
+        std::fprintf(stderr, "%s [SRT read pc 0x%x, rootMemory %d, rootUserData %d, rootShaderBase %d, probe %d, path %s]\n", error.what(), read.Flags<MemoryFlags>().pc, memory ? 1 : 0, userData ? 1 : 0, shaderBase ? 1 : 0, probe, path);
+    } catch (...) {}
 }
 
 bool IsDescriptorHandle(IrOpcode opcode) {

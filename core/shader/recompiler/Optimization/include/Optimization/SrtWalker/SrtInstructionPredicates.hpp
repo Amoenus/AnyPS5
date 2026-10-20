@@ -4,7 +4,7 @@
 #include "IntermediateRepresentation/IrProgram.hpp"
 
 #include <concepts>
-#include <string>
+#include <exception>
 #include <type_traits>
 
 namespace ShaderRecompiler::Detail {
@@ -12,7 +12,7 @@ namespace ShaderRecompiler::Detail {
 bool IsRawRead(const IrResourcePlan& program, const IrValue& inst);
 bool IsRawRead(const IrResourcePlan& program, IrOpcode op, std::uint32_t memoryIndex);
 bool LoadedFromMemory(const IrValue& handle);
-std::string DescribeSrtReadFailure(const IrValue& read, int probe, const char* path);
+void ReportSrtReadFailure(const std::exception& error, const IrValue& read, int probe, const char* path) noexcept;
 bool IsDescriptorHandle(IrOpcode opcode);
 bool IsRuntimeSelect(IrOpcode opcode);
 bool IsRuntimeUniformOp(IrOpcode opcode);

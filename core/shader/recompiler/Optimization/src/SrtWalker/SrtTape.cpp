@@ -397,7 +397,8 @@ bool SrtTape::compute(Frame& frame, const Node& node, std::uint64_t& result) con
                 try {
                     probe = frame.runtime.accessible(frame.runtime.userContext, address, sizeof(std::uint32_t)) ? 1 : 0;
                 } catch (const std::exception& error) {
-                    throw std::runtime_error(std::string(error.what()) + DescribeSrtReadFailure(*node.source, -2, "tape-probe"));
+                    ReportSrtReadFailure(error, *node.source, -2, "tape-probe");
+                    throw;
                 }
                 if (probe == 0) return false;
             }
@@ -411,7 +412,8 @@ bool SrtTape::compute(Frame& frame, const Node& node, std::uint64_t& result) con
                 try {
                     if (!reader(frame.runtime.userContext, address, &word)) return false;
                 } catch (const std::exception& error) {
-                    throw std::runtime_error(std::string(error.what()) + DescribeSrtReadFailure(*node.source, probe, "tape"));
+                    ReportSrtReadFailure(error, *node.source, probe, "tape");
+                    throw;
                 }
             } else {
                 std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
