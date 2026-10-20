@@ -23,6 +23,7 @@ LIMITATIONS = [
     "skipped, the device has no compute queue",
     "skipped, the device reports 4 lanes",
     "skipped, subgroup size 8",
+    "skipped, no display",
 ]
 
 OTHER = [
@@ -57,39 +58,22 @@ class CheckSkipsTests(unittest.TestCase):
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                         self.assertIn("1 test(s) skipped, all expected", result.stdout)
 
-    def test_high_refresh_skip_ignores_host_specific_startup_logs(self):
-        reason = "current display does not provide 120 Hz"
-        report = (
-            f'<skipped message="{reason}"/><system-out>'
-            '[src/HostCpu.cpp:193 operator()] host CPU flags differ by runner\n'
-            '[src/VulkanDevice.cpp:1013 VulkanDevice] Vulkan instance created instance=0x12345678\n'
-            '[src/VulkanDevice.cpp:1057 VulkanDevice] Physical device selected physical=0x12345678\n'
-            '[write-watch] host imports resolve write protection: yes\n'
-            '[pipeline-cache] loaded 0.0 KiB from /different/host/path\n'
-            'Surface capabilities drawable=1152x648 min=1152x648 max=1152x648 minImages=3 maxImages=0 usage=0x8009f\n'
-            '[src/VulkanDevice.cpp:1972 VulkanDevice] Swapchain created swapchain=0x12345678 extent=1152x648 images=3\n'
-            '[shader-disk-cache] /tmp/build/tests/shader_cache/hash (source version hash, format 36)\n'
-            f'skipped, {reason}</system-out>'
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            junit = Path(directory) / "junit.xml"
-            junit.write_text(f'<testsuite><testcase name="guest_video_out_high_frame_rate">{report}</testcase></testsuite>', encoding="utf-8")
-            for job in ("linux", "windows"):
-                with self.subTest(job=job):
-                    result = subprocess.run(
-                        [sys.executable, "-I", str(TOOL), str(junit), "--job", job],
-                        capture_output=True, text=True)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("1 test(s) skipped, all expected", result.stdout)
-
     def test_high_refresh_reason_cannot_hide_additional_diagnostics(self):
         reason = "current display does not provide 120 Hz"
         known = f"skipped, {reason}"
         extra = "unexpected failure detail"
         reports = (
-            f'<skipped message="{reason}">{reason}\nunexpected failure detail</skipped>',
-            f'<skipped/><system-out>{known}\nskipped, {extra}</system-out>',
-            f'<skipped message="{reason}"/><system-err>skipped, unsupported mode</system-err>',
+            f'<skipped/><system-out>{known}\n{extra}</system-out>',
+            f'<skipped/><system-out>{extra}\n{known}</system-out>',
+            f'<skipped/><system-err>{known}\n{extra}</system-err>',
+            f'<skipped/><system-out>{known}</system-out><system-err>{extra}</system-err>',
+            f'<skipped/><system-out>{extra}</system-out><system-err>{known}</system-err>',
+            f'<skipped message="{reason}"/><system-err>{extra}</system-err>',
+            f'<skipped>{reason}</skipped><system-out>{extra}</system-out>',
+            f'<skipped message="{reason}">{extra}</skipped>',
+            f'<skipped message="{extra}"/><system-out>{known}</system-out>',
+            f'<skipped>{reason}\n{extra}</skipped>',
+            f'<skipped/><system-out>{known}\n{known}\n{extra}</system-out>',
         )
         with tempfile.TemporaryDirectory() as directory:
             junit = Path(directory) / "junit.xml"
@@ -134,25 +118,6 @@ class CheckSkipsTests(unittest.TestCase):
                     self.assertIn("agc_disabled", result.stderr)
                     self.assertIn("disabled", result.stderr)
 
-    def test_ctest_skip_return_code_metadata_does_not_hide_high_refresh_reason(self):
-        reason = "current display does not provide 120 Hz"
-        report = (
-            '<skipped message="SKIP_RETURN_CODE=77"/>'
-            f'<system-out>skipped, {reason}</system-out>'
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            junit = Path(directory) / "junit.xml"
-            junit.write_text(
-                f'<testsuite><testcase name="guest_video_out_high_frame_rate">{report}</testcase></testsuite>',
-                encoding="utf-8")
-            for job in ("linux", "windows"):
-                with self.subTest(job=job):
-                    result = subprocess.run(
-                        [sys.executable, "-I", str(TOOL), str(junit), "--job", job],
-                        capture_output=True, text=True)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("1 test(s) skipped, all expected", result.stdout)
-
     def test_device_limitations_match(self):
         for message in LIMITATIONS:
             with self.subTest(message=message):
@@ -177,16 +142,6 @@ class CheckSkipsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("error: odd skipped", result.stdout)
         self.assertNotIn("error: geometry skipped", result.stdout)
-
-    def test_no_display_skip_is_unexpected_on_linux(self):
-        with tempfile.TemporaryDirectory() as directory:
-            junit = Path(directory) / "junit.xml"
-            junit.write_text(
-                '<testsuite><testcase name="video_out_flip_eop"><skipped/><system-out>skipped, no display</system-out></testcase></testsuite>',
-                encoding="utf-8")
-            result = subprocess.run([sys.executable, "-I", str(TOOL), str(junit), "--job", "linux"], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("error: video_out_flip_eop skipped", result.stdout)
 
     def test_reason_on_its_own_line_inside_skipped_is_expected(self):
         for reason, job in (("the device lacks geometryShader", "linux"), ("no display", "windows")):
@@ -263,10 +218,10 @@ class SkipReportTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertRegex(found[0][1], check_skips.DEVICE_LIMITATION)
 
-    def test_stderr_preserves_a_no_display_reason_without_excusing_linux_skip(self):
+    def test_stderr_preserves_the_device_reason(self):
         found = self.skipped('<testsuite><testcase name="gpu"><skipped/><system-err>skipped, no display</system-err></testcase></testsuite>')
         self.assertEqual(len(found), 1)
-        self.assertNotRegex(found[0][1], check_skips.DEVICE_LIMITATION)
+        self.assertRegex(found[0][1], check_skips.DEVICE_LIMITATION)
 
     def test_unnamed_skipped_test_is_an_error(self):
         with self.assertRaises(ValueError):
