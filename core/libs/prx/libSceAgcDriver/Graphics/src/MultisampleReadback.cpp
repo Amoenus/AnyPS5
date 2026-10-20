@@ -70,7 +70,7 @@ VkPipeline TextureDetiler::multisampleReadbackPipeline(std::uint32_t elementByte
     return result;
 }
 
-void TextureDetiler::DispatchMultisampleReadback(VkCommandBuffer commands, VkFormat format, VkBuffer destination, std::uint64_t offset, std::uint64_t bytes, VkImageView arrayView, std::uint32_t width, std::uint32_t height, std::uint32_t layers, std::uint32_t fragments, std::uint32_t firstElement, std::uint32_t elements) {
+void TextureDetiler::DispatchMultisampleReadback(VkCommandBuffer commands, VkFormat format, VkBuffer destination, std::uint64_t offset, std::uint64_t bytes, VkImageView arrayView, std::uint32_t width, std::uint32_t height, std::uint32_t layers, std::uint32_t fragments, std::uint32_t firstElement, std::uint32_t elements, VkImageLayout imageLayout) {
     GuestMemory::AssertGpuLockHeld("TextureDetiler::DispatchMultisampleReadback");
     const auto elementBytes = readbackElementBytes(format);
     Require(commands != VK_NULL_HANDLE && destination != VK_NULL_HANDLE && arrayView != VK_NULL_HANDLE, "multisample readback requires commands, buffer and array view");
@@ -92,7 +92,7 @@ void TextureDetiler::DispatchMultisampleReadback(VkCommandBuffer commands, VkFor
     const auto pipeline = multisampleReadbackPipeline(elementBytes, format == VK_FORMAT_D32_SFLOAT);
     const auto set = allocateFrom(readbackDescriptorSets, readbackDescriptorLayout, {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64u}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 64u}}, "vkCreateDescriptorPool multisample readback", "vkAllocateDescriptorSets multisample readback", "vkResetDescriptorPool multisample readback");
     const VkDescriptorBufferInfo buffer{destination, offset, bytes};
-    const VkDescriptorImageInfo image{VK_NULL_HANDLE, arrayView, VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorImageInfo image{VK_NULL_HANDLE, arrayView, imageLayout};
     const std::array<VkWriteDescriptorSet, 2> writes{{
         {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0u, 0u, 1u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &buffer, nullptr},
         {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 1u, 0u, 1u, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &image, nullptr, nullptr}
