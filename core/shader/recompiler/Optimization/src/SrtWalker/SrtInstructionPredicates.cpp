@@ -44,6 +44,8 @@ void ReportSrtReadFailure(const std::exception& error, const IrValue& read, int 
         bool memory = false;
         bool userData = false;
         bool shaderBase = false;
+        int userDataFirst = -1;
+        int userDataLast = -1;
         std::vector<const IrValue*> pending{read.Argument(0)};
         std::vector<const IrValue*> visited;
         while (!pending.empty()) {
@@ -57,9 +59,14 @@ void ReportSrtReadFailure(const std::exception& error, const IrValue& read, int 
             memory = memory || opcode == IrOpcode::ReadConst || opcode == IrOpcode::LoadAddressU32 || opcode == IrOpcode::ReadConstBuffer;
             userData = userData || opcode == IrOpcode::GetUserData;
             shaderBase = shaderBase || opcode == IrOpcode::GetShaderBase;
+            if (opcode == IrOpcode::GetUserData) {
+                const auto reg = static_cast<int>(value->Argument(0)->Register().index);
+                userDataFirst = userDataFirst == -1 ? reg : std::min(userDataFirst, reg);
+                userDataLast = std::max(userDataLast, reg);
+            }
             for (std::size_t index = 0; index < value->ArgumentCount(); ++index) pending.push_back(value->Argument(index));
         }
-        std::fprintf(stderr, "%s [SRT read pc 0x%x, rootMemory %d, rootUserData %d, rootShaderBase %d, probe %d, path %s]\n", error.what(), read.Flags<MemoryFlags>().pc, memory ? 1 : 0, userData ? 1 : 0, shaderBase ? 1 : 0, probe, path);
+        std::fprintf(stderr, "%s [SRT read pc 0x%x, rootMemory %d, rootUserData %d, rootShaderBase %d, userDataFirst %d, userDataLast %d, probe %d, path %s]\n", error.what(), read.Flags<MemoryFlags>().pc, memory ? 1 : 0, userData ? 1 : 0, shaderBase ? 1 : 0, userDataFirst, userDataLast, probe, path);
     } catch (...) {}
 }
 

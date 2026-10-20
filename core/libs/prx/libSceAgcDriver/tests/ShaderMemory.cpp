@@ -814,12 +814,15 @@ public:
 
 void verifySrtReadFailureDiagnostics() {
     using namespace ShaderRecompiler;
-    for (std::uint32_t kind = 0; kind < 4u; ++kind) {
+    for (std::uint32_t index = 0; index < 8u; ++index) {
+        const auto kind = index % 4u;
+        const auto rootRegister = index / 4u * 9u;
         IrProgram program;
         IrResourcePlan plan;
         plan.srtPlanComplete = true;
         plan.resourceTrackingComplete = true;
-        plan.userDataCount = 1u;
+        plan.userDataBase = rootRegister;
+        plan.userDataCount = 2u;
         plan.materializationSources = {0u};
         MemoryInfo info;
         info.kind = ResourceKind::ScalarAddress;
@@ -844,15 +847,18 @@ void verifySrtReadFailureDiagnostics() {
         auto& active = make(IrOpcode::Void, IrType::U1);
         active.SetImmediateBool(true);
         auto& reg = make(IrOpcode::Void, IrType::ScalarReg);
-        reg.SetRegister({RegisterBank::Scalar, 0u});
+        reg.SetRegister({RegisterBank::Scalar, rootRegister});
         auto& userData = make(IrOpcode::GetUserData, IrType::U32, {&reg});
+        auto& highReg = make(IrOpcode::Void, IrType::ScalarReg);
+        highReg.SetRegister({RegisterBank::Scalar, rootRegister + 1u});
+        auto& highUserData = make(IrOpcode::GetUserData, IrType::U32, {&highReg});
         IrValue* low = &constant(0x1000u);
         if (kind == 1u || kind == 3u) low = &userData;
         if (kind == 2u) {
             auto& shaderBase = make(IrOpcode::GetShaderBase, IrType::U64);
             low = &make(IrOpcode::CompositeExtractU64, IrType::U32, {&shaderBase, &zero});
         }
-        auto* address = &make(IrOpcode::GetAddressResource, IrType::AddressResource, {low, &zero});
+        auto* address = &make(IrOpcode::GetAddressResource, IrType::AddressResource, {low, kind == 1u || kind == 3u ? &highUserData : &zero});
         if (kind == 3u) {
             auto& loaded = make(IrOpcode::LoadAddressU32, IrType::U32, {address, &zero, &zero, &active}, memoryFlags(0x40u));
             address = &make(IrOpcode::GetAddressResource, IrType::AddressResource, {&loaded, &zero});
@@ -862,7 +868,7 @@ void verifySrtReadFailureDiagnostics() {
         source.dwordCount = 1u;
         source.dwords[0] = &read;
         plan.descriptorSources.push_back(source);
-        const std::array<std::uint32_t, 1> words{0x1000u};
+        const std::array<std::uint32_t, 2> words{0x1000u, 0u};
         for (const auto& [tapePath, failProbe] : std::array<std::pair<bool, bool>, 4>{{{false, false}, {true, false}, {false, true}, {true, true}}}) {
             if (failProbe && kind != 3u) continue;
             struct Context {
@@ -893,7 +899,8 @@ void verifySrtReadFailureDiagnostics() {
             const auto expectedProbe = failProbe ? -2 : kind == 3u ? 1 : tapePath ? -1 : 0;
             const auto expected = std::string(failProbe ? "injected SRT probe failure" : "injected SRT reader failure") + " [SRT read pc 0x44, rootMemory " +
                 (kind == 3u ? "1" : "0") + ", rootUserData " + (kind == 1u || kind == 3u ? "1" : "0") +
-                ", rootShaderBase " + (kind == 2u ? "1" : "0") + ", probe " + std::to_string(expectedProbe) +
+                ", rootShaderBase " + (kind == 2u ? "1" : "0") + ", userDataFirst " + (kind == 1u || kind == 3u ? std::to_string(rootRegister) : "-1") +
+                ", userDataLast " + (kind == 1u || kind == 3u ? std::to_string(rootRegister + 1u) : "-1") + ", probe " + std::to_string(expectedProbe) +
                 ", path " + (tapePath ? "tape" : "generic") + (failProbe ? "-probe" : "") + "]";
             const auto logged = loggedSrtFailure([&] {
                 bool failed = false;
