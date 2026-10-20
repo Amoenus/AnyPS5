@@ -14,6 +14,40 @@ TOOL = Path(__file__).resolve().parents[1] / "check_compile.py"
 
 
 class CheckCompileTests(unittest.TestCase):
+    def test_dependency_options_do_not_make_syntax_checks_fail_or_rewrite_outputs(self):
+        compiler = shutil.which("clang")
+        if compiler is None:
+            self.skipTest("Clang is required to check unused dependency options with -Werror")
+        source = self.source("unit.c")
+        object_file = self.build / "unit.o"
+        dependency_file = self.build / "unit.d"
+        for option in ("-MF", "-MT", "-MQ"):
+            for joined in (False, True):
+                with self.subTest(option=option, joined=joined):
+                    source.write_text("int x;\n", encoding="utf-8")
+                    value = str(dependency_file) if option == "-MF" else "target with spaces.o"
+                    flags = [option + value] if joined else [option, value]
+                    if option != "-MF":
+                        flags += ["-MF", str(dependency_file)]
+                    arguments = [compiler, "-Werror", "-MMD", *flags,
+                                 "-c", str(source), "-o", str(object_file)]
+                    original = subprocess.run(arguments, cwd=self.build, capture_output=True, text=True)
+                    self.assertEqual(original.returncode, 0, original.stderr)
+                    outputs = {path: path.read_bytes() for path in (object_file, dependency_file)}
+                    self.manifest([{"directory": str(self.build), "file": str(source),
+                                    "arguments": arguments}])
+                    result = self.tool("unit.c")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("1 translation units compile", result.stdout)
+                    for path, content in outputs.items():
+                        self.assertEqual(path.read_bytes(), content)
+                    source.write_text("#error syntax_check_must_fail\n", encoding="utf-8")
+                    result = self.tool("unit.c")
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn("syntax_check_must_fail", result.stderr)
+                    for path, content in outputs.items():
+                        self.assertEqual(path.read_bytes(), content)
+
     def test_ninja_response_file_is_expanded_before_syntax_rewriting(self):
         compiler = shutil.which("clang") or shutil.which("gcc")
         if compiler is None or shutil.which("ninja") is None:

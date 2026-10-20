@@ -228,12 +228,15 @@ std::shared_ptr<Socket> Lookup(int descriptor) {
     std::lock_guard lock(socketsMutex);
     const auto found = sockets.find(descriptor);
     if (found != sockets.end()) return found->second;
-    Fail(9);
+    Fail(descriptor >= 0 && DescriptorIsOpen_nid_no_patch(descriptor) ? 38 : 9);
     return {};
 }
 bool Address(const void* input, std::uint32_t length, sockaddr_storage& native, socklen_t& size) {
-    if (!input || length < 2) { Fail(14); return false; }
+    if (length > 255) { Fail(63); return false; }
+    if (length < 2) { Fail(22); return false; }
+    if (!input) { Fail(14); return false; }
     const auto* bytes = static_cast<const unsigned char*>(input);
+    if ((bytes[1] == 2 && length < 16) || (bytes[1] == 28 && length < 28)) { Fail(22); return false; }
     if (bytes[1] == 2 && length >= 16) {
         auto& v4 = reinterpret_cast<sockaddr_in&>(native);
         v4.sin_family = AF_INET;
@@ -1177,7 +1180,7 @@ int APS5_VABI bind_nid_postfix(int descriptor, const void* address, std::uint32_
 }
 int APS5_VABI shutdown_nid_postfix(int descriptor, int how) {
     const auto socket = Lookup(descriptor);
-    if (!socket) return Fail(9);
+    if (!socket) return -1;
     if (how < 0 || how > 2) return Fail(22);
     if (::shutdown(socket->value, how)) return Fail(NativeError());
     std::lock_guard lock(socket->modeMutex);
