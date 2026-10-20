@@ -2831,8 +2831,11 @@ static void CheckAvailableDirectMemoryIsLargestFreeBlock() {
     Require(start == top + 0x200000 && size == 0x400000);
     Require(sceKernelAvailableDirectMemorySize(top, top + window, 0x1000000, &start, &size) == 0);
     Require(start == top + 0x1000000 && size == static_cast<std::size_t>(window - 0x1000000));
-    Require(sceKernelAvailableDirectMemorySize(top, top + 0x200000, 0, &start, &size) == SCE_KERNEL_ERROR_EAGAIN);
+    Require(sceKernelAvailableDirectMemorySize(top, top + 0x200000, 0, &start, &size) == SCE_KERNEL_ERROR_ENOMEM);
     Require(start == 0 && size == 0);
+    Require(sceKernelAvailableDirectMemorySize(top + window, top, 0, &start, &size) == SCE_KERNEL_ERROR_EAGAIN);
+    Require(sceKernelAvailableDirectMemorySize(-1, top + window, 0, &start, &size) == SCE_KERNEL_ERROR_EAGAIN);
+    Require(sceKernelAvailableDirectMemorySize(top, top + window, std::numeric_limits<std::size_t>::max(), &start, &size) == SCE_KERNEL_ERROR_EAGAIN);
     Require(sceKernelAvailableDirectMemorySize(top, top + window, 0, nullptr, &size) == SCE_KERNEL_ERROR_EINVAL);
 
     Require(sceKernelReleaseDirectMemory(first, 0x200000) == 0);

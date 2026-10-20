@@ -113,5 +113,14 @@ class ConfigureSeedTests(unittest.TestCase):
 
 
 
+class ChecksParsingTests(unittest.TestCase):
+    def test_checks_reads_cache_with_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "CMakeCache.txt"
+            cache.write_bytes(b"\xef\xbb\xbf//Test FIRST_CHECK\nFIRST_CHECK:INTERNAL=1\n")
+            found = configure_seed.checks(cache)
+            self.assertEqual(found, {"FIRST_CHECK": ("1", "Test FIRST_CHECK")})
+
+
 if __name__ == "__main__":
     unittest.main()

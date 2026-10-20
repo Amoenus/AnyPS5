@@ -488,10 +488,22 @@ int receive_error(const Sock& socket) {
 }
 
 bool message_flags_supported(int flags, int accepted) {
-#ifdef _WIN32
-    accepted &= ~NET_MSG_DONTWAIT;
-#endif
     return (flags & ~accepted) == 0;
+}
+
+bool would_block(const Sock& socket, int flags, bool send) {
+#ifdef _WIN32
+    if ((flags & NET_MSG_DONTWAIT) == 0) return false;
+    WSAPOLLFD entry{};
+    entry.fd = socket.native->value;
+    entry.events = send ? POLLWRNORM : POLLRDNORM;
+    return WSAPoll(&entry, 1, 0) == 0;
+#else
+    static_cast<void>(socket);
+    static_cast<void>(flags);
+    static_cast<void>(send);
+    return false;
+#endif
 }
 
 int native_message_flags(int flags) {
@@ -530,11 +542,11 @@ int wait_for_datagram(const Sock& socket, std::chrono::steady_clock::time_point 
     return WSAPoll(&descriptor, 1, static_cast<INT>(std::min<long long>(remaining, INT_MAX))) == 0 ? NET_EAGAIN : 0;
 }
 
-int wait_for_local_address(int s, const Sock& socket, bool empty) {
+int wait_for_local_address(int s, const Sock& socket, bool empty, int flags) {
     if (socket.type == NET_SOCK_STREAM || socket.bound) return 0;
     const bool named = has_local_address(socket.native->value);
     if (!named && (socket.read_shut || empty)) return RECEIVE_NOTHING;
-    if (!named && socket.nonblock) return NET_EAGAIN;
+    if (!named && (socket.nonblock || (flags & NET_MSG_DONTWAIT) != 0)) return NET_EAGAIN;
     const auto deadline = socket.rcv_timeout_us > 0
         ? std::chrono::steady_clock::now() + std::chrono::microseconds(socket.rcv_timeout_us)
         : std::chrono::steady_clock::time_point::max();
@@ -988,10 +1000,11 @@ int64_t APS5_VABI sceNetRecv(int s, void* buf, size_t len, int flags) {
         socket = it->second;
     }
 #ifdef _WIN32
-    if (const int wait = wait_for_local_address(s, socket, len == 0)) return wait == RECEIVE_NOTHING ? 0 : fail(wait);
+    if (const int wait = wait_for_local_address(s, socket, len == 0, flags)) return wait == RECEIVE_NOTHING ? 0 : fail(wait);
 #endif
     const GuestArena::HostWrite destination(len == 0 ? nullptr : buf, len);
     if (!destination.Open()) return fail(NET_EFAULT);
+    if (would_block(socket, flags, false)) return fail(NET_EAGAIN);
     const int native_flags = native_message_flags(flags);
     const int result = ::recv(socket.native->value, static_cast<char*>(buf), static_cast<int>(len), native_flags);
 #ifdef _WIN32
@@ -1015,7 +1028,7 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
     const GuestArena::HostWrite lengthOutput(from == nullptr ? nullptr : fromlen, from == nullptr ? 0 : sizeof(*fromlen));
     if (!lengthOutput.Open()) return fail(NET_EFAULT);
 #ifdef _WIN32
-    if (const int wait = wait_for_local_address(s, socket, len == 0)) {
+    if (const int wait = wait_for_local_address(s, socket, len == 0, flags)) {
         if (wait != RECEIVE_NOTHING) return fail(wait);
         if (from) *fromlen = 0;
         return 0;
@@ -1029,6 +1042,7 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
     if (!destination.Open()) return fail(NET_EFAULT);
     sockaddr_storage peer{};
     NativeLength peer_length = sizeof(peer);
+    if (would_block(socket, flags, false)) return fail(NET_EAGAIN);
     const int native_flags = native_message_flags(flags);
     int result = ::recvfrom(socket.native->value, static_cast<char*>(buf), static_cast<int>(len),
         native_flags, from ? reinterpret_cast<sockaddr*>(&peer) : nullptr, from ? &peer_length : nullptr);
@@ -1051,6 +1065,7 @@ int64_t APS5_VABI sceNetSend(int s, const void* buf, size_t len, int flags) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+    if (would_block(socket, flags, true)) return fail(NET_EAGAIN);
     const int result = ::send(socket.native->value, static_cast<const char*>(buf), static_cast<int>(len), NATIVE_SEND_FLAGS | native_message_flags(flags));
     return result >= 0 ? result : fail(native_error());
 }
@@ -1066,6 +1081,7 @@ int64_t APS5_VABI sceNetSendto(int s, const void* buf, size_t len, int flags, co
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+    if (would_block(socket, flags, true)) return fail(NET_EAGAIN);
     int result;
     if (!to) {
         if (tolen != 0) return fail(NET_EINVAL);
@@ -1124,7 +1140,7 @@ int64_t APS5_VABI sceNetRecvmsg(int s, NetMsghdr* msg, int flags) {
     }
     const bool datagram = socket.type != NET_SOCK_STREAM;
 #ifdef _WIN32
-    if (const int wait = wait_for_local_address(s, socket, total == 0)) {
+    if (const int wait = wait_for_local_address(s, socket, total == 0, flags)) {
         if (wait != RECEIVE_NOTHING) return fail(wait);
         msg->flags = 0;
         if (msg->name) msg->name_length = 0;
@@ -1132,6 +1148,7 @@ int64_t APS5_VABI sceNetRecvmsg(int s, NetMsghdr* msg, int flags) {
         return 0;
     }
 #endif
+    if (would_block(socket, flags, false)) return fail(NET_EAGAIN);
     std::vector<char> buffer;
     try {
         buffer.resize(static_cast<std::size_t>(total) + (datagram ? 1u : 0u));

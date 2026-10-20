@@ -466,13 +466,15 @@ static void CheckDontWait() {
     char buffer[16]{};
     NetIovec in[] = {{buffer, sizeof(buffer)}};
     NetMsghdr receive{nullptr, 0, in, 1, nullptr, 0, 0};
-#ifdef _WIN32
-    Require(Failed(sceNetRecv(receiver, buffer, sizeof(buffer), DontWait), 45));
-    Require(Failed(sceNetRecvfrom(receiver, buffer, sizeof(buffer), DontWait, nullptr, nullptr), 45));
-    Require(Failed(sceNetRecvmsg(receiver, &receive, DontWait), 45));
-    Require(Failed(sceNetSendto(sender, "x", 1, DontWait, address.data(), address.size()), 45));
-#else
     const auto start = std::chrono::steady_clock::now();
+    const int unbound = sceNetSocket("dontwait-unbound", 2, 2, 17);
+    Require(unbound >= 0);
+    const auto unboundStart = std::chrono::steady_clock::now();
+    Require(Failed(sceNetRecv(unbound, buffer, sizeof(buffer), DontWait), 35));
+    Require(Failed(sceNetRecvfrom(unbound, buffer, sizeof(buffer), DontWait, nullptr, nullptr), 35));
+    Require(Failed(sceNetRecvmsg(unbound, &receive, DontWait), 35));
+    Require(std::chrono::steady_clock::now() - unboundStart < std::chrono::seconds(1));
+    Require(sceNetSocketClose(unbound) == 0);
     Require(Failed(sceNetRecv(receiver, buffer, sizeof(buffer), DontWait), 35));
     Require(Failed(sceNetRecvfrom(receiver, buffer, sizeof(buffer), DontWait, nullptr, nullptr), 35));
     Require(Failed(sceNetRecvmsg(receiver, &receive, DontWait), 35));
@@ -489,7 +491,6 @@ static void CheckDontWait() {
     Require(sceNetSend(sender, datagram, sizeof(datagram), DontWait) == sizeof(datagram));
     Require(sceNetRecvmsg(receiver, &receive, 0) == sizeof(datagram) && std::strcmp(buffer, datagram) == 0);
     Require(Failed(sceNetRecv(receiver, buffer, sizeof(buffer), DontWait), 35));
-#endif
     Require(Failed(sceNetRecv(receiver, buffer, sizeof(buffer), 0x1), 45));
     Require(Failed(sceNetSend(sender, "x", 1, Peek), 45));
     Require(sceNetSocketClose(receiver) == 0 && sceNetSocketClose(sender) == 0);

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def windows_runtime(build):
-    for line in (build / "CMakeCache.txt").read_text(encoding="utf-8").splitlines():
+    for line in (build / "CMakeCache.txt").read_text(encoding="utf-8-sig").splitlines():
         if line.startswith("CMAKE_CXX_COMPILER:"):
             compiler = line.partition("=")[2]
             if compiler and not compiler.endswith("-NOTFOUND"):
@@ -24,7 +24,7 @@ def tracy_runtime(platform, build):
     cache = build / "CMakeCache.txt"
     if not cache.is_file():
         return []
-    lines = cache.read_text(encoding="utf-8").splitlines()
+    lines = cache.read_text(encoding="utf-8-sig").splitlines()
     enabled = next((line.partition("=")[2].upper() for line in lines if line.startswith("APS5_ENABLE_TRACY:")), "OFF")
     if enabled in ("", "0", "OFF", "NO", "FALSE", "N", "IGNORE", "NOTFOUND") or enabled.endswith("-NOTFOUND"):
         return []

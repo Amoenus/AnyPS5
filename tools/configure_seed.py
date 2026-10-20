@@ -10,7 +10,7 @@ ENTRY = re.compile(r"^([^#/:][^:]*):([A-Z]+)=(.*)$")
 
 def checks(cache):
     found, doc = {}, ""
-    for line in Path(cache).read_text(encoding="utf-8").splitlines():
+    for line in Path(cache).read_text(encoding="utf-8-sig").splitlines():
         if line.startswith("//"):
             doc = line
             continue

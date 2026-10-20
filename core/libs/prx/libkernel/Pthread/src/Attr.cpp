@@ -77,6 +77,8 @@ int APS5_VABI scePthreadAttrGetstack(const PthreadAttr* attr, void** stackaddr, 
 int APS5_VABI scePthreadAttrGet(Pthread thread, PthreadAttr* attr) {
     if (!thread || !attr || !*attr)
         return SCE_KERNEL_ERROR_EINVAL;
+    const auto live = LockLiveGuestThread(thread);
+    if (!live) return SCE_KERNEL_ERROR_ESRCH;
     (*attr)->_stacksize = thread->stackSize;
     (*attr)->stackAddress = thread->stackAddress;
     (*attr)->_detachstate = thread->_detached ? DETACH_DETACHED : DETACH_JOINABLE;
