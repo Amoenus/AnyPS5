@@ -1839,7 +1839,7 @@ void NativeFmask(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
             std::string error;
             try { DispatchNativeFmask(*device, descriptor, false); } catch (const std::runtime_error& e) { error = e.what(); }
             Require(error.find(reason) != std::string::npos, "native FMASK missing refusal: " + error);
-            Require(std::all_of(NativeFmaskOutput.begin(), NativeFmaskOutput.end(), [](auto word) { return word == sentinel; }), "rejected native FMASK wrote output");
+            Require(std::all_of(NativeFmaskOutput.begin(), NativeFmaskOutput.end(), [sentinel](auto word) { return word == sentinel; }), "rejected native FMASK wrote output");
         };
         refused(NativeFmaskDescriptor(unrelated, cmask, pipeXor), "descriptor does not match");
         refused(NativeFmaskDescriptor(fmask, unrelated, pipeXor), "descriptor does not match");
