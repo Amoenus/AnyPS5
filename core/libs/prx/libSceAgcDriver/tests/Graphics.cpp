@@ -9859,8 +9859,6 @@ void pipelineJournalTests(bool longPath = false, bool extended = false) {
         color.format = VK_FORMAT_R8G8B8A8_UNORM;
         color.bytes = 64 * 32 * 4;
         color.componentMapping = 0xec;
-        color.fmaskAddress = 0x30000;
-        color.fmaskPipeBankXor = 0x1200;
         state.colors = {color, color};
         state.colors[1].format = VK_FORMAT_B8G8R8A8_UNORM;
         state.colors[1].exportIndex = 1;
@@ -9897,10 +9895,6 @@ void pipelineJournalTests(bool longPath = false, bool extended = false) {
         const auto recipe = MakeGraphicsPipelineRecipe(state, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
         Require(recipe.stages.size() == 2 && recipe.stages[0].identity == vertex.Identity() && recipe.stages[1].identity == fragment.Identity() && !recipe.stages[0].generated && recipe.stages[1].pushConstantOffset == PipelinePushSlotBytes && recipe.splitSets, "the recipe does not name its stages");
         Require(recipe.state.colors.size() == 2 && recipe.state.colors[0].address == 0 && recipe.state.colors[0].componentMapping == 0xec && recipe.state.depth && recipe.state.depth->address == 0 && recipe.state.viewport.width == 0 && recipe.state.stages.registerValue == 0 && recipe.state.stages.tessellation && recipe.state.stages.tessellation->breakAtInstance, "the canonical state kept or dropped the wrong fields");
-        Require(recipe.state.color.fmaskAddress == 0 && recipe.state.color.fmaskPipeBankXor == 0, "the canonical state kept the primary target's FMASK location");
-        for (const auto& canonicalColor : recipe.state.colors) {
-            Require(canonicalColor.fmaskAddress == 0 && canonicalColor.fmaskPipeBankXor == 0, "the canonical state kept an attachment's FMASK location");
-        }
         const auto bytes = EncodeGraphicsPipelineRecipe(recipe);
         GraphicsPipelineRecipe decoded;
         Require(DecodeGraphicsPipelineRecipe(bytes, decoded), "the recipe does not decode");
@@ -9915,7 +9909,29 @@ void pipelineJournalTests(bool longPath = false, bool extended = false) {
         const PipelineSetLayouts decodedLayouts{layouts.layouts.main, layouts.layouts.fragment, decoded.splitSets, decoded.mainLayoutKey, decoded.fragmentLayoutKey};
         BuildPipelineStoreKey(replayed, context, decoded.state, decoded.vertexInput, decodedLayouts, shaders, decoded.attachmentLayout);
         Require(!original.empty() && original == canonical && original == replayed, "the canonical or the decoded state keys another pipeline");
-        auto relocatedFmask = state;
+        auto fmaskState = state;
+        fmaskState.samples = 8;
+        fmaskState.color.samples = 8;
+        fmaskState.color.fmaskAddress = 0x30000;
+        fmaskState.color.fmaskPipeBankXor = 0x1200;
+        for (auto& target : fmaskState.colors) {
+            target.samples = 8;
+            target.fmaskAddress = 0x40000;
+            target.fmaskPipeBankXor = 0x2300;
+        }
+        const auto fmaskRecipe = MakeGraphicsPipelineRecipe(fmaskState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        Require(fmaskRecipe.state.color.fmaskAddress == 0 && fmaskRecipe.state.color.fmaskPipeBankXor == 0, "the canonical state kept the primary target's FMASK location");
+        for (const auto& canonicalColor : fmaskRecipe.state.colors) {
+            Require(canonicalColor.fmaskAddress == 0 && canonicalColor.fmaskPipeBankXor == 0, "the canonical state kept an attachment's FMASK location");
+        }
+        const auto fmaskBytes = EncodeGraphicsPipelineRecipe(fmaskRecipe);
+        GraphicsPipelineRecipe fmaskDecoded;
+        Require(DecodeGraphicsPipelineRecipe(fmaskBytes, fmaskDecoded) && EncodeGraphicsPipelineRecipe(fmaskDecoded) == fmaskBytes, "the FMASK pipeline recipe did not round-trip byte for byte");
+        std::vector<std::byte> fmaskKey, fmaskReplayedKey;
+        BuildPipelineStoreKey(fmaskKey, context, fmaskState, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
+        BuildPipelineStoreKey(fmaskReplayedKey, context, fmaskDecoded.state, fmaskDecoded.vertexInput, layouts.View(), shaders, fmaskDecoded.attachmentLayout);
+        Require(fmaskKey != original && fmaskKey == fmaskReplayedKey, "the decoded FMASK state keys another pipeline");
+        auto relocatedFmask = fmaskState;
         relocatedFmask.color.fmaskAddress += 0x10000;
         relocatedFmask.color.fmaskPipeBankXor ^= 0x100;
         for (auto& target : relocatedFmask.colors) {
@@ -9924,8 +9940,8 @@ void pipelineJournalTests(bool longPath = false, bool extended = false) {
         }
         std::vector<std::byte> relocatedFmaskKey;
         BuildPipelineStoreKey(relocatedFmaskKey, context, relocatedFmask, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL);
-        Require(relocatedFmaskKey == original, "the FMASK resource location changed the pipeline key");
-        Require(EncodeGraphicsPipelineRecipe(MakeGraphicsPipelineRecipe(relocatedFmask, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL)) == bytes, "the FMASK resource location changed the journal recipe");
+        Require(relocatedFmaskKey == fmaskKey, "the FMASK resource location changed the pipeline key");
+        Require(EncodeGraphicsPipelineRecipe(MakeGraphicsPipelineRecipe(relocatedFmask, input, layouts.View(), shaders, VK_IMAGE_LAYOUT_GENERAL)) == fmaskBytes, "the FMASK resource location changed the journal recipe");
         auto gridState = state;
         gridState.samples = 2;
         gridState.customSampleLocations = true;
