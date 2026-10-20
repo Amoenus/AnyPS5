@@ -818,11 +818,13 @@ bool CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                     SubmitDriverHtileClear(target.htileAddress, gpuLock);
                     recorder.Activate();
                     Require(Recorder::Active() == &recorder, "driver idle did not restore the native depth fixture recorder");
-                    if (!AgcDriver::GuestMemory::UnchangedSinceCollected(target.htileAddress, metadataBytes, generation)) {
+                    const bool unchangedSinceSubmit = AgcDriver::GuestMemory::UnchangedSinceCollected(target.htileAddress, metadataBytes, generation);
+                    const bool storedAll = AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation);
+                    if (!unchangedSinceSubmit && !storedAll) {
                         std::puts("skipped native HTILE driver dispatch: this device's host import path does not retain write-watch evidence independently of driver writes");
                         return false;
                     }
-                    Require(AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "driver idle returned before recording the completed HTILE dispatch");
+                    Require(storedAll, "driver idle returned before recording the completed HTILE dispatch");
                 } else {
                     const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
                     if (fault == ClearFault::PartialStore || fault == ClearFault::PossibleStore || fault == ClearFault::CompletedPossibleStore) {
