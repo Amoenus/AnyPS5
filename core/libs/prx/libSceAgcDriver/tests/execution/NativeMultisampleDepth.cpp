@@ -815,10 +815,14 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 const std::uint32_t clearPattern = clearOne ? (depthOnly ? 0xfffffff0u : 0xfffc00f0u) : 0u;
                 if (fault == ClearFault::DriverDispatch && clearOne) {
                     const auto generation = AgcDriver::GuestMemory::TrackerGeneration();
+                    const bool watchedBefore = AgcDriver::GuestMemory::Watched(target.htileAddress, metadataBytes);
                     SubmitDriverHtileClear(target.htileAddress, gpuLock);
                     recorder.Activate();
                     Require(Recorder::Active() == &recorder, "driver idle did not restore the native depth fixture recorder");
-                    Require(AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "driver idle returned before recording the completed HTILE dispatch");
+                    const bool watchedAfter = AgcDriver::GuestMemory::Watched(target.htileAddress, metadataBytes);
+                    const bool stored = AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation);
+                    std::cerr << "HTILE driver watch: before=" << watchedBefore << " after=" << watchedAfter << " generationBefore=" << generation << " generationAfter=" << AgcDriver::GuestMemory::TrackerGeneration() << " complete=" << stored << " bytes=" << metadataBytes << '\n';
+                    Require(stored, "driver idle returned before recording the completed HTILE dispatch");
                 } else {
                     const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
                     if (fault == ClearFault::PartialStore || fault == ClearFault::PossibleStore || fault == ClearFault::CompletedPossibleStore) {
