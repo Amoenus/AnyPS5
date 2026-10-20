@@ -849,7 +849,8 @@ void verifySrtReadFailureDiagnostics() {
                     static_cast<void>(tape->Run(plan, runtime, results, flat, activeSources));
                 } else {
                     std::vector<SrtReadPoison> poison;
-                    static_cast<void>(Detail::EvaluateRuntimeSourcesImpl(plan, plan.materializationSources, runtime, results, flat, true, {}, activeSources, &poison));
+                    const std::array<std::uint32_t, 1> sources{0u};
+                    static_cast<void>(Detail::EvaluateRuntimeSourcesImpl(plan, sources, runtime, results, flat, true, {}, activeSources, &poison));
                 }
             }, expected.c_str(), "SRT read diagnostics: failure origin or original reason changed");
             require(context.probes == (kind == 3u ? tapePath ? 1u : 2u : tapePath ? 0u : 1u) && context.reads == (failProbe ? 1u : kind == 3u ? 2u : 1u),
