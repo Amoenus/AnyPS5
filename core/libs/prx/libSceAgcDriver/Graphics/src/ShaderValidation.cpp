@@ -711,7 +711,7 @@ std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders,
         const auto outputType = color != state.colors.end() ? ColorOutputTypeOf(*color) : ShaderRecompiler::ColorOutputType::Float;
         const bool packed = color != state.colors.end() && color->packing != ShaderRecompiler::ColorExportPacking::None;
         const auto expected = packed || outputType == ShaderRecompiler::ColorOutputType::Uint ? "vertex:u32x4" : outputType == ShaderRecompiler::ColorOutputType::Sint ? "vertex:i32x4" : "vertex:f32x4";
-        Require(signature == expected, "fragment output numeric type disagrees with its attachment (expected " + std::string(expected) + ", got " + signature + ")");
+        Require(color == state.colors.end() || signature == expected, "fragment output numeric type disagrees with its attachment (expected " + std::string(expected) + ", got " + signature + ")");
         locations.insert(location);
     }
     Require((!state.dualSourceBlend && state.reversedBlend == 0) || previous.secondSource == "f32x4", "dual-source blending needs a float4 second color at location 0 index 1");

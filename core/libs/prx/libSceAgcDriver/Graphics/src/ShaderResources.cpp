@@ -665,30 +665,32 @@ void reportGuestAllocation(const GuestTextureResource& resource, std::uint64_t g
 }
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
-std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false, VkImageViewType multisampleViewType = VK_IMAGE_VIEW_TYPE_2D) {
-    if (resource.fmaskCmaskAddress != 0u) {
+std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& requested, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false, VkImageViewType multisampleViewType = VK_IMAGE_VIEW_TYPE_2D) {
+    if (requested.fmaskCmaskAddress != 0u) {
         Require(!depthCompare, "FMASK comparison sampling is not implemented");
-        const auto snapshotResource = FmaskSnapshotResource_nid_no_patch(resource);
-        const auto geometry = DescribeSurface(resource);
-        const CmaskLayout metadata(resource.width, resource.height);
+        const auto snapshotResource = FmaskSnapshotResource_nid_no_patch(requested);
+        const auto geometry = DescribeSurface(requested);
+        const CmaskLayout metadata(requested.width, requested.height);
         const auto metadataBytes = FmaskCmaskBytes_nid_no_patch(metadata, geometry.layers);
-        CompletePendingCpuWrites(context, resource.fmaskCmaskAddress, metadataBytes);
-        if (auto native = MultisampleTargetFmaskTexture_nid_no_patch(context, resource, components)) return native;
-        RequireNoMultisampleTarget(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes), "an FMASK texture read");
-        CompletePendingCpuWrites(context, resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
-        CompletePendingCpuWrites(context, resource.fmaskCmaskAddress, metadataBytes);
+        CompletePendingCpuWrites(context, requested.fmaskCmaskAddress, metadataBytes);
+        if (auto native = MultisampleTargetFmaskTexture_nid_no_patch(context, requested, components)) return native;
+        RequireNoMultisampleTarget(requested.baseAddress, static_cast<std::size_t>(geometry.guestBytes), "an FMASK texture read");
+        CompletePendingCpuWrites(context, requested.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+        CompletePendingCpuWrites(context, requested.fmaskCmaskAddress, metadataBytes);
         if (auto* recorder = Recorder::Active()) {
             recorder->BoundKeptBytes();
-            recorder->SyncThrough(resource.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
-            recorder->SyncThrough(resource.fmaskCmaskAddress, metadataBytes);
+            recorder->SyncThrough(requested.baseAddress, static_cast<std::size_t>(geometry.guestBytes));
+            recorder->SyncThrough(requested.fmaskCmaskAddress, metadataBytes);
         }
         std::vector<std::byte> fmask(geometry.guestBytes);
         std::vector<std::byte> cmask(metadataBytes);
-        GuestMemory::Read(resource.baseAddress, fmask);
-        GuestMemory::Read(resource.fmaskCmaskAddress, cmask);
-        const auto snapshot = FmaskSnapshot_nid_no_patch(resource, fmask, cmask);
+        GuestMemory::Read(requested.baseAddress, fmask);
+        GuestMemory::Read(requested.fmaskCmaskAddress, cmask);
+        const auto snapshot = FmaskSnapshot_nid_no_patch(requested, fmask, cmask);
         return std::make_shared<Texture>(context, *context.detiler, snapshotResource, components, snapshot);
     }
+    const auto resource = ArrayLayerWindow(requested, context.limits.maxImageArrayLayers);
+    if (resource.baseAddress != requested.baseAddress) guestBytes = 0;
     if (resource.dimension == TextureDimension::k2DMsaa) {
         Require(!depthCompare, "native multisampled depth comparison sampling is not implemented");
         if (auto depth = DepthSurfaceTexture(context, words, resource, components, multisampleViewType)) {
@@ -1125,7 +1127,9 @@ static WrittenStorage WrittenStorageBytes(const GuestTextureResource& viewed, st
 }
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
-std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, std::uint32_t mip, std::uint64_t guestBytes, bool written) {
+std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& requested, std::uint32_t mip, std::uint64_t guestBytes, bool written) {
+    const auto viewed = ArrayLayerWindow(requested, context.limits.maxImageArrayLayers);
+    if (viewed.baseAddress != requested.baseAddress) guestBytes = 0;
     Require(viewed.dimension != TextureDimension::k2DMsaa, "storage image access to a multisampled texture is not implemented");
     RequireNoMultisampleTarget(viewed.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a storage image access");
     if (auto depth = DepthSurfaceStorage(context, words, viewed, mip)) return depth;

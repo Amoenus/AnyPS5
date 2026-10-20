@@ -313,4 +313,34 @@ int APS5_VABI sceRudpPollDestroy() {
     return 0;
 }
 
+int APS5_VABI sceRudpAccept() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpFlush() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpGetLocalInfo() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpListen() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpPollCancel() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpSetMaxSegmentSize() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }

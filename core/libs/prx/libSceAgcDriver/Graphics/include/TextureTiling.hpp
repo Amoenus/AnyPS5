@@ -80,6 +80,7 @@ std::uint32_t FullMipChainLevels(std::uint32_t width, std::uint32_t height, std:
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor);
 bool LevelsFitAllocation(const GuestTextureResource& surface, std::uint32_t levels);
 GuestTextureResource ViewedArrayWindow(const GuestTextureResource& viewed);
+GuestTextureResource ArrayLayerWindow(const GuestTextureResource& viewed, std::uint32_t maxArrayLayers);
 
 }
 

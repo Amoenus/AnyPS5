@@ -2392,6 +2392,12 @@ int main(int argc, char** argv) {
             std::cout << "artifact codec tests passed\n";
             return 0;
         }
+#ifdef _WIN32
+        if (argc == 2 && std::string_view(argv[1]) == "--long-host-paths") {
+            verifyLongHostPaths();
+            return 0;
+        }
+#endif
         if (argc == 2 && std::string_view(argv[1]) == "--large-file") return runLargeFileWrite();
         if (argc == 2 && std::string_view(argv[1]) == "--load") return runLoadingProcess();
         if (argc == 2 && std::string_view(argv[1]) == "--load-prebuilt") return runPrebuiltLoadingProcess();
