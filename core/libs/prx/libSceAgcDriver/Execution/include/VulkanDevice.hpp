@@ -46,6 +46,7 @@ public:
     // Starts the journal replay if the device has not (a headless device starts it at its first
     // draw or dispatch) and joins it (tests; the teardown joins it anyway).
     void WaitForPipelineJournalReplay();
+    void SavePipelineCache();
     // Compute pipelines this device built, by dispatches and by the journal replay (tests).
     std::uint64_t ComputePipelinesCreated() const;
     ~VulkanDevice();
