@@ -544,7 +544,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         const auto [viewBaseLevel, viewLevelCount] = ViewLevels(descriptor, geometry.imageLevels);
         const auto viewLayerCount = geometry.imageLayers - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
-            Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
+            Require(viewLayerCount >= 6u, "guest cube texture view holds fewer than 6 array slices");
         }
 
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -651,7 +651,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         const auto [viewBaseLevel, viewLevelCount] = ViewLevels(descriptor, copyLevels);
         const auto viewLayerCount = geometry.imageLayers - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
-            Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
+            Require(viewLayerCount >= 6u, "guest cube texture view holds fewer than 6 array slices");
         }
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = image;
@@ -766,7 +766,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         const auto [viewBaseLevel, viewLevelCount] = ViewLevels(descriptor, copyLevels);
         const auto viewLayerCount = geometry.imageLayers - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
-            Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
+            Require(viewLayerCount >= 6u, "guest cube texture view holds fewer than 6 array slices");
         }
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = image;
@@ -1033,7 +1033,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         const auto [viewBaseLevel, viewLevelCount] = ViewLevels(descriptor, geometry.imageLevels);
         const auto viewLayerCount = std::min(geometry.imageLayers, source->ImageLayers()) - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
-            Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
+            Require(viewLayerCount >= 6u, "guest cube texture view holds fewer than 6 array slices");
         }
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         VkImageViewUsageCreateInfo viewUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};

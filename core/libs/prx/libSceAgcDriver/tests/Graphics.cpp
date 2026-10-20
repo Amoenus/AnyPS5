@@ -52,6 +52,7 @@
 #include <random>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -2659,6 +2660,28 @@ void DepthBoundsBiasTests() {
     queue.context[0x009] = bits(0.75f);
     auto state = AgcDriver::Graphics::DecodeState(queue);
     Require(state.depthTest && state.depthBoundsTest && state.minDepthBounds == 0.25f && state.maxDepthBounds == 0.75f, "depth bounds decode changed");
+    const auto infinity = std::numeric_limits<float>::infinity();
+    for (const auto bounds : {std::array{0.0f, infinity}, std::array{-infinity, 1.0f}, std::array{-infinity, infinity}}) {
+        queue.context[0x008] = bits(bounds[0]);
+        queue.context[0x009] = bits(bounds[1]);
+        state = AgcDriver::Graphics::DecodeState(queue);
+        Require(state.depthBoundsTest && state.minDepthBounds == bounds[0] && state.maxDepthBounds == bounds[1], "infinite depth bounds changed");
+        AgcDriver::Graphics::Context context{};
+        expectFailure([&] { AgcDriver::Graphics::ValidateDepthBounds(context, state); }, "depth bounds outside [0, 1]");
+        context.depthRangeUnrestricted = true;
+        AgcDriver::Graphics::ValidateDepthBounds(context, state);
+    }
+    for (const auto offset : {0x008u, 0x009u}) {
+        queue.context[0x008] = bits(0.25f);
+        queue.context[0x009] = bits(0.75f);
+        queue.context[offset] = bits(std::numeric_limits<float>::quiet_NaN());
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "NaN depth bound");
+    }
+    queue.context[0x008] = bits(0.25f);
+    queue.context[0x009] = bits(0.75f);
+    queue.context[0x00b] = bits(infinity);
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "non-finite register");
+    queue.context[0x00b] = bits(0.0f);
     queue.context[0x1b3] = 2;
     queue.context[0x1b4] = 2;
     const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
@@ -10364,6 +10387,11 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--multisample-dcc-state") {
             multisampleDccStateTests();
             std::cout << "Multisampled DCC state checks passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--depth-bounds-state") {
+            DepthBoundsBiasTests();
+            std::cout << "Depth bounds state checks passed\n";
             return 0;
         }
         {
