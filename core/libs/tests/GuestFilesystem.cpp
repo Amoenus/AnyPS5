@@ -856,6 +856,14 @@ int main() {
     Require(sceKernelCheckReachability("") == static_cast<int>(0x80020002u));
     Require(sceKernelRename("", presentName.c_str()) == static_cast<int>(0x80020002u));
     Require(sceKernelRename(presentName.c_str(), "") == static_cast<int>(0x80020002u));
+    Require(sceKernelRename(missingName.c_str(), nullptr) == static_cast<int>(0x80020002u));
+    Require(sceKernelRename("", nullptr) == static_cast<int>(0x80020002u));
+    Require(sceKernelRename(".", nullptr) == static_cast<int>(0x80020016u));
+    Require(sceKernelRename(missingName.c_str(), ".") == static_cast<int>(0x80020002u));
+    Require(sceKernelRename(presentName.c_str(), nullptr) == static_cast<int>(0x8002000Eu));
+    Require(sceKernelRename(nullptr, presentName.c_str()) == static_cast<int>(0x8002000Eu));
+    Require(rename_nid_postfix(missingName.c_str(), nullptr) == -1 && *__error_nid_postfix() == 2);
+    Require(rename_nid_postfix(presentName.c_str(), nullptr) == -1 && *__error_nid_postfix() == 14);
     Require(sceKernelRmdir("") == static_cast<int>(0x80020002u));
     Require(sceKernelMkdir("", 0700) == static_cast<int>(0x80020002u));
     const auto cwdPermissions = std::filesystem::status(".").permissions();
@@ -978,6 +986,11 @@ int main() {
     Require((junctionStatus.st_mode & 0170000) == 0120000 && junctionStatus.st_size > 0);
     FileStat junctionFollowed{};
     Require(stat_nid_postfix(junction.string().c_str(), &junctionFollowed) == 0 && (junctionFollowed.st_mode & 0170000) == 0040000);
+    constexpr int noFollow = 0x100;
+    Require(sceKernelOpen(junction.string().c_str(), noFollow, 0) == static_cast<int>(0x8002001Fu));
+    Require(open_nid_postfix(junction.string().c_str(), noFollow, 0) == -1 && *__error_nid_postfix() == 31);
+    const int followedJunction = sceKernelOpen(junction.string().c_str(), 0, 0);
+    Require(followedJunction >= 0 && sceKernelClose(followedJunction) == 0);
     Require(std::filesystem::remove(junction) && std::filesystem::remove(junctionTarget));
 #endif
     FileStat identity{};

@@ -26,6 +26,7 @@
 #endif
 #endif
 #include "SceTypes.hpp"
+#include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
@@ -257,9 +258,8 @@ std::uint16_t& PortOf(sockaddr_storage& address) {
     return address.ss_family == AF_INET ? reinterpret_cast<sockaddr_in&>(address).sin_port : reinterpret_cast<sockaddr_in6&>(address).sin6_port;
 }
 bool Listening(const Socket& socket) {
-    int listening = 0;
-    socklen_t size = sizeof(listening);
-    return ::getsockopt(socket.value, SOL_SOCKET, SO_ACCEPTCONN, reinterpret_cast<char*>(&listening), &size) == 0 && listening != 0;
+    bool listening = false;
+    return GuestSockets::NativeListening(static_cast<std::uintptr_t>(socket.value), listening) && listening;
 }
 bool ZeroPortConnect(const Socket& socket, const void* address, std::uint32_t length) {
     if (!address || (socket.type != 1 && socket.type != 2) || (socket.family != 2 && socket.family != 28)) return false;
@@ -377,7 +377,7 @@ bool GuestSockets::WaitAny(const std::vector<Interest>& interests, std::uint64_t
 #ifdef _WIN32
                 pipes = true;
 #else
-                entries.push_back({interest.descriptor, ReadMask, 0});
+                entries.push_back({interest.descriptor, interest.write ? WriteMask : ReadMask, 0});
 #endif
                 continue;
             }
@@ -439,9 +439,7 @@ bool GuestSockets::Listening(int descriptor) {
         if (found == sockets.end()) return false;
         socket = found->second;
     }
-    int accepting = 0;
-    socklen_t length = sizeof(accepting);
-    return getsockopt(socket->value, SOL_SOCKET, SO_ACCEPTCONN, reinterpret_cast<char*>(&accepting), &length) == 0 && accepting != 0;
+    return Listening(*socket);
 }
 
 extern "C" bool GuestSocketIsOpen_nid_no_patch(int descriptor) {
@@ -789,7 +787,11 @@ bool GuestSockets::Ready(int descriptor, bool write, std::int64_t* data, bool* e
     {
         std::lock_guard lock(socketsMutex);
         const auto found = sockets.find(descriptor);
-        if (found == sockets.end()) return !write && PipeReadState(descriptor, data, eof) && (*data > 0 || *eof);
+        if (found == sockets.end() && !write) return PipeReadState(descriptor, data, eof) && (*data > 0 || *eof);
+        if (found == sockets.end()) {
+            bool writable = false;
+            return PipeWriteState(descriptor, data, eof, &writable) && (writable || *eof);
+        }
         socket = found->second;
     }
 #ifdef _WIN32
@@ -839,6 +841,31 @@ bool GuestSockets::PipeReadState(int descriptor, std::int64_t* data, bool* eof) 
         throw std::runtime_error("kevent: querying pipe descriptor " + std::to_string(descriptor) + " failed");
     *data = available;
     *eof = (entry.revents & POLLHUP) != 0;
+#endif
+    return true;
+}
+
+bool GuestSockets::PipeWriteState(int descriptor, std::int64_t* data, bool* eof, bool* writable) {
+#ifdef _WIN32
+    ACCESS_MASK access = 0;
+    PipeLocalInformation pipe{};
+    if (!QueryPipe(descriptor, "kevent", access, pipe) || !(access & FILE_WRITE_DATA)) return false;
+    *eof = pipe.state == PipeClosingState;
+    *writable = pipe.writeQuotaAvailable >= PipeAtomicBytes;
+    *data = *eof ? 0 : pipe.writeQuotaAvailable;
+#elif defined(__linux__)
+    if (!IsPipe(descriptor, 0) || (::fcntl(descriptor, F_GETFL) & O_ACCMODE) == O_RDONLY) return false;
+    pollfd entry{descriptor, POLLOUT, 0};
+    int queued = 0;
+    const int capacity = ::fcntl(descriptor, F_GETPIPE_SZ);
+    if (::poll(&entry, 1, 0) < 0 || ::ioctl(descriptor, FIONREAD, &queued) != 0 || capacity < 0)
+        throw std::runtime_error("kevent: querying pipe descriptor " + std::to_string(descriptor) + " failed");
+    *eof = (entry.revents & POLLERR) != 0;
+    *writable = (entry.revents & POLLOUT) != 0;
+    *data = *eof ? 0 : std::max<std::int64_t>(0, capacity - queued);
+#else
+    if (!IsPipe(descriptor, 0) || (::fcntl(descriptor, F_GETFL) & O_ACCMODE) == O_RDONLY) return false;
+    NotImplemented_nid_no_patch("kevent: EVFILT_WRITE on a pipe on macOS");
 #endif
     return true;
 }
