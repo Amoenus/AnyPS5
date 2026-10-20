@@ -293,10 +293,26 @@ std::vector<std::byte> CheckReadback(TextureDetiler& reader, const Surface& surf
     reader.BeginBatch();
     CommandBatch batch(surface.context);
     RecordMemoryBarrier(surface.context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    const bool depth = surface.format == VK_FORMAT_D32_SFLOAT;
+    const auto readLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const auto transition = [&](VkImageLayout oldLayout, VkImageLayout newLayout) {
+        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.oldLayout = oldLayout;
+        barrier.newLayout = newLayout;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = surface.image;
+        barrier.subresourceRange = {static_cast<VkImageAspectFlags>(depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0u, 1u, 0u, VK_REMAINING_ARRAY_LAYERS};
+        surface.context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &barrier);
+    };
+    transition(VK_IMAGE_LAYOUT_GENERAL, readLayout);
     for (std::uint32_t repeat = 0u; repeat < repetitions; ++repeat) {
-        reader.DispatchMultisampleReadback(batch.Handle(), surface.format, output.Handle(), offset, bytes, surface.arrayView, surface.width, surface.height, surface.layers, surface.samples, first, elements);
+        reader.DispatchMultisampleReadback(batch.Handle(), surface.format, output.Handle(), offset, bytes, surface.arrayView, surface.width, surface.height, surface.layers, surface.samples, first, elements, readLayout);
         if (repeat + 1u < repetitions) RecordMemoryBarrier(surface.context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     }
+    transition(readLayout, VK_IMAGE_LAYOUT_GENERAL);
     RecordMemoryBarrier(surface.context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
     batch.SubmitAndWait();
     output.Invalidate();
