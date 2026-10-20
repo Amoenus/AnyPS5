@@ -1035,7 +1035,7 @@ static void CheckUnspecifiedIpv6() {
 
     const char payload[] = "IPv6 wildcard receive";
     const auto sent = sceNetSendto(sender, payload, sizeof(payload), 0, address.data(), address.size());
-    if (sent < 0 && *sceNetErrnoLoc() == 51 && HostIpv6LoopbackUnavailable()) {
+    if (sent < 0 && (*sceNetErrnoLoc() == 49 || *sceNetErrnoLoc() == 51 || *sceNetErrnoLoc() == 65) && HostIpv6LoopbackUnavailable()) {
         Require(sceNetSocketClose(sender) == 0);
         Require(sceNetSocketClose(receiver) == 0);
         ipv6Unavailable = true;
