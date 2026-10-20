@@ -9,6 +9,8 @@
 #include <xmmintrin.h>
 
 extern "C" {
+int* APS5_VABI __error_nid_postfix();
+void APS5_VABI _Feraise_nid_postfix(int);
 int APS5_VABI fegetround_nid_postfix();
 int APS5_VABI fesetround_nid_postfix(int);
 int APS5_VABI fetestexcept_nid_postfix(int);
@@ -90,6 +92,21 @@ void CheckRounding() {
     Require(fegetround_nid_postfix() == 0x400, "query uses the x87 rounding mode");
 }
 
+void CheckFeraise() {
+    for (unsigned requested = 0; requested <= 0x3f; ++requested) {
+        const auto seeded = SeedFlags(0, 0);
+        *__error_nid_postfix() = 0;
+        _Feraise_nid_postfix(static_cast<int>(requested));
+        const unsigned raised = (requested & 0x18) != 0 ? requested | 0x20 : requested;
+        const auto state = ReadEnvironment();
+        Require((state.x87[1] & 0x3f) == raised && (state.sse & 0x3f) == raised, "_Feraise raises the flags on both units");
+        Require(state.x87[0] == seeded.x87[0] && (state.sse & ~0x3fu) == (seeded.sse & ~0x3fu), "_Feraise preserves control bits");
+        const int error = (raised & 0x01) != 0 || (raised & 0x1c) == 0 ? 33 : 34;
+        Require(*__error_nid_postfix() == error, "_Feraise sets EDOM or ERANGE");
+    }
+    SeedFlags(0, 0);
+}
+
 void CheckFlags() {
     const auto initial = SeedFlags(0x03, 0x24);
     Require(fetestexcept_nid_postfix(0) == 0, "empty exception query");
@@ -133,6 +150,7 @@ void CheckFlags() {
         } catch (const std::invalid_argument&) { threw = true; }
         Require(threw, "reject null exception storage");
     }
+    CheckFeraise();
 }
 
 void CheckThreads() {
