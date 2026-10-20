@@ -20,6 +20,7 @@ static constexpr int MAX_SLOTS = 64;
 
 namespace {
 struct Request {
+    int titleCtxId = 0;
     bool started = false;
     bool aborted = false;
     int result = 0;
@@ -68,8 +69,15 @@ int APS5_VABI sceNpTusCreateRequest(int titleCtxId) {
     if (!titleContexts.contains(titleCtxId)) return SCE_NP_COMMUNITY_ERROR_INVALID_ID;
     if (requests.size() >= MAX_REQUESTS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_OBJECTS;
     const int reqId = nextRequest++;
-    requests.emplace(reqId, Request{});
+    requests.emplace(reqId, Request{titleCtxId});
     return reqId;
+}
+
+int APS5_VABI sceNpTusDeleteNpTitleCtx(int titleCtxId) {
+    std::lock_guard lock(tusMutex);
+    if (!titleContexts.erase(titleCtxId)) return SCE_NP_COMMUNITY_ERROR_INVALID_ID;
+    std::erase_if(requests, [titleCtxId](const auto& entry) { return entry.second.titleCtxId == titleCtxId; });
+    return 0;
 }
 
 int APS5_VABI sceNpTusDeleteRequest(int reqId) {

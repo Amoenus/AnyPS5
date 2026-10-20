@@ -3,6 +3,7 @@
 ### Unknown function info
 
 - [SceNpTusVariableA](../../../core/libs/prx/libSceNpTus/Export.cpp) (libSceNpTus) - the layout of the output array of `sceNpTusGetMultiSlotVariableAAsync` and of `outVariable` in `sceNpTusAddAndGetVariableAAsync` is not verified, so the output is never written and `variableArraySize` / `outVariableSize` are not checked. The signatures and the community error codes follow [shadPS4](https://github.com/shadps4-emu/shadPS4/tree/main/src/core/libraries/np/np_tus), which fpPS4 agrees with for the context and request calls; no console measurement.
+- [sceNpTusDeleteNpTitleCtx](../../../core/libs/prx/libSceNpTus/Export.cpp) (libSceNpTus) - the PS5 signature, error codes and child-request lifetime have not been measured on a console. Deletion invalidates the context and all its requests, following [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/a808e7626e3c7de8d0f0fda6a91f620b42f6c762/src/core/libraries/np/np_tus/np_tus.cpp#L158-L180).
 
 ### Functional
 
