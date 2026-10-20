@@ -21,6 +21,7 @@ extern "C" int APS5_VABI access_nid_postfix(const char* path, int mode) {
         const DWORD attributes = GetFileAttributesW(resolved.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES) {
             errno = FilesystemError(std::error_code(static_cast<int>(GetLastError()), std::system_category()));
+            if (errno == 2) errno = NotFoundError_nid_no_patch(resolved);
             return -1;
         }
         if (mode == 0) return 0;

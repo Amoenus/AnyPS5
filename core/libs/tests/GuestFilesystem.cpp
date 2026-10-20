@@ -1145,6 +1145,17 @@ int main() {
     Require(rmdir_nid_postfix((missingName + "/").c_str()) == -1 && *__error_nid_postfix() == 2);
     Require(sceKernelRmdir((presentName + "/").c_str()) == static_cast<int>(0x80020014u));
     Require(sceKernelRmdir((missingName + "/").c_str()) == static_cast<int>(0x80020002u));
+    const auto missingChild = missingName + "/child";
+    for (const auto* blocked : {&underFile, &deepUnderFile, &missingChild}) {
+        const int expected = blocked == &missingChild ? 2 : 20;
+        FileStat blockedStatus{};
+        Require(open_nid_postfix(blocked->c_str(), 0, 0) == -1 && *__error_nid_postfix() == expected);
+        Require(open_nid_postfix(blocked->c_str(), 0x202, 0644) == -1 && *__error_nid_postfix() == expected);
+        Require(stat_nid_postfix(blocked->c_str(), &blockedStatus) == -1 && *__error_nid_postfix() == expected);
+        Require(lstat_nid_postfix(blocked->c_str(), &blockedStatus) == -1 && *__error_nid_postfix() == expected);
+        Require(access_nid_postfix(blocked->c_str(), 0) == -1 && *__error_nid_postfix() == expected);
+        Require(unlink_nid_postfix(blocked->c_str()) == -1 && *__error_nid_postfix() == expected);
+    }
 #ifndef _WIN32
     const auto linkedDirectory = root / "linked-directory";
     const auto directoryLink = root / "directory-link";
