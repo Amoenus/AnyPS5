@@ -1779,36 +1779,7 @@ bool StoredOver(std::uint64_t address, std::size_t bytes, std::uint64_t generati
 #ifdef _WIN32
     if (GuestArena::GuestArenaHostRegionOverlaps_nid_postfix(address, bytes)) return true;
 #endif
-    const auto end = address + bytes;
-    const auto first = tracker.blockOf(address);
-    const auto last = tracker.blockOf(end - 1);
-    for (auto block = first; block <= last; ++block) {
-        if (tracker.stampOf(block) <= generation) continue;
-        if (const auto found = tracker.cpuPages.find(block); found != tracker.cpuPages.end()) {
-            const auto begin = tracker.blockBegin(block);
-            const auto from = std::max(address, begin) - begin;
-            const auto to = std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin;
-            for (auto page = from / WritePageBytes; page <= (to - 1) / WritePageBytes; ++page) {
-                if (found->second.pages[page] > generation) return true;
-            }
-        } else if (tracker.cpuStampOf(block) > generation) {
-            return true;
-        }
-        const auto found = tracker.driverPieces.find(block);
-        if (found == tracker.driverPieces.end()) return true;
-        const auto& entry = found->second;
-        if (entry.whole > generation || entry.dropped > generation || entry.possibleWhole > generation || entry.possibleDropped > generation) return true;
-        const auto begin = tracker.blockBegin(block);
-        const auto from = std::max(address, begin) - begin;
-        const auto to = std::min<std::uint64_t>(end, begin + WriteBlockBytes) - begin;
-        for (const auto& piece : entry.pieces) {
-            if (piece.generation > generation && piece.begin < to && from < piece.end) return true;
-        }
-        for (const auto& piece : entry.possiblePieces) {
-            if (piece.generation > generation && piece.begin < to && from < piece.end) return true;
-        }
-    }
-    return false;
+    return tracker.storedOver(address, address + bytes, generation, false);
 }
 
 bool StoredAllSince_nid_no_patch(std::uint64_t address, std::size_t bytes, std::uint64_t generation) {
