@@ -336,6 +336,9 @@ public:
 private:
     friend class AgcDriver::VulkanDevice;
     bool refreshData(VkCommandBuffer commands, const CompiledShader& shader, Recorder* recorder);
+    std::optional<std::size_t> shaderDataAllocation(const CompiledShader& shader) const;
+    VkBuffer shaderDataBuffer(const CompiledShader& shader) const;
+    void forgetShaderDataWords(const CompiledShader& shader);
     struct DescribedRange {
         const char* kind;
         std::uint64_t address;
@@ -543,6 +546,7 @@ private:
     GuestBufferMemory guestMemory;
     std::size_t maxDrawSnapshotBytes = MaxDrawSnapshotBytes();
     std::unique_ptr<BdaResources> bda;
+    std::vector<BdaResources::SrtGuardFaults> srtGuardFaults;
     bool usesBda = false;
     bool bdaReadOnly = true;
     std::vector<std::uint64_t> multisampleSources;

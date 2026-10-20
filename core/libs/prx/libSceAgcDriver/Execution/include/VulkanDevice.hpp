@@ -11,6 +11,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include <array>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -274,7 +275,7 @@ public:
         int cpuReason;
         double argumentReadMs;
     };
-    IndirectOutcome DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::uint64_t programAddress = 0, std::shared_ptr<PreparedDispatch> prepared = nullptr, std::shared_ptr<const Recipe>* recipe = nullptr);
+    IndirectOutcome DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::uint64_t programAddress = 0, std::shared_ptr<PreparedDispatch> prepared = nullptr, std::shared_ptr<const Recipe>* recipe = nullptr, const std::array<std::uint32_t, 3>& threadGroup = {});
     // A value-equal dispatch-cache hit with a recipe (design_cpu_final M4), in two steps.
     // PrepareRecipe, WITHOUT GuestMemory::GpuMutex: the pre-checks (recipes on, the recipe's
     // device is this one, its template and pipeline objects still alive), the template's
@@ -296,7 +297,7 @@ public:
     // with the recipe's, else the process aborts. `refreshByWords`: the driver's data-only hit
     // (`shader` carries live flat-SRT words the recipe's hash does not name), so the template's
     // data refresh is decided by the per-word compare instead of the hash.
-    RecipeOutcome DispatchRecipe(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::uint64_t programAddress, const std::shared_ptr<RecipeHit>& hit, IndirectOutcome& outcome, const std::shared_ptr<PreparedDispatch>& verify = nullptr, bool refreshByWords = false);
+    RecipeOutcome DispatchRecipe(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::uint64_t programAddress, const std::shared_ptr<RecipeHit>& hit, IndirectOutcome& outcome, const std::shared_ptr<PreparedDispatch>& verify = nullptr, bool refreshByWords = false, const std::array<std::uint32_t, 3>& threadGroup = {});
     // Whether dispatch-cache hits use recipes (APS5_NO_DISPATCH_RECIPE unset) and whether every
     // hit is verified (APS5_VERIFY_RECIPE=1).
     static bool DispatchRecipes();
@@ -352,7 +353,7 @@ private:
     ShaderRecompiler::SpirvTarget buildTarget() const;
     Graphics::Context buildContext() const;
     // Body of Dispatch and DispatchIndirect: `arguments` 0 dispatches x, y, z groups.
-    IndirectOutcome dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe);
+    IndirectOutcome dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe, const std::array<std::uint32_t, 3>& threadGroup = {});
     // The stage-A pre-sync over `surfaces` (see PrepareDispatch): the serial waited for, 0 none.
     std::uint64_t presync(std::span<const Graphics::PresyncSurface> surfaces);
     std::shared_ptr<ComputePipelineObjects> computePipeline(const Graphics::Context& context, const ShaderRecompiler::RecompileResult& shader, VkDescriptorSetLayout setLayout, std::span<const std::uint32_t> layoutKey, VkShaderStageFlags pushStages, std::uint64_t programAddress);

@@ -2037,8 +2037,8 @@ void Recorder::EndGpuTiming(std::uint32_t index, std::uint64_t bytes) {
     context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(open->commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, open->queries, index * 2 + 1);
 }
 
-bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress source, VkDeviceAddress arguments) {
-    constexpr std::uint32_t PushBytes = 32;
+bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress source, VkDeviceAddress arguments, const std::array<std::uint32_t, 3>* threadGroup) {
+    constexpr std::uint32_t PushBytes = 48;
     if (dispatchArgumentState == 0) {
         dispatchArgumentState = -1;
         VkShaderModule module = VK_NULL_HANDLE;
@@ -2071,11 +2071,15 @@ bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress
         VkDeviceAddress source;
         VkDeviceAddress arguments;
         std::array<std::uint32_t, 4> limits;
-    } parameters{source, arguments, {limit[0], limit[1], limit[2], 0u}};
+        std::array<std::uint32_t, 4> group;
+    } parameters{source, arguments, {limit[0], limit[1], limit[2], threadGroup != nullptr ? 1u : 0u}, {1u, 1u, 1u, 0u}};
+    if (threadGroup != nullptr) std::copy(threadGroup->begin(), threadGroup->end(), parameters.group.begin());
     static_assert(sizeof(parameters) == PushBytes);
     function(cmdPushConstants, "vkCmdPushConstants")(commands, dispatchArgumentLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, PushBytes, &parameters);
     function(cmdDispatch, "vkCmdDispatch")(commands, 1, 1, 1);
-    recordBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    const VkPipelineStageFlags readers = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | (threadGroup != nullptr ? VK_PIPELINE_STAGE_TRANSFER_BIT : 0u);
+    const VkAccessFlags reads = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | (threadGroup != nullptr ? VK_ACCESS_TRANSFER_READ_BIT : 0u);
+    recordBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, readers, VK_ACCESS_SHADER_WRITE_BIT, reads);
     CountBarriers(CommandClass::DispatchLeading, 2);
     return true;
 }
