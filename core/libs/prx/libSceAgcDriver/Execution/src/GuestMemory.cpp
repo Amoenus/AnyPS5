@@ -1174,8 +1174,11 @@ struct WriteTracker {
                 continue;
             }
             const auto& entry = found->second;
-            if (entry.whole > generation || entry.dropped > generation) return true;
+            if (entry.whole > generation || entry.dropped > generation || entry.possibleWhole > generation || entry.possibleDropped > generation) return true;
             for (const auto& piece : entry.pieces) {
+                if (piece.generation > generation && piece.begin < to && from < piece.end) return true;
+            }
+            for (const auto& piece : entry.possiblePieces) {
                 if (piece.generation > generation && piece.begin < to && from < piece.end) return true;
             }
         }
