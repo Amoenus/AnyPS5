@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libkernel/Time/include/SleepWake.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ParallelCompare.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
@@ -1083,6 +1084,60 @@ void FlushForAccess(std::uint64_t address, std::size_t bytes) {
 
 }
 
+struct Recorder::ProgressWatcher {
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::uint64_t submitted = 0;
+    bool stop = false;
+    std::thread thread;
+
+    ProgressWatcher(VkDevice device, VkSemaphore timeline, PFN_vkWaitSemaphoresKHR waitSemaphores, PFN_vkGetSemaphoreCounterValueKHR counterValue) {
+        thread = std::thread([this, device, timeline, waitSemaphores, counterValue] {
+            CpuTopology::PinHelperThread("GPU progress watcher");
+            std::uint64_t seen = 0;
+            for (;;) {
+                {
+                    std::unique_lock lock(mutex);
+                    wake.wait(lock, [&] { return stop || submitted > seen; });
+                    if (stop) return;
+                }
+                const std::uint64_t target = seen + 1;
+                VkSemaphoreWaitInfoKHR info{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO_KHR};
+                info.semaphoreCount = 1;
+                info.pSemaphores = &timeline;
+                info.pValues = &target;
+                const auto result = waitSemaphores(device, &info, 50'000'000ull);
+                if (result == VK_TIMEOUT) continue;
+                if (result != VK_SUCCESS) {
+                    std::fprintf(stderr, "[gpu] progress watcher: vkWaitSemaphoresKHR failed (%d), watcher stops\n", static_cast<int>(result));
+                    return;
+                }
+                std::uint64_t value = target;
+                if (counterValue(device, timeline, &value) != VK_SUCCESS) value = target;
+                seen = std::max(target, value);
+                KernelWakeSleepers_nid_no_patch();
+            }
+        });
+    }
+
+    void Submitted(std::uint64_t serial) {
+        {
+            std::lock_guard lock(mutex);
+            submitted = serial;
+        }
+        wake.notify_one();
+    }
+
+    ~ProgressWatcher() {
+        {
+            std::lock_guard lock(mutex);
+            stop = true;
+        }
+        wake.notify_one();
+        thread.join();
+    }
+};
+
 Recorder::Recorder(const Context& context, bool timelineSemaphores) : context(context), id(nextRecorderId.fetch_add(1)) {
     {
         std::lock_guard lock(liveRecordersMutex);
@@ -1129,6 +1184,7 @@ Recorder::~Recorder() {
     } catch (const std::exception& error) {
         std::fprintf(stderr, "[gpu] recorder teardown: %s\n", error.what());
     }
+    progressWatcher.reset();
     holdKept.clear();
     if (activeRecorder == this) {
         activeRecorder = nullptr;
@@ -1981,8 +2037,8 @@ void Recorder::EndGpuTiming(std::uint32_t index, std::uint64_t bytes) {
     context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(open->commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, open->queries, index * 2 + 1);
 }
 
-bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress source, VkDeviceAddress arguments) {
-    constexpr std::uint32_t PushBytes = 32;
+bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress source, VkDeviceAddress arguments, const std::array<std::uint32_t, 3>* threadGroup) {
+    constexpr std::uint32_t PushBytes = 48;
     if (dispatchArgumentState == 0) {
         dispatchArgumentState = -1;
         VkShaderModule module = VK_NULL_HANDLE;
@@ -1992,10 +2048,7 @@ bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress
             layoutInfo.pushConstantRangeCount = 1;
             layoutInfo.pPushConstantRanges = &push;
             Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &dispatchArgumentLayout), "vkCreatePipelineLayout dispatch arguments");
-            VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-            moduleInfo.codeSize = sizeof(DISPATCH_ARGUMENTS_SPV);
-            moduleInfo.pCode = DISPATCH_ARGUMENTS_SPV;
-            Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &moduleInfo, nullptr, &module), "vkCreateShaderModule dispatch arguments");
+            module = CreateShaderModule(context, DISPATCH_ARGUMENTS_SPV, sizeof(DISPATCH_ARGUMENTS_SPV), "vkCreateShaderModule dispatch arguments");
             VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
             pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -2018,11 +2071,15 @@ bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress
         VkDeviceAddress source;
         VkDeviceAddress arguments;
         std::array<std::uint32_t, 4> limits;
-    } parameters{source, arguments, {limit[0], limit[1], limit[2], 0u}};
+        std::array<std::uint32_t, 4> group;
+    } parameters{source, arguments, {limit[0], limit[1], limit[2], threadGroup != nullptr ? 1u : 0u}, {1u, 1u, 1u, 0u}};
+    if (threadGroup != nullptr) std::copy(threadGroup->begin(), threadGroup->end(), parameters.group.begin());
     static_assert(sizeof(parameters) == PushBytes);
     function(cmdPushConstants, "vkCmdPushConstants")(commands, dispatchArgumentLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, PushBytes, &parameters);
     function(cmdDispatch, "vkCmdDispatch")(commands, 1, 1, 1);
-    recordBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    const VkPipelineStageFlags readers = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | (threadGroup != nullptr ? VK_PIPELINE_STAGE_TRANSFER_BIT : 0u);
+    const VkAccessFlags reads = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | (threadGroup != nullptr ? VK_ACCESS_TRANSFER_READ_BIT : 0u);
+    recordBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, readers, VK_ACCESS_SHADER_WRITE_BIT, reads);
     CountBarriers(CommandClass::DispatchLeading, 2);
     return true;
 }
@@ -2075,10 +2132,7 @@ bool Recorder::gpuSampleCounter() {
         layoutInfo.pushConstantRangeCount = 1;
         layoutInfo.pPushConstantRanges = &push;
         Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &sampleLayout), "vkCreatePipelineLayout sample counter");
-        VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        moduleInfo.codeSize = sizeof(SAMPLE_COUNTER_SPV);
-        moduleInfo.pCode = SAMPLE_COUNTER_SPV;
-        Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &moduleInfo, nullptr, &module), "vkCreateShaderModule sample counter");
+        module = CreateShaderModule(context, SAMPLE_COUNTER_SPV, sizeof(SAMPLE_COUNTER_SPV), "vkCreateShaderModule sample counter");
         VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -2094,9 +2148,7 @@ bool Recorder::gpuSampleCounter() {
         const VkPushConstantRange dumpPush{VK_SHADER_STAGE_COMPUTE_BIT, 0, SampleDumpPushBytes};
         layoutInfo.pPushConstantRanges = &dumpPush;
         Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &dumpLayout), "vkCreatePipelineLayout sample dumps");
-        moduleInfo.codeSize = sizeof(SAMPLE_DUMPS_SPV);
-        moduleInfo.pCode = SAMPLE_DUMPS_SPV;
-        Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &moduleInfo, nullptr, &module), "vkCreateShaderModule sample dumps");
+        module = CreateShaderModule(context, SAMPLE_DUMPS_SPV, sizeof(SAMPLE_DUMPS_SPV), "vkCreateShaderModule sample dumps");
         pipelineInfo.stage.module = module;
         pipelineInfo.layout = dumpLayout;
         {
@@ -2391,10 +2443,7 @@ bool Recorder::RecordMeshArguments(VkCommandBuffer commands, VkDeviceAddress rec
             layoutInfo.pushConstantRangeCount = 1;
             layoutInfo.pPushConstantRanges = &push;
             Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &meshArgumentLayout), "vkCreatePipelineLayout mesh arguments");
-            VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-            moduleInfo.codeSize = sizeof(MESH_ARGUMENTS_SPV);
-            moduleInfo.pCode = MESH_ARGUMENTS_SPV;
-            Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &moduleInfo, nullptr, &module), "vkCreateShaderModule mesh arguments");
+            module = CreateShaderModule(context, MESH_ARGUMENTS_SPV, sizeof(MESH_ARGUMENTS_SPV), "vkCreateShaderModule mesh arguments");
             VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
             pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -3494,6 +3543,13 @@ void Recorder::Submit() {
         newestSubmitted = batch->serial;
         newestSubmittedAt = batch->submittedAt;
     }
+    if (timeline != VK_NULL_HANDLE) {
+        if (!progressWatcher) {
+            progressWatcher = std::make_unique<ProgressWatcher>(context.device, timeline, context.Function<PFN_vkWaitSemaphoresKHR>("vkWaitSemaphoresKHR"),
+                                                                context.Function<PFN_vkGetSemaphoreCounterValueKHR>("vkGetSemaphoreCounterValueKHR"));
+        }
+        progressWatcher->Submitted(batch->serial);
+    }
     inFlight.push_back(std::move(batch));
     inFlightKeptBytes += inFlight.back()->keptBytes;
     if (activeRecorder == this) pendingLabelSince.store(NoPendingLabel, std::memory_order_release);
@@ -3989,6 +4045,7 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool 
             }
         }
     }
+    if (!batch->completions.empty()) KernelWakeSleepers_nid_no_patch();
     if (profile) holdCounters.completions += batch->completions.size();
     const auto keptStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // Deferred only from inside a hold: the unlock that releases the list is this thread's own, and

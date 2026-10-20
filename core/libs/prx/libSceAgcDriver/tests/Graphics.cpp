@@ -8393,6 +8393,25 @@ void LineStripTests() {
     Require(rejection.empty(), "the draw precheck rejected an indexed line strip with primitive restart: " + rejection);
 }
 
+std::uint32_t keyedGenerator = 0;
+std::size_t keyedWords = 0;
+
+VKAPI_ATTR VkResult VKAPI_CALL keyedCreateShaderModule(VkDevice, const VkShaderModuleCreateInfo* info, const VkAllocationCallbacks*, VkShaderModule* module) {
+    keyedWords = info->codeSize / sizeof(std::uint32_t);
+    keyedGenerator = info->pCode[2];
+    *module = makeHandle<VkShaderModule>();
+    return VK_SUCCESS;
+}
+
+void ShaderModuleKeyTests() {
+    const std::array<std::uint32_t, 5> code{0x07230203u, 0x00010300u, 0x00080001u, 8u, 0u};
+    static_cast<void>(AgcDriver::Graphics::CreateShaderModule(keyedCreateShaderModule, VK_NULL_HANDLE, true, code.data(), sizeof(code), "keyed module"));
+    Require(keyedWords == code.size() && keyedGenerator == 0x00080001u, "a shader module with graphics pipeline libraries changed its generator word");
+    static_cast<void>(AgcDriver::Graphics::CreateShaderModule(keyedCreateShaderModule, VK_NULL_HANDLE, false, code.data(), sizeof(code), "keyed module"));
+    Require(keyedWords == code.size() && keyedGenerator == (0x00080001u ^ 0x8000u), "a shader module without graphics pipeline libraries kept the generator word of the other mode");
+    Require(code[2] == 0x00080001u, "keying a shader module changed its source words");
+}
+
 void ProvokingVertexTests() {
     using namespace AgcDriver::Graphics;
     constexpr std::uint32_t lastVertex = 1u << 19u;
@@ -10391,6 +10410,7 @@ int main(int argc, char** argv) {
         stencilReferenceUnusedTests();
         aliasedBufferViewTests();
         LineStripTests();
+        ShaderModuleKeyTests();
         ProvokingVertexTests();
         ProvokingVertexRenderPassTests();
         ConservativeRasterizationTests();

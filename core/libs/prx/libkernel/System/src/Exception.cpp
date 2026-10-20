@@ -192,6 +192,7 @@ void CallHandler(GuestExceptionHandler handler, int signum, GuestUcontext& ucont
 constexpr std::size_t RedZone = 128;
 constexpr std::size_t HomeArea = 32;
 constexpr auto RetryLimit = std::chrono::seconds(1);
+constexpr auto HostCodeLimit = std::chrono::milliseconds(50);
 constexpr std::size_t VectorBytes = 16 * 32;
 
 struct Delivery {
@@ -393,7 +394,9 @@ bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
     const auto native = static_cast<HANDLE>(thread->nativeHandle);
     auto queued = std::make_unique<Delivery>(Delivery{handler, signum, {}, {}, 0});
     alignas(16) Delivery delivery{handler, signum, {}, {}, SaveVectors ? 1u : 0u};
-    const auto retryDeadline = std::chrono::steady_clock::now() + RetryLimit;
+    const auto start = std::chrono::steady_clock::now();
+    const auto retryDeadline = start + RetryLimit;
+    const auto hostDeadline = start + HostCodeLimit;
     static_cast<void>(RestoringContext(0));
     static_cast<void>(InWinpthread(0));
     static_cast<void>(BlockedInWait(0));
@@ -423,7 +426,7 @@ bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
         const bool restoring = RestoringContext(delivery.context.Rip) || InWinpthread(delivery.context.Rip);
         DWORD64 image = 0;
         const auto running = restoring ? CodeKind::Guest : RunningCode(delivery.context.Rip, image);
-        if (!restoring && (running == CodeKind::Guest || (running == CodeKind::Host && std::chrono::steady_clock::now() >= retryDeadline))) break;
+        if (!restoring && (running == CodeKind::Guest || (running == CodeKind::Host && std::chrono::steady_clock::now() >= hostDeadline))) break;
         ResumeThread(native);
         if (running == CodeKind::Unknown) {
             static_cast<void>(ClassifyImage(image));

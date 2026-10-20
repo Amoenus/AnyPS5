@@ -134,6 +134,18 @@ ShaderStageInputInfo RequestInputInfo(const RecompileRequest& request) {
     return BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), mesh, tessellation);
 }
 
+void ValidateRequestInputs(const RecompileRequest& request) {
+    const auto stage = toShaderStageKind(request.shader.stage);
+    const bool vertexFamily = stage == ShaderStageKind::Vertex || stage == ShaderStageKind::Local || stage == ShaderStageKind::TessellationControl || stage == ShaderStageKind::TessellationEvaluation || stage == ShaderStageKind::Mesh;
+    if (!vertexFamily) {
+        static_cast<void>(RequestInputInfo(request));
+        return;
+    }
+    const auto* mesh = request.graphics && request.graphics->mesh ? &*request.graphics->mesh : nullptr;
+    const auto* tessellation = request.graphics && request.graphics->tessellation ? &*request.graphics->tessellation : nullptr;
+    ValidateVertexStageInputs(stage, request.context, mesh, tessellation);
+}
+
 std::uint32_t DeviceMemoryLdsBytes(const RecompileRequest& request) {
     if (!request.context.compute.has_value()) return 0u;
     const auto bytes = static_cast<std::uint64_t>(request.context.compute->ldsSizeDwords) * 4u;
@@ -989,6 +1001,10 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         .stencilReferenceDword = artifact.stencilReferenceDword,
         .variantId = artifact.variantId
     };
+    for (const auto reg : variant.bindings.layout.userDataRegisters) {
+        const auto index = reg - request.context.userDataBaseRegister;
+        result.userDataRegisterReads |= reg >= request.context.userDataBaseRegister && index < 64u ? std::uint64_t{1} << index : ~std::uint64_t{0};
+    }
     const auto plan = preparedBindingPlan(variant, snapshot, request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{}, request.target.registrationModules);
     const DescriptorBindingPlan* bindingPlan = &plan->bindings;
     std::shared_ptr<PreparedModuleEntry> entry;
@@ -1596,7 +1612,7 @@ std::optional<PreparedShaderInvocation> PreparedShaderInvocation::TryCreate(cons
 
 std::optional<PreparedShaderInvocation> PreparedShaderInvocation::TryCreate(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle, std::span<const std::uint64_t> key) {
     if (handle == nullptr || !MatchesPreparedShader(request, *handle, key)) return std::nullopt;
-    if (request.shader.stage != ShaderStage::Compute && request.shader.stage != ShaderStage::Fragment) static_cast<void>(RequestInputInfo(request));
+    if (request.shader.stage != ShaderStage::Compute && request.shader.stage != ShaderStage::Fragment) ValidateRequestInputs(request);
     return PreparedShaderInvocation(request, handle);
 }
 
@@ -1650,7 +1666,7 @@ std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& 
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // The whole vertex family (Vertex, Local, TC, TE, Mesh) validates V# fields the memo key does not cover.
-    if (request.shader.stage != ShaderStage::Compute && request.shader.stage != ShaderStage::Fragment) static_cast<void>(RequestInputInfo(request));
+    if (request.shader.stage != ShaderStage::Compute && request.shader.stage != ShaderStage::Fragment) ValidateRequestInputs(request);
     auto capture = std::make_shared<ResourceCapture>();
     capture->source = handle.source;
     capture->plan = acquirePlan(request, handle.source, true, &handle);

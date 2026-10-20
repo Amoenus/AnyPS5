@@ -163,6 +163,8 @@ static int SetTimes(HANDLE handle, const KernelTimeval* times) {
         GetSystemTimePreciseAsFileTime(&access);
         modified = access;
     } else if (!File::WindowsFileTime::Encode(times[0], access) || !File::WindowsFileTime::Encode(times[1], modified)) {
+        const FILETIME unchanged{0xFFFFFFFF, 0xFFFFFFFF};
+        SetFileTime(handle, nullptr, &unchanged, &unchanged);
         errno = EINVAL;
         return -1;
     }
@@ -1099,8 +1101,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     const GuestArena::HostWrite destination(buf, static_cast<std::size_t>(nbytes));
     const GuestArena::HostWrite baseDestination(basep, basep == nullptr ? 0 : sizeof(*basep));
     if (!destination.Open() || !baseDestination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
-    if (basep != nullptr) *basep = 0;
-    return File::ReadDirectoryDescriptor(fd, buf, nbytes);
+    return File::ReadDirectoryDescriptor(fd, buf, nbytes, basep);
 }
 
 int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
