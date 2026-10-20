@@ -816,6 +816,8 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 if (fault == ClearFault::DriverDispatch && clearOne) {
                     const auto generation = AgcDriver::GuestMemory::TrackerGeneration();
                     SubmitDriverHtileClear(target.htileAddress, gpuLock);
+                    recorder.Activate();
+                    Require(Recorder::Active() == &recorder, "driver idle did not restore the native depth fixture recorder");
                     Require(AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "driver idle returned before recording the completed HTILE dispatch");
                 } else {
                     const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
