@@ -1,4 +1,5 @@
 #include "Optimization/SrtWalker/SrtTape.hpp"
+#include "Optimization/SrtWalker/SrtFlatSlotClasses.hpp"
 #include "Optimization/SrtWalker/SrtAddressArithmetic.hpp"
 #include "Optimization/SrtWalker/SrtInstructionPredicates.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
@@ -50,8 +51,11 @@ public:
             tape.flatRoots[slot] = compile(read.value, clean ? CleanContext : MainContext, 0);
         }
         tape.conditionRoots.assign(plan.controlFlow.size(), SrtTape::NoNode);
+        tape.conditionWaits.assign(plan.controlFlow.size(), 0u);
         for (std::size_t block = 0; block < plan.controlFlow.size(); ++block) {
-            if (plan.controlFlow[block].condition != nullptr) tape.conditionRoots[block] = compile(plan.controlFlow[block].condition, CleanContext, 0);
+            if (plan.controlFlow[block].condition == nullptr || !ConditionSelectsResources(plan, static_cast<std::uint32_t>(block))) continue;
+            tape.conditionRoots[block] = compile(plan.controlFlow[block].condition, CleanContext, 0);
+            tape.conditionWaits[block] = ConditionGuardsImagesOrWrites(plan, static_cast<std::uint32_t>(block)) ? 1u : 0u;
         }
         return !malformed;
     }
@@ -322,6 +326,7 @@ struct SrtTape::Frame {
     std::uint64_t* values;
     std::uint8_t* states;
     bool nullRoot = false;
+    bool refusePending = false;
 };
 
 bool SrtTape::evaluate(Frame& frame, std::uint32_t index, std::uint64_t& result) const {
@@ -391,6 +396,7 @@ bool SrtTape::compute(Frame& frame, const Node& node, std::uint64_t& result) con
                 frame.nullRoot = true;
                 return false;
             }
+            if (frame.refusePending && frame.runtime.pendingWrite(frame.runtime.userContext, address, sizeof(std::uint32_t))) return false;
             if (frame.runtime.userDataUse != nullptr) frame.runtime.userDataUse->reads.emplace_back(address, origin);
             if (node.loaded && frame.runtime.accessible != nullptr && !frame.runtime.accessible(frame.runtime.userContext, address, sizeof(std::uint32_t))) return false;
             if (auto* trace = frame.runtime.readTrace; trace != nullptr) {
@@ -539,9 +545,18 @@ bool SrtTape::Run(const IrResourcePlan& plan, const SrtRuntime& runtime, std::ve
         std::vector<std::uint32_t> pending;
         std::vector<DescriptorValue> evaluated;
         std::vector<std::uint32_t> flattened;
+        std::vector<std::uint64_t> conditionValues;
+        std::vector<std::uint8_t> conditionStates;
     };
     struct ScratchStorage {};
     auto& scratch = HostThreadLocal<Scratch, ScratchStorage>();
+    const bool refusePending = runtime.pendingWrite != nullptr && !runtime.conditionsWaitForWrites && !plan.controlFlow.empty();
+    if (refusePending) {
+        scratch.conditionValues.resize(nodes.size());
+        scratch.conditionStates.assign(nodes.size(), 0u);
+    }
+    Frame conditionFrame {runtime, refusePending ? scratch.conditionValues.data() : values, refusePending ? scratch.conditionStates.data() : states};
+    conditionFrame.refusePending = refusePending;
     auto& active = scratch.active;
     const auto imageBase = plan.descriptorSources.size();
     active.assign(imageBase + plan.info.images.size(), 1u);
@@ -570,8 +585,9 @@ bool SrtTape::Run(const IrResourcePlan& plan, const SrtRuntime& runtime, std::ve
             for (const auto source : block.sources) active[source] = 1u;
             for (const auto image : block.images) active[imageBase + image] = 1u;
             std::uint64_t condition = 0;
-            const bool cleanEvaluable = block.condition != nullptr && runtime.readSpecializationMemory != nullptr && conditionRoots[index] != NoNode && evaluate(frame, conditionRoots[index], condition);
-            if (frame.nullRoot) return refuse();
+            Frame& conditions = refusePending && index < conditionWaits.size() && conditionWaits[index] == 0u ? conditionFrame : frame;
+            const bool cleanEvaluable = block.condition != nullptr && runtime.readSpecializationMemory != nullptr && conditionRoots[index] != NoNode && evaluate(conditions, conditionRoots[index], condition);
+            if (conditions.nullRoot) return refuse();
             if (cleanEvaluable) {
                 if (block.successors.size() < 2) return refuse();
                 pending.push_back(block.successors[static_cast<std::uint32_t>(condition) != 0u ? 0u : 1u]);

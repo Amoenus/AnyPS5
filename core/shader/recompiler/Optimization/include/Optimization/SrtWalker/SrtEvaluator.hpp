@@ -177,6 +177,7 @@ public:
     bool EvaluateWide(TNode value, std::uint64_t& result);
     void ReportInaccessibleReads(InaccessibleRead* sink) { _inaccessible = sink; }
     void ReportNullRootReads(std::uint32_t* sink) { _nullRoots = sink; }
+    void RefusePendingReads(bool refuse) { _refusePending = refuse; }
 
 private:
     static bool MayEvaluate(const IrResourcePlan& program, IrValue* value, const IrValue* activeMask, std::unordered_set<const IrValue*>& firstLanes);
@@ -199,6 +200,7 @@ private:
     const void* _firstLane = nullptr;
     InaccessibleRead* _inaccessible = nullptr;
     std::uint32_t* _nullRoots = nullptr;
+    bool _refusePending = false;
     EvaluatedValues _cache;
     std::vector<IrValue*> _visiting;
     DenseValues _dense;

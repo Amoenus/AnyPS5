@@ -1,4 +1,5 @@
 #include "Optimization/SrtWalker/SrtDescriptorEvaluation.hpp"
+#include "Optimization/SrtWalker/SrtFlatSlotClasses.hpp"
 #include "Optimization/SrtWalker/SrtEvaluator.hpp"
 #include "Optimization/SrtWalker/SrtTape.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
@@ -81,8 +82,13 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
         std::vector<std::uint32_t> pending {0};
         InaccessibleRead conditionRead;
         std::uint32_t conditionNullRoots = 0;
-        cleanEvaluator.ReportInaccessibleReads(&conditionRead);
-        cleanEvaluator.ReportNullRootReads(&conditionNullRoots);
+        const bool refusePending = runtime.pendingWrite != nullptr && !runtime.conditionsWaitForWrites;
+        BasicEvaluator<TNode> refusingEvaluator(program, cleanRuntime);
+        refusingEvaluator.RefusePendingReads(true);
+        for (auto* evaluatorForConditions : {&refusingEvaluator, &cleanEvaluator}) {
+            evaluatorForConditions->ReportInaccessibleReads(&conditionRead);
+            evaluatorForConditions->ReportNullRootReads(&conditionNullRoots);
+        }
         while (!pending.empty()) {
             const auto index = pending.back();
             pending.pop_back();
@@ -100,15 +106,19 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
             std::uint32_t condition = 0;
             TNode conditionValue{};
             const auto nullRootsBefore = conditionNullRoots;
-            const bool cleanEvaluable = TNode::Condition(program, index, conditionValue) && runtime.readSpecializationMemory != nullptr && cleanEvaluator.Evaluate(conditionValue, condition) && conditionNullRoots == nullRootsBefore;
+            const bool selects = TNode::Condition(program, index, conditionValue) && runtime.readSpecializationMemory != nullptr && ConditionSelectsResources(program, index);
+            auto& conditionEvaluator = selects && refusePending && !ConditionGuardsImagesOrWrites(program, index) ? refusingEvaluator : cleanEvaluator;
+            const bool cleanEvaluable = selects && conditionEvaluator.Evaluate(conditionValue, condition) && conditionNullRoots == nullRootsBefore;
             if (cleanEvaluable) {
                 pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
             } else {
                 pending.insert(pending.end(), block.successors.begin(), block.successors.end());
             }
         }
-        cleanEvaluator.ReportInaccessibleReads(nullptr);
-        cleanEvaluator.ReportNullRootReads(nullptr);
+        for (auto* evaluatorForConditions : {&refusingEvaluator, &cleanEvaluator}) {
+            evaluatorForConditions->ReportInaccessibleReads(nullptr);
+            evaluatorForConditions->ReportNullRootReads(nullptr);
+        }
     }
     InaccessibleRead inaccessible;
     std::uint32_t nullRoots = 0;
@@ -322,7 +332,7 @@ void verifyTape(const IrResourcePlan& program, const SrtRuntime& runtime, std::v
 
 }
 
-bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
+bool evaluateRuntimeSourcesOnce(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
     const bool planInputs = evaluateFlat && sources.data() == program.materializationSources.data() && sources.size() == program.materializationSources.size() && cleanFlatSlots.data() == program.cleanFlatSlots.data() && cleanFlatSlots.size() == program.cleanFlatSlots.size();
     if (planInputs) {
         if (const auto* tape = SrtTape::For(program); tape != nullptr) {
@@ -339,6 +349,31 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
         }
     }
     return interpretRuntimeSources(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
+}
+
+bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
+    if (runtime.pendingWrite == nullptr || runtime.conditionsWaitForWrites || program.controlFlow.empty()) return evaluateRuntimeSourcesOnce(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
+    auto* trace = runtime.readTrace;
+    auto* use = runtime.userDataUse;
+    const auto leavesBefore = trace != nullptr ? trace->leaves.size() : 0;
+    const auto readsBefore = trace != nullptr ? trace->otherReads.size() : 0;
+    const auto baseBefore = use != nullptr ? use->asBase : 0;
+    const auto valueBefore = use != nullptr ? use->asValue : 0;
+    const auto useReadsBefore = use != nullptr ? use->reads.size() : 0;
+    if (evaluateRuntimeSourcesOnce(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads)) return true;
+    if (trace != nullptr) {
+        trace->leaves.resize(leavesBefore);
+        trace->otherReads.resize(readsBefore);
+        trace->leaf = nullptr;
+    }
+    if (use != nullptr) {
+        use->asBase = baseBefore;
+        use->asValue = valueBefore;
+        use->reads.resize(useReadsBefore);
+    }
+    auto waiting = runtime;
+    waiting.conditionsWaitForWrites = true;
+    return evaluateRuntimeSourcesOnce(program, sources, waiting, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
 }
 
 const std::string& RuntimeSourceFailureReason() {

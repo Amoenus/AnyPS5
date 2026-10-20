@@ -241,6 +241,9 @@ bool BasicEvaluator<TNode>::EvaluateRawRead(const TNode& inst, std::uint64_t& re
         result = 0;
         return true;
     }
+    if (_refusePending && _runtime.pendingWrite != nullptr && _runtime.pendingWrite(_runtime.userContext, address, sizeof(std::uint32_t))) {
+        return false;
+    }
     if (_runtime.userDataUse != nullptr) _runtime.userDataUse->reads.emplace_back(address, origin);
     if (_inaccessible != nullptr && _runtime.accessible != nullptr && !_runtime.accessible(_runtime.userContext, address, sizeof(std::uint32_t)) && LoadedFromMemory(*handle.Value())) {
         *_inaccessible = {inst.Value(), address};
@@ -474,6 +477,7 @@ bool BasicEvaluator<TNode>::EvaluateInst(const TNode& inst, std::uint64_t& resul
             BasicEvaluator active(_program, _runtime, _cleanFlatSlots, _cleanEvaluator, &mask);
             active._outer = this;
             active._firstLane = inst.Value();
+            active._refusePending = _refusePending;
             active.ReportInaccessibleReads(_inaccessible);
             active.ReportNullRootReads(_nullRoots);
             return active.EvaluateWide(inst.Argument(0), result);
