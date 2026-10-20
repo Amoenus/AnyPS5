@@ -6967,6 +6967,63 @@ void verifyGuardedDirectRoot() {
     }, "guest memory is not readable", "guarded direct root: a taken inaccessible load was accepted");
     std::cout << "guarded direct root: inaccessible taken load rejected\n";
     root[4] = 0u;
+    std::vector<std::byte> encodedPlan;
+    require(ShaderDiskCache::EncodePlan(*valid->plan, encodedPlan), "guarded direct root: cannot encode the resource plan");
+    IrResourcePlan decodedPlan;
+    require(ShaderDiskCache::DecodePlan(encodedPlan, decodedPlan), "guarded direct root: cannot decode the resource plan");
+    require(!valid->plan->controlFlow.empty() && decodedPlan.controlFlow.size() == valid->plan->controlFlow.size(), "guarded direct root: the scalar branch was not retained in the plan");
+    for (std::size_t block = 0; block < decodedPlan.controlFlow.size(); ++block) {
+        require(decodedPlan.controlFlow[block].flatSlots == valid->plan->controlFlow[block].flatSlots, "guarded direct root: cached control flow lost its flat slots");
+    }
+    IrResourcePlan decodedIrPlan;
+    require(ShaderDiskCache::DecodePlan(encodedPlan, decodedIrPlan), "guarded direct root: cannot decode the IR control plan");
+    decodedIrPlan.compact = {};
+    struct ReadContext {
+        std::uint64_t root;
+        std::uint64_t payload;
+        bool guardReadable;
+        std::uint32_t invalidReads = 0;
+        SrtMemoryReader reader = nullptr;
+    };
+    const auto walk = [&](const IrResourcePlan& plan, bool tape, bool guardReadable) {
+        ReadContext context{rootAddress, payloadAddress, guardReadable};
+        context.reader = [](void* opaque, std::uint64_t address, std::uint32_t* value) {
+            auto& context = *static_cast<ReadContext*>(opaque);
+            if (!((address >= context.root && address - context.root <= sizeof(root) - sizeof(*value)) || address == context.payload)) {
+                ++context.invalidReads;
+                return false;
+            }
+            std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
+            return true;
+        };
+        SrtRuntime runtime{userData};
+        runtime.userContext = &context;
+        runtime.readMemory = context.reader;
+        runtime.readSpecializationMemory = [](void* opaque, std::uint64_t address, std::uint32_t* value) {
+            auto& context = *static_cast<ReadContext*>(opaque);
+            if (!context.guardReadable && address == context.root + 16u) return false;
+            return context.reader(opaque, address, value);
+        };
+        const std::vector<std::uint32_t> sourceCopy(plan.materializationSources.begin(), plan.materializationSources.end());
+        const std::vector<std::uint8_t> cleanCopy(plan.cleanFlatSlots.begin(), plan.cleanFlatSlots.end());
+        const auto sources = tape ? std::span<const std::uint32_t>(plan.materializationSources) : std::span<const std::uint32_t>(sourceCopy);
+        const auto clean = tape ? std::span<const std::uint8_t>(plan.cleanFlatSlots) : std::span<const std::uint8_t>(cleanCopy);
+        std::vector<DescriptorValue> descriptors;
+        std::vector<std::uint32_t> flat;
+        std::vector<std::uint8_t> active;
+        std::vector<SrtReadPoison> poison;
+        const auto* compiled = tape ? Detail::SrtTape::For(plan) : nullptr;
+        if (tape) require(compiled != nullptr, "guarded direct root: the plan has no SRT tape");
+        const bool ok = tape ? compiled->Run(plan, runtime, descriptors, flat, active) : Detail::EvaluateRuntimeSourcesImpl(plan, sources, runtime, descriptors, flat, true, clean, active, &poison, nullptr);
+        require(ok == guardReadable, "guarded direct root: a known skipped load failed, or an unresolved guard silently succeeded");
+        if (guardReadable) require(context.invalidReads == 0u && poison.empty(), "guarded direct root: the walker touched a known skipped load");
+    };
+    for (const IrResourcePlan* plan : {valid->plan.get(), static_cast<const IrResourcePlan*>(&decodedPlan), static_cast<const IrResourcePlan*>(&decodedIrPlan)}) {
+        for (const bool tape : {false, true}) {
+            walk(*plan, tape, true);
+            walk(*plan, tape, false);
+        }
+    }
     AgcDriver::ShaderMemory skippedMemory({});
     const auto skipped = skippedMemory.Capture(branch.request);
     const auto skippedRegions = skippedMemory.Regions();
@@ -6978,6 +7035,14 @@ void verifyGuardedDirectRoot() {
     static_cast<void>(ValidateAndOptimizeSpirv(skippedResult->spirv, branch.request.target.vulkanVersion, branch.request.target.spirvVersion));
 #endif
     std::cout << "guarded direct root: inaccessible skipped load passed\n";
+    auto repeatedCode = branchCode;
+    repeatedCode.insert(repeatedCode.begin() + 14, {0xf4000305u, 0xfa000000u, 0xbf8cc07fu});
+    NestedRequest repeated(std::move(repeatedCode), root.data());
+    repeated.request.context.userData = userData;
+    expectFailure([&] {
+        AgcDriver::ShaderMemory memory({});
+        static_cast<void>(memory.Capture(repeated.request));
+    }, "guest memory is not readable", "guarded direct root: an unconditional repeated load was skipped with its guarded use");
 #ifdef _WIN32
     VirtualFree(reserved, 0, MEM_RELEASE);
 #else
@@ -7041,16 +7106,16 @@ void verifyGuardedNullPointers() {
             AgcDriver::ShaderMemory memory({});
             const auto capture = memory.Capture(branch.request);
             const auto& poison = capture->snapshot.srtPoison;
-            require(poison.size() == 1u && poison[0].pc == 0x2cu && poison[0].address == pointer && slotPc(*capture->plan, poison[0].slot) == 0x2cu, "guarded pointer: the nested read was not poisoned at its pc and address");
+            require(condition == 0u ? poison.empty() : poison.size() == 1u && poison[0].pc == 0x2cu && poison[0].address == pointer && slotPc(*capture->plan, poison[0].slot) == 0x2cu, "guarded pointer: a skipped nested read was poisoned, or an executed read has the wrong poison record");
             require(GuardRecords(*capture), "guarded pointer: the poison record is not where the guard reads it");
             const auto regions = memory.Regions();
             require(!RegionsTouch(regions, pointer, 4u) && RegionsCover(regions, root.data() + 6, 8u), "guarded pointer: the captured regions are wrong");
             branch.request.context.memory = regions;
             const auto result = Recompile(branch.request, *capture);
-            require(result->poisonedSrtReads == 1u && faultBinding(*result) && result->bdaAbiVersion == BdaAbi::Version, "guarded pointer: the poisoned capture does not report through the fault buffer");
+            require(result->poisonedSrtReads == condition && faultBinding(*result) && result->bdaAbiVersion == BdaAbi::Version, "guarded pointer: the capture has the wrong poison count or no fault buffer");
             require(samePipeline(*result, *validResult), "guarded pointer: poison changed the variant, the specialization or the module");
             const auto replay = Recompile(branch.request);
-            require(replay.poisonedSrtReads == 1u && samePipeline(replay, *result), "guarded pointer: a replay of the captured regions did not reproduce the poison");
+            require(replay.poisonedSrtReads == condition && samePipeline(replay, *result), "guarded pointer: a replay of the captured regions did not reproduce the poison");
             verifyResult(*result, replay);
 #if ANYPS5_ENABLE_SPIRV_TOOLS
             static_cast<void>(ValidateAndOptimizeSpirv(result->spirv, branch.request.target.vulkanVersion, branch.request.target.spirvVersion));
@@ -7149,11 +7214,11 @@ void verifyGuardedNullPointers() {
         vertex.request.context.memory = {};
         AgcDriver::ShaderMemory memory({});
         const auto capture = memory.Capture(vertex.request);
-        require(poisonedWords(*capture, 0x20u, 0x10u), "guarded pointer: a vertex V# behind a branch and a null pointer did not poison its four words at its pc");
+        require(guard == 0u ? capture->snapshot.srtPoison.empty() && GuardRecords(*capture) : poisonedWords(*capture, 0x20u, 0x10u), "guarded pointer: a skipped vertex V# was poisoned, or an executed read has the wrong poison record");
         const auto regions = memory.Regions();
         vertex.request.context.memory = regions;
         const auto result = Recompile(vertex.request, *capture);
-        require(result->poisonedSrtReads == 4u && faultBinding(*result) && !result->spirv.empty(), "guarded pointer: a vertex capture with a poisoned V# has no fault buffer");
+        require(result->poisonedSrtReads == guard * 4u && faultBinding(*result) && !result->spirv.empty(), "guarded pointer: a vertex capture has the wrong poison count or no fault buffer");
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         static_cast<void>(ValidateAndOptimizeSpirv(result->spirv, vertex.request.target.vulkanVersion, vertex.request.target.spirvVersion));
 #endif
