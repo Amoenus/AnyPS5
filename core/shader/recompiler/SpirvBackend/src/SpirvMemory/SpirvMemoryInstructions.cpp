@@ -1301,7 +1301,7 @@ std::uint32_t AddressAtomic(SpirvValueEmitContext& ctx, const IrValue& inst) {
     });
 }
 
-std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, bool append, bool ordered = false) {
+std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, bool append, bool ordered = false, bool swap = false) {
     auto& state = ctx.state;
     if (ctx.half == 1u) {
         if (ctx.otherHalf == nullptr) {
@@ -1342,10 +1342,10 @@ std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, boo
     const auto condition = AndCondition(state, isFirst, AndCondition(state, lanesActive, bounds));
     const auto atomic = EmitValueOrZeroIfCondition(state, condition, [&]() {
         if (InFunctionStorage(state, mem.kind)) {
-            return UpdateFunctionElement(state, EmitMemoryElementPointer(state, access, index), [&](std::uint32_t old) { return Binary(state, append ? spv::OpIAdd : spv::OpISub, TypeU32(state), old, count); });
+            return UpdateFunctionElement(state, EmitMemoryElementPointer(state, access, index), [&](std::uint32_t old) { return swap ? amount : Binary(state, append ? spv::OpIAdd : spv::OpISub, TypeU32(state), old, count); });
         }
         const auto value = state.module.AllocateId();
-        state.module.AddFunction(append ? spv::OpAtomicIAdd : spv::OpAtomicISub, TypeU32(state), value, EmitMemoryElementPointer(state, access, index), ConstantU32(state, gds ? spv::ScopeDevice : spv::ScopeWorkgroup), ConstantU32(state, spv::MemorySemanticsMaskNone), amount);
+        state.module.AddFunction(swap ? spv::OpAtomicExchange : append ? spv::OpAtomicIAdd : spv::OpAtomicISub, TypeU32(state), value, EmitMemoryElementPointer(state, access, index), ConstantU32(state, gds ? spv::ScopeDevice : spv::ScopeWorkgroup), ConstantU32(state, spv::MemorySemanticsMaskNone), amount);
         return value;
     });
     const auto result = state.module.AllocateId();
@@ -1559,14 +1559,14 @@ std::uint32_t EmitReadConst(SpirvValueEmitContext& ctx, const IrValue& inst) {
             const auto guard = static_cast<std::uint32_t>(found - guarded.begin());
             const auto flag = load(ConstantU32(state, resources.srtGuardOffset + guard));
             const auto poisoned = Binary(state, spv::OpINotEqual, TypeBool(state), flag, ConstantU32(state, 0u));
+            const auto records = resources.srtGuardOffset + static_cast<std::uint32_t>(guarded.size());
+            if (records + 3u * guarded.size() >= (1u << BdaAbi::SrtGuardStageShift)) {
+                ctx.Fail(inst, "has more guarded SRT records than the fault buffer's guard word can name");
+            }
             EmitIfCondition(state, poisoned, [&] {
-                const auto records = resources.srtGuardOffset + static_cast<std::uint32_t>(guarded.size());
                 const auto record = Binary(state, spv::OpIAdd, u32, ConstantU32(state, records), Binary(state, spv::OpIMul, u32, Binary(state, spv::OpISub, u32, flag, ConstantU32(state, 1u)), ConstantU32(state, 3u)));
-                const auto word = [&](std::uint32_t offset) { return load(Binary(state, spv::OpIAdd, u32, record, ConstantU32(state, offset))); };
-                const auto pc = word(0u);
-                const auto low = word(1u);
-                const auto high = word(2u);
-                RecordBdaFaultWords(state, low, high, ConstantU32(state, 4u), pc, BdaAbi::FaultReason::Unmapped);
+                const auto stage = ConstantU32(state, static_cast<std::uint32_t>(resources.stage) << BdaAbi::SrtGuardStageShift);
+                state.module.AddFunction(spv::OpAtomicStore, BdaWord(state, state.faultBufferVariable, ConstantU32(state, BdaAbi::SrtGuardWord)), ConstantU32(state, spv::ScopeDevice), ConstantU32(state, spv::MemorySemanticsMaskNone), Binary(state, spv::OpBitwiseOr, u32, record, stage));
             });
             StopBdaInvocationIf(state, poisoned);
         }
@@ -1901,6 +1901,10 @@ std::uint32_t EmitDataConsume(SpirvValueEmitContext& ctx, const IrValue& inst) {
 
 std::uint32_t EmitDataOrderedCount(SpirvValueEmitContext& ctx, const IrValue& inst) {
     return AppendConsume(ctx, inst, true, true);
+}
+
+std::uint32_t EmitDataOrderedSwap(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    return AppendConsume(ctx, inst, true, true, true);
 }
 
 
