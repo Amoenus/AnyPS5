@@ -86,11 +86,17 @@ ShaderStageKind toShaderStageKind(ShaderStage stage) {
 
 namespace {
 
+bool MergedHullStage(const RecompileRequest& request) {
+    const auto stage = request.shader.stage;
+    return (stage == ShaderStage::Local || stage == ShaderStage::TessellationControl) && request.graphics && request.graphics->tessellation && request.graphics->tessellation->mergedHull;
+}
+
 // The host subgroup width wave64 programs are laid out for. Debug aid: APS5_SINGLE_LANE=<hex code
 // addresses, comma separated, or "all"> keeps the listed programs at one guest lane per invocation.
 std::uint32_t HostSubgroupSize(const RecompileRequest& request) {
     const bool vertexStage = request.shader.stage == ShaderStage::Vertex || request.shader.stage == ShaderStage::Local;
     if (vertexStage && !request.target.vertexSubgroups) return 1u;
+    if (request.shader.stage == ShaderStage::TessellationControl && MergedHullStage(request)) return 1u;
     static const std::string list = [] { const char* text = std::getenv("APS5_SINGLE_LANE"); return text ? std::string(text) : std::string(); }();
     if (!list.empty()) {
         if (list == "all") return 64u;
@@ -101,10 +107,16 @@ std::uint32_t HostSubgroupSize(const RecompileRequest& request) {
     return request.target.subgroupSize;
 }
 
-RdnaProgram DecodeStageProgram(ShaderStageKind stage, std::span<const std::uint32_t> code) {
+RdnaProgram DecodeStageProgram(ShaderStageKind stage, std::span<const std::uint32_t> code, bool mergedHull) {
+    static constexpr std::array<std::uint32_t, 1> EndProgram{0xbf810000u};
+    if (stage == ShaderStageKind::Local && mergedHull) {
+        RdnaProgram program;
+        program.code = EndProgram;
+        program.instructions.push_back(DecodeRdnaInstruction(0u, EndProgram, 0u));
+        return program;
+    }
     if (stage != ShaderStageKind::Local) return RdnaInstructionDecoder{}.Decode(code);
     auto program = DecodeRdnaFrontProgram(code);
-    static constexpr std::array<std::uint32_t, 1> EndProgram{0xbf810000u};
     program.instructions.back() = DecodeRdnaInstruction(program.instructions.back().programCounter, EndProgram, 0u);
     return program;
 }
@@ -134,8 +146,8 @@ std::atomic<std::uint64_t> frontEndBuilds{0};
 
 struct PreparedControlFlow {
     PreparedControlFlow(const RecompileRequest& request, const SwappcInfo& swappcInfo)
-        : stage(request.shader.stage), fallbacks(swappcInfo.linkedCallFallbacks.begin(), swappcInfo.linkedCallFallbacks.end()), swappc(WithFallbacks(swappcInfo, fallbacks)), code(request.shader.code.begin(), request.shader.code.end()),
-          decoded(DecodeStageProgram(toShaderStageKind(request.shader.stage), code)), cfg(GraphBuilder{}.Build(decoded, &swappc)) {
+        : stage(request.shader.stage), mergedHull(MergedHullStage(request)), fallbacks(swappcInfo.linkedCallFallbacks.begin(), swappcInfo.linkedCallFallbacks.end()), swappc(WithFallbacks(swappcInfo, fallbacks)), code(request.shader.code.begin(), request.shader.code.end()),
+          decoded(DecodeStageProgram(toShaderStageKind(request.shader.stage), code, mergedHull)), cfg(GraphBuilder{}.Build(decoded, &swappc)) {
         Structurizer{}.Structurize(cfg);
     }
 
@@ -143,7 +155,7 @@ struct PreparedControlFlow {
     PreparedControlFlow& operator=(const PreparedControlFlow&) = delete;
 
     bool Matches(const RecompileRequest& request, const SwappcInfo& swappcInfo) const {
-        return stage == request.shader.stage && swappc.fetchCallAllowed == swappcInfo.fetchCallAllowed &&
+        return stage == request.shader.stage && mergedHull == MergedHullStage(request) && swappc.fetchCallAllowed == swappcInfo.fetchCallAllowed &&
                swappc.userDataBaseRegister == swappcInfo.userDataBaseRegister && swappc.userDataCount == swappcInfo.userDataCount &&
                std::ranges::equal(fallbacks, swappcInfo.linkedCallFallbacks) && std::ranges::equal(code, request.shader.code);
     }
@@ -154,6 +166,7 @@ struct PreparedControlFlow {
     }
 
     ShaderStage stage;
+    bool mergedHull;
     std::vector<std::uint32_t> fallbacks;
     SwappcInfo swappc;
     std::vector<std::uint32_t> code;
@@ -218,8 +231,9 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
 
     constexpr InstructionTranslator translator;
 
+    if (frontend->mergedHull && cfg.hasFetchCall) throw std::runtime_error("a merged hull program that calls a fetch subroutine is unsupported");
     EmbeddedFetchPlan embeddedFetch;
-    if ((stageKind == ShaderStageKind::Vertex || stageKind == ShaderStageKind::Local) && inputInfo.vertex != nullptr && inputInfo.vertex->fetchEmbedded) {
+    if ((stageKind == ShaderStageKind::Vertex || stageKind == ShaderStageKind::Local) && !frontend->mergedHull && inputInfo.vertex != nullptr && inputInfo.vertex->fetchEmbedded) {
         embeddedFetch = EmbeddedVertexFetchAnalyzer{}.Analyze(decoded, inputInfo.vertex->fetchAttribReg, inputInfo.vertex->fetchBufferReg, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size()), request.context.waveSize);
         translateOptions.embeddedFetch = &embeddedFetch;
     }
@@ -290,7 +304,7 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
 
     if (inputInfo.vertex != nullptr) {
         constexpr TessellationLowering tessellationLowering;
-        tessellationLowering.Lower(program, inputInfo.vertex->tess);
+        tessellationLowering.Lower(program, inputInfo.vertex->tess, request.target.tessellation ? &*request.target.tessellation : nullptr);
     }
 
     constexpr SrtWalker srtWalker;
@@ -571,6 +585,39 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     targetOptions.spannedWaves = request.target.spannedWaves;
     targetOptions.robustBufferAccess2 = request.target.robustBufferAccess2;
     targetOptions.float32FlushToZero = request.target.float32FlushToZero;
+    targetOptions.meshBarycentricPixel = request.shader.stage == ShaderStage::Fragment && request.graphics && request.graphics->mesh;
+    if (request.shader.stage == ShaderStage::Mesh && request.graphics && request.graphics->meshBarycentrics) {
+        const auto& paired = *request.graphics->meshBarycentrics;
+        const auto emulated = DescribeEmulatedInterface(paired.parameters, paired.emulation, true);
+        const auto& layout = emulated.layout;
+        targetOptions.meshBarycentricVertex = true;
+        targetOptions.barycentricSmoothLocation = layout.smoothLocation;
+        targetOptions.barycentricLinearLocation = layout.linearLocation;
+        targetOptions.barycentricPositionsLocation = layout.positionsLocation;
+        targetOptions.meshExportedLocations = emulated.passed;
+        for (const auto& parameter : emulated.perVertex) targetOptions.meshPerVertexLocations.emplace_back(parameter.sourceLocation, parameter.location);
+        if (!request.graphics->mesh || !request.target.mesh) throw std::runtime_error("barycentric emulation on the mesh path needs a mesh configuration and a device with mesh shaders");
+        const auto& config = *request.graphics->mesh;
+        const auto& limits = *request.target.mesh;
+        if (config.provokingVertex != 0u) throw std::runtime_error("barycentric emulation on the mesh path is only measured with the first provoking vertex");
+        const std::uint64_t perVertexParameters = emulated.perVertex.size();
+        const std::uint64_t sharedBytes = 16ull * config.maxVertices * (1u + perVertexParameters) + DeviceMemoryLdsBytes(request);
+        if (sharedBytes > limits.maxSharedMemoryBytes) throw std::runtime_error("barycentric emulation on the mesh path needs " + std::to_string(sharedBytes) + " bytes of mesh shared memory for " + std::to_string(config.maxVertices) + " vertices, the device allows " + std::to_string(limits.maxSharedMemoryBytes));
+        MeshOutputUse use;
+        std::set<std::uint32_t> flatLocations;
+        for (const auto& output : program.Info().outputs) {
+            if (output.kind == StageOutputKind::Parameter && std::ranges::find(targetOptions.meshExportedLocations, output.location) != targetOptions.meshExportedLocations.end()) flatLocations.insert(output.location);
+            if (output.kind == StageOutputKind::ClipDistance) use.clipDistances = std::max(use.clipDistances, output.index + 1u);
+            if (output.kind == StageOutputKind::CullDistance) use.cullDistances = std::max(use.cullDistances, output.index + 1u);
+            if (output.kind == StageOutputKind::Layer) use.layer = true;
+        }
+        use.flatParameters = static_cast<std::uint32_t>(flatLocations.size());
+        use.perVertexParameters = static_cast<std::uint32_t>(perVertexParameters);
+        use.clipVaryings = emulated.barycentrics;
+        const auto budget = MeshBarycentricOutputBudget(config, limits, use);
+        if (budget.components > limits.maxOutputComponents) throw std::runtime_error("barycentric emulation on the mesh path needs " + std::to_string(budget.components) + " mesh output components (" + std::to_string(budget.vertexLocations) + " per-vertex and " + std::to_string(budget.primitiveLocations) + " per-primitive locations), the device allows " + std::to_string(limits.maxOutputComponents));
+        if (budget.bytes > limits.maxOutputMemoryBytes) throw std::runtime_error("barycentric emulation on the mesh path needs " + std::to_string(budget.bytes) + " bytes of mesh output memory, the device allows " + std::to_string(limits.maxOutputMemoryBytes));
+    }
 
     constexpr SpirvEmitter spirvEmitter;
     CompiledShaderArtifact result;
@@ -591,6 +638,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
         result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
     }
     result.registrationModule = registration;
+    if (request.shader.stage == ShaderStage::Mesh && request.graphics) result.meshBarycentrics = request.graphics->meshBarycentrics;
     result.stencilReplaySafe = (request.shader.stage == ShaderStage::Vertex || stencilReplay) && StencilReplaySafe(program);
     if (stencilReplay) {
         result.stencilReferences = StencilReferenceValues(program, request.context.pixel.has_value() && request.context.pixel->stencilOperationValueExport ? 8u : 0u);
@@ -935,11 +983,16 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         .parameterExports = artifact.parameterExports,
         .fragmentParameters = artifact.fragmentParameters,
         .barycentricEmulation = artifact.barycentricEmulation,
+        .meshBarycentrics = artifact.meshBarycentrics,
         .stencilReferences = artifact.stencilReferences,
         .stencilReplaySafe = artifact.stencilReplaySafe,
         .stencilReferenceDword = artifact.stencilReferenceDword,
         .variantId = artifact.variantId
     };
+    for (const auto reg : variant.bindings.layout.userDataRegisters) {
+        const auto index = reg - request.context.userDataBaseRegister;
+        result.userDataRegisterReads |= reg >= request.context.userDataBaseRegister && index < 64u ? std::uint64_t{1} << index : ~std::uint64_t{0};
+    }
     const auto plan = preparedBindingPlan(variant, snapshot, request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{}, request.target.registrationModules);
     const DescriptorBindingPlan* bindingPlan = &plan->bindings;
     std::shared_ptr<PreparedModuleEntry> entry;
@@ -1092,6 +1145,26 @@ bool sameLayout(const BindingLayout& left, const BindingLayout& right) {
     return left.descriptorSet == right.descriptorSet && left.firstBinding == right.firstBinding && left.pushConstantOffsetBytes == right.pushConstantOffsetBytes && left.pushConstantSizeBytes == right.pushConstantSizeBytes;
 }
 
+}
+
+MeshOutputBudget MeshBarycentricOutputBudget(const MeshConfiguration& mesh, const MeshTargetLimits& limits, const MeshOutputUse& use) {
+    const auto alignUp = [](std::uint64_t value, std::uint64_t granularity) { return granularity <= 1u ? value : (value + granularity - 1u) / granularity * granularity; };
+    MeshOutputBudget budget;
+    budget.vertexLocations = 1u + use.flatParameters + use.clipVaryings + (use.clipDistances + 3u) / 4u + (use.cullDistances + 3u) / 4u;
+    budget.primitiveLocations = 3u + 3u * use.perVertexParameters + 1u + (use.layer ? 1u : 0u);
+    budget.components = 4ull * (budget.vertexLocations + budget.primitiveLocations);
+    budget.bytes = 16ull * (budget.vertexLocations * alignUp(mesh.maxVertices, limits.outputPerVertexGranularity) + budget.primitiveLocations * alignUp(mesh.maxPrimitives, limits.outputPerPrimitiveGranularity));
+    return budget;
+}
+
+std::optional<MeshBarycentricLayout> MeshBarycentricLayoutOf(const RecompileResult& fragment) {
+    if (!fragment.barycentricEmulation.active) return std::nullopt;
+    MeshBarycentricLayout layout;
+    layout.emulation = fragment.barycentricEmulation;
+    for (const auto& parameter : fragment.fragmentParameters) {
+        layout.parameters.push_back({parameter.location, parameter.sourceLocation, false, parameter.perVertex});
+    }
+    return layout;
 }
 
 struct PreparedInterface {

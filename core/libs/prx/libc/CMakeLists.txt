@@ -30,7 +30,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FailureReport.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/gcc/StackGuard.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/windows/CrashReport.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/windows/CallTrace.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/x86_64/CallTrace.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/linux/DlIteratePhdr.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/macos/GuestImages.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Strings.cpp
@@ -42,12 +42,14 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/VectorAlgorithms.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Math.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/MathExact.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/Bessel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Random.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FloatBuiltins.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/HostEntropy.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Backtrace.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/DinkumwareAtomics.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Time.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/TimeExtras.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomicBuiltins.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FileAndHeap.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/HostErrno.cpp
@@ -85,6 +87,9 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Backtrace.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/exception/Exports.cpp
 )
+
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/MathExact.cpp
+        TARGET_DIRECTORY libc PROPERTIES COMPILE_OPTIONS "-frounding-math")
 
 target_sources(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/BinaryWordIo.cpp)
 
@@ -182,6 +187,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_mktime PROPERTIES TIMEOUT 10)
     if(WIN32)
         set_tests_properties(guest_mktime PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_time_extras_tests ${LIBS_INCLUDE_DIR}/tests/GuestTimeExtras.cpp)
+    target_include_directories(guest_time_extras_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_time_extras_tests PRIVATE libc)
+    configure_windows_unwind(guest_time_extras_tests)
+    add_test(NAME guest_time_extras COMMAND guest_time_extras_tests)
+    set_tests_properties(guest_time_extras PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(guest_time_extras PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(precise_wait_tests ${LIBS_INCLUDE_DIR}/tests/PreciseWait.cpp)
@@ -313,6 +328,15 @@ if(BUILD_TESTING)
         set_tests_properties(guest_integer_builtins PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test_executable(guest_stdio_variadic_tests ${LIBS_INCLUDE_DIR}/tests/GuestStdioVariadic.cpp)
+    target_include_directories(guest_stdio_variadic_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_stdio_variadic_tests PRIVATE libc)
+    configure_windows_unwind(guest_stdio_variadic_tests)
+    add_test(NAME guest_stdio_variadic COMMAND guest_stdio_variadic_tests)
+    if(WIN32)
+        set_tests_properties(guest_stdio_variadic PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test_executable(guest_execute_once_tests ${LIBS_INCLUDE_DIR}/tests/GuestExecuteOnce.cpp)
     target_include_directories(guest_execute_once_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_execute_once_tests PRIVATE libc)
@@ -340,6 +364,15 @@ if(BUILD_TESTING)
     add_test(NAME guest_math_exact COMMAND guest_math_exact_tests)
     if(WIN32)
         set_tests_properties(guest_math_exact PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_bessel_tests ${LIBS_INCLUDE_DIR}/tests/GuestBessel.cpp)
+    target_include_directories(guest_bessel_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_bessel_tests PRIVATE libc)
+    configure_windows_unwind(guest_bessel_tests)
+    add_test(NAME guest_bessel COMMAND guest_bessel_tests)
+    if(WIN32)
+        set_tests_properties(guest_bessel PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_libc_threads_tests ${LIBS_INCLUDE_DIR}/tests/GuestLibcThreads.cpp)
@@ -412,7 +445,7 @@ if(BUILD_TESTING)
     endif()
     add_test_executable(guest_directory_tests ${LIBS_INCLUDE_DIR}/tests/GuestDirectory.cpp)
     target_include_directories(guest_directory_tests PRIVATE ${LIBS_INCLUDE_DIR})
-    target_link_libraries(guest_directory_tests PRIVATE libc)
+    target_link_libraries(guest_directory_tests PRIVATE libc libkernel)
     configure_windows_unwind(guest_directory_tests)
     add_test(NAME guest_directory COMMAND guest_directory_tests)
     if(WIN32)
@@ -572,17 +605,24 @@ if(BUILD_TESTING)
         set_tests_properties(guest_errors PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-    if(WIN32)
+    if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_test_executable(guest_call_trace_tests ${LIBS_INCLUDE_DIR}/tests/GuestCallTrace.cpp)
         target_include_directories(guest_call_trace_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(guest_call_trace_tests PRIVATE libc)
         configure_windows_unwind(guest_call_trace_tests)
         add_test(NAME guest_call_trace COMMAND guest_call_trace_tests)
         add_test(NAME guest_call_trace_abort COMMAND guest_call_trace_tests abort)
-        set_tests_properties(guest_call_trace guest_call_trace_abort PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        if(WIN32)
+            set_tests_properties(guest_call_trace guest_call_trace_abort PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
         set_tests_properties(guest_call_trace_abort PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION
-            "last traced system library calls[^~]*#1 thread [0-9]+ libTraced.prx Integers from [^~]*guest_call_trace_tests.exe[^~]*#2 thread [0-9]+ libOther.prx Blocks from[^~]*most called traced imports \\(2 calls in total\\):[^~]* 1 libTraced.prx Integers[^~]* 1 libOther.prx Blocks")
+            "last traced system library calls[^~]*#1 thread [0-9]+ libTraced.prx Integers from [^~]*guest_call_trace_tests${CMAKE_EXECUTABLE_SUFFIX}[^~]*#2 thread [0-9]+ libOther.prx Blocks from[^~]*most called traced imports \\(2 calls in total\\):[^~]* 1 libTraced.prx Integers[^~]* 1 libOther.prx Blocks")
+        if(NOT WIN32)
+            add_test(NAME guest_call_trace_abort_race COMMAND guest_call_trace_tests abort-race)
+            set_tests_properties(guest_call_trace_abort_race PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION
+                "last traced system library calls[^~]*#102 thread [0-9]+ libTraced.prx Integers from[^~]*most called traced imports \\(102 calls in total\\):[^~]* 101 libTraced.prx Integers[^~]* 1 libOther.prx Blocks")
+        endif()
     endif()
     add_test_executable(guest_syslog_tests ${LIBS_INCLUDE_DIR}/tests/GuestSyslog.cpp)
     target_include_directories(guest_syslog_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -775,6 +815,7 @@ if(BUILD_TESTING)
         add_dependencies(application_heap_tests guest_sdk_heap_fixture guest_sdk_heap_partial_fixture)
         add_test(NAME application_heap_guest_sdk COMMAND application_heap_tests sdk $<TARGET_FILE:guest_sdk_heap_fixture>)
         add_test(NAME application_heap_guest_sdk_partial COMMAND application_heap_tests sdk-partial $<TARGET_FILE:guest_sdk_heap_partial_fixture>)
+        add_test(NAME application_heap_guest_sdk_default COMMAND application_heap_tests sdk-default $<TARGET_FILE:guest_sdk_heap_fixture>)
     endif()
     if(WIN32)
         set_tests_properties(application_heap_replacement application_heap_invalid_metadata application_heap_default application_heap_exit_order application_heap_scripting application_heap_lazy
@@ -908,6 +949,19 @@ if(BUILD_TESTING)
     add_test(NAME guest_libc_cnd_timed_wait COMMAND guest_libc_cnd_timed_wait_tests)
     if(WIN32)
         set_tests_properties(guest_libc_cnd_timed_wait PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
+add_test_executable(guest_heap_trace_info_tests EXCLUDE_FROM_ALL ${LIBS_INCLUDE_DIR}/tests/GuestHeapTraceInfo.cpp)
+target_include_directories(guest_heap_trace_info_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(guest_heap_trace_info_tests PRIVATE libc)
+configure_windows_unwind(guest_heap_trace_info_tests)
+if(BUILD_TESTING)
+    set_target_properties(guest_heap_trace_info_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
+    add_test(NAME guest_heap_trace_info COMMAND guest_heap_trace_info_tests)
+    if(WIN32)
+        set_tests_properties(guest_heap_trace_info PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
 
