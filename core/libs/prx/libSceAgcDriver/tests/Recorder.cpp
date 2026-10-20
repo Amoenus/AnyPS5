@@ -39,11 +39,13 @@
 #include "VertexRangeProducer_frag_spv.h"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "BdaAbi.hpp"
+#include "ShaderCacheSourceVersion.hpp"
 #include <SDL_loadso.h>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <io.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -57,6 +59,7 @@
 #include <cctype>
 #include <cmath>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -111,6 +114,54 @@ void ReleaseWatched(void* block, std::size_t bytes) {
 #else
     munmap(block, bytes);
     GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(block, bytes);
+#endif
+}
+
+bool partialWatchRestorationTests() {
+#ifdef _WIN32
+    constexpr std::size_t bytes = 131072;
+    constexpr std::size_t page = 4096;
+    constexpr std::size_t restoredOffset = 4 * page;
+    constexpr std::size_t restoredBytes = 4 * page;
+    if (!AgcDriver::GuestMemory::WriteWatched()) return false;
+    auto* memory = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536));
+    if (memory == nullptr) return false;
+    GuestArena::GuestArenaCommit_nid_postfix(memory, bytes, PAGE_READWRITE, restoredBytes);
+    struct Cleanup {
+        std::uint8_t* memory;
+        ~Cleanup() { ReleaseWatched(memory, bytes); }
+    } cleanup{memory};
+    const auto address = reinterpret_cast<std::uint64_t>(memory);
+    AgcDriver::GuestMemory::Unwatch(address, 65536);
+    Require(!AgcDriver::GuestMemory::Watched(address, page), "the partial remap fixture was not excluded");
+    memory[page] = 0x22;
+    AgcDriver::GuestMemory::MarkWritten(address + page, 1);
+    Require(AgcDriver::GuestMemory::UntrackedHint(address + page, 1) != 0, "the excluded remap fixture has no driver hint");
+    GuestArena::GuestArenaReset_nid_postfix(memory + restoredOffset, restoredBytes);
+    GuestArena::GuestArenaCommit_nid_postfix(memory + restoredOffset, restoredBytes, PAGE_READWRITE, restoredBytes);
+    Require(AgcDriver::GuestMemory::Watched(address + restoredOffset, restoredBytes), "a partial private remap did not restore its write watch");
+    Require(!AgcDriver::GuestMemory::Watched(address, restoredOffset), "a partial remap restored an excluded prefix");
+    Require(!AgcDriver::GuestMemory::Watched(address + restoredOffset + restoredBytes, page), "a partial remap restored an excluded suffix");
+    Require(AgcDriver::GuestMemory::UntrackedHint(address + page, 1) == 0, "a partial remap retained a stale driver hint");
+    std::memset(memory + restoredOffset, 0x33, restoredBytes);
+    AgcDriver::GuestMemory::BumpCollectEpoch();
+    const auto generation = AgcDriver::GuestMemory::CollectWrites(address + restoredOffset, restoredBytes);
+    Require(generation != 0, "the private remap has no collected CPU write history");
+    memory[restoredOffset + page] = 0x44;
+    AgcDriver::GuestMemory::BumpCollectEpoch();
+    Require(AgcDriver::GuestMemory::CollectWrites(address + restoredOffset, restoredBytes) != 0, "the private remap stopped collecting CPU writes");
+    Require(!AgcDriver::GuestMemory::UnchangedSince(address + restoredOffset, restoredBytes, generation), "the private remap hid a genuine CPU write");
+    GuestArena::GuestArenaReset_nid_postfix(memory, restoredBytes);
+    GuestArena::GuestArenaCommit_nid_postfix(memory, restoredBytes, PAGE_READWRITE, restoredBytes);
+    Require(AgcDriver::GuestMemory::Watched(address, restoredBytes), "the first private pages did not regain coverage");
+    Require(!AgcDriver::GuestMemory::Watched(address + 12 * page, page), "restoring the first pages restored an excluded tail");
+    memory[12 * page] = 0x55;
+    AgcDriver::GuestMemory::MarkWritten(address + 12 * page, 1);
+    AgcDriver::GuestMemory::Unwatch(address + 12 * page, page);
+    Require(AgcDriver::GuestMemory::UntrackedHint(address + 12 * page, 1) == 0, "excluding a partially watched block invented a write-watch hint");
+    return true;
+#else
+    return false;
 #endif
 }
 
@@ -1138,6 +1189,67 @@ void completionCountTests(const Device& device, Recorder& recorder) {
     Require(ran == 1 && Recorder::PendingCompletionLabels() == 0 && Recorder::PendingWriteBackCompletions() == 0 && recorder.Idle(), "counts did not return to 0 at finish");
     const bool storeAlways = std::getenv("APS5_LABEL_STORE_ALWAYS") != nullptr;
     Require(memory[0] == 1 && memory[2] == (storeAlways ? 1u : 7u) && memory[16] == 1, "completion stores ran for the wrong labels (overlapped and not-imported ones store, the untouched GPU-stored one skips)");
+}
+
+class StderrCapture {
+public:
+    StderrCapture() {
+        std::fflush(stderr);
+        file = std::tmpfile();
+        Require(file != nullptr, "cannot open a temporary file for stderr");
+#ifdef _WIN32
+        saved = _dup(_fileno(stderr));
+        _dup2(_fileno(file), _fileno(stderr));
+#else
+        saved = dup(fileno(stderr));
+        dup2(fileno(file), fileno(stderr));
+#endif
+    }
+
+    std::string Finish() {
+        std::fflush(stderr);
+#ifdef _WIN32
+        _dup2(saved, _fileno(stderr));
+        _close(saved);
+#else
+        dup2(saved, fileno(stderr));
+        close(saved);
+#endif
+        std::rewind(file);
+        std::string text;
+        char buffer[4096];
+        for (std::size_t read = 0; (read = std::fread(buffer, 1, sizeof(buffer), file)) != 0;) text.append(buffer, read);
+        std::fclose(file);
+        std::fwrite(text.data(), 1, text.size(), stderr);
+        return text;
+    }
+
+private:
+    std::FILE* file = nullptr;
+    int saved = -1;
+};
+
+std::size_t DeferredFailureLines(Recorder& recorder, std::size_t count, const std::function<void()>& failure, std::string* log = nullptr) {
+    StderrCapture capture;
+    for (std::size_t index = 0; index < count; ++index) recorder.OnComplete(failure);
+    recorder.Sync();
+    const auto text = capture.Finish();
+    if (log != nullptr) *log = text;
+    std::size_t lines = 0;
+    for (auto at = text.find("deferred write-back failed"); at != std::string::npos; at = text.find("deferred write-back failed", at + 1)) ++lines;
+    return lines;
+}
+
+void deferredFailureReportTests(Recorder& recorder) {
+    std::uint32_t serial = 0;
+    const auto plain = [&serial] { throw std::runtime_error("image table: poisoned entry " + std::to_string(serial++)); };
+    const auto unaligned = [](std::uint32_t instruction) { return [instruction] { throw BdaUnalignedAccess("BDA access failed: unaligned", instruction); }; };
+    Require(DeferredFailureLines(recorder, 12, plain) == 12, "a deferred failure other than an unaligned BDA access was not printed every time");
+    Require(DeferredFailureLines(recorder, 12, unaligned(0x5c8)) == 8, "the first 8 deferred reports of an unaligned BDA access were not the only ones printed");
+    std::string log;
+    Require(DeferredFailureLines(recorder, 1012, unaligned(0x5c8), &log) == 1 && log.find("pc 0x5c8 1024 times so far") != std::string::npos, "the 1024th deferred report of an unaligned BDA access was not the only one printed");
+    Require(DeferredFailureLines(recorder, 12, unaligned(0x7a0)) == 8, "unaligned BDA reports at one instruction limited the printing of the reports at another");
+    Require(DeferredFailureLines(recorder, 12, plain) == 12, "unaligned BDA reports limited the printing of other deferred failures");
 }
 
 void directCompletionLabelTests(Recorder& recorder) {
@@ -2590,6 +2702,7 @@ int trimmedImportTests(const Device& device) {
         const auto end = address + test.keptEnd;
         const auto* kept = HostImportFor(context, begin, static_cast<std::size_t>(end - begin));
         Require(kept != nullptr && kept->base == begin && kept->base + kept->bytes == end, name + ": the larger side is not imported whole");
+        const auto keptMemory = kept->memory;
         if (test.trimmed) Require(kept->memory == original, "the larger side of " + name + " was imported again instead of kept");
         else Require(kept->memory != original, "the side of " + name + " whose 2 MiB run the unmap replaced is served from the import that pinned the run's old pages");
         requireImportServesGuest(context, recorder, *kept, begin, end, ++salt, "the larger side of " + name);
@@ -2609,7 +2722,7 @@ int trimmedImportTests(const Device& device) {
             const auto from = reinterpret_cast<std::uint64_t>(cut);
             const auto* remapped = HostImportFor(context, address, bytes);
             Require(remapped != nullptr && remapped->base == address && remapped->bytes == bytes, name + ": the range mapped again is not imported whole");
-            Require(remapped->memory != original, "after " + name + " the pages mapped again are served from the import that pinned the old ones");
+            Require(remapped->memory != keptMemory, "after " + name + " the pages mapped again are served from the import made before they were mapped again");
             requireImportServesGuest(context, recorder, *remapped, from, from + test.length, ++salt, "the pages mapped again after " + name);
             requireImportServesGuest(context, recorder, *remapped, begin, end, ++salt, "the larger side after " + name + " and a new mapping");
         }
@@ -8296,6 +8409,70 @@ void singleCubeTests(const Device& device, Recorder& recorder) {
     }
 }
 
+void cubeExtraSliceTests(const Device& device, Recorder& recorder) {
+    auto context = device.GetContext();
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    SampleProgram program(context, recorder, SAMPLE_ARRAY_SPV);
+    const VkComponentMapping identity{};
+    std::array<std::uint32_t, 8> words{0x1000u, (56u << 20u) | (3u << 30u), 15u | (63u << 14u), 0xb0000facu, 6u, 0, 0, 0};
+    auto resource = DecodeTextureResource(words);
+    const auto geometry = DescribeSurface(resource);
+    Require(geometry.imageLayers == 7u, "a cube with a slice past its last whole cube does not allocate it");
+    std::vector<std::byte> memory(static_cast<std::size_t>(geometry.guestBytes) + 256);
+    auto* surface = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(memory.data()) + 255) & ~std::uintptr_t{255});
+    for (std::uint32_t layer = 0; layer < geometry.imageLayers; ++layer) {
+        std::memset(surface + geometry.GuestLayerOffset(layer), 16 * (layer + 1), static_cast<std::size_t>(geometry.layerBytes));
+    }
+    resource.baseAddress = reinterpret_cast<std::uint64_t>(surface);
+    const std::span<const std::byte> snapshot(surface, static_cast<std::size_t>(geometry.guestBytes));
+    Texture texture(context, detiler, resource, identity, snapshot);
+    auto storage = StorageTexture::Create(context, detiler, resource, 0);
+    recorder.Keep(storage);
+    Texture storageView(context, storage, resource, identity);
+    const auto wordCube = [&words](std::vector<std::byte>& backing, std::uint32_t format, const std::function<std::uint32_t(std::uint32_t)>& word) {
+        auto cubeWords = words;
+        cubeWords[1] = (format << 20u) | (3u << 30u);
+        auto described = DecodeTextureResource(cubeWords);
+        const auto layout = DescribeSurface(described);
+        backing.assign(static_cast<std::size_t>(layout.guestBytes) + 256, std::byte{});
+        auto* base = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(backing.data()) + 255) & ~std::uintptr_t{255});
+        for (std::uint32_t layer = 0; layer < layout.imageLayers; ++layer) {
+            const auto value = word(layer);
+            for (std::uint64_t offset = 0; offset < layout.layerBytes; offset += sizeof(value)) std::memcpy(base + layout.GuestLayerOffset(layer) + offset, &value, sizeof(value));
+        }
+        described.baseAddress = reinterpret_cast<std::uint64_t>(base);
+        return described;
+    };
+    std::vector<std::byte> depthMemory;
+    const auto depth = wordCube(depthMemory, 22u, [](std::uint32_t layer) {
+        const float value = static_cast<float>(layer + 1) / 8.0f;
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+    });
+    auto depthStorage = StorageTexture::Create(context, detiler, depth, 0);
+    recorder.Keep(depthStorage);
+    Require(Texture::CanDepthCopyFrom(*depthStorage, depth), "a cube with a slice past its last whole cube cannot take a depth copy");
+    Texture depthCopy(context, depthStorage, depth, identity, Texture::DepthCopyTag{});
+    depthCopy.RefreshDepthCopy();
+    constexpr std::array<std::uint32_t, 7> unsignedFloats{960u, 1024u, 1056u, 1088u, 1104u, 1120u, 1136u};
+    std::vector<std::byte> repackMemory;
+    const auto repacked = wordCube(repackMemory, 43u, [&unsignedFloats](std::uint32_t layer) { return unsignedFloats[layer] << 21u; });
+    auto repackStorage = StorageTexture::Create(context, detiler, repacked, 0);
+    recorder.Keep(repackStorage);
+    Require(Texture::CanRepackCopyFrom(*repackStorage, repacked), "a cube with a slice past its last whole cube cannot take a repacked copy");
+    Texture repackCopy(context, repackStorage, repacked, identity, Texture::RepackCopyTag{});
+    repackCopy.RefreshDepthCopy();
+    for (std::uint32_t layer = 0; layer < geometry.imageLayers; ++layer) {
+        const auto expected = 16.0f * (layer + 1) / 255.0f;
+        expectRed(program.Red(texture.View(), texture.Layout(), 0, static_cast<float>(layer)), expected, "a cube snapshot with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(storageView.View(), storageView.Layout(), 0, static_cast<float>(layer)), expected, "a cube storage view with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(depthCopy.View(), depthCopy.Layout(), 0, static_cast<float>(layer)), static_cast<float>(layer + 1) / 8.0f, "a cube depth copy with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(repackCopy.View(), repackCopy.Layout(), 0, static_cast<float>(layer)), static_cast<float>(layer + 1), "a cube repacked copy with a slice past its last whole cube sampled the wrong slice");
+    }
+}
+
 struct SampledViewProbe {
     Context& context;
     PFN_vkGetDeviceProcAddr resolver;
@@ -8871,9 +9048,14 @@ int pipelineCacheFileTests(const Device& device) {
         return after < before + footprints[index] / 2;
     };
     const auto cacheFile = [&] {
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) Require(entry.is_directory(), "a pipeline cache file lives in the shader cache root");
+        char version[17];
+        std::snprintf(version, sizeof(version), "%016llx", static_cast<unsigned long long>(ShaderRecompiler::ShaderDiskCache::Generated::SourceVersion));
+        const auto versionDirectory = directory / version;
+        Require(std::filesystem::is_directory(versionDirectory), "the current shader cache version has no directory");
         std::vector<std::filesystem::path> found;
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) found.push_back(entry.path());
-        Require(found.size() == 1 && found.front().filename().string().starts_with("vk-pipelines-"), "the pipeline cache directory does not hold exactly one cache file");
+        for (const auto& entry : std::filesystem::directory_iterator(versionDirectory)) found.push_back(entry.path());
+        Require(found.size() == 1 && found.front().filename().string().starts_with("vk-pipelines-"), "the current shader cache version's directory does not hold exactly one pipeline cache file");
         return found.front();
     };
     const auto contents = [](const std::filesystem::path& path) {
@@ -9507,6 +9689,11 @@ void Run(Context context) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--partial-watch-restoration-only") {
+            if (!partialWatchRestorationTests()) return 77;
+            std::cout << "partial private write-watch restoration tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--device-selection-only") {
             deviceSelectionTests();
             std::cout << "recorder device selection tests passed\n";
@@ -9641,6 +9828,7 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--cube-only") {
             singleCubeTests(device, recorder);
+            cubeExtraSliceTests(device, recorder);
             std::cout << "Single cube snapshot and storage sampling tests passed\n";
             return 0;
         }
@@ -9687,6 +9875,11 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--read-list-only") {
             readListTests(device, recorder);
             std::cout << "Read list tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--deferred-failure-report-only") {
+            deferredFailureReportTests(recorder);
+            std::cout << "Deferred failure report tests passed\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--host-import-unmap-only") {
@@ -9911,6 +10104,7 @@ int main(int argc, char** argv) {
         firstLayerViewTests(device, recorder);
         sampledStorageBaseLevelUsageTests(device, recorder);
         singleCubeTests(device, recorder);
+        cubeExtraSliceTests(device, recorder);
         atomicViewTests(device, recorder);
         metadataPassTests(device, recorder);
         cmaskPassTests(device, recorder);
