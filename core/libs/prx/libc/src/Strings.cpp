@@ -183,7 +183,9 @@ TFloat ParseFloat(const char* text, char** end, TFloat (*parse)(const char*, cha
         return value;
     }
     char* parsedEnd = nullptr;
+    const int saved = errno;
     const TFloat value = parse(text, &parsedEnd);
+    if (errno == ERANGE && value != 0 && (value < 0 ? -value : value) < std::numeric_limits<TFloat>::min()) errno = saved;
     if (end != nullptr) *end = parsedEnd;
     return parsedEnd == text ? TFloat{0} : value;
 }

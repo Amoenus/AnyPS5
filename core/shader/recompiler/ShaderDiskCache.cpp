@@ -1477,17 +1477,33 @@ private:
             entries += pack->Count();
             packs.push_back(std::move(pack));
         };
-        for (const auto& path : PrebuiltCachePaths(root)) {
+        for (const auto& candidate : PrebuiltCachePaths(root)) {
             std::error_code error;
+#ifdef _WIN32
+            const auto path = NativeCachePath_nid_no_patch(candidate, error);
+            if (error) continue;
+#else
+            const auto& path = candidate;
+#endif
             if (std::filesystem::is_regular_file(path, error)) { addPack(path); continue; }
             if (!std::filesystem::is_directory(path, error)) continue;
             bool loose = false;
             std::vector<std::filesystem::path> packPaths;
-            for (std::filesystem::directory_iterator it(path, error), end; !error && it != end; it.increment(error)) {
-                const auto extension = it->path().extension();
-                if (extension == ".pack") packPaths.push_back(it->path());
-                if (extension == ".bin" && it->path().stem().string().size() == 32) loose = true;
+            const auto collect = [&](const std::filesystem::path& entry) {
+                const auto extension = entry.extension();
+                if (extension == ".pack") packPaths.push_back(entry);
+                if (extension == ".bin" && entry.stem().string().size() == 32) loose = true;
+            };
+#ifdef _WIN32
+            WIN32_FIND_DATAW data{};
+            const auto handle = FindFirstFileW((path / L"*").c_str(), &data);
+            if (handle != INVALID_HANDLE_VALUE) {
+                struct Search { HANDLE handle; ~Search() { FindClose(handle); } } search{handle};
+                do { collect(path / data.cFileName); } while (FindNextFileW(handle, &data));
             }
+#else
+            for (std::filesystem::directory_iterator it(path, error), end; !error && it != end; it.increment(error)) collect(it->path());
+#endif
             std::sort(packPaths.begin(), packPaths.end());
             for (const auto& item : packPaths) addPack(item);
             if (loose) looseDirectories.push_back(path);

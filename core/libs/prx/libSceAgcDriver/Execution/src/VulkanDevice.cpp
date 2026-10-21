@@ -2119,6 +2119,10 @@ void VulkanDevice::WaitForPipelineJournalReplay() {
     if (state->journalReplay != nullptr) state->journalReplay->Wait();
 }
 
+void VulkanDevice::SavePipelineCache() {
+    if (state->pipelineCache) state->pipelineCache->SaveNow();
+}
+
 std::uint64_t VulkanDevice::ComputePipelinesCreated() const {
     return state->computePipelinesCreated.load(std::memory_order_relaxed);
 }

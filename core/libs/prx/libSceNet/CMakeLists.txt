@@ -1,5 +1,6 @@
 add_library(libSceNet SHARED EXCLUDE_FROM_ALL Export.cpp)
 target_include_directories(libSceNet PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(libSceNet PRIVATE libSceNetCtl)
 configure_windows_unwind(libSceNet)
 
 if(BUILD_TESTING)
