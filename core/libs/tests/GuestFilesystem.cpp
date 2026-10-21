@@ -954,6 +954,9 @@ int main() {
         const auto statLoop = root / "stat-loop";
         Require(CreateSymbolicLinkW(statLoop.c_str(), L"stat-loop", SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != 0);
         Require(sceKernelStat(statLoop.generic_string().c_str(), &status) == static_cast<int>(0x8002003eu));
+        Require(sceKernelOpen(statLoop.generic_string().c_str(), 0, 0) == static_cast<int>(0x8002003eu));
+        Require(open_nid_postfix(statLoop.string().c_str(), 0, 0) == -1 && *__error_nid_postfix() == 62);
+        Require(fopen_nid_postfix(statLoop.string().c_str(), "r") == nullptr && *__error_nid_postfix() == 62);
         const auto checkRelativeLink = [](const std::filesystem::path& link, std::int64_t targetLength) {
             FileStat own{};
             return lstat_nid_postfix(link.string().c_str(), &own) == 0 && (own.st_mode & 0170000) == 0120000 &&
