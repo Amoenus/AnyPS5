@@ -143,6 +143,7 @@ std::int64_t APS5_VABI llabs_nid_postfix(std::int64_t);
 std::int64_t APS5_VABI imaxabs_nid_postfix(std::int64_t);
 long double APS5_VABI scalbnl_nid_postfix(long double, int);
 float APS5_VABI significandf_nid_postfix(float);
+double APS5_VABI significand_nid_postfix(double);
 long double APS5_VABI acoshl_nid_postfix(long double);
 long double APS5_VABI asinhl_nid_postfix(long double);
 long double APS5_VABI atanhl_nid_postfix(long double);
@@ -449,6 +450,22 @@ static void CheckNanConversions() {
         char* end = nullptr;
         Require(std::bit_cast<std::uint64_t>(strtod_nid_postfix(plain.text, &end)) == plain.bits && end == plain.text + plain.used);
     }
+}
+
+static void CheckFloatUnderflowErrno() {
+    char* end = nullptr;
+    errno = 7;
+    Require(strtod_nid_postfix("1e-310", &end) == 1e-310 && errno == 7);
+    Require(strtod_nid_postfix("-4.9406564584124654e-324", &end) == -0x1p-1074 && errno == 7);
+    Require(strtof_nid_postfix("1e-40", &end) == 1e-40f && errno == 7);
+    Require(strtold_nid_postfix("1e-4940", &end) == 1e-4940L && errno == 7);
+    Require(strtod_nid_postfix("1e-330", &end) == 0.0 && errno == ERANGE);
+    errno = 0;
+    Require(strtof_nid_postfix("1e-46", &end) == 0.0f && errno == ERANGE);
+    errno = 0;
+    Require(strtod_nid_postfix("1e400", &end) == HUGE_VAL && errno == ERANGE);
+    errno = 0;
+    Require(strtod_nid_postfix("2.2250738585072014e-308", &end) == 0x1p-1022 && errno == 0);
 }
 
 static void CheckHypotSpecialValue() {
@@ -1030,6 +1047,11 @@ static void CheckScaling() {
     Require(std::signbit(significandf_nid_postfix(-0.0f)) && significandf_nid_postfix(-0.0f) == 0.0f);
     Require(significandf_nid_postfix(std::numeric_limits<float>::infinity()) == std::numeric_limits<float>::infinity());
     Require(std::isnan(significandf_nid_postfix(std::numeric_limits<float>::quiet_NaN())));
+    Require(significand_nid_postfix(12.0) == 1.5 && significand_nid_postfix(-0.375) == -1.5);
+    Require(significand_nid_postfix(0x1p-1074) == 1.0);
+    Require(std::signbit(significand_nid_postfix(-0.0)) && significand_nid_postfix(-0.0) == 0.0);
+    Require(significand_nid_postfix(std::numeric_limits<double>::infinity()) == std::numeric_limits<double>::infinity());
+    Require(std::isnan(significand_nid_postfix(std::numeric_limits<double>::quiet_NaN())));
 }
 
 static bool Near(long double actual, long double expected) {
@@ -1453,6 +1475,7 @@ int main() {
     CheckSinhf();
     CheckAtanhf();
     CheckHypotSpecialValue();
+    CheckFloatUnderflowErrno();
     CheckFmodErrno();
     CheckDoubleClassification();
     CheckIntegerAbsAndDivision();

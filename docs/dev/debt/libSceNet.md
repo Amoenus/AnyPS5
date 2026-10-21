@@ -36,7 +36,7 @@
 - [sceNetFreeAllRouteInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetArpInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetAppMemInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetGetDnsInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
+- [sceNetGetDnsInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the `(info, int flags)` signature, the two IPv4 server slots in network byte order and the server count as the return value follow the PS4 [OpenOrbis musl resolver](https://github.com/OpenOrbis/musl/blob/2b0bb8ce2fa64ac255cb656785729d159a5f074c/src/network/resolvconf.c) and [OpenOrbis Net.h](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/blob/0a1aaf9dd4a92695538bdeb09fb056d06dd11725/include/orbis/Net.h); unverified on PS5 hardware. It reports the host DNS servers of the interface `sceNetCtlGetInfo` reports, never servers set through `sceNetSetDnsInfo`. Zeroing the unused slots and returning 0 without a host IPv4 interface are unverified. Nonzero flags and a null info throw because their console results are unknown
 - [sceNetGetIfList](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetIfListEx](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetIfListOnce](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature

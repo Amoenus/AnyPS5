@@ -17,6 +17,17 @@ void ReplaceFlags(unsigned mask, unsigned flags) {
     _mm_setcsr((_mm_getcsr() & ~mask) | (flags & mask));
 }
 
+int ChangeTraps(int exceptions, bool enable) {
+    const auto mask = static_cast<unsigned>(exceptions) & Exceptions;
+    std::uint16_t control;
+    asm volatile("fnstcw %0" : "=m"(control));
+    const unsigned csr = _mm_getcsr();
+    const auto changed = static_cast<std::uint16_t>(enable ? (control & ~mask) : (control | mask));
+    asm volatile("fldcw %0" : : "m"(changed));
+    _mm_setcsr(enable ? (csr & ~(mask << 7)) : (csr | (mask << 7)));
+    return static_cast<int>(~((csr >> 7) | control) | ~Exceptions);
+}
+
 }
 
 extern "C" {
@@ -82,6 +93,40 @@ int APS5_VABI feclearexcept_nid_postfix(int exceptions) {
     } else if (mask != 0) {
         ReplaceFlags(mask, 0);
     }
+    return 0;
+}
+
+
+int APS5_VABI feenableexcept_nid_postfix(int exceptions) {
+    return ChangeTraps(exceptions, true);
+}
+
+int APS5_VABI fedisableexcept_nid_postfix(int exceptions) {
+    return ChangeTraps(exceptions, false);
+}
+
+int APS5_VABI __feenableexcept_nid_postfix(int exceptions) {
+    return ChangeTraps(exceptions, true);
+}
+
+int APS5_VABI __fedisableexcept_nid_postfix(int exceptions) {
+    return ChangeTraps(exceptions, false);
+}
+
+int APS5_VABI fegettrapenable_nid_postfix() {
+    std::uint16_t control;
+    asm volatile("fnstcw %0" : "=m"(control));
+    return ~control & Exceptions;
+}
+
+int APS5_VABI fesettrapenable_nid_postfix(int exceptions) {
+    const auto mask = static_cast<std::uint16_t>(exceptions);
+    if (mask > Exceptions) return 1;
+    std::uint16_t control;
+    asm volatile("fnstcw %0" : "=m"(control));
+    control = static_cast<std::uint16_t>(control & ~mask);
+    asm volatile("fldcw %0" : : "m"(control));
+    _mm_setcsr(_mm_getcsr() & ~(static_cast<unsigned>(mask) << 7));
     return 0;
 }
 
