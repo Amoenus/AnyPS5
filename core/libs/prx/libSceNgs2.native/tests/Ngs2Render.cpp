@@ -764,6 +764,33 @@ static void TestUserData() {
         threw = true;
     }
     Require(threw);
+
+    Require(sceNgs2RackSetUserData(0x1234, 5) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE);
+    Require(sceNgs2RackSetUserData(system, 5) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE);
+    value = 1;
+    Require(sceNgs2RackGetUserData(0x1234, &value) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE && value == 1);
+    Require(sceNgs2RackGetUserData(system, &value) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE && value == 1);
+    Require(sceNgs2RackGetUserData(0x1234, nullptr) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE);
+    const auto rack = CreateRack(system, SCE_NGS2_RACK_ID_SAMPLER);
+    const auto other = CreateRack(system, SCE_NGS2_RACK_ID_MASTERING);
+    Require(sceNgs2RackGetUserData(rack, &value) == SCE_NGS2_OK && value == 0);
+    Require(sceNgs2RackSetUserData(rack, 0x0123456789abcdef) == SCE_NGS2_OK);
+    Require(sceNgs2RackGetUserData(rack, &value) == SCE_NGS2_OK && value == 0x0123456789abcdef);
+    Require(sceNgs2RackGetUserData(other, &value) == SCE_NGS2_OK && value == 0);
+    Require(sceNgs2SystemGetUserData(system, &value) == SCE_NGS2_OK && value == 0xfedcba9876543210);
+    Require(sceNgs2RackSetUserData(other, 0) == SCE_NGS2_OK);
+    Require(sceNgs2RackGetUserData(rack, &value) == SCE_NGS2_OK && value == 0x0123456789abcdef);
+    threw = false;
+    try {
+        sceNgs2RackGetUserData(rack, nullptr);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    Require(threw);
+    Require(sceNgs2RackDestroy(rack, nullptr) == SCE_NGS2_OK);
+    value = 1;
+    Require(sceNgs2RackGetUserData(rack, &value) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE && value == 1);
+    Require(sceNgs2RackSetUserData(rack, 5) == SCE_NGS2_ERROR_INVALID_RACK_HANDLE);
     Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
 }
 

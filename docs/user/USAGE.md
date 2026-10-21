@@ -308,11 +308,13 @@ To measure how a title runs on a machine, start it with `APS5_TRACE_SUMMARY_EVER
 
 ### Tracing system library calls
 
-Windows and Linux. An executable converted with `--trace-imports` records the calls it makes to the libraries named in `APS5_TRACE_CALLS`, a comma-separated list such as `libkernel,libSceSaveData`, or `all`. Without the variable nothing is recorded. The crash and abort reports then end with the last 64 calls (on Linux, which has no crash report, only an abort prints them): sequence number, thread, library, import name as the executable imports it (a NID) and the caller's address. They are followed by the 32 most called imports since start-up, with their number of calls.
+Windows and Linux. An executable converted with `--trace-imports` records the calls it makes to the libraries named in `APS5_TRACE_CALLS`, a comma-separated list such as `libkernel,libSceSaveData`, or `all`. Without the variable nothing is recorded. The crash and abort reports then end with the last 64 calls (on Linux, which has no crash report, only an abort prints them): sequence number, thread, library, import name as the executable imports it (a NID) and the caller's address. The last 32 of these calls made by the reporting thread follow, taken from the 65536 most recent calls, so a thread whose calls were pushed out of the last 64 by a busier one still shows them. Then come the 32 most called imports since start-up, with their number of calls.
 
 ```
 last traced system library calls (APS5_TRACE_CALLS):
   #1 thread 9384 libkernel.prx k+AXqu2-eBc from 0x0000000140010006 app.exe+0x10006
+last traced calls of thread 9384:
+  #1 libkernel.prx k+AXqu2-eBc from 0x0000000140010006 app.exe+0x10006
 most called traced imports (1 calls in total):
              1 libkernel.prx k+AXqu2-eBc
 ```
