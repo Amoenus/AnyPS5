@@ -194,6 +194,15 @@ int APS5_VABI pthread_getschedparam_nid_postfix(Pthread thread, int* policy, Ker
     return PosixThread::ToErrno(scePthreadGetschedparam(thread, policy, param));
 }
 
+int APS5_VABI pthread_getprio_nid_postfix(Pthread thread) {
+    const auto lock = LockLiveGuestThread(thread);
+    if (!lock.owns_lock()) {
+        *__error_nid_postfix() = PosixThread::GUEST_ESRCH;
+        return -1;
+    }
+    return thread->priority.load(std::memory_order_relaxed);
+}
+
 int APS5_VABI pthread_getaffinity_np_nid_postfix(Pthread thread, std::size_t cpusetSize, void* cpuset) {
     if (!thread) return PosixThread::GUEST_EINVAL;
     if (cpusetSize != GUEST_CPUSET_BYTES) return GUEST_ERANGE;
