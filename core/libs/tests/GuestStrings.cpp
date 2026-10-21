@@ -11,6 +11,7 @@
 extern "C" {
 void APS5_VABI bcopy_nid_postfix(const void*, void*, std::size_t);
 char* APS5_VABI basename_nid_postfix(const char*);
+char* APS5_VABI basename_r_nid_postfix(const char*, char*);
 char* APS5_VABI __inet_ntoa_nid_postfix(unsigned int);
 char* APS5_VABI dirname_nid_postfix(const char*);
 int* APS5_VABI __error_nid_postfix();
@@ -360,6 +361,15 @@ int main() {
     Require(std::strcmp(basename_nid_postfix("one\\two"), "one\\two") == 0);
     const std::string longName(1024, 'x');
     Require(basename_nid_postfix(longName.c_str()) == nullptr && *__error_nid_postfix() == 63);
+    char baseBuffer[1024];
+    Require(basename_r_nid_postfix(path, baseBuffer) == baseBuffer && std::strcmp(baseBuffer, "two") == 0);
+    Require(basename_r_nid_postfix(nullptr, baseBuffer) == baseBuffer && std::strcmp(baseBuffer, ".") == 0);
+    Require(basename_r_nid_postfix("///", baseBuffer) == baseBuffer && std::strcmp(baseBuffer, "/") == 0);
+    Require(basename_r_nid_postfix("plain", baseBuffer) == baseBuffer && std::strcmp(baseBuffer, "plain") == 0);
+    const std::string longest(1023, 'y');
+    Require(basename_r_nid_postfix(("/a/" + longest).c_str(), baseBuffer) == baseBuffer && std::strlen(baseBuffer) == 1023);
+    *__error_nid_postfix() = 0;
+    Require(basename_r_nid_postfix(longName.c_str(), baseBuffer) == nullptr && *__error_nid_postfix() == 63);
     const unsigned char loopbackBytes[4] = {127, 0, 0, 1};
     unsigned int loopback;
     std::memcpy(&loopback, loopbackBytes, sizeof(loopback));
