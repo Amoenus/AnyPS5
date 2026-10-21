@@ -131,10 +131,40 @@ public:
         const int replaced = previous ? _fileno(previous) : -1;
         auto* const standard = HostStandardHandle_nid_no_patch(replaced);
         GuestFileLockForget_nid_no_patch(replaced);
-        if (open && !IsHostStandard() && !filename.empty()) {
-            _handle = nullptr;
-            std::fclose(previous);
-            _handle = open(filename, mode);
+        if (open && !filename.empty()) {
+            if (!IsHostStandard()) {
+                _handle = nullptr;
+                std::fclose(previous);
+                _handle = open(filename, mode);
+            } else {
+                std::wstring resetMode;
+                for (const char character : std::string_view(mode))
+                    if (character != 'x') resetMode.push_back(static_cast<unsigned char>(character));
+                const int kept = DuplicateHostDescriptor_nid_no_patch(replaced);
+                if (kept >= 0) ::_lock_file(previous);
+                _handle = nullptr;
+                try {
+                    std::FILE* const replacement = open(filename, mode);
+                    if (replacement) {
+                        if (::_wfreopen(L"NUL", resetMode.c_str(), previous) == previous) {
+                            const int moved = ::_dup2(_fileno(replacement), replaced);
+                            const int error = errno;
+                            std::fclose(replacement);
+                            if (moved == 0) _handle = previous;
+                            else errno = error;
+                        } else {
+                            const int error = errno;
+                            std::fclose(replacement);
+                            errno = error;
+                        }
+                    }
+                } catch (...) {
+                    if (kept >= 0) RestoreHostStandard(previous, kept);
+                    KeepStandardHandle_nid_no_patch(replaced, standard);
+                    throw;
+                }
+                if (kept >= 0) RestoreHostStandard(previous, kept);
+            }
         } else {
             const int kept = IsHostStandard() ? DuplicateHostDescriptor_nid_no_patch(replaced) : -1;
             if (kept >= 0) ::_lock_file(previous);
