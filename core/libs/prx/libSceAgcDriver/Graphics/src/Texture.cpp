@@ -4749,7 +4749,7 @@ bool StorageTexture::SameSurfaceShape(const StorageTexture& other) const {
 
 const char* StorageTexture::CopyRefusal(const Context& context, const StorageTexture* destination, const StorageTexture& source, std::uint64_t address) {
     if (destination != nullptr && (destination == &source || !destination->SameSurfaceShape(source))) return "shape";
-    if (source.geometry.imageLevels < source.descriptor.mipCount || (destination != nullptr && destination->geometry.imageLevels < destination->descriptor.mipCount)) return "levels past the image";
+    if (source.geometry.imageLevels < source.descriptor.mipCount) return "levels past the image";
     if (source.descriptor.dccAddress != 0 || (destination != nullptr && destination->descriptor.dccAddress != 0)) return "keys";
     if (source.released || !source.Cached() || (destination != nullptr && (destination->released || !destination->Cached()))) return "released";
     if (HostImportFor(context, address, static_cast<std::size_t>(source.guestBytes)) == nullptr) return "not imported";
