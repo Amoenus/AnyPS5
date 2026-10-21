@@ -74,6 +74,7 @@ inline void Check(VkResult result, const char* operation) {
 
 inline VkShaderModule CreateShaderModule(PFN_vkCreateShaderModule create, VkDevice device, bool graphicsPipelineLibrary, const std::uint32_t* code, std::size_t bytes, const char* operation) {
     std::vector<std::uint32_t> keyed(code, code + bytes / sizeof(std::uint32_t));
+    if (keyed.size() > 2) keyed[2] ^= 0x4000u;
     if (!graphicsPipelineLibrary && keyed.size() > 2) keyed[2] ^= 0x8000u;
     VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     info.codeSize = keyed.size() * sizeof(std::uint32_t);
