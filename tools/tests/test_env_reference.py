@@ -109,6 +109,15 @@ class EnvReferenceTests(unittest.TestCase):
             env_reference.check(found, root / "missing.md", env_reference.PREFIXES, out), 1)
         self.assertIn("cannot read", out.getvalue())
 
+    def test_ancestor_directory_named_in_skip_does_not_suppress_root_scan(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        core = Path(directory.name) / "build" / "checkout" / "core"
+        (core / "3rdparty").mkdir(parents=True)
+        (core / "Sample.cpp").write_text('static bool a = IsEnvironmentSet("APS5_TRACE_GPU");\n', encoding="utf-8")
+        (core / "3rdparty" / "Ignored.cpp").write_text('static bool b = IsEnvironmentSet("APS5_IGNORED");\n', encoding="utf-8")
+        self.assertEqual(set(env_reference.reads([core], BOTH)), {"APS5_TRACE_GPU"})
+
 
 if __name__ == "__main__":
     unittest.main()

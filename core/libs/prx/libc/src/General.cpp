@@ -326,10 +326,12 @@ std::filesystem::path Resolve(WorkingDirectory& state, const char* path, bool mo
     if (text.empty() || text.front() != '/') text = state.current.lexically_relative(state.root).generic_string() + "/" + text;
     std::vector<std::string> names;
     bool trailing = true;
+    bool endsWithDot = false;
     const auto parts = SplitNames(text);
     for (std::size_t i = 0; i < parts.size(); ++i) {
         const auto& name = parts[i];
         if (name.empty() && i + 1 != parts.size()) continue;
+        if (!name.empty()) endsWithDot = name == ".";
         if (name == ".." && !names.empty()) {
             if (!(archived && AppArchiveHasDirectory_nid_no_patch(HostPath(state, names)))) RequireHostDirectory(state, WithTrailingSeparator(names, trailing));
             names.pop_back();
@@ -337,6 +339,7 @@ std::filesystem::path Resolve(WorkingDirectory& state, const char* path, bool mo
         trailing = name.empty() || name == "." || name == "..";
         if (!trailing) names.push_back(name);
     }
+    if (endsWithDot && !names.empty() && !(archived && AppArchiveHasDirectory_nid_no_patch(HostPath(state, names)))) RequireHostDirectory(state, names);
     return HostPath(state, WithTrailingSeparator(std::move(names), trailing), module);
 }
 #ifdef _WIN32

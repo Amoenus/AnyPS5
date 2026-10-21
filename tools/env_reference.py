@@ -77,7 +77,7 @@ def source_files(root):
     if not root.is_dir():
         return
     for path in sorted(root.rglob("*")):
-        if path.suffix not in EXTENSIONS or any(part in SKIP for part in path.parts):
+        if path.suffix not in EXTENSIONS or any(part in SKIP for part in path.relative_to(root).parts):
             continue
         yield path
 

@@ -406,7 +406,7 @@ def fenced_lines(text):
 
 def links(path, text):
     result = []
-    text = INLINE.sub("", FENCE.sub("", text))
+    text = INLINE.sub("code", FENCE.sub("", text))
     for target in LINK.findall(text):
         if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:|//|#", target):
             continue

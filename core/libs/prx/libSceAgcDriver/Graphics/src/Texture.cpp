@@ -3165,6 +3165,10 @@ std::uint64_t StorageTexture::writeBackWindows(std::span<const ImportSegment> se
     }
     if (runs.empty()) return 0;
     auto windows = sliceWindows(runs);
+    // A kept unit can lie outside every window: the tracking grid is flat over the guest range
+    // while the slices of a 3D surface taper in depth with the level (HasLayer), so the upper
+    // depth slices' higher-level blocks belong to no window. There is no tiled data to retile.
+    if (windows.empty()) return 0;
     // The linear rows and the tiled bytes of every window, each at a 256-byte position; the tail
     // levels of a layer retile into one scratch region (their block is shared).
     std::vector<std::uint64_t> linearPositions, scratchPositions;

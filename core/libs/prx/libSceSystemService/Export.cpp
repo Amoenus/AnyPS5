@@ -430,6 +430,23 @@ int APS5_VABI sceSystemServiceKillApp(int appId, int how, int reason, int coreDu
  LibcExit_nid_no_patch(0);
 }
 
+int APS5_VABI sceLncUtilKillApp(uint32_t appId) {
+ if (appId != static_cast<uint32_t>(SYSTEM_SERVICE_RUNNING_APP_ID)) {
+  NotImplemented_nid_no_patch("sceLncUtilKillApp: application other than the running title");
+ }
+ LibcExit_nid_no_patch(0);
+}
+
+int APS5_VABI sceLncUtilKillAppWithReason(uint32_t appId, int reason) {
+ if (appId != static_cast<uint32_t>(SYSTEM_SERVICE_RUNNING_APP_ID)) {
+  NotImplemented_nid_no_patch("sceLncUtilKillAppWithReason: application other than the running title");
+ }
+ if (reason != 0) {
+  NotImplemented_nid_no_patch("sceLncUtilKillAppWithReason: a reason other than 0");
+ }
+ LibcExit_nid_no_patch(0);
+}
+
 int APS5_VABI sceSystemServiceLaunchSystemDeeplink(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;

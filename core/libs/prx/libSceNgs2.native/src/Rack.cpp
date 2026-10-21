@@ -203,6 +203,7 @@ int APS5_VABI sceNgs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* b
         rack = Ngs2FindRack(rack_handle);
     }
     if (rack == nullptr) return SCE_NGS2_ERROR_INVALID_RACK_HANDLE;
+    if (Ngs2RenderingHere(*rack->system)) throw std::runtime_error("NGS2: destroying a rack of a system from that system's render (a voice callback) is not implemented");
     return Ngs2DestroyRack(*rack, buffer_info);
 }
 

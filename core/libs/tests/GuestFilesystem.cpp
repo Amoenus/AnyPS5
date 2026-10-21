@@ -238,6 +238,16 @@ static void TestParentTraversal() {
     checkInvalid("/parent-test-mount/present.txt/..", 20);
     FileStat status{};
     Require(sceKernelStat("/parent-test-mount/existing/../present.txt", &status) == 0 && status.st_size == 9);
+    for (const char* name : {"/parent-test-mount/present.txt/.", "/parent-test-mount/present.txt/./"}) {
+        Require(stat_nid_postfix(name, &status) == -1 && *__error_nid_postfix() == 20);
+        Require(sceKernelStat(name, &status) == static_cast<int>(0x80020014u));
+        Require(access_nid_postfix(name, 0) == -1 && *__error_nid_postfix() == 20);
+        Require(open_nid_postfix(name, 0, 0) == -1 && *__error_nid_postfix() == 20);
+        Require(mkdir_nid_postfix(name, 0755) == -1 && *__error_nid_postfix() == 20);
+    }
+    Require(stat_nid_postfix("/parent-test-mount/missing/.", &status) == -1 && *__error_nid_postfix() == 2);
+    Require(stat_nid_postfix("/parent-test-mount/existing/.", &status) == 0 && (status.st_mode & 0170000) == 0040000);
+    Require(access_nid_postfix("/parent-test-mount/existing/./", 0) == 0);
 #ifndef _WIN32
     for (const char* name : {"slash-unlink", "slash-remove", "slash-rename", "slash-open", "slash-kernel"}) std::ofstream(root / name) << "kept";
     Require(unlink_nid_postfix("/parent-test-mount/slash-unlink/") == -1 && *__error_nid_postfix() == 20);
