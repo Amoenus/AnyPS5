@@ -351,9 +351,11 @@ int APS5_VABI sceSystemServiceSetNoticeScreenSkipFlag(void) {
  return SYSTEM_SERVICE_OK;
 }
 
-int APS5_VABI sceSystemServiceInitializePlayerDialogParam(void* param) {
- if (param == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
- return SYSTEM_SERVICE_OK;
+void APS5_VABI sceSystemServiceInitializePlayerDialogParam(SystemServicePlayerDialogParam* param) {
+ if (param == nullptr) APS5_INVALID_ARG_EX;
+ *param = SystemServicePlayerDialogParam{};
+ param->size = sizeof(SystemServicePlayerDialogParam);
+ param->user_id = -1;
 }
 
 int APS5_VABI sceSystemServiceDisableMediaPlay() {

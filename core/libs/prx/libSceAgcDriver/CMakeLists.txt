@@ -2875,6 +2875,20 @@ if(MINGW)
 endif()
 configure_windows_unwind(agc_pm4_replay)
 
+if(MINGW)
+    get_filename_component(replayCompilerDirectory "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(replayTool IN ITEMS agc_shader_replay agc_pm4_replay)
+        add_custom_command(TARGET ${replayTool} POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${replayCompilerDirectory}/libgcc_s_seh-1.dll"
+                "${replayCompilerDirectory}/libstdc++-6.dll"
+                "${replayCompilerDirectory}/libwinpthread-1.dll"
+                "$<TARGET_FILE_DIR:${replayTool}>"
+                VERBATIM
+        )
+    endforeach()
+endif()
+
 if(BUILD_TESTING)
     add_test_executable(agc_driver_pm4_replay_tests tests/Pm4Replay.cpp tools/Pm4Analysis.cpp)
     target_include_directories(agc_driver_pm4_replay_tests PRIVATE ${LIBS_INCLUDE_DIR})

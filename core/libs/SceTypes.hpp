@@ -1901,6 +1901,15 @@ struct SystemServiceDisplaySafeAreaInfo {
     std::uint8_t reserved[128];
 };
 
+struct SystemServicePlayerDialogParam {
+    std::uint64_t size;
+    std::int32_t mode;
+    std::int32_t user_id;
+    std::uint64_t target_account_id;
+    std::uint8_t reserved[40];
+};
+static_assert(sizeof(SystemServicePlayerDialogParam) == 0x40);
+
 struct SystemServiceHdrToneMapLuminance {
     float max_full_frame_tone_map_luminance;
     float max_tone_map_luminance;

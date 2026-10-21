@@ -64,6 +64,28 @@ extern "C" int APS5_VABI sceSystemServiceSetNoticeScreenSkipFlag(void);
 extern "C" int APS5_VABI sceSystemServiceDisableNoticeScreenSkipFlagAutoSet(void);
 extern "C" int APS5_VABI sceSystemServiceHideSplashScreen(void);
 extern "C" int APS5_VABI sceSystemServiceReceiveEvent(SystemServiceEvent* event);
+extern "C" void APS5_VABI sceSystemServiceInitializePlayerDialogParam(SystemServicePlayerDialogParam* param);
+
+namespace {
+
+void TestPlayerDialogParam() {
+    alignas(8) unsigned char buffer[0x100];
+    std::memset(buffer, 0xab, sizeof(buffer));
+    sceSystemServiceInitializePlayerDialogParam(reinterpret_cast<SystemServicePlayerDialogParam*>(buffer));
+    unsigned char expected[0x40] = {0x40};
+    std::memset(expected + 0xc, 0xff, 4);
+    Require(std::memcmp(buffer, expected, sizeof(expected)) == 0);
+    for (std::size_t i = sizeof(expected); i < sizeof(buffer); ++i) Require(buffer[i] == 0xab);
+    bool threw = false;
+    try {
+        sceSystemServiceInitializePlayerDialogParam(nullptr);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    Require(threw);
+}
+
+}
 
 int main() {
     Require(sceSystemServicePowerTick() == SYSTEM_SERVICE_OK);
@@ -143,4 +165,5 @@ int main() {
     SystemServiceEvent event;
     event.event_type = 7;
     Require(sceSystemServiceReceiveEvent(&event) == SYSTEM_SERVICE_ERROR_NO_EVENT);
+    TestPlayerDialogParam();
 }
