@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <atomic>
 #include <chrono>
 #include <thread>
 using Handler = void (APS5_VABI *)(int);
@@ -56,6 +57,14 @@ struct SuspendSender {
     void* target = nullptr;
     int result = -1;
 };
+struct EndingThread {
+    std::atomic<bool> release{false};
+};
+void* APS5_VABI EndingEntry(void* arg) {
+    auto& state = *static_cast<EndingThread*>(arg);
+    while (!state.release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return nullptr;
+}
 void* APS5_VABI SuspendSend(void* arg) {
     auto& sender = *static_cast<SuspendSender*>(arg);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -89,12 +98,32 @@ int main() {
     Require(pthread_kill_nid_postfix(nullptr, 128) == 3);
     Require(pthread_kill_nid_postfix(nullptr, 129) == 22);
     Require(pthread_kill_nid_postfix(reinterpret_cast<void*>(std::uintptr_t{0x10}), 15) == 3);
+    Require(pthread_kill_nid_postfix(reinterpret_cast<void*>(std::uintptr_t{0x10}), 0) == 3);
+    {
+        EndingThread ending;
+        void* thread = nullptr;
+        Require(scePthreadCreate(&thread, nullptr, EndingEntry, &ending, nullptr) == 0);
+        Require(pthread_kill_nid_postfix(thread, 0) == 0);
+        ending.release.store(true);
+        int answer = 0;
+        for (int attempt = 0; attempt < 2000 && (answer = pthread_kill_nid_postfix(thread, 0)) != 3; ++attempt)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        Require(answer == 3);
+        Require(pthread_kill_nid_postfix(thread, 15) == 3);
+        Require(scePthreadJoin(thread, nullptr) == 0);
+        Require(pthread_kill_nid_postfix(thread, 0) == 3);
+    }
     Require(received == 0);
     Require(signal_nid_postfix(15, ignore) != invalid);
     received = 0;
     Require(raise_nid_postfix(15) == 0 && received == 0);
     Require(signal_nid_postfix(15, nullptr) == ignore);
     Require(raise_nid_postfix(100) == -1 && *__error_nid_postfix() == 22);
+    *__error_nid_postfix() = 0;
+    received = 0;
+    Require(raise_nid_postfix(0) == 0 && received == 0 && *__error_nid_postfix() == 0);
+    Require(raise_nid_postfix(129) == -1 && *__error_nid_postfix() == 22);
+    Require(raise_nid_postfix(-1) == -1 && *__error_nid_postfix() == 22);
     GuestSignalSet blocked{{0x20, 0, 0, 0}};
     GuestSignalSet previous{{}};
     Require(sigprocmask_nid_postfix(3, &blocked, &previous) == 0);

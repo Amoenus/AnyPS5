@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -37,6 +38,12 @@
 #else
 #include <sys/mman.h>
 #endif
+
+namespace AgcDriver::DriverDetail {
+struct DriverTestAccess {
+    static std::shared_ptr<VulkanDevice> GetDevice() { return Driver::Get().device.Load(); }
+};
+}
 
 namespace {
 
@@ -188,7 +195,7 @@ std::vector<std::uint32_t> DriverPm4Packet(std::uint32_t opcode, std::initialize
     return words;
 }
 
-void SubmitDriverHtileClear(std::uint64_t address, std::unique_lock<AgcDriver::GuestMemory::GpuMutexType>& gpuLock) {
+Context SubmitDriverHtileClear(std::uint64_t address, std::unique_lock<AgcDriver::GuestMemory::GpuMutexType>& gpuLock) {
     const auto shader = reinterpret_cast<std::uintptr_t>(HtileMaskKernel.data());
     std::vector<std::uint32_t> commands;
     const auto append = [&commands](std::vector<std::uint32_t> packet) { commands.insert(commands.end(), packet.begin(), packet.end()); };
@@ -211,6 +218,9 @@ void SubmitDriverHtileClear(std::uint64_t address, std::unique_lock<AgcDriver::G
     try { AgcDriverWaitIdle_nid_postfix(); }
     catch (...) { gpuLock.lock(); throw; }
     gpuLock.lock();
+    const auto driverDevice = AgcDriver::DriverDetail::DriverTestAccess::GetDevice();
+    Require(driverDevice != nullptr, "HTILE clear driver device is missing");
+    return driverDevice->graphicsContext();
 }
 
 template<typename Action>
@@ -814,11 +824,26 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                 Require(DepthSurfaceView(context, target) == view, "updating the native clear value replaced its attachment");
                 const std::uint32_t clearPattern = clearOne ? (depthOnly ? 0xfffffff0u : 0xfffc00f0u) : 0u;
                 if (fault == ClearFault::DriverDispatch && clearOne) {
+                    struct ShutdownDriver {
+                        ~ShutdownDriver() {
+                            try { AgcDriverShutdown_nid_postfix(); } catch (...) {}
+                        }
+                    } shutdownDriver;
                     const auto generation = AgcDriver::GuestMemory::TrackerGeneration();
-                    SubmitDriverHtileClear(target.htileAddress, gpuLock);
+                    const auto driverContext = SubmitDriverHtileClear(target.htileAddress, gpuLock);
                     recorder.Activate();
                     Require(Recorder::Active() == &recorder, "driver idle did not restore the native depth fixture recorder");
-                    Require(AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation), "driver idle returned before recording the completed HTILE dispatch");
+                    if (!AgcDriver::GuestMemory::Watched(target.htileAddress, metadataBytes)) {
+                        Require(PrepareImportWatch(driverContext) == ImportWatch::Unwatch,
+                                "the HTILE metadata range lost write-watch coverage on a device whose host imports stay watched");
+                        std::puts("skipped native HTILE write-coverage assertion: the write tracker does not cover the imported metadata range; the production depth-sampling path may still decline this clear");
+                        TargetRefuses([&] { Require(DepthSurfaceHolds(context, DecodeTextureResource(words), texture.get()), "native depth owner was not retained"); },
+                                      "native multisample depth clear requires tracked HTILE generations");
+                        return;
+                    } else {
+                        const bool storedAll = AgcDriver::GuestMemory::StoredAllSince_nid_no_patch(target.htileAddress, metadataBytes, generation);
+                        Require(storedAll, "driver idle returned before recording the completed HTILE dispatch");
+                    }
                 } else {
                     const auto nativeBytes = fault == ClearFault::UnprovenDispatch ? 0u : static_cast<std::size_t>(metadataBytes);
                     if (fault == ClearFault::PartialStore || fault == ClearFault::PossibleStore || fault == ClearFault::CompletedPossibleStore) {

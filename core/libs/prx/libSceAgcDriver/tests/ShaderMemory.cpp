@@ -5074,7 +5074,7 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel->targetOutputType[0] = ColorOutputType::Uint;
     minimal.context.pixel->targetOutputType[3] = ColorOutputType::Sint;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQSgAAAA=", "new requests did not use serialization version 40");
+    require(requestPrefix(encoded, 8u) == "NVNQQSoAAAA=", "new requests did not use serialization version 42");
     require(serializer.Deserialize(encoded).request.context.pixel->targetOutputType == minimal.context.pixel->targetOutputType, "attachment numeric types did not round-trip");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
@@ -5193,7 +5193,7 @@ void verifyPixelRequestSerialization() {
     for (std::size_t bytes = 0; bytes < 45u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class, layer export, dither or front-face flag, quad pixel mask or quad sample mask was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQSkAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQSsAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{
@@ -5286,6 +5286,7 @@ void verifyVertexInfoVersion19() {
     auto version20Vertex = flagged;
     version20Vertex.pop_back();
     version20Vertex.pop_back();
+    version20Vertex.pop_back();
     version20Vertex[4] = 20u;
     const auto replay20Vertex = serializer.Deserialize(encodeBase64(version20Vertex));
     require(replay20Vertex.request.context.vertex.has_value() && replay20Vertex.request.context.vertex->paClVsOutCntl == 0x89abcdefu, "a main version20 request lost PA_CL_VS_OUT_CNTL");
@@ -5294,6 +5295,7 @@ void verifyVertexInfoVersion19() {
     const auto layered = serializer.Deserialize(serializer.Serialize(vertex));
     require(layered.request.context.vertex.has_value() && layered.request.context.vertex->paClVsOutCntl == vertex.context.vertex->paClVsOutCntl, "a layered vertex info lost its clip distances or render target index");
     auto legacy = plain;
+    legacy.pop_back();
     legacy.pop_back();
     legacy.pop_back();
     legacy.erase(legacy.begin() + offset, legacy.begin() + offset + 4u);
@@ -5320,6 +5322,7 @@ void verifyVertexInfoVersion19() {
     expectFailure([&] { static_cast<void>(serializer.Deserialize(encodeBase64(invalidType))); }, "invalid color output type", "an invalid attachment numeric type was accepted");
     auto version37Pixel = decodeBase64(encodedPixel);
     version37Pixel.resize(version37Pixel.size() - 8u);
+    version37Pixel.pop_back();
     version37Pixel[4] = 37u;
     const auto replay37Pixel = serializer.Deserialize(encodeBase64(version37Pixel));
     require(replay37Pixel.request.context.pixel.has_value() && replay37Pixel.request.context.pixel->targetOutputType == pixel.context.pixel->targetOutputType && serializer.Serialize(replay37Pixel.request) == encodedPixel, "a version 37 request read attachment numeric types or misread trailing fields");
@@ -5362,6 +5365,7 @@ void verifyVertexInfoVersion19() {
     version30.pop_back();
     version30.pop_back();
     version30.pop_back();
+    version30.pop_back();
     version30.erase(version30.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u), version30.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
     version30[4] = 30u;
     const auto replay30 = serializer.Deserialize(encodeBase64(version30));
@@ -5370,6 +5374,7 @@ void verifyVertexInfoVersion19() {
     spanned.target.spannedWaves = true;
     auto version32 = decodeBase64(serializer.Serialize(spanned));
     version32.resize(version32.size() - 8u);
+    version32.pop_back();
     require(version32.size() > 2u && version32.back() == 0u && version32[version32.size() - 2u] == 0u && version32[version32.size() - 3u] == 1u, "the spanned-waves flag is not the byte before the depth remap flag");
     version32.pop_back();
     version32.pop_back();
@@ -5382,9 +5387,11 @@ void verifyVertexInfoVersion19() {
     version29.pop_back();
     version29.pop_back();
     version29.pop_back();
+    version29.pop_back();
     version29.erase(version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes), version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
     auto version36 = sampledBytes;
     version36.resize(version36.size() - 8u);
+    version36.pop_back();
     version36.erase(version36.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes - 1u));
     version36[4] = 36u;
     const auto replay36 = serializer.Deserialize(encodeBase64(version36));
@@ -5397,6 +5404,7 @@ void verifyVertexInfoVersion19() {
     version28.pop_back();
     version28.pop_back();
     version28.pop_back();
+    version28.pop_back();
     version28.erase(version28.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u), version28.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
     version28[4] = 28u;
     const auto replay28 = serializer.Deserialize(encodeBase64(version28));
@@ -5406,12 +5414,14 @@ void verifyVertexInfoVersion19() {
     version27.pop_back();
     version27.pop_back();
     version27.pop_back();
+    version27.pop_back();
     version27.erase(version27.begin() + static_cast<std::ptrdiff_t>(maskOffset), version27.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes));
     version27[4] = 27u;
     const auto replay27 = serializer.Deserialize(encodeBase64(version27));
     require(replay27.request.context.pixel.has_value() && replay27.request.context.pixel->quadPixelMask == 0xfu && replay27.request.context.pixel->reversedBlend == 0u && serializer.Serialize(replay27.request) == encodedPixel, "a version 27 request read a quad pixel mask or reversed-order blend code, or misread the fields after it");
     auto legacyPixel = plainPixel;
     legacyPixel.resize(legacyPixel.size() - 8u);
+    legacyPixel.pop_back();
     legacyPixel.pop_back();
     legacyPixel.pop_back();
     legacyPixel.pop_back();
@@ -5464,9 +5474,10 @@ void verifyDepthRemapRequests() {
     require(serializer.Serialize(replay.request) == remapped, "a version 35 depth remap request changed on re-serialization");
     const auto plainBytes = decodeBase64(plain);
     const auto remappedBytes = decodeBase64(remapped);
-    require(plainBytes.size() == remappedBytes.size() && plainBytes.size() > 5u && std::equal(plainBytes.begin(), plainBytes.end() - 6, remappedBytes.begin()), "the depth remap flag and mode are not the last 6 bytes before the f32 flush flag of a vertex request");
+    require(plainBytes.size() == remappedBytes.size() && plainBytes.size() > 5u && std::equal(plainBytes.begin(), plainBytes.end() - 7, remappedBytes.begin()), "the depth remap flag and mode are not the 6 bytes before the f32 flush and denormal preserve flags of a vertex request");
     for (const std::uint8_t legacyVersion : {32u, 34u}) {
         auto legacyBytes = remappedBytes;
+        legacyBytes.pop_back();
         legacyBytes[4] = legacyVersion;
         legacyBytes.resize(legacyBytes.size() - 6u);
         const auto legacy = serializer.Deserialize(encodeBase64(legacyBytes));
@@ -5474,6 +5485,7 @@ void verifyDepthRemapRequests() {
         require(serializer.Serialize(legacy.request) == plain, ("a version " + std::to_string(legacyVersion) + " vertex request misread the fields before the depth remap").c_str());
     }
     auto version35 = remappedBytes;
+    version35.pop_back();
     version35[4] = 35u;
     version35.pop_back();
     const auto replay35 = serializer.Deserialize(encodeBase64(version35));
@@ -5520,6 +5532,7 @@ void verifyMergedHullConfiguration() {
     require(replay.request.graphics.has_value() && replay.request.graphics->tessellation.has_value() && replay.request.graphics->tessellation->mergedHull, "a merged hull configuration was lost in serialization");
     require(!serializer.Deserialize(separate).request.graphics->tessellation->mergedHull, "a separate hull configuration was read as merged");
     auto legacy = decodeBase64(merged);
+    legacy.pop_back();
     require(legacy.size() > 52u && legacy[legacy.size() - 52u] == 1u, "the merged hull flag is not the last byte of the tessellation configuration");
     legacy.erase(legacy.end() - 52);
     for (const auto version : {30u, 31u, 32u, 34u, 35u, 36u, 37u, 38u}) {
@@ -7131,6 +7144,10 @@ void verifySrtReadPatching() {
     const auto* replacement = repeatedUse.Argument(0);
     require(replacement->Opcode() == IrOpcode::ReadConst, "SRT read patching: the uses do not reference a flat read");
     require(repeatedUse.Argument(1) == replacement && secondUser.Argument(0) == replacement, "SRT read patching: not every operand uses the same replacement");
+    const std::vector<const IrValue*> order(block.Instructions().begin(), block.Instructions().end());
+    const auto readAt = std::find(order.begin(), order.end(), &read);
+    require(readAt != order.end() && readAt - order.begin() >= 2 && *(readAt - 1) == replacement && *(readAt - 2) == replacement->Argument(0) && (*(readAt - 2))->Opcode() == IrOpcode::GetSrtResource, "SRT read patching: the flat read is not right before the original read");
+    require(order.back()->Opcode() == IrOpcode::ReferenceU32 && order.back()->Argument(0) == &read, "SRT read patching: the planning reference is not at the end of the block");
     const auto& remainingUses = read.OperandUses();
     require(remainingUses.size() == 1u && remainingUses.front().user->Opcode() == IrOpcode::ReferenceU32, "SRT read patching: the original read retains non-planning uses");
 }
@@ -7384,6 +7401,28 @@ void verifyGuardedNullPointers() {
     const auto samePipeline = [](const RecompileResult& left, const RecompileResult& right) {
         return left.variantId == right.variantId && left.specializationId == right.specializationId && left.PipelineVariantId() == right.PipelineVariantId() && left.spirv == right.spirv;
     };
+    const auto guardSites = [](const RecompileResult& result) {
+        const auto words = result.spirv.Words();
+        std::map<std::uint32_t, std::string> names;
+        std::map<std::uint32_t, std::uint32_t> constants;
+        std::vector<std::uint32_t> guardWords;
+        std::string function;
+        std::size_t calls = 0;
+        std::size_t stores = 0;
+        for (std::size_t cursor = 5; cursor < words.size();) {
+            const auto count = words[cursor] >> 16u;
+            const auto opcode = words[cursor] & 0xffffu;
+            require(count != 0 && count <= words.size() - cursor, "guarded pointer: truncated SPIR-V instruction");
+            if (opcode == spv::OpName) names[words[cursor + 1]] = reinterpret_cast<const char*>(&words[cursor + 2]);
+            if (opcode == spv::OpConstant && count == 4u) constants[words[cursor + 2]] = words[cursor + 3];
+            if (opcode == spv::OpFunction) function = names[words[cursor + 2]];
+            if (opcode == spv::OpAccessChain && count == 6u && names[words[cursor + 3]] == "fault_buffer" && constants.contains(words[cursor + 5]) && constants[words[cursor + 5]] == BdaAbi::SrtGuardWord) guardWords.push_back(words[cursor + 2]);
+            if (function == "main" && opcode == spv::OpFunctionCall && names[words[cursor + 3]] == "record_bda_fault") ++calls;
+            if (function == "main" && opcode == spv::OpAtomicStore && std::find(guardWords.begin(), guardWords.end(), words[cursor + 1]) != guardWords.end()) ++stores;
+            cursor += count;
+        }
+        return std::pair{calls, stores};
+    };
 
     NestedRequest branch(branchCode, root.data());
     point(payloadAddress);
@@ -7395,6 +7434,8 @@ void verifyGuardedNullPointers() {
     branch.request.context.memory = validRegions;
     const auto validResult = Recompile(branch.request, *valid);
     require(validResult->poisonedSrtReads == 0u && faultBinding(*validResult) && validResult->bdaAbiVersion == BdaAbi::Version, "guarded pointer: a guarded program has no fault buffer");
+    const auto [branchCalls, branchStores] = guardSites(*validResult);
+    require(branchCalls == 0u && branchStores == 1u, ("guarded pointer: a guarded read calls record_bda_fault " + std::to_string(branchCalls) + " times in main and stores its record to the fault buffer's guard word " + std::to_string(branchStores) + " times, expected one store and no call").c_str());
 
     for (const auto pointer : {std::uint64_t{0}, unmapped}) {
         for (const auto condition : {1u, 0u}) {
@@ -7453,6 +7494,8 @@ void verifyGuardedNullPointers() {
     chain.request.context.memory = mappedChainRegions;
     const auto mappedChainResult = Recompile(chain.request, *mappedChain);
     require(chainResult->poisonedSrtReads == 3u && nullChainResult->poisonedSrtReads == 1u && mappedChainResult->poisonedSrtReads == 0u, "guarded pointer: a chain result does not count its poisoned reads");
+    const auto [chainCalls, chainStores] = guardSites(*mappedChainResult);
+    require(chainCalls == 0u && chainStores == mappedChain->plan->guardedSrtSlots.size(), ("guarded pointer: a chain's guarded reads call record_bda_fault " + std::to_string(chainCalls) + " times in main and store to the guard word " + std::to_string(chainStores) + " times, expected one store per guard and no call").c_str());
     require(samePipeline(*chainResult, *mappedChainResult) && samePipeline(*nullChainResult, *mappedChainResult), "guarded pointer: a chain's poison changed the variant, the specialization or the module");
 
     const auto poisonedWords = [](const ResourceCapture& capture, std::uint32_t pc, std::uint64_t base) {
@@ -8029,6 +8072,13 @@ int main(int argc, char** argv) {
         std::vector<std::uint64_t> float32FlushKey;
         RecompileCacheKey::Build(float32Flush, float32FlushKey);
         require(plainKey != float32FlushKey, "f32 hardware flush did not change the cache key");
+        auto float32Preserve = uncached;
+        float32Preserve.target.float32DenormPreserve = true;
+        require(RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(float32Preserve)).request.target.float32DenormPreserve, "f32 denormal preservation was lost in serialization");
+        require(!RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(uncached)).request.target.float32DenormPreserve, "f32 denormal preservation appeared from nowhere in serialization");
+        std::vector<std::uint64_t> float32PreserveKey;
+        RecompileCacheKey::Build(float32Preserve, float32PreserveKey);
+        require(plainKey != float32PreserveKey && float32FlushKey != float32PreserveKey, "f32 denormal preservation did not change the cache key");
         auto changedLayout = request;
         changedLayout.layout.pushConstantSizeBytes = 64;
         require(!Recompile(changedLayout).cacheHit, "binding layout change reused an incompatible variant");

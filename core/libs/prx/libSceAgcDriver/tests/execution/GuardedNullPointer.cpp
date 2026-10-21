@@ -71,6 +71,12 @@ alignas(256) constexpr std::array<std::uint32_t, 22> ChainCode{
     0xbf8cc07fu, 0x7e02020cu, 0x34040082u, 0xe0701000u, 0x80010102u, 0xbf810000u,
 };
 
+alignas(256) constexpr std::array<std::uint32_t, 22> TwoGuardCode{
+    0xf4080100u, 0xfa000000u, 0xf4040280u, 0xfa000018u, 0xf4040380u, 0xfa000020u, 0xbe8c03ffu, 0x11111111u,
+    0xbf8cc07fu, 0xbf068002u, 0xbf840003u, 0xf4000305u, 0xfa000000u, 0xbf820002u, 0xf4000307u, 0xfa000000u,
+    0xbf8cc07fu, 0x7e02020cu, 0x34040082u, 0xe0701000u, 0x80010102u, 0xbf810000u,
+};
+
 alignas(256) constexpr std::array<std::uint32_t, 21> DescriptorCode{
     0xf4080100u, 0xfa000000u, 0xf4000200u, 0xfa000010u, 0xf4040280u, 0xfa000018u, 0x7e0202ffu, 0x11111111u,
     0xbf8cc07fu, 0xbf068008u, 0xbf850006u, 0xf4080405u, 0xfa000010u, 0xbf8cc07fu, 0xe0300000u, 0x80040100u,
@@ -124,7 +130,7 @@ struct Outcome {
 };
 
 template <std::size_t CodeWords>
-Outcome Run(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, CodeWords>& code, std::uint64_t pointer, std::uint32_t guard, bool direct = false) {
+Outcome Run(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, CodeWords>& code, std::uint64_t pointer, std::uint32_t guard, std::uint32_t groups = 1u, std::uint64_t second = 0u, bool direct = false) {
     const auto output = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Output.data()));
     Root = {};
     Root[0] = static_cast<std::uint32_t>(output);
@@ -134,12 +140,14 @@ Outcome Run(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, Cod
     Root[4] = guard;
     Root[6] = static_cast<std::uint32_t>(pointer);
     Root[7] = static_cast<std::uint32_t>(pointer >> 32u);
+    Root[8] = static_cast<std::uint32_t>(second);
+    Root[9] = static_cast<std::uint32_t>(second >> 32u);
     std::fill(Output.begin(), Output.end(), 0xdeadbeefu);
     const auto root = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Root.data()));
     const std::array<std::uint32_t, 4> words{static_cast<std::uint32_t>(root), static_cast<std::uint32_t>(root >> 32u), static_cast<std::uint32_t>(pointer), static_cast<std::uint32_t>(pointer >> 32u)};
     const std::span<const std::uint32_t> userData(words.data(), direct ? 4u : 2u);
     const std::span<const std::uint32_t> span(code);
-    const ShaderRecompiler::ShaderComputeStageInfo compute{{Lanes, 1, 1}, 0u, {false, false, false}, false, 1};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{Lanes, 1, 1}, 0u, {groups > 1u, false, false}, false, 1};
     ShaderRecompiler::RecompileRequest request{
         {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(span.data()), span, 0, {}},
         {64, 0, userData, compute, std::nullopt, std::nullopt, {}},
@@ -158,7 +166,7 @@ Outcome Run(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, Cod
     outcome.cacheable = AgcDriver::DriverDetail::CacheableResult(*result);
     StderrCapture log;
     try {
-        device.Dispatch(*result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(span.data()));
+        device.Dispatch(*result, groups, 1, 1, {}, reinterpret_cast<std::uintptr_t>(span.data()));
         device.WaitIdle();
     } catch (...) {
         static_cast<void>(log.Finish());
@@ -197,17 +205,17 @@ void RunDirectRootTests(AgcDriver::VulkanDevice& device) {
 #endif
     Require(reserved != nullptr, "direct root: cannot reserve an inaccessible range");
     const auto unmapped = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(reserved));
-    const auto taken = Run(device, DirectRootCode, valid, 1u, true);
+    const auto taken = Run(device, DirectRootCode, valid, 1u, 1u, 0u, true);
     Require(!Faulted(taken) && taken.poisoned == 0u && taken.cacheable, "direct root: a mapped taken load faulted, was poisoned or left the caches:\n" + taken.log);
     RequireWords(taken, Lanes, Payload, "direct root: a mapped taken load");
     std::puts("direct root: mapped taken load wrote the payload");
-    const auto skippedMapped = Run(device, DirectRootCode, valid, 0u, true);
+    const auto skippedMapped = Run(device, DirectRootCode, valid, 0u, 1u, 0u, true);
     Require(!Faulted(skippedMapped) && skippedMapped.poisoned == 0u && skippedMapped.cacheable, "direct root: a mapped skipped load faulted, was poisoned or left the caches:\n" + skippedMapped.log);
     RequireWords(skippedMapped, 0u, 0u, "direct root: a mapped skipped load");
     std::puts("direct root: mapped skipped load wrote the default");
     bool refused = false;
     try {
-        static_cast<void>(Run(device, DirectRootCode, unmapped, 1u, true));
+        static_cast<void>(Run(device, DirectRootCode, unmapped, 1u, 1u, 0u, true));
     } catch (const std::runtime_error& error) {
         char expected[96];
         std::snprintf(expected, sizeof(expected), "guest memory is not readable at 0x%llx", static_cast<unsigned long long>(unmapped));
@@ -216,7 +224,7 @@ void RunDirectRootTests(AgcDriver::VulkanDevice& device) {
     }
     Require(refused, "direct root: an invalid taken load was accepted");
     std::puts("direct root: inaccessible taken load was rejected");
-    const auto skipped = Run(device, DirectRootCode, unmapped, 0u, true);
+    const auto skipped = Run(device, DirectRootCode, unmapped, 0u, 1u, 0u, true);
     Require(!Faulted(skipped) && skipped.poisoned == 0u && skipped.cacheable, "direct root: an inaccessible skipped load faulted, was poisoned or left the caches:\n" + skipped.log);
     RequireWords(skipped, 0u, 0u, "direct root: an inaccessible skipped load");
     std::puts("direct root: inaccessible skipped load wrote the default");
@@ -252,6 +260,11 @@ void RunTests(AgcDriver::VulkanDevice& device) {
     const auto takenUnmapped = Run(device, BranchCode, unmapped, 1u);
     Require(Faulted(takenUnmapped) && takenUnmapped.log.find(Fault(unmapped, 0x2cu)) != std::string::npos, "guarded pointer: a read through an unmapped pointer that runs did not fault at its address:\n" + takenUnmapped.log);
     Require(takenUnmapped.pipelineVariantId == taken.pipelineVariantId, "guarded pointer: an unmapped pointer changed the pipeline variant");
+
+    const auto twoGuards = Run(device, TwoGuardCode, 0u, 0u, 2u, unmapped);
+    const bool nullRecord = twoGuards.log.find(Fault(0u, 0x2cu)) != std::string::npos;
+    const bool unmappedRecord = twoGuards.log.find(Fault(unmapped, 0x38u)) != std::string::npos;
+    Require(twoGuards.poisoned == 2u && Faulted(twoGuards) && nullRecord != unmappedRecord, "guarded pointer: two workgroups faulting through different guards did not report exactly one of their two records:\n" + twoGuards.log);
 
     const auto someLanes = Run(device, ExecCode, valid, 5u);
     Require(!Faulted(someLanes), "guarded pointer: a mapped pointer under EXEC faulted:\n" + someLanes.log);

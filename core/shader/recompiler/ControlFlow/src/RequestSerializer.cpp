@@ -827,7 +827,7 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     std::string buffer;
     Writer writer(buffer);
     writer.WriteU32(0x41505335u);
-    writer.WriteU32(40u);
+    writer.WriteU32(42u);
     writeShaderBinary(writer, request.shader);
     writeGuestContext(writer, request.context);
     writeSpirvTarget(writer, request.target);
@@ -858,6 +858,7 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
         writer.WriteU32(request.context.vertex->depthRemapMode);
     }
     writer.WriteBool(request.target.float32FlushToZero);
+    writer.WriteBool(request.target.float32DenormPreserve);
     if (request.context.pixel) {
         for (const auto type : request.context.pixel->targetOutputType) writer.WriteU8(static_cast<std::uint8_t>(type));
     }
@@ -869,7 +870,7 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     Reader reader(decoded);
     if (reader.ReadU32() != 0x41505335u) throw std::runtime_error("invalid recompile request signature");
     const auto version = reader.ReadU32();
-    if (version < 1u || version > 40u) throw std::runtime_error("unsupported recompile request serialization version");
+    if (version < 1u || version > 42u) throw std::runtime_error("unsupported recompile request serialization version");
     DeserializedRequest result{};
     result.request.shader = readShaderBinary(reader, result.shaderCode, result.shaderHeader);
     result.request.context = readGuestContext(reader, result, version);
@@ -914,7 +915,8 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
         }
     }
     if (version >= 36u) result.request.target.float32FlushToZero = reader.ReadBool();
-    if (version >= 40u && result.request.context.pixel) {
+    if (version >= 41u) result.request.target.float32DenormPreserve = reader.ReadBool();
+    if (version >= 42u && result.request.context.pixel) {
         for (auto& type : result.request.context.pixel->targetOutputType) {
             const auto value = reader.ReadU8();
             if (value > static_cast<std::uint8_t>(ColorOutputType::Sint)) throw std::runtime_error("RequestSerializer: invalid color output type");
