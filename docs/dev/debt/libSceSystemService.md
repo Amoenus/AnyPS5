@@ -7,6 +7,7 @@
 - [sceSystemServiceShowControllerSettings](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - returns success without showing the controller settings: AnyPS5 has no system UI to open. Cat Quest III (PPSA15065) imports it
 - [sceSystemServiceShowDisplaySafeAreaSettings](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - returns success without showing the display safe area settings dialog: AnyPS5 has no system UI to open. PPSA03332 imports it, and the no-argument signature is assumed: [Orbital](https://github.com/AlexAltea/orbital/blob/cc408367da6a6ebbf5ac1ac559fefeadc73b2831/tools/ida/db_types.json) has `sceSystemServiceShowControllerSettings` but not this call
 - [sceSystemServiceOpenChallengeActivity](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - returns success without opening the challenge activity: AnyPS5 has no system UI to open. Cat Quest III (PPSA15065) imports it
+- [sceSystemServiceOpenTournamentOccurrence](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - returns success without opening the tournament occurrence: AnyPS5 has no system UI to open
 
 ### Unknown function info
 
