@@ -1399,6 +1399,12 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_storage_baseline_settled COMMAND agc_driver_recorder_tests --settled-baseline-only)
+    add_test(NAME agc_storage_clear_hand_over COMMAND agc_driver_recorder_tests --clear-hand-over-only)
+    set_tests_properties(agc_storage_clear_hand_over PROPERTIES SKIP_RETURN_CODE 77)
+    if(WIN32)
+        set_tests_properties(agc_storage_clear_hand_over PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test(NAME agc_storage_integer_clear COMMAND agc_driver_recorder_tests --integer-clear-only)
     set_tests_properties(agc_storage_integer_clear PROPERTIES SKIP_RETURN_CODE 77)
     if(WIN32)
@@ -1590,6 +1596,7 @@ target_include_directories(agc_host_import_retire_tests PRIVATE ${LIBS_INCLUDE_D
 target_link_libraries(agc_host_import_retire_tests PRIVATE libSceAgcDriver libc)
 set_target_properties(agc_host_import_retire_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_host_import_retire_tests)
+target_sources(agc_host_import_retire_tests PRIVATE tests/HostImportFailure.cpp)
 if(BUILD_TESTING)
     set_target_properties(agc_host_import_retire_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME agc_host_import_retire COMMAND agc_host_import_retire_tests)
@@ -1799,6 +1806,7 @@ add_test_executable(agc_driver_bda_device_tests EXCLUDE_FROM_ALL
         tests/BdaShader.cpp
         tests/BdaExecution.cpp
         tests/BdaContracts.cpp
+        tests/HostImportFailure.cpp
 )
 
 target_include_directories(agc_driver_bda_device_tests PRIVATE
@@ -1810,6 +1818,15 @@ target_include_directories(agc_driver_bda_device_tests PRIVATE
 target_link_libraries(agc_driver_bda_device_tests PRIVATE libSceAgcDriver SDL2-static libc)
 set_target_properties(agc_driver_bda_device_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_bda_device_tests)
+if(BUILD_TESTING)
+    add_test(NAME agc_driver_host_import_failure_handles COMMAND agc_driver_bda_device_tests --host-import-failures)
+    set_tests_properties(agc_driver_host_import_failure_handles PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_tests_properties(agc_driver_host_import_failure_handles PROPERTIES
+                ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
 
 add_test_executable(agc_driver_mesh_tests EXCLUDE_FROM_ALL tests/Mesh.cpp)
 target_include_directories(agc_driver_mesh_tests PRIVATE
@@ -2161,6 +2178,22 @@ if(BUILD_TESTING)
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
         set_tests_properties(agc_shader_disk_cache_long_paths PROPERTIES TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    if(Python3_Interpreter_FOUND)
+        set(prebuiltDiscoveryModes plain relative plain-long)
+        if(WIN32)
+            list(APPEND prebuiltDiscoveryModes extended extended-forward device extended-long)
+        endif()
+        foreach(prebuiltDiscoveryMode IN LISTS prebuiltDiscoveryModes)
+            set(prebuiltDiscoveryTest agc_shader_prebuilt_discovery_${prebuiltDiscoveryMode})
+            add_test(NAME ${prebuiltDiscoveryTest} COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_shader_cache_prebuilt_discovery.py
+                $<TARGET_FILE:agc_shader_disk_cache_tests> ${prebuiltDiscoveryMode})
+            set_tests_properties(${prebuiltDiscoveryTest} PROPERTIES TIMEOUT 20)
+            if(WIN32)
+                set_tests_properties(${prebuiltDiscoveryTest} PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+            endif()
+        endforeach()
     endif()
     add_test(NAME agc_driver_large_tracked_snapshot COMMAND agc_driver_partially_resident_snapshot_tests --large-tracked)
     set_tests_properties(agc_driver_large_tracked_snapshot PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)

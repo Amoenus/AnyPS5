@@ -139,6 +139,15 @@ std::int64_t CopyLinkTarget(const std::string& target, char* buffer, std::size_t
     return static_cast<std::int64_t>(count);
 }
 
+bool HasNonDirectoryPrefix(const std::filesystem::path& native) {
+    std::error_code error;
+    for (auto prefix = native.parent_path(); prefix.has_relative_path(); prefix = prefix.parent_path()) {
+        const auto status = std::filesystem::status(prefix, error);
+        if (std::filesystem::exists(status)) return !std::filesystem::is_directory(status);
+    }
+    return false;
+}
+
 std::int64_t ReadNativeLink(const std::filesystem::path& native, char* buffer, std::size_t size) {
 #ifdef _WIN32
     const DWORD attributes = GetFileAttributesW(native.wstring().c_str());
@@ -153,8 +162,10 @@ std::int64_t ReadNativeLink(const std::filesystem::path& native, char* buffer, s
 #endif
     std::error_code error;
     const auto status = std::filesystem::symlink_status(native, error);
-    if (error) return Fail(GuestError(error));
-    if (status.type() == std::filesystem::file_type::not_found) return Fail(GuestEnoent);
+    if (error)
+        return Fail(error == std::errc::no_such_file_or_directory && HasNonDirectoryPrefix(native) ? GuestEnotdir : GuestError(error));
+    if (status.type() == std::filesystem::file_type::not_found)
+        return Fail(HasNonDirectoryPrefix(native) ? GuestEnotdir : GuestEnoent);
     if (!std::filesystem::is_symlink(status)) return Fail(GuestEinval);
     const auto target = std::filesystem::read_symlink(native, error).generic_string();
     if (error) return Fail(GuestError(error));
@@ -172,15 +183,6 @@ bool HasLongComponent(std::string_view path) {
             return std::filesystem::is_directory(prefix, error);
         }
         start = end + 1;
-    }
-    return false;
-}
-
-bool HasNonDirectoryPrefix(const std::filesystem::path& native) {
-    std::error_code error;
-    for (auto prefix = native.parent_path(); prefix.has_relative_path(); prefix = prefix.parent_path()) {
-        const auto status = std::filesystem::status(prefix, error);
-        if (std::filesystem::exists(status)) return !std::filesystem::is_directory(status);
     }
     return false;
 }

@@ -230,6 +230,7 @@ struct RegisterPthreadOnLoad {
     RegisterPthreadOnLoad() {
         RegisterPthreadCreate_nid_no_patch(reinterpret_cast<PthreadCreateFn_nid_no_patch>(pthread_create_nid_postfix));
         RegisterPthreadJoin_nid_no_patch(reinterpret_cast<PthreadJoinFn_nid_no_patch>(pthread_join_nid_postfix));
+        RegisterPthreadDetach_nid_no_patch(reinterpret_cast<PthreadDetachFn_nid_no_patch>(pthread_detach_nid_postfix));
     }
 };
 const RegisterPthreadOnLoad gRegisterPthread;

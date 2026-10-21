@@ -184,10 +184,30 @@ long double AsinDenominator(long double t) {
 }
 
 template<typename T>
+bool NanWithoutException(T value) {
+    if constexpr (sizeof(T) == sizeof(std::uint32_t)) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return (bits & UINT32_C(0x7fffffff)) > UINT32_C(0x7f800000);
+    } else if constexpr (sizeof(T) == sizeof(std::uint64_t)) {
+        std::uint64_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return (bits & UINT64_C(0x7fffffffffffffff)) > UINT64_C(0x7ff0000000000000);
+    } else {
+        static_assert(std::numeric_limits<T>::digits == 64);
+        std::uint64_t significand;
+        std::uint16_t signAndExponent;
+        std::memcpy(&significand, &value, sizeof(significand));
+        std::memcpy(&signAndExponent, reinterpret_cast<const unsigned char*>(&value) + sizeof(significand), sizeof(signAndExponent));
+        return (signAndExponent & 0x7fff) == 0x7fff && (significand & UINT64_C(0x7fffffffffffffff)) != 0;
+    }
+}
+
+template<typename T>
 T GuestFmin(T x, T y) {
-    if (std::isnan(x))
+    if (NanWithoutException(x))
         return y;
-    if (std::isnan(y))
+    if (NanWithoutException(y))
         return x;
     if (std::signbit(x) != std::signbit(y))
         return std::signbit(x) ? x : y;
@@ -196,9 +216,9 @@ T GuestFmin(T x, T y) {
 
 template<typename T>
 T GuestFmax(T x, T y) {
-    if (std::isnan(x))
+    if (NanWithoutException(x))
         return y;
-    if (std::isnan(y))
+    if (NanWithoutException(y))
         return x;
     if (std::signbit(x) != std::signbit(y))
         return std::signbit(x) ? y : x;
@@ -315,6 +335,7 @@ double APS5_VABI scalbn_nid_postfix(double x, int exponent) { return std::scalbn
 float APS5_VABI scalbnf_nid_postfix(float x, int exponent) { return std::scalbn(x, exponent); }
 long double APS5_VABI scalbnl_nid_postfix(long double x, int exponent) { return std::scalbn(x, exponent); }
 float APS5_VABI significandf_nid_postfix(float x) { return x == 0.0f || !std::isfinite(x) ? x : std::scalbn(x, -std::ilogb(x)); }
+double APS5_VABI significand_nid_postfix(double x) { return x == 0.0 || !std::isfinite(x) ? x : std::scalbn(x, -std::ilogb(x)); }
 double APS5_VABI frexp_nid_postfix(double x, int* exponent) { return std::frexp(x, exponent); }
 float APS5_VABI frexpf_nid_postfix(float x, int* exponent) { return std::frexp(x, exponent); }
 // Guest long is 64-bit, including on Windows where native long is 32-bit.
