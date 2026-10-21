@@ -9099,7 +9099,7 @@ void pipelineCacheHeaderTests(const Device& device) {
         }
     } removeDirectory{cleanupRoot};
     auto directory = root;
-    while (directory.native().size() < 220) directory /= "long-pipeline-cache-directory";
+    while (directory.native().size() < 200) directory /= "long-pipeline-cache-directory";
 #ifdef _WIN32
     _putenv_s("ANYPS5_NO_SHADER_CACHE", "0");
     _putenv_s("ANYPS5_SHADER_CACHE_DIR", directory.string().c_str());
@@ -9111,8 +9111,13 @@ void pipelineCacheHeaderTests(const Device& device) {
     PipelineCacheFileProbe probe(context);
     PipelineCache cache(context, device.Properties());
     cache.SaveNow();
+    char version[17];
+    std::snprintf(version, sizeof(version), "%016llx", static_cast<unsigned long long>(ShaderRecompiler::ShaderDiskCache::Generated::SourceVersion));
+    const auto versionDirectory = directory / version;
+    Require(versionDirectory.native().size() < 260, "the pipeline cache header test requires a directory listing below MAX_PATH");
+    Require(std::filesystem::is_directory(versionDirectory), "the current shader cache version has no directory");
     std::vector<std::filesystem::path> files;
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) files.push_back(entry.path());
+    for (const auto& entry : std::filesystem::directory_iterator(versionDirectory)) files.push_back(entry.path());
     Require(files.size() == 1 && files.front().filename().string().starts_with("vk-pipelines-"), "the long pipeline cache directory does not hold exactly one cache file");
     Require(files.front().native().size() > 260, "the pipeline cache header test did not exceed MAX_PATH");
     std::vector<std::byte> stored;
