@@ -305,6 +305,8 @@ struct Decoder {
     std::deque<FramePointer> ready;
     std::vector<std::uint8_t> annexB;
     std::vector<std::uint8_t> parameterSets;
+    bool lengthPrefixed = false;
+    bool shortStartCodes = false;
     bool flushing = false;
     std::array<Vp9PictureInfo, 8> vp9References{};
     Vp9PictureInfo vp9Colors{};
@@ -381,21 +383,45 @@ void OpenCodec(Decoder& decoder) {
     }
 }
 
-const std::vector<std::uint8_t>* ToAnnexB(Decoder& decoder, const std::uint8_t* data, std::size_t size) {
-    if (size >= 4 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || (data[2] == 0 && data[3] == 1))) {
-        decoder.annexB.assign(data, data + size);
-        return &decoder.annexB;
-    }
-    decoder.annexB.clear();
+bool TilesAsAvcc(const std::uint8_t* data, std::size_t size) {
+    if (size < 4) return false;
     for (std::size_t index = 0; index < size;) {
-        if (size - index < 4) throw std::runtime_error("Videodec2: truncated NAL length");
+        if (size - index < 4) return false;
         const std::size_t length = (static_cast<std::size_t>(data[index]) << 24u) | (static_cast<std::size_t>(data[index + 1]) << 16u) | (static_cast<std::size_t>(data[index + 2]) << 8u) | data[index + 3];
-        if (length == 0 || length > size - index - 4) throw std::runtime_error("Videodec2: invalid NAL length");
-        static constexpr std::uint8_t startCode[4] = {0, 0, 0, 1};
-        decoder.annexB.insert(decoder.annexB.end(), startCode, startCode + 4);
-        decoder.annexB.insert(decoder.annexB.end(), data + index + 4, data + index + 4 + length);
+        if (length == 0 || length > size - index - 4) return false;
         index += 4 + length;
     }
+    return true;
+}
+
+bool StartsWithStartCode(const std::uint8_t* data, std::size_t size) {
+    return size >= 3 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || (size >= 4 && data[2] == 0 && data[3] == 1));
+}
+
+const std::vector<std::uint8_t>* ToAnnexB(Decoder& decoder, const std::uint8_t* data, std::size_t size) {
+    const bool tiles = TilesAsAvcc(data, size);
+    const bool opensWithStartCode = StartsWithStartCode(data, size);
+    if (!tiles && !opensWithStartCode) throw std::runtime_error("Videodec2: access unit is neither Annex-B nor length-prefixed");
+    const bool shortStartCode = opensWithStartCode && data[2] == 1;
+    bool lengthPrefixed = tiles;
+    if (tiles && opensWithStartCode) {
+        lengthPrefixed = shortStartCode ? !decoder.shortStartCodes : decoder.lengthPrefixed;
+    } else {
+        decoder.lengthPrefixed = tiles;
+        if (shortStartCode) decoder.shortStartCodes = true;
+    }
+    if (lengthPrefixed) {
+        decoder.annexB.clear();
+        for (std::size_t index = 0; index < size;) {
+            const std::size_t length = (static_cast<std::size_t>(data[index]) << 24u) | (static_cast<std::size_t>(data[index + 1]) << 16u) | (static_cast<std::size_t>(data[index + 2]) << 8u) | data[index + 3];
+            static constexpr std::uint8_t startCode[4] = {0, 0, 0, 1};
+            decoder.annexB.insert(decoder.annexB.end(), startCode, startCode + 4);
+            decoder.annexB.insert(decoder.annexB.end(), data + index + 4, data + index + 4 + length);
+            index += 4 + length;
+        }
+        return &decoder.annexB;
+    }
+    decoder.annexB.assign(data, data + size);
     return &decoder.annexB;
 }
 
@@ -683,7 +709,15 @@ int APS5_VABI sceVideodec2GetPictureInfo_nid_postfix(const OutputInfo* output, A
         if (owner() != handle) continue;
         const auto found = decoder->pictures.find(output->frameBuffer);
         if (found == decoder->pictures.end()) throw std::runtime_error("Videodec2: owned picture is missing");
-        if (decoder->codec != CodecAvc) throw std::runtime_error("Videodec2: picture info is only implemented for H.264");
+        if (decoder->codec == CodecVp9) {
+            auto* info = reinterpret_cast<Vp9PictureInfo*>(first);
+            if (!Fits(info, sizeof(Vp9PictureInfo))) throw std::runtime_error("Videodec2: VP9 picture structure is too small");
+            const auto size = info->thisSize;
+            *info = found->second.vp9;
+            info->thisSize = size;
+            return 0;
+        }
+        if (decoder->codec != CodecAvc) throw std::runtime_error("Videodec2: picture info is only implemented for H.264 and VP9");
         const auto& picture = found->second;
         first->isValid = true;
         first->ptsData = picture.pts;
