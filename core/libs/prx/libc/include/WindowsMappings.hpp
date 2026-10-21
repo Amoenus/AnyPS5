@@ -519,11 +519,24 @@ private:
         ~Section() { CloseHandle(handle); }
     };
     struct Saved {
-        unsigned char* bytes;
-        explicit Saved(unsigned char* bytes) : bytes(bytes) {}
+        unsigned char* bytes = nullptr;
+        std::size_t length;
+        std::array<std::uint64_t, chunkBytes / pageBytes / 64> committed{};
+        explicit Saved(std::size_t length) : length(length) {
+            bytes = static_cast<unsigned char*>(VirtualAlloc(nullptr, length, MEM_RESERVE, PAGE_READWRITE));
+            if (bytes == nullptr) fail("reserve unmapped direct memory");
+        }
         Saved(const Saved&) = delete;
         Saved& operator=(const Saved&) = delete;
         ~Saved() { VirtualFree(bytes, 0, MEM_RELEASE); }
+
+        void Commit(std::size_t offset) {
+            const auto page = offset / pageBytes;
+            const auto bit = std::uint64_t{1} << (page & 63);
+            if ((committed[page >> 6] & bit) != 0) return;
+            if (!VirtualAlloc(bytes + offset, pageBytes, MEM_COMMIT, PAGE_READWRITE)) fail("keep unmapped direct memory");
+            committed[page >> 6] |= bit;
+        }
     };
     struct Physical {
         std::weak_ptr<SharedPage> page;
@@ -687,12 +700,8 @@ private:
             const auto found = views.find(page);
             auto& view = found->second;
             if (!blank(page)) {
-                if (!saved) {
-                    auto* bytes = static_cast<unsigned char*>(VirtualAlloc(nullptr, stop - start, MEM_RESERVE, PAGE_READWRITE));
-                    if (bytes == nullptr) fail("reserve unmapped direct memory");
-                    saved = std::make_shared<Saved>(bytes);
-                }
-                if (!VirtualAlloc(saved->bytes + (page - start), pageBytes, MEM_COMMIT, PAGE_READWRITE)) fail("keep unmapped direct memory");
+                if (!saved) saved = savedMemory(stop - start);
+                saved->Commit(page - start);
                 std::memcpy(saved->bytes + (page - start), reinterpret_cast<const void*>(page), pageBytes);
                 view.slot->saved = saved;
                 view.slot->savedOffset = page - start;
@@ -702,6 +711,28 @@ private:
         }
         forget(freshRanges, start, stop);
         residentRuns.erase(run);
+    }
+
+    std::shared_ptr<Saved> savedMemory(std::size_t bytes) {
+        for (const auto& saved : savedPool) {
+            if (saved.use_count() == 1 && saved->length == bytes) return saved;
+        }
+        constexpr std::size_t limit = 32u * 1024u * 1024u;
+        const auto reserved = (bytes + granularity - 1) / granularity * granularity;
+        for (auto it = savedPool.begin(); reserved <= limit && savedPoolBytes > limit - reserved && it != savedPool.end();) {
+            if (it->use_count() != 1) {
+                ++it;
+                continue;
+            }
+            savedPoolBytes -= ((*it)->length + granularity - 1) / granularity * granularity;
+            it = savedPool.erase(it);
+        }
+        auto saved = std::make_shared<Saved>(bytes);
+        if (reserved <= limit && savedPoolBytes <= limit - reserved) {
+            savedPool.push_back(saved);
+            savedPoolBytes += reserved;
+        }
+        return saved;
     }
 
     static void forget(Ranges& ranges, std::uintptr_t start, std::uintptr_t end) {
@@ -820,6 +851,21 @@ private:
         forgetClean(address, end);
         breakRun(address);
         breakRun(end);
+        if (const auto run = residentRuns.find(address); run != residentRuns.end() && run->second.end == end) {
+            const auto memory = query(address);
+            if (reinterpret_cast<std::uintptr_t>(memory.AllocationBase) != address) throw std::runtime_error("cannot release part of a host allocation");
+            if (memory.Type != MEM_PRIVATE) throw std::runtime_error("resident guest mapping is not private memory");
+            auto allocationEnd = address;
+            do {
+                const auto part = query(allocationEnd);
+                if (part.AllocationBase != memory.AllocationBase) break;
+                allocationEnd = reinterpret_cast<std::uintptr_t>(part.BaseAddress) + part.RegionSize;
+            } while (allocationEnd < end);
+            if (allocationEnd != end || query(end).AllocationBase == memory.AllocationBase) throw std::runtime_error("guest release truncates a host allocation");
+            evict(run);
+            if (!VirtualFree(reinterpret_cast<void*>(address), bytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) fail("release private guest memory");
+            return;
+        }
         for (auto cursor = address; cursor < end;) {
             const auto memory = query(cursor);
             if (memory.State == MEM_RESERVE) {
@@ -910,6 +956,8 @@ private:
     }
     std::map<std::pair<std::uintptr_t, std::uint64_t>, std::shared_ptr<Physical>> physical;
     std::map<std::uintptr_t, Run> residentRuns;
+    std::vector<std::shared_ptr<Saved>> savedPool;
+    std::size_t savedPoolBytes = 0;
     std::map<std::uintptr_t, std::size_t> splitAliases;
     std::size_t granularity = 0x10000;
     bool watchResident = false;

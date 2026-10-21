@@ -1978,7 +1978,9 @@ std::string NullPixelProgramRejection(const QueueState& queue) {
     const auto targetMask = find(queue.context, 0x8e);
     const auto shaderMask = find(queue.context, 0x8f);
     if (targetMask == queue.context.end() || shaderMask == queue.context.end()) return "AGC graphics: a draw without a pixel program needs CB_TARGET_MASK and CB_SHADER_MASK";
-    if (ColorWriteMask(queue.context) != 0) return "AGC graphics: a draw without a pixel program writes color";
+    const auto colorControl = find(queue.context, 0x202);
+    const bool colorDisabled = colorControl != queue.context.end() && ((colorControl->second >> 4u) & 7u) == 0u;
+    if (!colorDisabled && ColorWriteMask(queue.context) != 0) return "AGC graphics: a draw without a pixel program writes color";
     return {};
 }
 
