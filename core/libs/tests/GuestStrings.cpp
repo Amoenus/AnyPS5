@@ -38,6 +38,8 @@ int APS5_VABI strncat_s_nid_postfix(char*, std::size_t, const char*, std::size_t
 int APS5_VABI memcpy_s_nid_postfix(void*, std::size_t, const void*, std::size_t);
 int APS5_VABI memmove_s_nid_postfix(void*, std::size_t, const void*, std::size_t);
 int APS5_VABI memset_s_nid_postfix(void*, std::size_t, int, std::size_t);
+void* APS5_VABI memccpy_nid_postfix(void*, const void*, int, std::size_t);
+void* APS5_VABI memmem_nid_postfix(const void*, std::size_t, const void*, std::size_t);
 char* APS5_VABI strnstr_nid_postfix(const char*, const char*, std::size_t);
 std::size_t APS5_VABI strxfrm_nid_postfix(char*, const char*, std::size_t);
 int APS5_VABI snprintf_s_nid_postfix(char*, std::size_t, const char*, ...);
@@ -523,6 +525,16 @@ int main() {
     Require(strcasestr_nid_postfix("", "a") == nullptr);
     const char highBytes[] = {static_cast<char>(0xff), 'A', 0};
     Require(strcasestr_nid_postfix(highBytes, "a") == highBytes + 1);
+    const char hay[] = "hello world";
+    Require(memmem_nid_postfix(hay, 11, "world", 5) == hay + 6);
+    Require(memmem_nid_postfix(hay, 11, "world", 0) == hay);
+    Require(memmem_nid_postfix(hay, 5, "world", 5) == nullptr);
+    Require(memmem_nid_postfix(hay, 11, "xyz", 3) == nullptr);
+    char dest[16] = {};
+    Require(memccpy_nid_postfix(dest, "abc:def", ':', 8) == dest + 4);
+    Require(std::memcmp(dest, "abc:", 4) == 0);
+    Require(memccpy_nid_postfix(dest, "abcdef", ':', 6) == nullptr);
+    Require(memccpy_nid_postfix(dest, "abcdef", ':', 0) == nullptr);
     CheckSecureCopySizeLimits();
     CheckSecureStringSizeLimits();
     return CheckMemcpyOverlap() ? 0 : 1;

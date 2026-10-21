@@ -233,6 +233,32 @@ void* APS5_VABI memrchr_nid_postfix(const void* s, int c, size_t n) {
     return nullptr;
 }
 
+void* APS5_VABI memccpy_nid_postfix(void* dest, const void* src, int c, size_t n) {
+    auto* d = static_cast<unsigned char*>(dest);
+    const auto* s = static_cast<const unsigned char*>(src);
+    const auto target = static_cast<unsigned char>(c);
+    for (size_t i = 0; i < n; ++i) {
+        d[i] = s[i];
+        if (s[i] == target) return d + i + 1;
+    }
+    return nullptr;
+}
+
+void* APS5_VABI memmem_nid_postfix(const void* haystack, size_t haystacklen, const void* needle, size_t needlelen) {
+    if (needlelen == 0) return const_cast<void*>(haystack);
+    if (haystacklen < needlelen) return nullptr;
+    const auto* h = static_cast<const unsigned char*>(haystack);
+    const auto* n = static_cast<const unsigned char*>(needle);
+    const unsigned char first = n[0];
+    const size_t limit = haystacklen - needlelen;
+    for (size_t i = 0; i <= limit; ++i) {
+        if (h[i] == first && std::memcmp(h + i, n, needlelen) == 0) {
+            return const_cast<unsigned char*>(h + i);
+        }
+    }
+    return nullptr;
+}
+
 int APS5_VABI strcmp_nid_postfix(const char* s1, const char* s2) {
     return std::strcmp(s1, s2);
 }

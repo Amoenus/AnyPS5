@@ -110,7 +110,7 @@ int SendError(int type) {
 #endif
     return NativeError();
 }
-struct Socket {
+struct Socket : KernelSocketPoll::NativeOwner {
     NativeSocket value;
     int family;
     int type;
@@ -963,7 +963,7 @@ int GuestSockets::Poll(KernelSocketPoll::Entry* entries, int count, int timeoutM
 extern "C" bool KernelLookupSocketNative_nid_no_patch(int descriptor, std::shared_ptr<void>* owner, std::uintptr_t* native) {
     if (auto socket = Find(descriptor)) {
         *native = static_cast<std::uintptr_t>(socket->value);
-        *owner = std::move(socket);
+        *owner = std::static_pointer_cast<KernelSocketPoll::NativeOwner>(std::move(socket));
         return true;
     }
     return KernelFindSocketNative_nid_no_patch(descriptor, owner, native);
