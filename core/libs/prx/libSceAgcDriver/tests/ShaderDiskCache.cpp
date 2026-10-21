@@ -748,6 +748,7 @@ void verifyKeySensitivity() {
     changes("f32 denormal preservation", [](SampleRequest& sample) { sample.request.target.float32DenormPreserve = true; });
     changes("spanned waves", [](SampleRequest& sample) { sample.request.target.spannedWaves = true; });
     changes("robust buffer access 2", [](SampleRequest& sample) { sample.request.target.robustBufferAccess2 = true; });
+    changes("wave LDS memory barriers", [](SampleRequest& sample) { sample.request.target.waveLdsMemoryBarriers = true; });
     changes("the workgroup size limit", [](SampleRequest& sample) { sample.request.target.maxWorkgroupSize[2] = 128; });
     changes("the invocation limit", [](SampleRequest& sample) { sample.request.target.maxWorkgroupInvocations = 512; });
     changes("the shared memory limit", [](SampleRequest& sample) { sample.request.target.maxWorkgroupSharedMemoryBytes = 32768; });

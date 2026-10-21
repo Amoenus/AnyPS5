@@ -19,6 +19,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PipelineLinkOptimization.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DrawInputsInPlace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/RobustBufferAccess.hpp"
+#include "prx/libSceAgcDriver/Execution/include/SubgroupBarrier.hpp"
 #include "prx/libSceAgcDriver/Execution/include/SubgroupClock.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderDeviceProfile.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PresentMode.hpp"
@@ -327,6 +328,7 @@ struct VulkanDevice::State {
     bool demoteToHelperInvocation = false;
     bool earlyFragmentSampleMaskTestBeforeSampleCounting = false;
     bool robustBufferAccess2 = false;
+    bool subgroupControlBarriers = true;
     // VK_EXT_descriptor_indexing with non-uniform image array indexing (bindless image tables in
     // graphics stages, and compute workgroups wider than a wave).
     bool descriptorIndexing = false;
@@ -1169,6 +1171,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         driverId = driver.driverID;
         state->driverInfo = std::string(driver.driverName) + " " + driver.driverInfo;
         state->individuallyFreeDescriptorSets = driver.driverID == VK_DRIVER_ID_MESA_LLVMPIPE;
+        state->subgroupControlBarriers = SubgroupControlBarrierUsable(driver.driverID);
     }
     auto byteFeatures = QueryBdaByteFeatures(selected, state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2"), availableExtensions);
     auto bdaFeatures = QueryBdaFeatures(selected, state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2"), availableExtensions);
@@ -3665,6 +3668,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::buildTarget() const {
     target.fixedPushSlots = state->graphicsPipelineLibrary;
     target.registrationModules = state->graphicsPipelineLibrary;
     target.robustBufferAccess2 = state->robustBufferAccess2;
+    target.waveLdsMemoryBarriers = !state->subgroupControlBarriers;
     target.srgbDecodeFormats = state->srgbDecodeFormats & ~state->srgbCopyFormats;
     target.vertexSubgroups = (state->subgroup.supportedStages & VK_SHADER_STAGE_VERTEX_BIT) != 0;
     if (state->meshShader) {
