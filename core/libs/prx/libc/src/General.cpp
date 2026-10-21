@@ -707,6 +707,8 @@ extern "C" int WindowsOpenError_nid_no_patch(unsigned long error) {
         return ENOMEM;
     case ERROR_DISK_FULL:
         return ENOSPC;
+    case ERROR_CANT_RESOLVE_FILENAME:
+        return ELOOP;
     default:
         return EINVAL;
     }
