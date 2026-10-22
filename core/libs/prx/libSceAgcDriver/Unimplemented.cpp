@@ -154,9 +154,8 @@ int APS5_VABI sceAgcDriverAcquireHDRScopesACQ() {
     return 0;
 }
 
-int APS5_VABI sceAgcDriverGetCoredumpAddress() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void* APS5_VABI sceAgcDriverGetCoredumpAddress() {
+    return nullptr;
 }
 
 int APS5_VABI sceAgcDriverHp3dLockEnd() {
@@ -185,8 +184,7 @@ int APS5_VABI sceAgcDriverReleaseHDRScopesACQ() {
 }
 
 int APS5_VABI sceAgcDriverSetTargetRingForDiag() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return DRIVER_FEATURE_UNAVAILABLE;
 }
 
 int APS5_VABI sceAgcDriverSetValueToSharedGds() {
