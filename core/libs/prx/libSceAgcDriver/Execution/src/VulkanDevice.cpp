@@ -4937,6 +4937,10 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     recordStep(PhaseRecordBind);
     if (record.htileClear.has_value()) Graphics::ArmHtileDepthClear(record.htileClear->first, record.htileClear->second);
     resources.MarkGpuWrites(recorder);
+    if (record.htileClear.has_value()) {
+        Graphics::QueueHtileDepthClear(record.htileClear->first, record.htileClear->second);
+        recorder.NotePendingWrite(record.htileClear->first, record.htileClear->second);
+    }
     recordStep(PhaseRecordMarks);
     // Only copied written buffers (and BDA fault checks) need work once the GPU is done; without them
     // the batch can signal its labels from the GPU.
