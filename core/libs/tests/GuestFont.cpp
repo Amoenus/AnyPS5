@@ -1,4 +1,5 @@
 #include "prx/libSceFont/include/FontDriver.hpp"
+#include "prx/libc/include/General.hpp"
 #include "tests/FontFixture.hpp"
 #include <array>
 #include <cstddef>
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <map>
 #include <random>
@@ -89,9 +91,9 @@ static void Check(bool value, int line) {
 
 static void SetFontDirectory(const std::filesystem::path& directory) {
 #ifdef _WIN32
-    Require(_putenv_s("ANYPS5_SYSTEM_FONTS", directory.string().c_str()) == 0);
+    Require(_wputenv_s(L"ANYPS5_SYSTEM_FONTS", directory.wstring().c_str()) == 0);
 #else
-    Require(::setenv("ANYPS5_SYSTEM_FONTS", directory.string().c_str(), 1) == 0);
+    Require(::setenv("ANYPS5_SYSTEM_FONTS", directory.c_str(), 1) == 0);
 #endif
 }
 
@@ -311,6 +313,20 @@ int main() {
     Require(sceFontOpenFontMemory(library, notAFont, sizeof(notAFont), nullptr, &font) == SCE_FONT_ERROR_NO_SUPPORT_FORMAT && font == nullptr);
 
     const std::vector<unsigned char> fontData = EmptyGlyphFont();
+    const auto fileFont = fontRoot / std::filesystem::path(u8"external-a\u00e7\u00e3o-\u65e5\u672c") / "font.ttf";
+    std::filesystem::create_directories(fileFont.parent_path());
+    {
+        std::ofstream file(fileFont, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(fontData.data()), static_cast<std::streamsize>(fontData.size()));
+        Require(static_cast<bool>(file));
+    }
+    const std::u8string fontRootText = fontRoot.u8string();
+    AddPathAlias_nid_no_patch("/font-test", reinterpret_cast<const char*>(fontRootText.c_str()));
+    const std::u8string fileFontText = u8"/font-test/external-a\u00e7\u00e3o-\u65e5\u672c/font.ttf";
+    FontHandle fileHandle = nullptr;
+    Require(sceFontOpenFontFile(library, reinterpret_cast<const char*>(fileFontText.c_str()), 1, nullptr, &fileHandle) == SCE_FONT_OK && fileHandle != nullptr);
+    Require(sceFontCloseFont(fileHandle) == SCE_FONT_OK);
+    RemovePathAlias_nid_no_patch("/font-test");
     Require(sceFontOpenFontMemory(library, fontData.data(), static_cast<std::uint32_t>(fontData.size()), nullptr, &font) == SCE_FONT_OK && font != nullptr);
     int setting = -1;
     Require(sceFontGetScriptLanguage(font, 3, &setting) == SCE_FONT_ERROR_INVALID_PARAMETER && setting == 0);

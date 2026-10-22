@@ -106,7 +106,9 @@ int ConnectError() {
 }
 int SendError(int type) {
 #ifdef _WIN32
-    if (type == 2 && WSAGetLastError() == WSAENOTCONN) return 39;
+    const int error = WSAGetLastError();
+    if (type == 2 && error == WSAENOTCONN) return 39;
+    if (type == 1 && (error == WSAECONNABORTED || error == WSAECONNRESET)) return 32;
 #else
     static_cast<void>(type);
 #endif
