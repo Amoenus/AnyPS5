@@ -1626,7 +1626,6 @@ void DrawRecipePublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     std::puts("native draw recipe: current source, moved source, old guard, complete bytes and output bounds passed");
 }
 
-
 alignas(256) constexpr std::array<std::uint32_t, 10> NativeFmaskCode{0x34020084u, 0xe0381000u, 0x80000201u, 0xbf8c3f70u, 0xf0001f08u, 0x00020602u, 0xbf8c3f70u, 0xe0781000u, 0x80010601u, 0xbf810000u};
 alignas(256) std::array<std::uint32_t, Threads * 4u> NativeFmaskInput{};
 alignas(256) std::array<std::uint32_t, Threads * 4u + 4u> NativeFmaskOutput{};
