@@ -1095,6 +1095,7 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& requested)
     const auto& use = requested;
     const auto bytes = MultisampledColorBytes(use);
     Require(bytes <= std::numeric_limits<std::size_t>::max(), "initial multisample color exceeds host address space");
+    ClaimMultisampleTargetMemory(use.address, bytes);
     RequireNoMultisampleTarget(use.address, static_cast<std::size_t>(bytes), "initializing a multisampled color target");
     if (use.dccAddress != 0) RequireNoMultisampleTarget(use.dccAddress, MultisampledDccBytes(use), "initializing multisampled DCC metadata");
     if (use.cmaskAddress != 0) RequireNoMultisampleTarget(use.cmaskAddress, use.cmaskBytes, "initializing multisampled CMASK metadata");
