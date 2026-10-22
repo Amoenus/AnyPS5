@@ -676,7 +676,7 @@ int APS5_VABI sceVideodec2Flush_nid_postfix(std::uint64_t handle, FrameBuffer* f
     if (!found) throw std::runtime_error("Videodec2: invalid decoder handle");
     auto& decoder = *found;
     std::lock_guard guard(decoder.mutex);
-    if (!decoder.flushing) {
+    if (!decoder.flushing && decoder.ready.empty() && !decoder.inputs.empty()) {
         Send(decoder, nullptr);
         decoder.flushing = true;
     }
