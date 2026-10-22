@@ -13,6 +13,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/Socket/include/SocketSelectDeadline.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
+#include "prx/libSceNet/src/ResolverTestHooks.hpp"
 #include "SceTypes.hpp"
 #include <algorithm>
 #include <array>
@@ -145,6 +146,20 @@ void APS5_VABI sceNetMemoryFree(void*);
 static void Require(bool condition) {
     if (!condition) std::abort();
 }
+
+static bool FailResolverLookup(const char*, int, std::vector<std::array<std::uint8_t, 16>>&) {
+    return false;
+}
+
+class ScopedResolverLookupOverride {
+public:
+    explicit ScopedResolverLookupOverride(GuestSceNetTest::ResolverLookup lookup) {
+        GuestSceNetTest::SetResolverLookupForTests_nid_no_patch(lookup);
+    }
+    ~ScopedResolverLookupOverride() {
+        GuestSceNetTest::SetResolverLookupForTests_nid_no_patch(nullptr);
+    }
+};
 
 static void APS5_VABI IgnoreNetCtlEvent(int, void*) {}
 
@@ -1779,8 +1794,13 @@ int main() {
     int resolver_error = -1;
     Require(sceNetResolverGetError(resolver, &resolver_error) == 0 && resolver_error == 0);
     std::array<std::uint8_t, 4> ipv4{};
-    Require(sceNetResolverStartNtoa(resolver, "guest-sce-net.invalid.", ipv4.data(), 5000000, 1, 0) ==
-        static_cast<int>(0x804101E1));
+    ipv4.fill(0xA5);
+    {
+        ScopedResolverLookupOverride lookupOverride(FailResolverLookup);
+        Require(sceNetResolverStartNtoa(resolver, "guest-sce-net.invalid.", ipv4.data(), 5000000, 1, 0) ==
+            static_cast<int>(0x804101E1));
+    }
+    Require(std::all_of(ipv4.begin(), ipv4.end(), [](std::uint8_t byte) { return byte == 0xA5; }));
     Require(sceNetResolverGetError(resolver, &resolver_error) == 0 &&
         resolver_error == static_cast<int>(0x804101E1));
     Require(sceNetResolverStartNtoa(resolver, nullptr, ipv4.data(), 5000000, 1, 0) == static_cast<int>(0x80410116));
@@ -1794,7 +1814,12 @@ int main() {
     Require(std::all_of(resolved6.begin(), resolved6.end() - 1, [](std::uint8_t byte) { return byte == 0; }) && resolved6[15] == 1);
     Require(sceNetResolverGetError(resolver, &resolver_error) == 0 && resolver_error == 0);
     Require(sceNetResolverStartNtoa6(resolver, nullptr, resolved6.data(), 5000000, 1, 0) == static_cast<int>(0x80410116));
-    Require(sceNetResolverStartNtoa6(resolver, "127.0.0.1", resolved6.data(), 5000000, 1, 0) == static_cast<int>(0x804101E1));
+    const auto resolved6BeforeFailure = resolved6;
+    {
+        ScopedResolverLookupOverride lookupOverride(FailResolverLookup);
+        Require(sceNetResolverStartNtoa6(resolver, "127.0.0.1", resolved6.data(), 5000000, 1, 0) == static_cast<int>(0x804101E1));
+    }
+    Require(resolved6 == resolved6BeforeFailure);
     Require(sceNetResolverGetError(resolver, &resolver_error) == 0 && resolver_error == static_cast<int>(0x804101E1));
     Require(sceNetResolverStartNtoa(resolver, "localhost", ipv4.data(), 5000000, 1, 0) == 0);
     Require(sceNetResolverGetError(resolver, &resolver_error) == 0 && resolver_error == 0);
@@ -1811,6 +1836,7 @@ int main() {
     Require(std::all_of(records.begin() + 32 * record_count, records.begin() + 320, [](std::uint8_t byte) { return byte == 0; }));
     Require(std::all_of(records.begin() + 328, records.begin() + 384, [](std::uint8_t byte) { return byte == 0; }));
     Require(std::all_of(records.begin() + 384, records.end(), [](std::uint8_t byte) { return byte == 0xA5; }));
+    const auto resolvedRecords = records;
     for (int first = 0; first < record_count; ++first) {
         for (int second = first + 1; second < record_count; ++second) {
             Require(std::memcmp(records.data() + 32 * first, records.data() + 32 * second, 4) != 0);
@@ -1821,8 +1847,12 @@ int main() {
         static_cast<int>(0x80410116) && *sceNetErrnoLoc() == 22 && records == resolved);
     Require(sceNetResolverStartNtoaMultipleRecordsEx(resolver, "localhost", nullptr, 5000000, 1, 0) ==
         static_cast<int>(0x80410116) && *sceNetErrnoLoc() == 22);
-    Require(sceNetResolverStartNtoaMultipleRecordsEx(resolver, "guest-sce-net.invalid.", records.data(), 5000000, 1, 0) ==
-        static_cast<int>(0x804101E1) && records == resolved);
+    {
+        ScopedResolverLookupOverride lookupOverride(FailResolverLookup);
+        Require(sceNetResolverStartNtoaMultipleRecordsEx(resolver, "guest-sce-net.invalid.", records.data(), 5000000, 1, 0) ==
+            static_cast<int>(0x804101E1));
+    }
+    Require(records == resolvedRecords);
 
     std::array<std::uint8_t, 512> plain{};
     plain.fill(0xA5);
@@ -1833,8 +1863,13 @@ int main() {
         static_cast<int>(0x80410116) && *sceNetErrnoLoc() == 22 && plain == resolved);
     Require(sceNetResolverStartNtoaMultipleRecords(resolver, "localhost", nullptr, 5000000, 1, 0) ==
         static_cast<int>(0x80410116) && *sceNetErrnoLoc() == 22);
-    Require(sceNetResolverStartNtoaMultipleRecords(resolver, "guest-sce-net.invalid", plain.data(), 5000000, 1, 0) ==
-        static_cast<int>(0x804101E1) && plain == resolved);
+    const auto resolvedPlain = plain;
+    {
+        ScopedResolverLookupOverride lookupOverride(FailResolverLookup);
+        Require(sceNetResolverStartNtoaMultipleRecords(resolver, "guest-sce-net.invalid", plain.data(), 5000000, 1, 0) ==
+            static_cast<int>(0x804101E1));
+    }
+    Require(plain == resolvedPlain);
     Require(sceNetResolverGetError(resolver, &resolver_error) == 0 && resolver_error == static_cast<int>(0x804101E1));
     for (const int flags : {0x1, 0x10000}) {
         bool threw = false;

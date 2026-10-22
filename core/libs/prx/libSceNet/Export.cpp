@@ -43,6 +43,7 @@
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
+#include "src/ResolverTestHooks.hpp"
 
 // Guest socket descriptors retain PS5 semantics while their transport is backed by host sockets.
 
@@ -478,6 +479,7 @@ int g_next_epoll = 0x4000;
 int g_next_pool = 1;
 int g_next_resolver = 0x100;
 bool g_net_inited = false;
+std::atomic<GuestSceNetTest::ResolverLookup> g_resolverLookupForTests{nullptr};
 
 int* errno_slot() {
     static thread_local int e = 0;
@@ -787,6 +789,10 @@ bool parse_ipv4_parts(const char* text, std::uint32_t& address) {
 }
 
 }  // namespace
+
+void GuestSceNetTest::SetResolverLookupForTests_nid_no_patch(ResolverLookup lookup) noexcept {
+    g_resolverLookupForTests.store(lookup);
+}
 
 extern "C" {
 
@@ -2052,6 +2058,14 @@ int lookup_host(int rid, const char* hostname, const char* func, int family, std
     if (!initialize_sockets()) return fail(5);
     std::uint64_t generation = 0;
     if (const int error = begin_lookup(rid, &Resolver::abort_ntoa, generation)) return error;
+    if (const auto lookup = g_resolverLookupForTests.load()) {
+        if (!lookup(hostname, family, addresses) || addresses.empty()) {
+            set_errno(NET_ENOENT);
+            log_soft(func, "host DNS lookup failed");
+            return end_lookup(rid, generation, NET_ERROR_RESOLVER_ENODNS);
+        }
+        return end_lookup(rid, generation, 0);
+    }
     addrinfo hints{};
     hints.ai_family = family;
     addrinfo* results = nullptr;
