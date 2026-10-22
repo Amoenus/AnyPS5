@@ -758,6 +758,60 @@ void verifySignedSrtComparison() {
     }
 }
 
+void verifyBulkMultisampleDescriptorSource() {
+    using namespace ShaderRecompiler;
+    constexpr std::uint64_t tableAddress = 0x10000u;
+    constexpr std::uint64_t codeAddress = 0x20000u;
+    const std::array<std::uint32_t, 32> code{
+        0xf4100402u, 0xfa000000u,
+        0x34020087u, 0xe0301000u, 0x80000201u, 0xe0301004u, 0x80000301u, 0xe0301008u,
+        0x80000401u, 0xe030100cu, 0x80000501u, 0xe0301010u, 0x80000601u, 0xe0301014u,
+        0x80000701u, 0xbf8c3f70u, 0xf0001108u, 0x00061405u, 0xf0001f30u, 0x00041005u,
+        0xbf8c3f70u, 0xe0701030u, 0x80001001u, 0xe0701034u, 0x80001101u, 0xe0701038u,
+        0x80001201u, 0xe070103cu, 0x80001301u, 0xe0701040u, 0x80001401u, 0xbf810000u,
+    };
+    const std::array<std::uint32_t, 4> buffer{0x03000000u, (28u << 16u) | 0x40u, 4096u, 0x11014facu};
+    std::array<std::uint32_t, 16> table{};
+    for (std::size_t index = 0; index < table.size(); index += buffer.size()) std::copy(buffer.begin(), buffer.end(), table.begin() + index);
+    const std::array<std::uint32_t, 6> userData{0x80000u, 0u, 128u, 0x31016facu, static_cast<std::uint32_t>(tableAddress), 0u};
+    const std::array<MemoryRegion, 2> regions{{{tableAddress, std::as_bytes(std::span(table))}, {codeAddress, std::as_bytes(std::span(code))}}};
+    const ShaderComputeStageInfo compute{{32u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    RecompileRequest request{
+        {ShaderStage::Compute, codeAddress, code, 0u, {}},
+        {32u, 0u, userData, compute, std::nullopt, std::nullopt, regions}, BufferTarget(), {0u, 0u, 0u, 128u}
+    };
+    request.useCache = false;
+    const auto plan = GetResourcePlan(request);
+    require(plan->info.images.size() == 2u && plan->info.buffers.size() == 1u, "bulk multisample source: unexpected resource count");
+    const auto image = std::find_if(plan->info.images.begin(), plan->info.images.end(), [](const auto& resource) { return resource.dimension == RdnaImageDimension::Dim2DMsaa; });
+    require(image != plan->info.images.end() && !image->r128, "bulk multisample source: eight-word image was lost or narrowed");
+    const auto imageIndex = static_cast<std::size_t>(image - plan->info.images.begin());
+    RequestMemoryView memory(regions);
+    const auto runtime = memory.MakeRuntime(userData, codeAddress);
+    const auto preserve = [&] {
+        std::vector<DescriptorValue> values;
+        std::vector<std::uint32_t> flat;
+        std::vector<std::uint8_t> active;
+        require(Detail::EvaluateRuntimeSourcesImpl(*plan, plan->materializationSources, runtime, values, flat, true, {}, active), "bulk multisample source: descriptor walk failed");
+        const auto& words = values.at(plan->info.buffers.size() + imageIndex);
+        require(words.dwordCount == 8u && std::equal(words.dwords.begin(), words.dwords.end(), table.begin()), "bulk multisample source: descriptor walk changed or shifted the eight source words");
+    };
+    for (const auto samplesLog2 : {1u, 2u, 3u}) {
+        const std::array<std::uint32_t, 8> imageWords{0x400u, (71u << 20u) | (3u << 30u), 7u | (15u << 14u), 0xfacu | (samplesLog2 << 16u) | (27u << 20u) | (14u << 28u), 0u, samplesLog2 << 4u, 0u, 0u};
+        std::copy(imageWords.begin(), imageWords.end(), table.begin());
+        preserve();
+        ResourceSnapshot snapshot;
+        ResourceMaterializer{}.Materialize(*plan, runtime, snapshot);
+        require(std::equal(snapshot.images.at(imageIndex).dwords.begin(), snapshot.images.at(imageIndex).dwords.end(), table.begin()), "bulk multisample source: materialization changed a valid image");
+        std::copy(buffer.begin(), buffer.end(), table.begin() + 4u);
+        preserve();
+        expectFailure([&] { ResourceMaterializer{}.Materialize(*plan, runtime, snapshot); }, "runtime image descriptor is invalid", "bulk multisample source: incompatible adjacent buffer words bypassed descriptor validation");
+        std::copy(imageWords.begin(), imageWords.end(), table.begin());
+        preserve();
+        ResourceMaterializer{}.Materialize(*plan, runtime, snapshot);
+    }
+}
+
 void verifyTypeZeroImageMaterialization() {
     using namespace ShaderRecompiler;
     for (const std::uint32_t type : {0u, 1u}) {
@@ -7711,6 +7765,11 @@ int main(int argc, char** argv) {
             std::cout << "TYPE=0 image descriptor materialization passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--bulk-multisample-descriptor-source") {
+            verifyBulkMultisampleDescriptorSource();
+            std::cout << "Bulk multisample descriptor source preservation and validation passed\n";
+            return 0;
+        }
         require(argc == 1, "unknown shader memory test arguments");
         verifyRegisterSources();
         verifyEvaluatedValues();
@@ -7718,6 +7777,7 @@ int main(int argc, char** argv) {
         verifyLayoutPair();
         verifySignedSrtComparison();
         verifyTypeZeroImageMaterialization();
+        verifyBulkMultisampleDescriptorSource();
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
         verifyMayEvaluate();
