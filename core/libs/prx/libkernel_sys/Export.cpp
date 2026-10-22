@@ -21,6 +21,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libkernel/File/include/DescriptorControl.hpp"
 #include "prx/libc/include/CreationMask.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
@@ -357,6 +358,7 @@ int APS5_VABI link_nid_postfix(const char* existing, const char* created) {
 int APS5_VABI fchdir_nid_postfix(int fd) {
     int error = 0;
     const char* path = GetDirectoryDescriptorPath_nid_no_patch(fd, &error);
+    if (path == nullptr && error == GuestEnotdir && DescriptorHasNoVnode_nid_no_patch(fd)) return static_cast<int>(Fail(GuestEinval));
     if (path == nullptr) return static_cast<int>(Fail(error));
 #ifndef _WIN32
     if (::faccessat(fd, ".", X_OK, AT_EACCESS) != 0) return static_cast<int>(Fail(errno));
@@ -385,6 +387,7 @@ int APS5_VABI chroot_nid_postfix(const char* path) {
 
 int APS5_VABI symlink_nid_postfix(const char* target, const char* created) {
     if (target == nullptr || created == nullptr) return static_cast<int>(Fail(GuestEfault));
+    if (std::strlen(target) >= GuestPathMax) return static_cast<int>(Fail(GuestEnametoolong));
     if (*target == '\0' || *created == '\0') return static_cast<int>(Fail(GuestEnoent));
     const std::filesystem::path contents(target);
     if (contents.has_root_name() || contents.has_root_directory()) {
@@ -575,8 +578,8 @@ int APS5_VABI unlinkat_nid_postfix(int fd, const char* path, int flag) {
     while (!native.has_filename() && native.has_relative_path()) native = native.parent_path();
     std::error_code statusError;
     const auto symlinkStatus = std::filesystem::symlink_status(native, statusError);
+    if (IsDotOrDotDot(path)) return static_cast<int>(Fail(GuestEinval));
     if (flag & GuestAtRemovedir) {
-        if (IsDotOrDotDot(path)) return static_cast<int>(Fail(GuestEinval));
         if (std::filesystem::is_symlink(symlinkStatus)) return static_cast<int>(Fail(GuestEnotdir));
         if (!std::filesystem::is_directory(symlinkStatus)) {
             if (HasNonDirectoryPrefix(native) || std::filesystem::exists(symlinkStatus))

@@ -32,6 +32,8 @@ int APS5_VABI fstatfs_nid_postfix(int, void*);
 int APS5_VABI _fstatfs_nid_postfix(int, void*);
 int APS5_VABI open_nid_postfix(const char*, int, int);
 int APS5_VABI close_nid_postfix(int);
+int APS5_VABI pipe_nid_postfix(int*);
+int APS5_VABI socket_nid_postfix(int, int, int);
 std::int64_t APS5_VABI readlink_nid_postfix(const char*, char*, std::size_t);
 int APS5_VABI lstat_nid_postfix(const char*, FileStat*);
 std::int64_t APS5_VABI pathconf_nid_postfix(const char*, int);
@@ -297,6 +299,19 @@ int main() {
         Require(symlink_nid_postfix("file.txt", created.c_str()) == -1 && Error() == expected);
         Require(std::filesystem::hard_link_count(file) == 1 && !std::filesystem::exists(root / "new.txt"));
     }
+    for (const std::size_t length : {std::size_t{1024}, std::size_t{1100}}) {
+        const auto tooLong = std::string(length, 'a');
+        const auto created = (root / "target-too-long").string();
+        Require(symlink_nid_postfix(tooLong.c_str(), created.c_str()) == -1 && Error() == 63);
+        Require(!std::filesystem::exists(std::filesystem::symlink_status(root / "target-too-long")));
+    }
+    {
+        const auto longest = std::string(1023, 'a');
+        const auto created = (root / "target-longest").string();
+        const int made = symlink_nid_postfix(longest.c_str(), created.c_str());
+        Require(made == 0 || Error() != 63);
+        if (made == 0) Require(RemoveSymlink(created));
+    }
     Require(readlink_nid_postfix(file.c_str(), buffer, sizeof(buffer)) == -1 && Error() == 22);
     Require(readlink_nid_postfix(root.string().c_str(), buffer, sizeof(buffer)) == -1 && Error() == 22);
     Require(readlink_nid_postfix((root / "missing").string().c_str(), buffer, sizeof(buffer)) == -1 && Error() == 2);
@@ -417,6 +432,19 @@ int main() {
     Require(fileDescriptor >= 0);
     Require(fchdir_nid_postfix(-1) == -1 && Error() == 9);
     Require(fchdir_nid_postfix(fileDescriptor) == -1 && Error() == 20);
+    int pipeEnds[2] = {-1, -1};
+    Require(pipe_nid_postfix(pipeEnds) == 0);
+    Require(fchdir_nid_postfix(pipeEnds[0]) == -1 && Error() == 22);
+    Require(fchdir_nid_postfix(pipeEnds[1]) == -1 && Error() == 22);
+    Require(close_nid_postfix(pipeEnds[0]) == 0 && close_nid_postfix(pipeEnds[1]) == 0);
+    const int characterDevice = open_nid_postfix("/dev/random", 0, 0);
+    Require(characterDevice >= 0);
+    Require(fchdir_nid_postfix(characterDevice) == -1 && Error() == 20);
+    Require(close_nid_postfix(characterDevice) == 0);
+    const int socketDescriptor = socket_nid_postfix(2, 2, 0);
+    Require(socketDescriptor >= 0);
+    Require(fchdir_nid_postfix(socketDescriptor) == -1 && Error() == 22);
+    Require(close_nid_postfix(socketDescriptor) == 0);
     Require(fchdir_nid_postfix(directory) == 0);
     char directoryPath[1024];
     Require(getcwd_nid_postfix(directoryPath, sizeof(directoryPath)) == directoryPath);
@@ -605,7 +633,8 @@ int main() {
     Require(unlinkat_nid_postfix(base, "file.txt", 0x800) == -1 && Error() == 20);
     Require(unlinkat_nid_postfix(base, ".", 0x800) == -1 && Error() == 22);
     Require(unlinkat_nid_postfix(base, "..", 0x800) == -1 && Error() == 22);
-    Require(unlinkat_nid_postfix(base, ".", 0) == -1 && Error() == 1);
+    Require(unlinkat_nid_postfix(base, ".", 0) == -1 && Error() == 22);
+    Require(unlinkat_nid_postfix(base, "..", 0) == -1 && Error() == 22);
     std::filesystem::create_directory(root / "usub");
     Require(unlinkat_nid_postfix(base, "usub", 0) == -1 && Error() == 1);
     std::filesystem::create_directory(root / "nonempty");
