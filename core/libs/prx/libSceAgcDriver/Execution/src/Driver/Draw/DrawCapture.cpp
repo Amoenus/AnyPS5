@@ -7,6 +7,7 @@
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <span>
 #include <sstream>
@@ -34,14 +35,26 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     stageCapture.forgetSerial = GuestMemory::ForgetSerial();
     stageCapture.pushOffset = pushOffset;
     const auto named = [&](const std::exception& error, std::span<const ShaderRecompiler::MemoryRegion> regions) {
-        static const bool dumpShaders = std::getenv("APS5_DUMP_SHADERS") != nullptr;
+        std::size_t remaining = 256u * 1024u;
+        const auto fits = [&](std::size_t bytes) {
+            if (bytes > remaining) return false;
+            remaining -= bytes;
+            return true;
+        };
+        bool bounded = fits(request.shader.code.size_bytes()) && fits(request.shader.header.size()) && fits(request.context.userData.size_bytes());
+        for (const auto& region : regions) bounded = bounded && fits(16u) && fits(region.bytes.size());
+        if (request.graphics.has_value()) {
+            for (const auto& linked : request.graphics->linkedPrograms) bounded = bounded && fits(64u) && fits(linked.binary.code.size_bytes()) && fits(linked.binary.header.size()) && fits(linked.userData.size_bytes());
+        }
         std::string dump;
-        if (dumpShaders) {
+        if (bounded) {
             try {
                 auto failed = request;
                 failed.context.memory = regions;
                 dump = dumpRequest(program.binary.codeAddress, failed, "_failed");
             } catch (...) {}
+        } else {
+            std::fprintf(stderr, "[capture] failed draw request exceeds the 256 KiB local diagnostic budget\n");
         }
         std::ostringstream where;
         where << "shader 0x" << std::hex << program.binary.codeAddress << " stage " << std::dec << static_cast<unsigned>(program.binary.stage);
