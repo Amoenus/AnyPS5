@@ -95,7 +95,7 @@ struct CallbackSlot {
     int lastEvent = 0;
 };
 
-static std::atomic_bool g_initialized{false};
+static std::atomic_bool g_initialized{true};
 static std::mutex g_callbackLock;
 static CallbackSlot g_callbacks[MAX_CALLBACKS] = {};
 static CallbackSlot g_callbacksV6[MAX_CALLBACKS] = {};
