@@ -43,7 +43,7 @@ RECORD_SIZE = 0x20
 RECORD_HAS_SEGMENT = 0x800
 RECORD_SEGMENT_SHIFT = 20
 FIRST_REGION = 0x400
-MAX_EMPTY_LOAD_PADDING = 64 * 1024 * 1024
+MAX_ALIGNMENT_PADDING = 64 * 1024 * 1024
 PT_LOAD = 1
 PT_NOTE = 4
 ENTROPY_LIMIT = 7.5
@@ -273,9 +273,11 @@ def unwrap(path, output, verbose=False):
     regions.sort(key=lambda region: region["old"])
     program_offset = struct.unpack_from("<Q", elf_header, 0x20)[0]
     cursor = max(FIRST_REGION, program_offset + len(headers) * 56)
+    padding = 0
     for region in regions:
         alignment = region["align"] if region["align"] and (region["align"] & (region["align"] - 1)) == 0 else 1
         placed = cursor + (region["vaddr"] - cursor) % alignment
+        padding += placed - cursor
         region["new"] = placed
         cursor = placed + region["size"]
 
@@ -283,8 +285,9 @@ def unwrap(path, output, verbose=False):
     for header in headers:
         if header["type"] == PT_LOAD and header["size"] == 0:
             empty_end = max(empty_end, header["vaddr"] % max(header["align"], 1))
-    if empty_end - cursor > MAX_EMPTY_LOAD_PADDING:
-        raise Refused("empty load alignment requires more than %d bytes of output padding" % MAX_EMPTY_LOAD_PADDING)
+    padding += empty_end - cursor
+    if padding > MAX_ALIGNMENT_PADDING:
+        raise Refused("segment alignment requires more than %d bytes of output padding" % MAX_ALIGNMENT_PADDING)
     cursor = empty_end
 
     result = bytearray(cursor)

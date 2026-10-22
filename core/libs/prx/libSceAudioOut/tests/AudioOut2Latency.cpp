@@ -9,6 +9,7 @@
 
 extern "C" {
 int APS5_VABI sceAudioOut2Initialize();
+int APS5_VABI sceAudioOut2InitializeEx(std::uint32_t);
 int APS5_VABI sceAudioOut2LoInit();
 int APS5_VABI sceAudioOut2LoTerminate();
 int APS5_VABI sceAudioOut2Set3DLatency(int, std::uint32_t);
@@ -125,7 +126,9 @@ void TestEnableChat() {
 void TestLowLatencyService() {
     Require(sceAudioOut2LoInit() == 0, "starting the low-latency service must be accepted");
     Require(sceAudioOut2LoInit() == 0, "starting the low-latency service again must be accepted");
-    Require(ThrowsRuntimeError([] { sceAudioOut2LoTerminate(); }), "stopping the low-latency service must throw");
+    Require(sceAudioOut2LoTerminate() == 0, "stopping the low-latency service returns 0");
+    Require(sceAudioOut2LoTerminate() == 0, "stopping a stopped low-latency service returns 0");
+    Require(sceAudioOut2InitializeEx(0) == 0 && sceAudioOut2InitializeEx(1) == 0, "the extended initialization succeeds");
 }
 
 }
