@@ -1352,12 +1352,21 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
                     ", fragmentsLog2 " + std::to_string((descriptor.dwords[3] >> 16u) & 0xfu) +
                     ", maxMip " + std::to_string((descriptor.dwords[5] >> 4u) & 0xfu);
             }
-            message += ") [source " + std::to_string(image.source) +
+            const auto address = (static_cast<std::uint64_t>(descriptor.dwords[0]) | (static_cast<std::uint64_t>(descriptor.dwords[1] & 0xffu) << 32u)) << 8u;
+            const auto width = ((descriptor.dwords[1] >> 30u) | ((descriptor.dwords[2] & 0x3fffu) << 2u)) + 1u;
+            const auto height = ((descriptor.dwords[2] >> 14u) & 0xffffu) + 1u;
+            char words[80]{};
+            std::snprintf(words, sizeof(words), "%08x %08x %08x %08x %08x %08x %08x %08x", descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4], descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
+            const bool tapeReady = plan.tapeSlot && plan.tapeSlot->ready.load(std::memory_order_acquire);
+            message += ", address " + std::to_string(address) + ", width " + std::to_string(width) + ", height " + std::to_string(height) + ") [source " + std::to_string(image.source) +
                 ", firstUsePc " + std::to_string(image.firstUsePc) +
                 ", plannedDimension " + std::to_string(static_cast<std::uint32_t>(image.dimension)) +
                 ", activeSource " + (image.source < activeSources.size() ? std::to_string(activeSources[image.source]) : "unknown") +
                 ", activeImage " + (activity < activeSources.size() ? std::to_string(activeSources[activity]) : "unknown") +
-                ", controlFlowBlocks " + std::to_string(plan.controlFlow.size()) + "]";
+                ", controlFlowBlocks " + std::to_string(plan.controlFlow.size()) +
+                ", compactValues " + std::to_string(plan.compact.values.size()) +
+                ", tapeReady " + std::to_string(tapeReady) +
+                ", tapeCompiled " + std::to_string(tapeReady && static_cast<bool>(plan.tapeSlot->tape)) + "] [words " + words + "]";
             throw std::runtime_error(message);
         }
         snapshot.images[i] = descriptor;
