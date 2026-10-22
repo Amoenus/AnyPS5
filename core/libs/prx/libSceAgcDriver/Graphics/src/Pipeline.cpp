@@ -112,6 +112,10 @@ void ValidateProvokingVertex(const Context& context, const State& state, std::sp
         }
         return;
     }
+    for (const auto& shader : shaders) {
+        if (shader.stage != ShaderRecompiler::ShaderStage::Fragment || shader.program == nullptr) continue;
+        Require(std::none_of(shader.program->fragmentParameters.begin(), shader.program->fragmentParameters.end(), [](const ShaderRecompiler::FragmentParameter& parameter) { return parameter.flatP20; }), "v_interp_mov p20 of a flat input with the last provoking vertex is not measured");
+    }
     if (BarycentricPatches(state, shaders)) {
         for (const auto& shader : shaders) {
             if (shader.stage != ShaderRecompiler::ShaderStage::Fragment || shader.program == nullptr) continue;
@@ -345,7 +349,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
     ValidateProvokingVertex(context, state, shaders);
     if (state.rectList) Require(context.tessellationShader && context.limits.maxTessellationPatchSize >= 4, "rect-list requires tessellation with four output control points");
     const bool barycentricPatches = BarycentricPatches(state, shaders);
-    if (barycentricPatches) Require(context.tessellationShader && state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && !state.primitiveRestart, "emulated barycentrics through tessellation require a triangle list without primitive restart");
+    if (barycentricPatches) Require(context.tessellationShader && (state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP) && !state.primitiveRestart, "emulated barycentrics through tessellation require a triangle list or strip without primitive restart");
     if (std::any_of(shaders.begin(), shaders.end(), [](const CompiledShader& shader) { return shader.stage == ShaderRecompiler::ShaderStage::Geometry; })) Require(context.geometryShader, "device does not support geometry shaders");
     if (state.stages.tessellation) {
         Require(context.tessellationShader, "device does not support tessellation shaders");
