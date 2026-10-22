@@ -1346,7 +1346,9 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
                 ", type " + std::to_string(static_cast<std::uint32_t>(type)) +
                 ", format " + std::to_string(static_cast<std::uint32_t>(rawImageFormat(descriptor))) +
                 ", r128 " + std::to_string(image.r128) + ", read " + std::to_string(image.read) +
-                ", written " + std::to_string(image.written) + ", atomic " + std::to_string(image.atomic);
+                ", written " + std::to_string(image.written) + ", atomic " + std::to_string(image.atomic) +
+                ", levelUses " + std::to_string(image.levelUses) + ", fmaskCompatible " + std::to_string(image.fmaskCompatible) +
+                ", samplerFree " + std::to_string(image.srgbDecodeCompatible) + ", imageCount " + std::to_string(plan.info.images.size());
             if (type == ImageType::Color2DMsaa || type == ImageType::Color2DMsaaArray) {
                 message += ", baseLevel " + std::to_string((descriptor.dwords[3] >> 12u) & 0xfu) +
                     ", fragmentsLog2 " + std::to_string((descriptor.dwords[3] >> 16u) & 0xfu) +
