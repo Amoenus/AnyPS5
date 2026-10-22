@@ -106,6 +106,16 @@ class UnwrapTest(unittest.TestCase):
                 self.assertEqual(source.read_bytes(), container)
                 self.assertEqual(alias.read_bytes(), container)
 
+    def test_main_with_explicit_argv(self):
+        container = build_container(default_segments(), default_records(), default_payloads())
+        source = Path(self.directory) / "input.self"
+        output = Path(self.directory) / "output.elf"
+        source.write_bytes(container)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = unwrap_self.main([str(source), str(output)])
+        self.assertEqual(code, 0)
+        self.assertTrue(output.exists())
+
     def convert(self, container, name="input.self"):
         directory = Path(self.directory)
         source = directory / name
