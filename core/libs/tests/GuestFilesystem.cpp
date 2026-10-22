@@ -1193,6 +1193,14 @@ int main() {
         Require(pread_nid_postfix(locked, nullptr, 1, 0) == -1 && *__error_nid_postfix() == 14);
         Require(close_nid_postfix(transferPipe[0]) == 0 && close_nid_postfix(transferPipe[1]) == 0);
     }
+    Require(lseek_nid_postfix(locked, 4, 0) == 4);
+    Require(lseek_nid_postfix(locked, INT64_MAX, 1) == -1 && *__error_nid_postfix() == 84);
+    Require(lseek_nid_postfix(locked, 0, 1) == 4);
+    Require(lseek_nid_postfix(locked, -1, 0) == -1 && *__error_nid_postfix() == 22);
+    const std::int64_t lockedSize = lseek_nid_postfix(locked, 0, 2);
+    Require(lockedSize >= 0);
+    Require(lseek_nid_postfix(locked, INT64_MAX - lockedSize + 1, 2) == -1 && *__error_nid_postfix() == 84);
+    Require(lseek_nid_postfix(locked, 0, 1) == lockedSize);
     Require(flock_nid_postfix(-1, 2 | 4) == -1 && *__error_nid_postfix() == 9);
     Require(flock_nid_postfix(0x7fffffff, 1) == -1 && *__error_nid_postfix() == 9);
     int flockPipe[2] = {-1, -1};

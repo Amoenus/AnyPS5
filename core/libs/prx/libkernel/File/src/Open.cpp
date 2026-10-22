@@ -352,6 +352,18 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
     return static_cast<std::int64_t>(n);
 }
 
+static bool SeekOverflows(int d, std::int64_t offset, int whence) {
+    const std::int64_t current = NativeLseek(d, 0, 1);
+    if (current < 0) return false;
+    std::int64_t base = current;
+    if (whence == 2) {
+        base = NativeLseek(d, 0, 2);
+        NativeLseek(d, current, 0);
+        if (base < 0) return false;
+    }
+    return base > std::numeric_limits<std::int64_t>::max() - offset;
+}
+
 std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
     if (GuestSockets::IsOpen(d)) return SCE_KERNEL_ERROR_ESPIPE;
     if (whence < 0 || whence > 2) {
@@ -365,7 +377,11 @@ std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
     }
 #endif
     std::int64_t result = NativeLseek(d, offset, whence);
-    if (result < 0) return SceIoErrorFromErrno(errno);
+    if (result < 0) {
+        const int error = errno;
+        if (error == EINVAL && offset > 0 && (whence == 1 || whence == 2) && SeekOverflows(d, offset, whence)) return SceIoErrorFromErrno(EOVERFLOW);
+        return SceIoErrorFromErrno(error);
+    }
     return result;
 }
 

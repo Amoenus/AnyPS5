@@ -21,6 +21,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libkernel/File/include/DescriptorControl.hpp"
 #include "prx/libc/include/CreationMask.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
@@ -357,6 +358,7 @@ int APS5_VABI link_nid_postfix(const char* existing, const char* created) {
 int APS5_VABI fchdir_nid_postfix(int fd) {
     int error = 0;
     const char* path = GetDirectoryDescriptorPath_nid_no_patch(fd, &error);
+    if (path == nullptr && error == GuestEnotdir && DescriptorHasNoVnode_nid_no_patch(fd)) return static_cast<int>(Fail(GuestEinval));
     if (path == nullptr) return static_cast<int>(Fail(error));
 #ifndef _WIN32
     if (::faccessat(fd, ".", X_OK, AT_EACCESS) != 0) return static_cast<int>(Fail(errno));

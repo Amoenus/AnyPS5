@@ -9633,7 +9633,12 @@ void float11_11_10TargetTests() {
     auto changed = queue;
     changed.context[0x31c] &= ~0x40000u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "rounding (ROUND_MODE 0) 11_11_10 float color targets");
-    for (const auto swap : {0u, 1u, 3u}) {
+    changed = queue;
+    changed.context[0x31c] &= ~0x1800u;
+    const auto standard = AgcDriver::Graphics::DecodeState(changed);
+    Require(standard.color.format == VK_FORMAT_R32_UINT && standard.color.componentMapping == 0xe4u && standard.color.packing == ColorExportPacking::Float11_11_10, "an 11_11_10 float target with the standard component order did not decode");
+    Require(AgcDriver::Graphics::ExportMappings(standard)[0] == 0xe4u, "export 0 reordered its components into the standard-order 11_11_10 float target");
+    for (const auto swap : {1u, 3u}) {
         changed = queue;
         changed.context[0x31c] = (changed.context[0x31c] & ~0x1800u) | (swap << 11u);
         expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "unsupported color format 7 number type 7 component swap " + std::to_string(swap));

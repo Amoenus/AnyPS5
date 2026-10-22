@@ -929,8 +929,8 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
             if (number == unorm) return {VK_FORMAT_R32_UINT, 4, 0xe4u, ShaderRecompiler::ColorExportPacking::Unorm10_11_11};
             return {VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4};
         case 7:
-            if (swap != 2 || number != floating) return fail();
-            return {VK_FORMAT_R32_UINT, 4, 0xc6u, ShaderRecompiler::ColorExportPacking::Float11_11_10};
+            if ((swap != 0 && swap != 2) || number != floating) return fail();
+            return {VK_FORMAT_R32_UINT, 4, static_cast<std::uint8_t>(swap == 2 ? 0xc6u : 0xe4u), ShaderRecompiler::ColorExportPacking::Float11_11_10};
         case 9:
             // COLOR_2_10_10_10 keeps red in the low bits, the Vulkan A2B10G10R10 packing.
             if (number != unorm) return fail();
