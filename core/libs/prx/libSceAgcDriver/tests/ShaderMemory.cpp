@@ -7600,6 +7600,24 @@ void verifyDynamicStorageMipChain() {
     require(ResourceMaterializer::TryRuntimeImageMode(image, allLevels, modes).mode.has_value(), "a dynamic-mip storage image with sixteen levels was rejected");
 }
 
+void verifyArrayVolumeStoreMode() {
+    using namespace ShaderRecompiler;
+    const DescriptorValue descriptor{{0x11800100u, 0xc3800000u, 0x0003c003u, 0xd0900facu, 0u, 0x00700000u, 0u, 0u}, 8u};
+    ImageResource store{};
+    store.resourceClass = ImageResourceClass::Storage;
+    store.dimension = RdnaImageDimension::Dim3D;
+    store.written = true;
+    store.fmaskCompatible = false;
+    const auto modes = ResourceMaterializer::RuntimeImageModes(store);
+    require(modes[ResourceMaterializer::RuntimeImageMode(store, descriptor, modes)].dimension == RdnaImageDimension::Dim2DArray, "3D image store on a 2D-array T# did not select an array runtime mode");
+    store.read = true;
+    expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(store, descriptor, ResourceMaterializer::RuntimeImageModes(store))); }, "incompatible with the static runtime image interface", "3D image load and store on a 2D-array T# was accepted");
+    store.read = false;
+    store.atomic = true;
+    const DescriptorValue uintDescriptor{{0x11800100u, 0xc1400000u, 0x0003c003u, 0xd0900facu, 0u, 0x00700000u, 0u, 0u}, 8u};
+    expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(store, uintDescriptor, ResourceMaterializer::RuntimeImageModes(store))); }, "incompatible with the static runtime image interface", "3D image atomic on a 2D-array T# was accepted");
+}
+
 void verifySrgbDepthCompareModes() {
     using namespace ShaderRecompiler;
     for (const auto decodeFormats : {0u, 1u, 2u, 3u}) {
@@ -7774,6 +7792,7 @@ int main(int argc, char** argv) {
         verifyFmaskImageMode();
         verifyCubeDepthCompareMode();
         verifyVolumeArrayLoadMode();
+        verifyArrayVolumeStoreMode();
         verifyVolumeBiasTableRejection();
         verifyDynamicStorageMipChain();
         verifySrgbDepthCompareModes();

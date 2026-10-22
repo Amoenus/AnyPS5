@@ -258,14 +258,14 @@ int APS5_VABI sceAudioInGetHandleStatusInfo(void) {
     return 0;
 }
 
-int APS5_VABI sceAudioInOpenEx(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceAudioInOpenEx(int user_id, uint32_t type, uint32_t index, uint32_t extra, uint32_t len, uint32_t freq, uint32_t param) {
+    (void)extra;
+    return sceAudioInOpen(user_id, type, index, len, freq, param);
 }
 
-int APS5_VABI sceAudioInHqOpenEx(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceAudioInHqOpenEx(int user_id, uint32_t type, uint32_t index, uint32_t extra, uint32_t len, uint32_t freq, uint32_t param) {
+    (void)extra;
+    return sceAudioInOpen(user_id, type, index, len, freq, param);
 }
 
 int APS5_VABI sceAudioInDeviceOpenEx(void) {
@@ -289,12 +289,10 @@ int APS5_VABI sceAudioInSetSparkSideTone(void) {
 }
 
 int APS5_VABI sceAudioInSetCompressorPreGain(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceAudioInSetNoiseGateThreshold(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 

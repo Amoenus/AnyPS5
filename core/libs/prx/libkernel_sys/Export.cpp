@@ -335,6 +335,35 @@ std::int64_t APS5_VABI pathconf_nid_postfix(const char* path, int name) {
     }
 }
 
+#ifdef _WIN32
+static int FollowLinkPath(const std::filesystem::path& source, std::filesystem::path& target) {
+    target = source;
+    const DWORD attributes = GetFileAttributesW(source.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) return 0;
+    const HANDLE handle = CreateFileW(source.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const DWORD code = GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) return GuestEnoent;
+        if (code == ERROR_CANT_RESOLVE_FILENAME) return GuestEloop;
+        throw std::system_error(static_cast<int>(code), std::system_category(), "link: CreateFileW");
+    }
+    std::wstring name(MAX_PATH, L'\0');
+    DWORD length = GetFinalPathNameByHandleW(handle, name.data(), static_cast<DWORD>(name.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (length >= name.size()) {
+        name.resize(length);
+        length = GetFinalPathNameByHandleW(handle, name.data(), static_cast<DWORD>(name.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    }
+    const DWORD code = GetLastError();
+    CloseHandle(handle);
+    if (length == 0 || length >= name.size())
+        throw std::system_error(static_cast<int>(code), std::system_category(), "link: GetFinalPathNameByHandleW");
+    name.resize(length);
+    target = std::filesystem::path(name);
+    return 0;
+}
+#endif
+
 int APS5_VABI link_nid_postfix(const char* existing, const char* created) {
     if (existing == nullptr || created == nullptr) return static_cast<int>(Fail(GuestEfault));
     if (*existing == '\0' || *created == '\0') return static_cast<int>(Fail(GuestEnoent));
@@ -347,7 +376,13 @@ int APS5_VABI link_nid_postfix(const char* existing, const char* created) {
     if (std::filesystem::is_directory(status)) return static_cast<int>(Fail(GuestEperm));
     if (std::filesystem::exists(std::filesystem::symlink_status(destination, error))) return static_cast<int>(Fail(GuestEexist));
     if (!std::filesystem::is_directory(destination.parent_path(), error)) return static_cast<int>(Fail(HasNonDirectoryPrefix(destination) ? GuestEnotdir : GuestEnoent));
+#ifdef _WIN32
+    std::filesystem::path target;
+    if (const int followError = FollowLinkPath(source, target)) return static_cast<int>(Fail(followError));
+    if (std::filesystem::is_directory(target, error)) return static_cast<int>(Fail(GuestEperm));
+#else
     const auto target = std::filesystem::is_symlink(source, error) ? std::filesystem::canonical(source, error) : source;
+#endif
     if (!error) std::filesystem::create_hard_link(target, destination, error);
     if (error == std::errc::cross_device_link) return static_cast<int>(Fail(GuestExdev));
     if (error) throw std::system_error(error, "link");

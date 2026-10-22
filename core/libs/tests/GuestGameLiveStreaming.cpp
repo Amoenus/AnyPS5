@@ -1,4 +1,5 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -62,17 +63,20 @@ int main() {
         Require(byte == 0);
     }
 
-    bool threwProgramInfo = false;
-    try {
-        sceGameLiveStreamingGetProgramInfo(nullptr);
-    } catch (const std::runtime_error&) {
-        threwProgramInfo = true;
+    Require(sceGameLiveStreamingGetProgramInfo(nullptr) == static_cast<int>(0x80A00002));
+    std::array<std::uint8_t, 0x134C + 16> programInfo{};
+    programInfo.fill(0x7f);
+    Require(sceGameLiveStreamingGetProgramInfo(reinterpret_cast<GameLiveStreamingProgramInfo*>(programInfo.data())) == 0);
+    for (std::size_t i = 0; i < programInfo.size(); ++i) {
+        Require(programInfo[i] == (i < 0x134C ? 0 : 0x7f));
     }
-    Require(threwProgramInfo);
 
     Require(sceGameLiveStreamingTerminate() == 0);
     std::memset(&status, 0x7f, sizeof(status));
     Require(sceGameLiveStreamingGetCurrentStatus2(&status) == notInitialized);
     for (const auto value : std::as_bytes(std::span(&status, 1))) Require(value == std::byte{0x7f});
+    programInfo.fill(0x7f);
+    Require(sceGameLiveStreamingGetProgramInfo(reinterpret_cast<GameLiveStreamingProgramInfo*>(programInfo.data())) == notInitialized);
+    for (const std::uint8_t byte : programInfo) Require(byte == 0x7f);
     Require(sceGameLiveStreamingTerminate() == notInitialized);
 }

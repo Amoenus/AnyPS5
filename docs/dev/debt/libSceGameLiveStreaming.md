@@ -5,7 +5,7 @@
 - [sceGameLiveStreamingEnableLiveStreaming](../../../core/libs/prx/libSceGameLiveStreaming/Export.cpp) (libSceGameLiveStreaming) - imported by PS4 titles, which do not load without it, and added without an implementation: declared without parameters, every call throws
 - [libSceGameLiveStreaming](../../../core/libs/prx/libSceGameLiveStreaming/Export.cpp) - native initialization requires exactly 0x4000 heap bytes before checking repeated initialization. Host lifecycle and pointer errors now match the wrapper, but service registration, allocation failures and asynchronous service readiness are not modelled. The host becomes ready immediately after initialization.
 - [sceGameLiveStreamingGetCurrentStatus2](../../../core/libs/prx/libSceGameLiveStreaming/Export.cpp) - the supplied module confirms the 72-byte layout and inactive status (user -1, remaining bytes zero). Live service counters, active-user changes and broadcast-resolution conversion are unimplemented.
-- [sceGameLiveStreamingGetProgramInfo](../../../core/libs/prx/libSceGameLiveStreaming/Export.cpp) - consumes one output pointer and uses a 4940-byte record. Field semantics remain unresolved; the protected body remains unimplemented.
+- [sceGameLiveStreamingGetProgramInfo](../../../core/libs/prx/libSceGameLiveStreaming/Export.cpp) (libSceGameLiveStreaming) - the PS5 12.00 module clears the 0x134C-byte program info, asks the system service for its first 0xFD4 bytes and returns `0x80A00002` for a null pointer and `0x80A00004` before initialization. With nothing broadcast here the info stays zero, which assumes the service reports an empty program when nothing is on air; the field layout is unknown
 
 ### Unknown function info
 
