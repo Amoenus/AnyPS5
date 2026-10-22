@@ -1982,6 +1982,10 @@ if(BUILD_TESTING)
     target_link_libraries(agc_driver_target_address_window_tests PRIVATE libc)
     configure_windows_unwind(agc_driver_target_address_window_tests)
     add_test(NAME agc_driver_target_address_window COMMAND agc_driver_target_address_window_tests)
+    if(WIN32)
+        set_tests_properties(agc_driver_target_address_window PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
 
 set(ANYPS5_AGC_EXECUTION_TESTS "" CACHE STRING "tests/execution sources to build, by file name without extension; the others build a stub that reports a skip. Empty builds all")
