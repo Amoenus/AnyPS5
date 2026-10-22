@@ -1,5 +1,9 @@
 # libSceAudioOut technical debt
 
+### Silent stubs
+
+- [sceAudioOut2LoTerminate](../../../core/libs/prx/libSceAudioOut/src/AudioOut2Low.cpp) (libSceAudioOut) - returns 0, as the PS5 12.00 module (0x248d0) does whether or not the low-latency service runs. The module disconnects from the audio server and clears the service tables; here `sceAudioOut2LoInit` starts no service and open contexts and ports are left as they are
+
 ### Unknown function info
 
 - [sceAudioOut2ContextAdvance and sceAudioOut2ContextPush](../../../core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp) (libSceAudioOut) - with an SDL device, Advance snapshots each port's PCM and gain; Push consumes completed grains in order and a blocking Push waits for Advance when none is ready. Inferred from PPSA26358, which rewrites the same 512-frame, 12-channel float buffer on a producer thread and pushes on another thread. Console buffer ownership, snapshot timing and empty-queue errors are unverified. Completed grains remain queued until Push consumes them, so memory use grows with an unconsumed PCM backlog. The console backlog limit is unverified. A nonblocking Push without a completed grain throws; this is a runtime restriction, not a console measurement. Context destruction concurrent with active calls remains unsupported. Without an SDL device the existing wall-clock path remains.
@@ -90,7 +94,6 @@
 - [sceAudioOut2MbusSetSparkParam](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2AllAudioMainToHeadphoneForDiag](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2LoPortGetStateEx](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
-- [sceAudioOut2LoTerminate](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) throws. It takes no arguments and returns an int, and stops the low-latency service ([SharpProspero](https://github.com/SvenGDK/SharpProspero/blob/5dfdb4b0b166e83dc9ae275001afb695f12c7174/src/SharpProspero/Interop/Audio/AudioOut2.cs#L497-L498)), but what it does to open contexts and ports and what it returns when the service is not started are unknown, and its counterpart `sceAudioOut2Terminate` is unimplemented.
 - [sceAudioOut2ReportRegisterHandler](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2ReportUnregisterHandler](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2GetTvCorrectionInfo](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
@@ -101,7 +104,7 @@
 - [sceAudioOut2DebugStateCtrl](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2ContextBedWrite](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2PortCreateEx](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
-- [sceAudioOut2InitializeEx](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
+- [sceAudioOut2InitializeEx](../../../core/libs/prx/libSceAudioOut/src/AudioOut2System.cpp) (libSceAudioOut) - the PS5 12.00 module (0x2a640) stores its 32-bit argument and runs `sceAudioOut2Initialize`; the argument's meaning is unknown and it is ignored
 - [sceAudioOut2Terminate](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2PortRegister](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2PortUnregister](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature

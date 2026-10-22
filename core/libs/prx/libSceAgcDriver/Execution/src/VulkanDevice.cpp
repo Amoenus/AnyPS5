@@ -386,6 +386,8 @@ struct VulkanDevice::State {
     bool samplerFilterMinmax = false;
     bool nonSeamlessCubeMap = false;
     VkSampleCountFlags mergedCoverageSampleCounts = 0;
+    VkSampleCountFlags truncatedCoverageSampleCounts = 0;
+    bool mixedAttachmentSamples = false;
     bool fragmentShaderPixelInterlock = false;
     bool conservativeRasterization = false;
     bool provokingVertexLast = false;
@@ -1515,12 +1517,17 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
             check(combinations(selected, &count, supported.data()), "vkGetPhysicalDeviceSupportedFramebufferMixedSamplesCombinationsNV");
             for (const auto& combination : supported) {
                 if (combination.coverageReductionMode == VK_COVERAGE_REDUCTION_MODE_MERGE_NV && combination.colorSamples == VK_SAMPLE_COUNT_1_BIT && combination.depthStencilSamples == 0) state->mergedCoverageSampleCounts |= combination.rasterizationSamples;
+                if (combination.coverageReductionMode == VK_COVERAGE_REDUCTION_MODE_TRUNCATE_NV && combination.colorSamples == VK_SAMPLE_COUNT_1_BIT && combination.depthStencilSamples == combination.rasterizationSamples) state->truncatedCoverageSampleCounts |= combination.rasterizationSamples;
             }
         }
-        if (state->mergedCoverageSampleCounts != 0) {
+        if (state->mergedCoverageSampleCounts != 0 || state->truncatedCoverageSampleCounts != 0) {
             deviceExtensions.push_back(VK_NV_FRAMEBUFFER_MIXED_SAMPLES_EXTENSION_NAME);
             deviceExtensions.push_back(VK_NV_COVERAGE_REDUCTION_MODE_EXTENSION_NAME);
         }
+    } else if (hasExtension(VK_AMD_MIXED_ATTACHMENT_SAMPLES_EXTENSION_NAME)) {
+        state->mixedAttachmentSamples = true;
+        state->truncatedCoverageSampleCounts = state->properties.limits.framebufferDepthSampleCounts & state->properties.limits.framebufferColorSampleCounts & ~static_cast<VkSampleCountFlags>(VK_SAMPLE_COUNT_1_BIT);
+        deviceExtensions.push_back(VK_AMD_MIXED_ATTACHMENT_SAMPLES_EXTENSION_NAME);
     }
     coverageReductionFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COVERAGE_REDUCTION_MODE_FEATURES_NV};
     coverageReductionFeatures.coverageReductionMode = VK_TRUE;
@@ -1811,7 +1818,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         nonSeamlessCubeFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &nonSeamlessCubeFeatures;
     }
-    if (state->mergedCoverageSampleCounts != 0) {
+    if (!state->mixedAttachmentSamples && (state->mergedCoverageSampleCounts != 0 || state->truncatedCoverageSampleCounts != 0)) {
         coverageReductionFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &coverageReductionFeatures;
     }
@@ -3814,6 +3821,8 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.samplerFilterMinmax = state->samplerFilterMinmax;
     context.nonSeamlessCubeMap = state->nonSeamlessCubeMap;
     context.mergedCoverageSampleCounts = state->mergedCoverageSampleCounts;
+    context.truncatedCoverageSampleCounts = state->truncatedCoverageSampleCounts;
+    context.mixedAttachmentSamples = state->mixedAttachmentSamples;
     context.conservativeRasterization = state->conservativeRasterization;
     context.meshWave32 = state->meshWave32;
     context.provokingVertexLast = state->provokingVertexLast;

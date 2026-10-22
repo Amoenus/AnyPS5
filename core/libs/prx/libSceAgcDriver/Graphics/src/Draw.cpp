@@ -55,6 +55,7 @@ std::uint64_t DrawRenderPassKey(const Context& context, const State& state, std:
     mix(state.renderExtent.height);
     mix(state.samples);
     mix(state.mergedCoverage);
+    mix(state.truncatedCoverage);
     mix(state.customSampleLocations);
     if (state.customSampleLocations) {
         mix(state.sampleLocationGrid);
