@@ -822,9 +822,10 @@ int APS5_VABI sceHttpSetDefaultAcceptEncodingGZIPEnabled(int http_ctx_id, int en
     return SetHttpContextAcceptEncodingGzip(http_ctx_id, enable != 0) ? 0 : ERROR_INVALID_ID;
 }
 
-int APS5_VABI sceHttpSetProxy(int id, int mode, int authentication, const char* hostname, std::uint16_t port) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceHttpSetProxy(int id, int, int, const char* hostname, std::uint16_t) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
+    if (!hostname) return ERROR_INVALID_VALUE;
+    return FindHttpOptions(id) ? 0 : ERROR_INVALID_ID;
 }
 
 int APS5_VABI sceHttpSetSocketCreationCallback(std::int32_t id, HttpSocketCreationCallback callback, void* userArg) {

@@ -19,6 +19,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ParallelCompare.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "SceShaders.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
@@ -1729,7 +1730,39 @@ void DisabledColorTests() {
     queue.context[0x002] = 3;
     const auto thirdSlice = AgcDriver::Graphics::DecodeState(queue);
     Require(thirdSlice.depth && thirdSlice.depth->firstSlice == 3 && thirdSlice.depth->address == depthOnly.depth->address + 3u * AgcDriver::Graphics::DepthSliceBytes(depthOnly.depth->extent, 4u), "a depth view of slice 3 lost its slice or its Z offset");
+    queue.context[0x002] = 1u << 26u;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "on a surface without mips");
     queue.context[0x002] = 0;
+    {
+        using AgcDriver::Graphics::ComputeElementMipLayout;
+        using AgcDriver::Graphics::TextureTileMode;
+        auto mipped = queue;
+        mipped.context[0x007] = 0x03ff03ff;
+        mipped.context[0x010] = 0x80000181u | (2u << 16u);
+        const auto mips = ComputeElementMipLayout(TextureTileMode::kZ64KBX, 2u, 1024u, 1024u, 3u);
+        Require(!mips.at(1).tail && mips.at(1).width == 512u && mips.at(1).height == 512u, "the 1024x1024 Z_X layout does not give a 512x512 second mip outside the tail");
+        const auto first = AgcDriver::Graphics::DecodeState(mipped);
+        Require(first.depth && first.depth->address == depthOnly.depth->address + mips.at(0).tiledOffset && first.depth->extent.width == 1024u && first.depth->extent.height == 1024u, "view mip 0 of a mip chain is not its first level");
+        mipped.context[0x002] = 1u << 26u;
+        const auto second = AgcDriver::Graphics::DecodeState(mipped);
+        Require(second.depth && second.depth->address == depthOnly.depth->address + mips.at(1).tiledOffset, "view mip 1 is not at the second level's offset in the Z_X mip chain");
+        Require(second.depth->extent.width == 512u && second.depth->extent.height == 512u, "view mip 1 does not render at the second level's extent");
+        mipped.context[0x002] = (1u << 26u) | 1u | (1u << 13u);
+        const auto sliced = AgcDriver::Graphics::DecodeState(mipped);
+        Require(sliced.depth && sliced.depth->address == second.depth->address + AgcDriver::Graphics::ComputeSurfaceSize(mips, 1u), "slice 1 of a mip chain does not step by the whole chain");
+        mipped.context[0x002] = 3u << 26u;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(mipped); }, "is beyond the surface's mips");
+        mipped.context[0x002] = 2u << 26u;
+        mipped.context[0x007] = 0x003f003f;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(mipped); }, "into the packed mip tail is unsupported");
+        mipped.context[0x007] = 0x03ff03ff;
+        mipped.context[0x002] = 1u << 26u;
+        mipped.context[0x010] |= 1u << 29u;
+        mipped.context[0x005] = 0x300;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(mipped); }, "HTILE for the depth view mip");
+        mipped.context[0x010] = (0x80000181u | (2u << 16u)) & ~(31u << 4u);
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(mipped); }, "uses a swizzle other than 64 KiB Z_X");
+    }
     for (const auto colorControl : {0x0u, 0xcc0000u}) {
         queue = makeState();
         queue.context[0x202] = colorControl;
@@ -7894,9 +7927,11 @@ void barycentricEmulationTests() {
     Require(BarycentricPatches(state, patchShaders) && !BarycentricPatches(state, shaders), "generated tessellation stages were not recognised as barycentric patches");
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     ValidateShaders(patchShaders, state, subgroup, false);
-    for (const auto topology : {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, VK_PRIMITIVE_TOPOLOGY_POINT_LIST}) {
+    state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    ValidateShaders(patchShaders, state, subgroup, false);
+    for (const auto topology : {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, VK_PRIMITIVE_TOPOLOGY_POINT_LIST}) {
         state.topology = topology;
-        expectFailure([&] { ValidateShaders(patchShaders, state, subgroup, false); }, "require a triangle list");
+        expectFailure([&] { ValidateShaders(patchShaders, state, subgroup, false); }, "require a triangle list or strip");
     }
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     const std::array<CompiledShader, 4> plainPatchShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &patches.control, 0}, {ShaderStage::TessellationEvaluation, &patches.evaluation, 0}, {ShaderStage::Fragment, &plain, 0}}};
