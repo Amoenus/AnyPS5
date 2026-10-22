@@ -1341,7 +1341,24 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
             descriptor.dwordCount = 8u;
         }
         if (!validImageDescriptor(descriptor, image.r128) && !nullImageDescriptor(image, descriptor)) {
-            throw std::runtime_error("runtime image descriptor is invalid");
+            const auto type = rawImageType(descriptor);
+            auto message = "runtime image descriptor is invalid (image " + std::to_string(i) +
+                ", type " + std::to_string(static_cast<std::uint32_t>(type)) +
+                ", format " + std::to_string(static_cast<std::uint32_t>(rawImageFormat(descriptor))) +
+                ", r128 " + std::to_string(image.r128) + ", read " + std::to_string(image.read) +
+                ", written " + std::to_string(image.written) + ", atomic " + std::to_string(image.atomic);
+            if (type == ImageType::Color2DMsaa || type == ImageType::Color2DMsaaArray) {
+                message += ", baseLevel " + std::to_string((descriptor.dwords[3] >> 12u) & 0xfu) +
+                    ", fragmentsLog2 " + std::to_string((descriptor.dwords[3] >> 16u) & 0xfu) +
+                    ", maxMip " + std::to_string((descriptor.dwords[5] >> 4u) & 0xfu);
+            }
+            message += ") [source " + std::to_string(image.source) +
+                ", firstUsePc " + std::to_string(image.firstUsePc) +
+                ", plannedDimension " + std::to_string(static_cast<std::uint32_t>(image.dimension)) +
+                ", activeSource " + (image.source < activeSources.size() ? std::to_string(activeSources[image.source]) : "unknown") +
+                ", activeImage " + (activity < activeSources.size() ? std::to_string(activeSources[activity]) : "unknown") +
+                ", controlFlowBlocks " + std::to_string(plan.controlFlow.size()) + "]";
+            throw std::runtime_error(message);
         }
         snapshot.images[i] = descriptor;
     }
