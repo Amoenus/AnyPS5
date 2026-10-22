@@ -218,7 +218,7 @@ if(TARGET mimalloc)
     target_compile_features(pe_import_first PRIVATE cxx_std_20)
     if(MINGW)
         target_compile_options(pe_import_first PRIVATE -fasynchronous-unwind-tables)
-        target_link_options(pe_import_first PRIVATE -static -static-libgcc -static-libstdc++)
+        target_link_options(pe_import_first PRIVATE -municode -static -static-libgcc -static-libstdc++)
     endif()
     add_custom_command(
             OUTPUT ${PATCHED_DIR}/mimalloc.dll
