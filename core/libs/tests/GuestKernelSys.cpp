@@ -32,6 +32,8 @@ int APS5_VABI fstatfs_nid_postfix(int, void*);
 int APS5_VABI _fstatfs_nid_postfix(int, void*);
 int APS5_VABI open_nid_postfix(const char*, int, int);
 int APS5_VABI close_nid_postfix(int);
+int APS5_VABI pipe_nid_postfix(int*);
+int APS5_VABI socket_nid_postfix(int, int, int);
 std::int64_t APS5_VABI readlink_nid_postfix(const char*, char*, std::size_t);
 int APS5_VABI lstat_nid_postfix(const char*, FileStat*);
 std::int64_t APS5_VABI pathconf_nid_postfix(const char*, int);
@@ -430,6 +432,19 @@ int main() {
     Require(fileDescriptor >= 0);
     Require(fchdir_nid_postfix(-1) == -1 && Error() == 9);
     Require(fchdir_nid_postfix(fileDescriptor) == -1 && Error() == 20);
+    int pipeEnds[2] = {-1, -1};
+    Require(pipe_nid_postfix(pipeEnds) == 0);
+    Require(fchdir_nid_postfix(pipeEnds[0]) == -1 && Error() == 22);
+    Require(fchdir_nid_postfix(pipeEnds[1]) == -1 && Error() == 22);
+    Require(close_nid_postfix(pipeEnds[0]) == 0 && close_nid_postfix(pipeEnds[1]) == 0);
+    const int characterDevice = open_nid_postfix("/dev/random", 0, 0);
+    Require(characterDevice >= 0);
+    Require(fchdir_nid_postfix(characterDevice) == -1 && Error() == 20);
+    Require(close_nid_postfix(characterDevice) == 0);
+    const int socketDescriptor = socket_nid_postfix(2, 2, 0);
+    Require(socketDescriptor >= 0);
+    Require(fchdir_nid_postfix(socketDescriptor) == -1 && Error() == 22);
+    Require(close_nid_postfix(socketDescriptor) == 0);
     Require(fchdir_nid_postfix(directory) == 0);
     char directoryPath[1024];
     Require(getcwd_nid_postfix(directoryPath, sizeof(directoryPath)) == directoryPath);
@@ -618,7 +633,8 @@ int main() {
     Require(unlinkat_nid_postfix(base, "file.txt", 0x800) == -1 && Error() == 20);
     Require(unlinkat_nid_postfix(base, ".", 0x800) == -1 && Error() == 22);
     Require(unlinkat_nid_postfix(base, "..", 0x800) == -1 && Error() == 22);
-    Require(unlinkat_nid_postfix(base, ".", 0) == -1 && Error() == 1);
+    Require(unlinkat_nid_postfix(base, ".", 0) == -1 && Error() == 22);
+    Require(unlinkat_nid_postfix(base, "..", 0) == -1 && Error() == 22);
     std::filesystem::create_directory(root / "usub");
     Require(unlinkat_nid_postfix(base, "usub", 0) == -1 && Error() == 1);
     std::filesystem::create_directory(root / "nonempty");
@@ -757,20 +773,27 @@ int main() {
     Require(junctionText.find('?') == std::string::npos && std::filesystem::equivalent(junctionText, junctionTarget, junctionError) && !junctionError);
     Require(std::filesystem::remove(junction) && std::filesystem::remove(junctionTarget));
 #endif
-#ifndef _WIN32
     if (created == 0) {
         const auto throughLink = (root / "through-link.bin").string();
         Require(link_nid_postfix(symbolic.c_str(), throughLink.c_str()) == 0);
+#ifdef _WIN32
+        Require((GetFileAttributesW(std::filesystem::path(throughLink).c_str()) & FILE_ATTRIBUTE_REPARSE_POINT) == 0);
+#else
         Require(!std::filesystem::is_symlink(std::filesystem::symlink_status(throughLink)));
+#endif
         Require(std::filesystem::equivalent(throughLink, original) && std::filesystem::hard_link_count(original) == 2);
         Require(std::filesystem::remove(throughLink) && std::filesystem::hard_link_count(original) == 1);
         Require(link_nid_postfix((root / "dangling").string().c_str(), throughLink.c_str()) == -1 && Error() == 2);
-        const auto directoryLink = (root / "directory-link").string();
-        Require(symlink_nid_postfix(".", directoryLink.c_str()) == 0);
-        Require(link_nid_postfix(directoryLink.c_str(), throughLink.c_str()) == -1 && Error() == 1);
+        const auto dotLink = (root / "dot-link").string();
+        Require(symlink_nid_postfix(".", dotLink.c_str()) == 0);
+        Require(link_nid_postfix(dotLink.c_str(), throughLink.c_str()) == -1 && Error() == 1);
+#ifdef _WIN32
+        Require(symlink_nid_postfix("loop-b", (root / "loop-a").string().c_str()) == 0);
+        Require(symlink_nid_postfix("loop-a", (root / "loop-b").string().c_str()) == 0);
+        Require(link_nid_postfix((root / "loop-a").string().c_str(), throughLink.c_str()) == -1 && Error() == 62);
+#endif
         Require(!std::filesystem::exists(std::filesystem::symlink_status(throughLink)));
     }
-#endif
     RemoveTree(root);
     return 0;
 }

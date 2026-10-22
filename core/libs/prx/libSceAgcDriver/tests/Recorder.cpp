@@ -4804,11 +4804,14 @@ void idlePublishWaitTests(const Device& device, Recorder& recorder) {
     recorder.Sync();
     Require(words[2 * unit] == 0x44 && words[4 * unit - 1] == 0x45, "a CPU store made after the idle flush returned was overwritten by its publish");
     Require(words[2 * unit + 1] == 0x22 && words[3 * unit - 1] == 0x22 && words[3 * unit] == 0x33 && words[1 * unit] == 0x11 && words[4 * unit] == 0x11, "the idle publish's bytes are wrong");
+    words[5 * unit] = 0x11;
+    CollectWritesUncached(address, bytes);
     retile(address + 5 * unit, 0x55);
     StorageTexture::FlushAllPending("label");
-    Require(recorder.PendingWriteOverlaps(address + 5 * unit, unit), "a publish of a flush other than the idle one was waited");
+    const bool pending = recorder.PendingWriteOverlaps(address + 5 * unit, unit);
     recorder.Sync();
-    Require(words[5 * unit] == 0x55 && words[6 * unit - 1] == 0x55, "the label flush's publish did not land");
+    Require(words[5 * unit] == 0x55 && words[6 * unit - 1] == 0x55, "the label flush's publish did not land: the unit read as written after its retile, so the publish dropped it as stale");
+    Require(pending, "a publish of a flush other than the idle one was waited");
     std::cout << "idle publish wait verified\n";
 }
 

@@ -11,6 +11,8 @@ int APS5_VABI setuid_nid_postfix(std::uint32_t);
 int APS5_VABI setgid_nid_postfix(std::uint32_t);
 int APS5_VABI setreuid_nid_postfix(std::uint32_t, std::uint32_t);
 int APS5_VABI setregid_nid_postfix(std::uint32_t, std::uint32_t);
+int APS5_VABI setresuid_nid_postfix(std::uint32_t, std::uint32_t, std::uint32_t);
+int APS5_VABI setresgid_nid_postfix(std::uint32_t, std::uint32_t, std::uint32_t);
 int APS5_VABI setgroups_nid_postfix(int, const std::uint32_t*);
 int APS5_VABI getgroups_nid_postfix(int, std::uint32_t*);
 int APS5_VABI getuid_nid_postfix(void);
@@ -37,6 +39,17 @@ static bool Throws(SetId function, std::uint32_t id) {
 static bool ThrowsRe(SetReId function, std::uint32_t r, std::uint32_t e) {
     try {
         function(r, e);
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+using SetResId = int (APS5_VABI *)(std::uint32_t, std::uint32_t, std::uint32_t);
+
+static bool ThrowsRes(SetResId function, std::uint32_t r, std::uint32_t e, std::uint32_t s) {
+    try {
+        function(r, e, s);
     } catch (const std::runtime_error&) {
         return true;
     }
@@ -81,6 +94,30 @@ int main() {
     Require(setregid_nid_postfix(0, 0) == 0);
     Require(ThrowsRe(setregid_nid_postfix, 1000, 0));
     Require(ThrowsRe(setregid_nid_postfix, 0, 1000));
+
+    Require(setresuid_nid_postfix(Unchanged, Unchanged, Unchanged) == 0);
+    Require(setresuid_nid_postfix(0, Unchanged, Unchanged) == 0);
+    Require(setresuid_nid_postfix(Unchanged, 0, Unchanged) == 0);
+    Require(setresuid_nid_postfix(Unchanged, Unchanged, 0) == 0);
+    Require(setresuid_nid_postfix(0, 0, 0) == 0);
+    Require(ThrowsRes(setresuid_nid_postfix, 1000, 0, 0));
+    Require(ThrowsRes(setresuid_nid_postfix, 0, 1000, 0));
+    Require(ThrowsRes(setresuid_nid_postfix, 0, 0, 1000));
+    Require(ThrowsRes(setresuid_nid_postfix, 1000, Unchanged, Unchanged));
+    Require(ThrowsRes(setresuid_nid_postfix, Unchanged, 1000, Unchanged));
+    Require(ThrowsRes(setresuid_nid_postfix, Unchanged, Unchanged, 1000));
+
+    Require(setresgid_nid_postfix(Unchanged, Unchanged, Unchanged) == 0);
+    Require(setresgid_nid_postfix(0, Unchanged, Unchanged) == 0);
+    Require(setresgid_nid_postfix(Unchanged, 0, Unchanged) == 0);
+    Require(setresgid_nid_postfix(Unchanged, Unchanged, 0) == 0);
+    Require(setresgid_nid_postfix(0, 0, 0) == 0);
+    Require(ThrowsRes(setresgid_nid_postfix, 1000, 0, 0));
+    Require(ThrowsRes(setresgid_nid_postfix, 0, 1000, 0));
+    Require(ThrowsRes(setresgid_nid_postfix, 0, 0, 1000));
+    Require(ThrowsRes(setresgid_nid_postfix, 1000, Unchanged, Unchanged));
+    Require(ThrowsRes(setresgid_nid_postfix, Unchanged, 1000, Unchanged));
+    Require(ThrowsRes(setresgid_nid_postfix, Unchanged, Unchanged, 1000));
 
     std::array<std::uint32_t, 4> groups{};
     Require(getgroups_nid_postfix(0, nullptr) == 1);

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <numbers>
 #include <stdexcept>
@@ -262,10 +263,32 @@ static void TestPan() {
     work.speaker_angles[0] = -INFINITY;
     Require(PanThrows(&work, &front, 1, 2));
     Require(sceNgs2PanInit(&work, nullptr, 360.0f, 2) == SCE_NGS2_OK);
-    Require(PanInitThrows(nullptr, nullptr, 360.0f, 2));
-    for (std::uint32_t count : {0u, 1u, 3u, 6u, 8u}) Require(PanInitThrows(&work, nullptr, 360.0f, count));
+    Ngs2PanWork marked;
+    std::memset(&marked, 0x5a, sizeof(marked));
+    Ngs2PanWork expected;
+    std::memcpy(&expected, &marked, sizeof(marked));
+    const auto unchanged = [&] { return std::memcmp(&marked, &expected, sizeof(marked)) == 0; };
     const float pair[] = {-30.0f, 30.0f};
-    Require(PanInitThrows(&work, pair, 180.0f, 2) && !PanInitThrows(&work, pair, 2.0f * pi, 2));
+    Require(sceNgs2PanInit(nullptr, nullptr, 360.0f, 2) == static_cast<int>(0x804A8010));
+    Require(sceNgs2PanInit(nullptr, pair, 180.0f, 3) == static_cast<int>(0x804A8010));
+    Require(sceNgs2PanInit(nullptr, nullptr, 100.0f, 3) == static_cast<int>(0x804A8010));
+    for (std::uint32_t count : {1u, 3u, 6u, 8u, 255u}) {
+        Require(sceNgs2PanInit(&marked, nullptr, 360.0f, count) == static_cast<int>(0x804A8451));
+        Require(unchanged());
+    }
+    Require(PanInitThrows(&marked, nullptr, 360.0f, 0));
+    Require(unchanged());
+    for (std::uint32_t count : {0u, 1u, 3u, 6u, 8u, 255u}) {
+        Require(sceNgs2PanInit(&marked, pair, 360.0f, count) == static_cast<int>(0x804A8451));
+        Require(sceNgs2PanInit(&marked, pair, 2.0f * pi, count) == static_cast<int>(0x804A8451));
+        Require(unchanged());
+    }
+    for (const float unitAngle : {180.0f, 0.0f, 359.0f, 361.0f, 90.0f, pi}) {
+        Require(sceNgs2PanInit(&marked, pair, unitAngle, 2) == static_cast<int>(0x804A8450));
+        Require(sceNgs2PanInit(&marked, pair, unitAngle, 3) == static_cast<int>(0x804A8450));
+        Require(unchanged());
+    }
+    Require(sceNgs2PanInit(&work, pair, 2.0f * pi, 2) == SCE_NGS2_OK);
     const float invalid[] = {0.0f, NAN};
     Require(PanInitThrows(&work, invalid, 360.0f, 2));
     const float onUnit[] = {720.0f, 30.0f};

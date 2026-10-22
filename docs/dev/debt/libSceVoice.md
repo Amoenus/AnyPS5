@@ -16,9 +16,7 @@
 - [sceVoiceVADAdjustment](../../../core/libs/prx/libSceVoice/Export.cpp) (libSceVoice) - unknown signature
 - [sceVoiceVADPVTAdjustment](../../../core/libs/prx/libSceVoice/Export.cpp) (libSceVoice) - unknown signature
 - [sceVoiceVADSetVersion](../../../core/libs/prx/libSceVoice/Export.cpp) (libSceVoice) - unknown signature
-- [sceVoiceSetMuteFlagAll](../../../core/libs/prx/libSceVoice/Export.cpp) (libSceVoice) - unknown signature
-- [sceVoiceSetBitRate](../../../core/libs/prx/libSceVoice/Export.cpp) (libSceVoice) - unknown signature
-- [sceVoiceUpdatePort](../../../core/libs/prx/libSceVoice/Export.cpp) (libSceVoice) - unknown signature
+- [sceVoiceSetMuteFlagAll, sceVoiceSetBitRate, sceVoiceUpdatePort](../../../core/libs/prx/libSceVoice/Export.cpp) (libSceVoice) - not measured on a PS5; signatures follow [Orbital](https://github.com/AlexAltea/orbital/blob/master/tools/ida/db_types.json), behaviour the Vita's [VitaSDK](https://github.com/vitasdk/vita-headers/blob/ae5808f3105c42fa3373ba4ab64ab54e2e3ca848/include/psp2/voice.h#L250-L557). They return the not-initialized, port-range and missing-port codes the other port calls return. The mute-all flag makes `sceVoiceGetMuteFlag` report every port muted without changing port flags. A non-voice port, a bitrate `sceVoiceCreatePort` rejects, a null param or a different port type throw, since the console's codes for them are unknown
 - [sceVoiceGetPortAttr](../../../core/libs/prx/libSceVoice/Export.cpp): native initialization, port-range, pointer, attribute-size and port-type validation is implemented. Supported device attributes throw because the host has no device state or voice-activity processing. The former constant-zero voice-activity fallback is removed; failed calls leave output untouched.
 
 - [sceVoiceSetThreadsParams](../../../core/libs/prx/libSceVoice/Export.cpp): the 48-byte mode/priority/affinity layout and initialization, null, started-state and mode validation are recovered. Mode 1 throws because worker scheduling is not implemented; mode 0 is the native no-op. The 32-byte event callback union is recovered, but callback delivery and device-state byte semantics remain unimplemented.

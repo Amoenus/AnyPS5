@@ -350,9 +350,19 @@ class ReleasePackageTests(unittest.TestCase):
             package_release.package("linux", self.build, self.output, "../v1.0")
         self.assertFalse(self.output.exists())
 
+    def test_windows_runtime_missing_cmake_cache_raises_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "Missing CMakeCache.txt"):
+                package_release.windows_runtime(Path(tmp))
+
 
 
 class DocumentationAssetsTests(unittest.TestCase):
+    def test_source_not_directory_raises_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "not a directory"):
+                package_release.collect_docs(Path(tmp) / "nonexistent", Path(tmp) / "assets")
+
     def test_unique_nested_documents_are_flattened(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source"
@@ -599,6 +609,49 @@ class ReleaseNotesEdgeCaseTests(unittest.TestCase):
         result = prepare_release_notes.release_body(notes + "x" * (prepare_release_notes.BODY_LIMIT + 1))
         self.assertNotIn("What's Changed", result)
         self.assertIn("Full Changelog", result)
+
+
+class ReleaseMainTests(unittest.TestCase):
+    def test_main_with_docs_arguments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp) / "docs"
+            docs.mkdir()
+            (docs / "guide.md").write_text("# Guide", encoding="utf-8")
+            output = Path(tmp) / "out"
+            result = package_release.main(["--docs", str(docs), "--output", str(output)])
+            self.assertEqual(result, 0)
+            self.assertEqual((output / "guide.md").read_text(encoding="utf-8"), "# Guide")
+
+    def test_main_reports_packaging_error_via_parser_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                package_release.main(["--docs", str(Path(tmp) / "nonexistent"), "--output", str(output)])
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn("not a directory", stderr.getvalue())
+
+    def test_main_reconfigures_streams(self):
+        class Stream:
+            def __init__(self):
+                self.encoding = None
+                self.errors = None
+
+            def reconfigure(self, encoding=None, errors=None):
+                self.encoding = encoding
+                self.errors = errors
+
+        out, err = Stream(), Stream()
+        with patch.object(package_release.sys, "stdout", out), patch.object(package_release.sys, "stderr", err):
+            with tempfile.TemporaryDirectory() as tmp:
+                docs = Path(tmp) / "docs"
+                docs.mkdir()
+                (docs / "doc.md").write_text("text", encoding="utf-8")
+                package_release.main(["--docs", str(docs), "--output", str(Path(tmp) / "out")])
+        self.assertEqual(out.encoding, "utf-8")
+        self.assertEqual(out.errors, "backslashreplace")
+        self.assertEqual(err.encoding, "utf-8")
+        self.assertEqual(err.errors, "backslashreplace")
 
 
 if __name__ == "__main__":
