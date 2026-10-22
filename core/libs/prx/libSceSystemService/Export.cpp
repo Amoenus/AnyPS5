@@ -852,4 +852,12 @@ int APS5_VABI sceCoredumpSequenceHandlerCancelCoredump(void) {
     return 0;
 }
 
+int APS5_VABI sceSystemServiceIsBgmPlaying(void) {
+    return 0;
+}
+
+int APS5_VABI sceShellCoreUtilIsBgmPlaying(void) {
+    return 0;
+}
+
 }
