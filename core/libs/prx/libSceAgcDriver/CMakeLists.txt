@@ -1977,6 +1977,11 @@ target_link_libraries(agc_driver_mesh_tests PRIVATE libSceAgcDriver SDL2-static 
 set_target_properties(agc_driver_mesh_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_mesh_tests)
 
+if(BUILD_TESTING)
+    add_test_executable(agc_driver_target_address_window_tests tests/TargetAddressWindow.cpp)
+    add_test(NAME agc_driver_target_address_window COMMAND agc_driver_target_address_window_tests)
+endif()
+
 set(ANYPS5_AGC_EXECUTION_TESTS "" CACHE STRING "tests/execution sources to build, by file name without extension; the others build a stub that reports a skip. Empty builds all")
 file(GLOB agcExecutionTestSources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/execution/*.cpp)
 set(agcExecutionTests)
