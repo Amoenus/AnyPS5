@@ -53,6 +53,14 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
                 failed.context.memory = regions;
                 dump = dumpRequest(program.binary.codeAddress, failed, "_failed");
             } catch (...) {}
+            std::size_t compared = 0;
+            for (const auto& region : regions) {
+                if (region.bytes.empty() || region.bytes.size() > 256u || compared == 16u) continue;
+                const auto comparison = GuestMemory::CompareMapped(region.guestAddress, region.bytes);
+                const char* result = comparison == GuestMemory::Compare::Equal ? "equal" : comparison == GuestMemory::Compare::Differs ? "differs" : "unmapped";
+                std::fprintf(stderr, "[failed-capture] draw shader 0x%llx stage %u region 0x%llx bytes %zu raw-after-failure %s (unsynchronized diagnostic)\n", static_cast<unsigned long long>(program.binary.codeAddress), static_cast<unsigned>(program.binary.stage), static_cast<unsigned long long>(region.guestAddress), region.bytes.size(), result);
+                ++compared;
+            }
         } else {
             std::fprintf(stderr, "[capture] failed draw request exceeds the 256 KiB local diagnostic budget\n");
         }
