@@ -1047,6 +1047,37 @@ std::vector<std::shared_ptr<MultisampleTarget>>& targets() {
     return list;
 }
 
+void retireReusedTargets(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return;
+    std::vector<std::shared_ptr<std::atomic<bool>>> reused;
+    {
+        std::shared_lock lock(guardedMutex());
+        for (const auto& range : guarded()) {
+            if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
+            if (range.use->claimed.load(std::memory_order_acquire)) {
+                reused.push_back(range.active);
+                continue;
+            }
+            if (range.metadataValid) continue;
+            const auto used = range.use->writes.load(std::memory_order_acquire);
+            const auto begin = std::max(address, range.address);
+            const auto overlap = static_cast<std::size_t>(std::min(address + bytes, range.address + range.bytes) - begin);
+            if (used != 0 && GuestMemory::Watched(begin, overlap) && !GuestMemory::UnchangedSinceCollected(begin, overlap, used)) reused.push_back(range.active);
+        }
+    }
+    if (!reused.empty()) {
+        const auto retired = [&](const GuardedRange& range) { return std::find(reused.begin(), reused.end(), range.active) != reused.end(); };
+        std::unique_lock lock(guardedMutex());
+        for (const auto& range : guarded()) {
+            if (!retired(range)) continue;
+            range.active->store(false, std::memory_order_release);
+            if (range.metadataValid) range.metadataValid->store(false, std::memory_order_release);
+        }
+        std::erase_if(guarded(), retired);
+        anyGuarded().store(!guarded().empty(), std::memory_order_release);
+    }
+}
+
 void discardRetiredTargets() {
     std::erase_if(targets(), [](const auto& target) { return !target->active->load(std::memory_order_acquire); });
 }
@@ -1522,7 +1553,15 @@ MultisampleColorSnapshot ReadMultisampleTargetColorSnapshot_nid_no_patch(const C
 void PublishMultisampleTargetColor_nid_no_patch(const Context& context, const ColorTarget& target) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
     const auto owner = snapshotTarget(context, target);
+    const auto retireReusedOwner = [&] {
+        retireReusedTargets(target.address, static_cast<std::size_t>(owner->colorBytes));
+        if (owner->active->load(std::memory_order_acquire)) return false;
+        UpdateResidentImageUnmapObserver_nid_no_patch();
+        return true;
+    };
+    if (retireReusedOwner()) return;
     const auto snapshot = owner->ColorSnapshot();
+    if (retireReusedOwner()) return;
     const auto bytes = snapshot.current.size();
     Require(bytes <= std::numeric_limits<std::uint64_t>::max() - target.address, "guest color publication range overflows");
     RequireNoResidentDepthRead_nid_no_patch(target.address, bytes);
@@ -1697,33 +1736,7 @@ void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const 
 
 void RequireNoMultisampleColorTarget(std::uint64_t address, std::size_t bytes, const char* access) {
     if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return;
-    std::vector<std::shared_ptr<std::atomic<bool>>> reused;
-    {
-        std::shared_lock lock(guardedMutex());
-        for (const auto& range : guarded()) {
-            if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
-            if (range.use->claimed.load(std::memory_order_acquire)) {
-                reused.push_back(range.active);
-                continue;
-            }
-            if (range.metadataValid) continue;
-            const auto used = range.use->writes.load(std::memory_order_acquire);
-            const auto begin = std::max(address, range.address);
-            const auto overlap = static_cast<std::size_t>(std::min(address + bytes, range.address + range.bytes) - begin);
-            if (used != 0 && GuestMemory::Watched(begin, overlap) && !GuestMemory::UnchangedSinceCollected(begin, overlap, used)) reused.push_back(range.active);
-        }
-    }
-    if (!reused.empty()) {
-        const auto retired = [&](const GuardedRange& range) { return std::find(reused.begin(), reused.end(), range.active) != reused.end(); };
-        std::unique_lock lock(guardedMutex());
-        for (const auto& range : guarded()) {
-            if (!retired(range)) continue;
-            range.active->store(false, std::memory_order_release);
-            if (range.metadataValid) range.metadataValid->store(false, std::memory_order_release);
-        }
-        std::erase_if(guarded(), retired);
-        anyGuarded().store(!guarded().empty(), std::memory_order_release);
-    }
+    retireReusedTargets(address, bytes);
     std::shared_lock lock(guardedMutex());
     for (const auto& range : guarded()) {
         if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
