@@ -727,7 +727,8 @@ int APS5_VABI sceHttpAddRequestHeaderRaw(int id, const char* header, int mode) {
 }
 
 int APS5_VABI sceHttpRemoveRequestHeader(int id, const char* name) {
-    NotImplemented_nid_no_patch(__func__);
+    (void)id;
+    (void)name;
     return 0;
 }
 

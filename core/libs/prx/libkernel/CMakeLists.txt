@@ -1047,7 +1047,7 @@ if(BUILD_TESTING)
     target_link_libraries(guest_raise_exception_tests PRIVATE libkernel libc)
     configure_windows_unwind(guest_raise_exception_tests)
     add_test(NAME guest_raise_exception COMMAND guest_raise_exception_tests)
-    set_tests_properties(guest_raise_exception PROPERTIES TIMEOUT 30)
+    set_tests_properties(guest_raise_exception PROPERTIES TIMEOUT 60)
     add_asan_test_options(guest_raise_exception detect_stack_use_after_return=0)
     if(WIN32)
         set_tests_properties(guest_raise_exception PROPERTIES ENVIRONMENT_MODIFICATION

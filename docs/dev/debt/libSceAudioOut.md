@@ -99,7 +99,7 @@
 - [sceAudioOut2GetTvCorrectionInfo](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2GetIpcHandle](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2GetSystemStateEx](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
-- [sceAudioOut2MasteringInitEx](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
+- [sceAudioOut2MasteringInitEx](../../../core/libs/prx/libSceAudioOut/src/AudioOut2Mastering.cpp) (libSceAudioOut) accepts only flag bit 31, following the shared Init/InitEx validation routine in the decrypted PS5 12.00 `libSceAudioOut` analyzed for #9027. The mode is not applied because this implementation has no mastering stage; other firmware versions are unverified.
 - [sceAudioOut2SetDebugHeadphoneMode](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2DebugStateCtrl](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature
 - [sceAudioOut2ContextBedWrite](../../../core/libs/prx/libSceAudioOut/src/Unimplemented.cpp) (libSceAudioOut) - unknown signature

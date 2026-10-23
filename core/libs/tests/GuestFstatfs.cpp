@@ -124,9 +124,7 @@ int main() {
 
     RequireFailure(-1, GuestEbadf);
     Require(close_nid_postfix(file) == 0);
-#ifndef _WIN32
     RequireFailure(file, GuestEbadf);
-#endif
 
     std::filesystem::remove_all(root);
 }

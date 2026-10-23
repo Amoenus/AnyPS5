@@ -569,6 +569,23 @@ int APS5_VABI fchmodat_nid_postfix(int fd, const char* path, int mode, int flag)
     return 0;
 }
 
+int APS5_VABI lchmod_nid_postfix(const char* path, std::uint16_t mode) {
+#ifndef __APPLE__
+    std::filesystem::path native;
+    if (path != nullptr && *path != '\0' && ResolvePathError_nid_no_patch(path, native) == 0) {
+#ifdef _WIN32
+        const DWORD attributes = GetFileAttributesW(native.wstring().c_str());
+        const bool symbolic = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+        std::error_code status;
+        const bool symbolic = std::filesystem::is_symlink(std::filesystem::symlink_status(native, status));
+#endif
+        if (symbolic) NotImplemented_nid_no_patch("lchmod: the mode of a symbolic link on a host that cannot change it");
+    }
+#endif
+    return fchmodat_nid_postfix(GuestAtFdcwd, path, mode, GuestAtSymlinkNofollow);
+}
+
 int APS5_VABI fchown_nid_postfix(int fd, std::uint32_t uid, std::uint32_t gid) {
     constexpr std::uint32_t Unchanged = 0xFFFFFFFFu;
     if (uid != 0 && uid != Unchanged) NotImplemented_nid_no_patch("fchown: an owner other than the guest user");

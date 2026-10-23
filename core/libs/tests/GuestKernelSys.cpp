@@ -59,6 +59,7 @@ std::int64_t APS5_VABI readlinkat_nid_postfix(int, const char*, char*, std::size
 int APS5_VABI mkdirat_nid_postfix(int, const char*, std::uint16_t);
 int APS5_VABI renameat_nid_postfix(int, const char*, int, const char*);
 int APS5_VABI fchmodat_nid_postfix(int, const char*, int, int);
+int APS5_VABI lchmod_nid_postfix(const char*, std::uint16_t);
 int APS5_VABI fchown_nid_postfix(int, std::uint32_t, std::uint32_t);
 int APS5_VABI fstatat_nid_postfix(int, const char*, FileStat*, int);
 std::int64_t APS5_VABI sceKernelRead(int, void*, std::size_t);
@@ -724,6 +725,38 @@ int main() {
     Require(symlink_nid_postfix("loop", (root / "loop").string().c_str()) == 0);
     Require(fchmodat_nid_postfix(base, "loop/x", 0600, 0) == -1 && Error() == 62);
     Require(fchmodat_nid_postfix(base, longName.c_str(), 0600, 0) == -1 && Error() == 63);
+#endif
+    const auto modeFile = (root / "file.txt").string();
+#ifndef _WIN32
+    const auto ownerOnly = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write;
+    const auto readable = ownerOnly | std::filesystem::perms::group_read | std::filesystem::perms::others_read;
+#endif
+    Require(lchmod_nid_postfix(modeFile.c_str(), 0600) == 0);
+#ifndef _WIN32
+    Require((std::filesystem::status(modeFile).permissions() & std::filesystem::perms::all) == ownerOnly);
+#endif
+    Require(lchmod_nid_postfix(guestFile.c_str(), 0100644) == 0);
+#ifndef _WIN32
+    Require((std::filesystem::status(modeFile).permissions() & std::filesystem::perms::all) == readable);
+#endif
+    Require(lchmod_nid_postfix((root / "missing.bin").string().c_str(), 0600) == -1 && Error() == 2);
+    Require(lchmod_nid_postfix(nullptr, 0600) == -1 && Error() == 14);
+    Require(lchmod_nid_postfix("", 0600) == -1 && Error() == 2);
+#ifndef _WIN32
+    Require(lchmod_nid_postfix((root / "loop" / "x").string().c_str(), 0600) == -1 && Error() == 62);
+    Require(lchmod_nid_postfix((root / longName).string().c_str(), 0600) == -1 && Error() == 63);
+    const auto modeLink = (root / "mode-link.txt").string();
+    Require(symlink_nid_postfix("file.txt", modeLink.c_str()) == 0);
+#ifdef __APPLE__
+    Require(lchmod_nid_postfix(modeLink.c_str(), 0600) == 0);
+    Require((std::filesystem::symlink_status(modeLink).permissions() & std::filesystem::perms::all) == ownerOnly);
+#else
+    bool lchmodThrew = false;
+    try { lchmod_nid_postfix(modeLink.c_str(), 0600); } catch (const std::exception&) { lchmodThrew = true; }
+    Require(lchmodThrew);
+#endif
+    Require((std::filesystem::status(modeFile).permissions() & std::filesystem::perms::all) == readable);
+    Require(RemoveSymlink(modeLink));
 #endif
     Require(fchown_nid_postfix(base, 0, 0) == 0);
     Require(fchown_nid_postfix(base, 0xFFFFFFFFu, 0xFFFFFFFFu) == 0);

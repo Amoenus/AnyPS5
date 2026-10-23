@@ -14,6 +14,7 @@ int APS5_VABI sceAudioOut2LoInit();
 int APS5_VABI sceAudioOut2LoTerminate();
 int APS5_VABI sceAudioOut2Set3DLatency(int, std::uint32_t);
 int APS5_VABI sceAudioOut2MasteringInit(std::uint32_t);
+int APS5_VABI sceAudioOut2MasteringInitEx(std::uint32_t);
 int APS5_VABI sceAudioOut2MasteringTerm();
 int APS5_VABI sceAudioOut2MasteringSetParam(const void*, std::uint32_t, std::uint32_t);
 int APS5_VABI sceAudioOut2MasteringGetState(void*, std::uint32_t, std::uint64_t);
@@ -69,6 +70,10 @@ void TestSet3DLatency() {
 void TestMasteringInit() {
     Require(sceAudioOut2MasteringInit(0) == 0, "flags 0 must be accepted");
     Require(ThrowsRuntimeError([] { sceAudioOut2MasteringInit(1); }), "flags 1 must throw");
+    Require(sceAudioOut2MasteringInitEx(0) == 0, "InitEx flags 0 must be accepted");
+    Require(sceAudioOut2MasteringInitEx(0x80000000u) == 0, "InitEx flag bit 31 must be accepted");
+    Require(ThrowsRuntimeError([] { sceAudioOut2MasteringInitEx(1); }), "InitEx flag bit 0 must throw");
+    Require(ThrowsRuntimeError([] { sceAudioOut2MasteringInitEx(0x40000000u); }), "InitEx flag bit 30 must throw");
 }
 
 void TestMasteringTerm() {

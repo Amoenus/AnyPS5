@@ -33,6 +33,8 @@ int APS5_VABI sceHttpsEnableOptionPrivate(int, std::uint32_t);
 int APS5_VABI sceHttpsDisableOptionPrivate(int, std::uint32_t);
 int APS5_VABI sceHttpAbortRequestForce(int);
 int APS5_VABI sceHttpSetProxy(int, int, int, const char*, std::uint16_t);
+int APS5_VABI sceHttpAddRequestHeader(int, const char*, const char*, std::uint32_t);
+int APS5_VABI sceHttpRemoveRequestHeader(int, const char*);
 }
 
 namespace {
@@ -163,6 +165,8 @@ void CheckUnobservedOptions(int context) {
     const int pattern = sceHttpCreateTemplate(context, "anyps5-test", 2, 0);
     const int connection = sceHttpCreateConnectionWithURL(pattern, "http://example.com/", 1);
     const int request = sceHttpCreateRequestWithURL(connection, 0, "http://example.com/a", 0);
+    Require(sceHttpAddRequestHeader(request, "X-Test", "value", 0) == 0 && sceHttpRemoveRequestHeader(request, "X-Test") == 0, "offline request header calls failed");
+    Require(sceHttpRemoveRequestHeader(UnknownId, nullptr) == 0, "offline header removal started validating arguments");
     Require(sceHttpCacheRedirectedConnectionEnabled(pattern, 0) == 0 && sceHttpCacheRedirectedConnectionEnabled(request, 1) == 0, "sceHttpCacheRedirectedConnectionEnabled refused a live object");
     Require(sceHttpCacheRedirectedConnectionEnabled(UnknownId, 1) == InvalidId, "sceHttpCacheRedirectedConnectionEnabled took an unknown id");
     for (const auto option : {sceHttpsEnableOptionPrivate, sceHttpsDisableOptionPrivate}) {
