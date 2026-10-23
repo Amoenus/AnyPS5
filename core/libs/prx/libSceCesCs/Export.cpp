@@ -664,6 +664,70 @@ int bufferToJapanese(bool (*matches)(const void*), const Source* source, uint32_
     return 0;
 }
 
+int decodeUtf32(const uint32_t* utf32, uint32_t, uint32_t& length, uint32_t& code) {
+    length = 1;
+    code = utf32[0];
+    return isScalar(code) ? 0 : CES_ERROR_INVALID_ENCODE;
+}
+
+uint32_t encodeUtf32(uint32_t code, uint32_t* utf32) {
+    utf32[0] = code;
+    return 1;
+}
+
+int sbcToUnit(const uint8_t* profile, uint8_t sbc, const void* target, uint32_t& code) {
+    if (!isSbc(profile)) return CES_ERROR_INVALID_PARAMETER;
+    if (!target) return CES_ERROR_INVALID_DST_BUFFER;
+    code = sbcToUnicode(profile, sbc);
+    return 0;
+}
+
+template<bool BigEndian>
+int sbcToUtf16(const uint8_t* profile, uint8_t sbc, uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len) {
+    uint32_t code = 0;
+    if (const int result = sbcToUnit(profile, sbc, utf16, code); result != 0) return result;
+    if (utf16max < 1) return CES_ERROR_DST_BUFFER_END;
+    storeUnit<uint16_t, BigEndian>(utf16, code);
+    if (utf16Len) *utf16Len = 1;
+    return 0;
+}
+
+template<bool BigEndian>
+int sbcToUtf32(const uint8_t* profile, uint8_t sbc, uint32_t* utf32) {
+    uint32_t code = 0;
+    if (const int result = sbcToUnit(profile, sbc, utf32, code); result != 0) return result;
+    storeUnit<uint32_t, BigEndian>(utf32, code);
+    return 0;
+}
+
+int scalarToSbc(uint32_t code, const uint8_t* profile, uint8_t* sbc) {
+    if (!isSbc(profile)) return CES_ERROR_INVALID_PARAMETER;
+    if (!sbc) return CES_ERROR_INVALID_DST_BUFFER;
+    if (!isScalar(code)) return CES_ERROR_INVALID_ENCODE;
+    return unicodeToSbc(profile, code, *sbc) ? 0 : CES_ERROR_UNASSIGNED_CODE;
+}
+
+template<bool BigEndian>
+int utf16ToSbc(const uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len, const uint8_t* profile, uint8_t* sbc) {
+    if (!isSbc(profile)) return CES_ERROR_INVALID_PARAMETER;
+    if (!utf16) return CES_ERROR_INVALID_SRC_BUFFER;
+    if (utf16max == 0) return CES_ERROR_SRC_BUFFER_END;
+    if (!sbc) return CES_ERROR_INVALID_DST_BUFFER;
+    uint32_t length = 0;
+    uint32_t code = 0;
+    if (const int result = decodeUtf16<BigEndian>(utf16, utf16max, length, code); result != 0) return result;
+    if (!unicodeToSbc(profile, code, *sbc)) return CES_ERROR_UNASSIGNED_CODE;
+    if (utf16Len) *utf16Len = length;
+    return 0;
+}
+
+template<bool BigEndian>
+int utf32ToSbc(const uint32_t* utf32, const uint8_t* profile, uint8_t* sbc) {
+    if (!isSbc(profile)) return CES_ERROR_INVALID_PARAMETER;
+    if (!utf32) return CES_ERROR_INVALID_SRC_BUFFER;
+    return scalarToSbc(loadUnit<uint32_t, BigEndian>(utf32), profile, sbc);
+}
+
 }
 
 extern "C" {
@@ -1066,6 +1130,101 @@ int APS5_VABI sceCesJisX0208ToSJisCode(uint8_t ku, uint8_t ten, uint16_t* sjisCo
     jisToSjis(ku, ten, lead, trail);
     *sjisCode = static_cast<uint16_t>(lead << 8 | trail);
     return 0;
+}
+
+int APS5_VABI sceCesSbcToUcs2(const uint8_t* profile, uint8_t sbc, uint16_t* ucs2) {
+    uint32_t code = 0;
+    if (const int result = sbcToUnit(profile, sbc, ucs2, code); result != 0) return result;
+    *ucs2 = static_cast<uint16_t>(code);
+    return 0;
+}
+
+int APS5_VABI sceCesSbcToUtf16(const uint8_t* profile, uint8_t sbc, uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len) {
+    return sbcToUtf16<NATIVE_BIG_ENDIAN>(profile, sbc, utf16, utf16max, utf16Len);
+}
+
+int APS5_VABI sceCesSbcToUtf16be(const uint8_t* profile, uint8_t sbc, uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len) {
+    return sbcToUtf16<true>(profile, sbc, utf16, utf16max, utf16Len);
+}
+
+int APS5_VABI sceCesSbcToUtf16le(const uint8_t* profile, uint8_t sbc, uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len) {
+    return sbcToUtf16<false>(profile, sbc, utf16, utf16max, utf16Len);
+}
+
+int APS5_VABI sceCesSbcToUtf32(const uint8_t* profile, uint8_t sbc, uint32_t* utf32) {
+    return sbcToUtf32<NATIVE_BIG_ENDIAN>(profile, sbc, utf32);
+}
+
+int APS5_VABI sceCesSbcToUtf32be(const uint8_t* profile, uint8_t sbc, uint32_t* utf32) {
+    return sbcToUtf32<true>(profile, sbc, utf32);
+}
+
+int APS5_VABI sceCesSbcToUtf32le(const uint8_t* profile, uint8_t sbc, uint32_t* utf32) {
+    return sbcToUtf32<false>(profile, sbc, utf32);
+}
+
+int APS5_VABI sceCesUcs2ToSbc(uint16_t ucs2, const uint8_t* profile, uint8_t* sbc) {
+    return scalarToSbc(ucs2, profile, sbc);
+}
+
+int APS5_VABI sceCesUtf16ToSbc(const uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len, const uint8_t* profile, uint8_t* sbc) {
+    return utf16ToSbc<NATIVE_BIG_ENDIAN>(utf16, utf16max, utf16Len, profile, sbc);
+}
+
+int APS5_VABI sceCesUtf16beToSbc(const uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len, const uint8_t* profile, uint8_t* sbc) {
+    return utf16ToSbc<true>(utf16, utf16max, utf16Len, profile, sbc);
+}
+
+int APS5_VABI sceCesUtf16leToSbc(const uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len, const uint8_t* profile, uint8_t* sbc) {
+    return utf16ToSbc<false>(utf16, utf16max, utf16Len, profile, sbc);
+}
+
+int APS5_VABI sceCesUtf32ToSbc(uint32_t utf32, const uint8_t* profile, uint8_t* sbc) {
+    return scalarToSbc(utf32, profile, sbc);
+}
+
+int APS5_VABI sceCesUtf32beToSbc(const uint32_t* utf32, const uint8_t* profile, uint8_t* sbc) {
+    return utf32ToSbc<true>(utf32, profile, sbc);
+}
+
+int APS5_VABI sceCesUtf32leToSbc(const uint32_t* utf32, const uint8_t* profile, uint8_t* sbc) {
+    return utf32ToSbc<false>(utf32, profile, sbc);
+}
+
+int APS5_VABI sceCesUtf16StrToMbcsStr(void* context, const uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len, uint8_t* mbcs, uint32_t mbcsMax, uint32_t* mbcsLen) {
+    if (!mbcs) return CES_ERROR_INVALID_DST_BUFFER;
+    return toMbcs(context, utf16, utf16max, utf16Len, mbcs, mbcsMax, mbcsLen, decodeUtf16<NATIVE_BIG_ENDIAN>);
+}
+
+int APS5_VABI sceCesUtf16StrGetMbcsLen(void* context, const uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len, uint32_t* mbcsLen) {
+    return toMbcs(context, utf16, utf16max, utf16Len, static_cast<uint8_t*>(nullptr), 0, mbcsLen, decodeUtf16<NATIVE_BIG_ENDIAN>);
+}
+
+int APS5_VABI sceCesMbcsStrToUtf16Str(void* context, const uint8_t* mbcs, uint32_t mbcsMax, uint32_t* mbcsLen, uint16_t* utf16, uint32_t utf16max, uint32_t* utf16Len) {
+    if (!utf16) return CES_ERROR_INVALID_DST_BUFFER;
+    return fromMbcs(context, mbcs, mbcsMax, mbcsLen, utf16, utf16max, utf16Len, encodeUcs2);
+}
+
+int APS5_VABI sceCesMbcsStrGetUtf16Len(void* context, const uint8_t* mbcs, uint32_t mbcsMax, uint32_t* mbcsLen, uint32_t* utf16Len) {
+    return fromMbcs(context, mbcs, mbcsMax, mbcsLen, static_cast<uint16_t*>(nullptr), 0, utf16Len, encodeUcs2);
+}
+
+int APS5_VABI sceCesUtf32StrToMbcsStr(void* context, const uint32_t* utf32, uint32_t utf32max, uint32_t* utf32Len, uint8_t* mbcs, uint32_t mbcsMax, uint32_t* mbcsLen) {
+    if (!mbcs) return CES_ERROR_INVALID_DST_BUFFER;
+    return toMbcs(context, utf32, utf32max, utf32Len, mbcs, mbcsMax, mbcsLen, decodeUtf32);
+}
+
+int APS5_VABI sceCesUtf32StrGetMbcsLen(void* context, const uint32_t* utf32, uint32_t utf32max, uint32_t* utf32Len, uint32_t* mbcsLen) {
+    return toMbcs(context, utf32, utf32max, utf32Len, static_cast<uint8_t*>(nullptr), 0, mbcsLen, decodeUtf32);
+}
+
+int APS5_VABI sceCesMbcsStrToUtf32Str(void* context, const uint8_t* mbcs, uint32_t mbcsMax, uint32_t* mbcsLen, uint32_t* utf32, uint32_t utf32max, uint32_t* utf32Len) {
+    if (!utf32) return CES_ERROR_INVALID_DST_BUFFER;
+    return fromMbcs(context, mbcs, mbcsMax, mbcsLen, utf32, utf32max, utf32Len, encodeUtf32);
+}
+
+int APS5_VABI sceCesMbcsStrGetUtf32Len(void* context, const uint8_t* mbcs, uint32_t mbcsMax, uint32_t* mbcsLen, uint32_t* utf32Len) {
+    return fromMbcs(context, mbcs, mbcsMax, mbcsLen, static_cast<uint32_t*>(nullptr), 0, utf32Len, encodeUtf32);
 }
 
 }

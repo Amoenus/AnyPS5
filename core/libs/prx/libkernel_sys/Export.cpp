@@ -11,6 +11,7 @@
 #include <string_view>
 #include <system_error>
 #include <sys/stat.h>
+#include <ctime>
 #ifndef _WIN32
 #include <cerrno>
 #include <fcntl.h>
@@ -22,11 +23,13 @@
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
+#include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 #include "prx/libkernel/File/include/DescriptorControl.hpp"
 #include "prx/libc/include/CreationMask.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
-#include "prx/libkernel/KernelErrors.hpp"
+extern "C" int APS5_VABI getpid_nid_postfix(void);
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -625,6 +628,16 @@ int APS5_VABI fchown_nid_postfix(int fd, std::uint32_t uid, std::uint32_t gid) {
     return 0;
 }
 
+int APS5_VABI sched_rr_get_interval_nid_postfix(int pid, KernelTimespec* interval) {
+    constexpr int GuestEsrch = 3;
+    const int self = getpid_nid_postfix();
+    if (pid != 0 && pid != self) return static_cast<int>(Fail(GuestEsrch));
+    if (interval == nullptr) return static_cast<int>(Fail(GuestEfault));
+    interval->tv_sec = 0;
+    interval->tv_nsec = 94000000;
+    return 0;
+}
+
 int APS5_VABI stat_nid_postfix(const char* path, FileStat* sb);
 int APS5_VABI lstat_nid_postfix(const char* path, FileStat* sb);
 
@@ -709,6 +722,13 @@ int APS5_VABI unlinkat_nid_postfix(int fd, const char* path, int flag) {
 #endif
     }
     RecordWrittenPath_nid_no_patch(native);
+    return 0;
+}
+
+int APS5_VABI scePthreadCondattrGetclock(const PthreadCondattr* attr, KernelClockid* clockId) {
+    if (!attr || !*attr) return SCE_KERNEL_ERROR_EINVAL;
+    if (!clockId) throw std::runtime_error("scePthreadCondattrGetclock: null clock id");
+    *clockId = (*attr)->_clockid;
     return 0;
 }
 

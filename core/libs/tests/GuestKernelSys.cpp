@@ -2,6 +2,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/RemoveTree.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include "SceTypes.hpp"
 #include <array>
 #include <chrono>
@@ -66,6 +67,10 @@ int APS5_VABI fchown_nid_postfix(int, std::uint32_t, std::uint32_t);
 int APS5_VABI fstatat_nid_postfix(int, const char*, FileStat*, int);
 std::int64_t APS5_VABI sceKernelRead(int, void*, std::size_t);
 std::uint16_t APS5_VABI umask_nid_postfix(std::uint16_t);
+int APS5_VABI scePthreadCondattrInit(PthreadCondattr*);
+int APS5_VABI scePthreadCondattrDestroy(PthreadCondattr*);
+int APS5_VABI scePthreadCondattrSetclock(PthreadCondattr*, KernelClockid);
+int APS5_VABI scePthreadCondattrGetclock(const PthreadCondattr*, KernelClockid*);
 int* APS5_VABI __error_nid_postfix();
 }
 
@@ -147,6 +152,26 @@ void CheckSymlinkTargetRestrictions(const std::filesystem::path& root) {
         Require(link == -1 && Error() == 1);
         std::fprintf(stderr, "symbolic links unavailable: the symlink target success cases not tested\n");
     }
+}
+
+void CheckCondattrClock() {
+    constexpr KernelClockid Realtime = 0;
+    constexpr KernelClockid Monotonic = 4;
+    PthreadCondattr attr = nullptr;
+    KernelClockid clock = -1;
+    Require(scePthreadCondattrGetclock(nullptr, &clock) == SCE_KERNEL_ERROR_EINVAL && clock == -1);
+    Require(scePthreadCondattrGetclock(nullptr, nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(scePthreadCondattrGetclock(&attr, &clock) == SCE_KERNEL_ERROR_EINVAL && clock == -1);
+    Require(scePthreadCondattrInit(&attr) == 0 && attr != nullptr);
+    Require(scePthreadCondattrGetclock(&attr, &clock) == 0 && clock == Realtime);
+    Require(scePthreadCondattrSetclock(&attr, Monotonic) == 0);
+    Require(scePthreadCondattrGetclock(&attr, &clock) == 0 && clock == Monotonic);
+    bool getclockThrew = false;
+    try { scePthreadCondattrGetclock(&attr, nullptr); } catch (const std::runtime_error&) { getclockThrew = true; }
+    Require(getclockThrew);
+    Require(scePthreadCondattrDestroy(&attr) == 0 && attr == nullptr);
+    clock = -1;
+    Require(scePthreadCondattrGetclock(&attr, &clock) == SCE_KERNEL_ERROR_EINVAL && clock == -1);
 }
 
 void CheckPathconf(const std::filesystem::path& root, const std::string& file) {
@@ -273,6 +298,7 @@ int main() {
     Require(umask_nid_postfix(0) == 022);
     Require(umask_nid_postfix(07777) == 0);
     Require(umask_nid_postfix(022) == 07777);
+    CheckCondattrClock();
     const auto root = std::filesystem::path("anyps5-kernel-sys-test-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Require(std::filesystem::create_directory(root));
