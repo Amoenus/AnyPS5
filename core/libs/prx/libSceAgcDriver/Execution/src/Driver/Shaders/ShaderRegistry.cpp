@@ -1146,9 +1146,8 @@ public:
             Closing() = true;
             pools = {Existing(), ExistingPrebuild()};
         }
-        for (auto* pool : pools) {
-            if (pool != nullptr) pool->Close();
-        }
+        if (pools[0] != nullptr) pools[0]->Close(false);
+        if (pools[1] != nullptr) pools[1]->Close(true);
     }
 
 private:
@@ -1204,11 +1203,17 @@ public:
         idle.wait(lock, [&] { return unfinished.empty() || *unfinished.begin() > ticket; });
     }
 
-    void Close() {
+    void Close(bool dropQueued) {
         std::vector<Worker> joined;
+        std::deque<Task> dropped;
         {
             std::unique_lock lock(mutex);
             closed = true;
+            if (dropQueued) {
+                dropped.swap(tasks);
+                for (const auto& task : dropped) unfinished.erase(task.sequence);
+                idle.notify_all();
+            }
             idle.wait(lock, [&] { return tasks.empty() && running == 0; });
             joined.swap(workers);
         }
@@ -1435,7 +1440,10 @@ std::vector<PreparedGraphicsStage> PrepareGraphicsStages(const DrawDecode& decod
             prepared.push_back({program.snapshot, {program.codeOffset, nullptr}, program.binary.stage, offset, nullptr});
             continue;
         }
-        if (vertex) vertex->paClVsOutCntl = PositionExportLayout(program.snapshot.get(), program.codeOffset, program.binary.code, decoded.state.paClVsOutCntl, program.tailContinuation.get()) | decoded.state.layerExports;
+        if (vertex) {
+            vertex->paClVsOutCntl = PositionExportLayout(program.snapshot.get(), program.codeOffset, program.binary.code, decoded.state.paClVsOutCntl, program.tailContinuation.get()) | decoded.state.layerExports;
+            Graphics::ApplyPointSize(decoded.state, *vertex);
+        }
         ShaderRecompiler::RecompileRequest request{program.binary, {wave, program.firstUserSgpr, program.userData, {}, fragment ? std::optional(decoded.pixel) : std::nullopt, vertex, memory, RegisteredFloatMode(*program.snapshot)}, target, {0, 0, offset, room}, ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, decoded.state.stages.mesh, decoded.state.stages.tessellation, {}}};
         std::vector<std::uint64_t> key;
         ShaderRecompiler::BuildPreparedShaderKey(request, key);

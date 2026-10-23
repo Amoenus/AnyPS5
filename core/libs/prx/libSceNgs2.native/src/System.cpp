@@ -212,13 +212,15 @@ static Ngs2SystemOption DefaultSystemOption() {
     option.max_grain_samples = 512;
     option.num_grain_samples = 256;
     option.sample_rate = 48000;
+    option.max_voice_channels = 8;
     return option;
 }
 
 static Ngs2SystemOption CheckedSystemOption(const Ngs2SystemOption* option) {
     if (option == nullptr) return DefaultSystemOption();
     if (option->size != sizeof(Ngs2SystemOption)) throw std::invalid_argument("NGS2: unexpected system option size " + std::to_string(option->size));
-    if (option->flags != 0) throw std::runtime_error("NGS2: system option flags are not implemented");
+    constexpr std::uint32_t knownFlags = 0x2;
+    if ((option->flags & ~knownFlags) != 0) throw std::runtime_error("NGS2: system option flags " + Ngs2Hex(option->flags) + " are not implemented");
     if (option->sample_rate == 0 || option->max_grain_samples < MIN_GRAIN_SAMPLES || option->num_grain_samples == 0 ||
         option->num_grain_samples > option->max_grain_samples) {
         throw std::invalid_argument("NGS2: invalid system grain or sample rate");
@@ -422,7 +424,7 @@ int APS5_VABI sceNgs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuffe
 }
 
 int APS5_VABI sceNgs2SystemResetOption(Ngs2SystemOption* option) {
-    if (option == nullptr) APS5_INVALID_ARG_EX;
+    if (option == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
     *option = DefaultSystemOption();
     return SCE_NGS2_OK;
 }

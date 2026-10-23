@@ -214,6 +214,10 @@ struct ShaderVertexStageInfo {
     bool fetchEmbedded;
     std::uint32_t paClVsOutCntl = 0;
     std::uint32_t depthRemapMode = 0;
+    bool pointList = false;
+    float pointSize = 1.0f;
+    float pointSizeMin = 0.0f;
+    float pointSizeMax = 0.0f;
 };
 
 struct ShaderFloatMode {
@@ -377,6 +381,7 @@ struct FragmentParameter {
     bool custom = false;
     bool flatP10 = false;
     bool vertexOrder = false;
+    bool flatP20 = false;
     bool operator==(const FragmentParameter&) const = default;
 };
 
