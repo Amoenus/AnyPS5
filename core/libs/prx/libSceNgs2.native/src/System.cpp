@@ -416,7 +416,16 @@ int APS5_VABI sceNgs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuffe
         system = Ngs2FindSystem(system_handle);
     }
     if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    if (num_buffer_info > 31) return SCE_NGS2_ERROR_INVALID_NUM_RENDER_BUFFERS;
     if (buffer_info == nullptr || num_buffer_info == 0) APS5_INVALID_ARG_EX;
+    for (std::uint32_t i = 0; i < num_buffer_info; i++) {
+        const auto waveform_type = buffer_info[i].waveform_type;
+        if (waveform_type != SCE_NGS2_WAVEFORM_TYPE_PCM_I16L && waveform_type != SCE_NGS2_WAVEFORM_TYPE_PCM_I16B &&
+            waveform_type != SCE_NGS2_WAVEFORM_TYPE_PCM_F32L && waveform_type != SCE_NGS2_WAVEFORM_TYPE_PCM_F32B) {
+            return SCE_NGS2_ERROR_INVALID_WAVEFORM_TYPE;
+        }
+        if (buffer_info[i].buffer == nullptr) return SCE_NGS2_ERROR_INVALID_RENDER_BUFFER;
+    }
     SystemLockState* state = nullptr;
     {
         const auto self = std::this_thread::get_id();

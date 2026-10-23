@@ -22,6 +22,8 @@
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
+#include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 #include "prx/libkernel/File/include/DescriptorControl.hpp"
 #include "prx/libc/include/CreationMask.hpp"
@@ -709,6 +711,13 @@ int APS5_VABI unlinkat_nid_postfix(int fd, const char* path, int flag) {
 #endif
     }
     RecordWrittenPath_nid_no_patch(native);
+    return 0;
+}
+
+int APS5_VABI scePthreadCondattrGetclock(const PthreadCondattr* attr, KernelClockid* clockId) {
+    if (!attr || !*attr) return SCE_KERNEL_ERROR_EINVAL;
+    if (!clockId) throw std::runtime_error("scePthreadCondattrGetclock: null clock id");
+    *clockId = (*attr)->_clockid;
     return 0;
 }
 

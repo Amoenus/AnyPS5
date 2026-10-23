@@ -27,46 +27,6 @@ int SceResult(int error) {
 
 extern "C" {
 
-int APS5_VABI aio_cancel_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI aio_error_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI aio_fsync_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI aio_read_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI aio_return_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI aio_suspend_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI aio_waitcomplete_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI aio_write_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI amd64_set_fsbase_nid_postfix(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -2289,11 +2249,6 @@ int APS5_VABI scePthreadBarrierattrInit(void** attr) {
 
 int APS5_VABI scePthreadBarrierattrSetpshared(void** attr, int pshared) {
     return SceResult(pthread_barrierattr_setpshared_nid_postfix(attr, pshared));
-}
-
-int APS5_VABI scePthreadCondattrGetclock(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
 }
 
 int APS5_VABI scePthreadGetconcurrency(void) {
