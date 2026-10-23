@@ -619,15 +619,6 @@ std::int64_t message_length(const NetMsghdr* message) {
     return static_cast<std::int64_t>(total);
 }
 
-int receive_error(const Sock& socket) {
-#ifdef _WIN32
-    if (WSAGetLastError() == WSAETIMEDOUT && socket.type != NET_SOCK_STREAM && socket.native->receiveTimeout > 0) return NET_EAGAIN;
-#else
-    (void)socket;
-#endif
-    return native_error();
-}
-
 bool message_flags_supported(int flags, int accepted) {
     return (flags & ~accepted) == 0;
 }
@@ -655,7 +646,7 @@ auto native_transfer(const NativeSocketHandle& socket, int flags, bool send, TOp
         if (timeout > 0) {
             const auto remaining = deadline - std::chrono::steady_clock::now();
             if (remaining <= std::chrono::steady_clock::duration::zero()) {
-                WSASetLastError(completeLength > 0 ? WSAEWOULDBLOCK : WSAETIMEDOUT);
+                WSASetLastError(send && completeLength == 0 ? WSAETIMEDOUT : WSAEWOULDBLOCK);
                 return transferred > 0 ? static_cast<Result>(transferred) : static_cast<Result>(-1);
             }
             milliseconds = static_cast<int>(std::min<std::int64_t>(std::chrono::ceil<std::chrono::milliseconds>(remaining).count(), milliseconds));
@@ -1268,7 +1259,7 @@ int64_t APS5_VABI sceNetRecv(int s, void* buf, size_t len, int flags) {
 #ifdef _WIN32
     if (result < 0 && socket.type == NET_SOCK_DGRAM && WSAGetLastError() == WSAEMSGSIZE) return static_cast<int64_t>(len);
 #endif
-    return result >= 0 ? result : fail(receive_error(socket));
+    return result >= 0 ? result : fail(native_error());
 }
 
 int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* from, uint32_t* fromlen) {
@@ -1309,7 +1300,7 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
 #ifdef _WIN32
     if (result < 0 && socket.type == NET_SOCK_DGRAM && WSAGetLastError() == WSAEMSGSIZE) result = static_cast<int>(len);
 #endif
-    if (result < 0) return fail(receive_error(socket));
+    if (result < 0) return fail(native_error());
     if (from && !native_to_guest_address(peer, from, fromlen)) return fail(NET_EAFNOSUPPORT);
     return result;
 }
@@ -1427,7 +1418,7 @@ int64_t APS5_VABI sceNetRecvmsg(int s, NetMsghdr* msg, int flags) {
     });
     if (received < 0) {
 #ifdef _WIN32
-        if (!datagram || WSAGetLastError() != WSAEMSGSIZE) return fail(receive_error(socket));
+        if (!datagram || WSAGetLastError() != WSAEMSGSIZE) return fail(native_error());
         received = static_cast<std::int64_t>(buffer.size());
 #else
         return fail(native_error());
@@ -1515,6 +1506,7 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
         if (value < 0) return fail(NET_EINVAL);
         if (set_native_timeout(socket.native->value, optname, value) != 0) return fail(native_error());
     } else if (optname == NET_SO_REUSEADDR || optname == NET_SO_BROADCAST || optname == NET_SO_SNDBUF || optname == NET_SO_RCVBUF) {
+        if ((optname == NET_SO_SNDBUF || optname == NET_SO_RCVBUF) && value < 1) return fail(NET_EINVAL);
         const int native_option = optname == NET_SO_REUSEADDR ? SO_REUSEADDR : optname == NET_SO_BROADCAST ? SO_BROADCAST : optname == NET_SO_SNDBUF ? SO_SNDBUF : SO_RCVBUF;
         if (::setsockopt(socket.native->value, SOL_SOCKET, native_option, reinterpret_cast<const char*>(&value), sizeof(value)) != 0)
             return fail(native_error());
@@ -2482,12 +2474,11 @@ int APS5_VABI sceNetIoctl(int socketId, std::uint32_t command, void* argument) {
 
 void* APS5_VABI sceNetMemoryAllocate(std::int32_t size, int flags) {
     constexpr int zeroFill = 2;
+    constexpr std::size_t blockAlignment = 64;
     if (size <= 0) return nullptr;
-    if ((flags & 4) != 0)
-        throw std::runtime_error("sceNetMemoryAllocate: pool reserve allocation is not implemented");
     void* memory = nullptr;
     try {
-        memory = GuestHeap::GuestHeapAllocate_nid_postfix(static_cast<std::size_t>(size));
+        memory = GuestHeap::GuestHeapAlign_nid_postfix(blockAlignment, static_cast<std::size_t>(size));
     } catch (const std::bad_alloc&) {
         return nullptr;
     } catch (const std::length_error&) {

@@ -263,6 +263,8 @@ bool libraryKeys(PipelineLibraryKeys& keys, const Context& context, const State&
     appendKey(keys.fragmentOutput, state.perSampleShading);
     appendKey(keys.fragmentShader, state.mergedCoverage);
     appendKey(keys.fragmentOutput, state.mergedCoverage);
+    appendKey(keys.fragmentShader, state.truncatedCoverage);
+    appendKey(keys.fragmentOutput, state.truncatedCoverage);
     const auto sampleLocationsEnabled = ValidateSampleLocations(context, state);
     appendKey(keys.fragmentShader, sampleLocationsEnabled);
     appendKey(keys.fragmentOutput, sampleLocationsEnabled);
@@ -345,6 +347,8 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
     Require(!state.negativeOneToOne || context.depthClipControl, "negative-one-to-one depth clipping requires VK_EXT_depth_clip_control with depthClipControl enabled");
     Require(!state.perSampleShading || context.sampleRateShading, "per-sample pixel shading requires the sampleRateShading device feature");
     Require(!state.mergedCoverage || (context.mergedCoverageSampleCounts & state.samples) != 0, "an overrasterized draw (a multisampled rasterizer into one-sample color targets) requires VK_NV_framebuffer_mixed_samples with merged coverage reduction");
+    Require(!(state.vertexPoints || (state.stages.mesh.has_value() && state.stages.mesh->outputPrimitiveSize == 1u)) || context.largePoints || (state.pointSize == 1.0f && ((state.paClVsOutCntl & (1u << 16u)) == 0 || (state.pointSizeMin == 1.0f && state.pointSizeMax == 1.0f))), "points of a size other than one pixel require the largePoints device feature");
+    Require(!state.truncatedCoverage || (context.truncatedCoverageSampleCounts & state.samples) != 0, "one-sample color targets beside a multisampled depth target require VK_AMD_mixed_attachment_samples or VK_NV_framebuffer_mixed_samples with truncated coverage reduction");
     Require(state.conservativeRasterization == VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT || context.conservativeRasterization, "conservative rasterization requires VK_EXT_conservative_rasterization with at most 1/256 pixel of overestimation and degenerate triangles rasterized");
     ValidateProvokingVertex(context, state, shaders);
     if (state.rectList) Require(context.tessellationShader && context.limits.maxTessellationPatchSize >= 4, "rect-list requires tessellation with four output control points");
@@ -407,7 +411,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         for (std::uint32_t index = 0; index < state.colors.size(); ++index) {
             VkAttachmentDescription color{};
             color.format = state.colors[index].format;
-            color.samples = state.mergedCoverage ? VK_SAMPLE_COUNT_1_BIT : static_cast<VkSampleCountFlagBits>(state.samples);
+            color.samples = state.mergedCoverage || state.truncatedCoverage ? VK_SAMPLE_COUNT_1_BIT : static_cast<VkSampleCountFlagBits>(state.samples);
             color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
             color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -444,7 +448,8 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         VkAttachmentSampleCountInfoNV attachmentSamples{VK_STRUCTURE_TYPE_ATTACHMENT_SAMPLE_COUNT_INFO_NV};
         attachmentSamples.colorAttachmentCount = static_cast<std::uint32_t>(mergedColorSamples.size());
         attachmentSamples.pColorAttachmentSamples = mergedColorSamples.empty() ? nullptr : mergedColorSamples.data();
-        if (state.mergedCoverage) rendering.pNext = &attachmentSamples;
+        if (state.truncatedCoverage) attachmentSamples.depthStencilAttachmentSamples = static_cast<VkSampleCountFlagBits>(state.samples);
+        if (state.mergedCoverage || state.truncatedCoverage) rendering.pNext = &attachmentSamples;
         if (state.depth) {
             rendering.depthAttachmentFormat = HostDepthFormat(context, state.depth->format);
             if (HasStencil(state.depth->format)) rendering.stencilAttachmentFormat = rendering.depthAttachmentFormat;
@@ -518,8 +523,8 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         sampleLocations.sampleLocationsInfo = {VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT, nullptr, samples.rasterizationSamples, grid, state.samples * grid.width * grid.height, locations.data()};
         if (sampleLocationsEnabled) samples.pNext = &sampleLocations;
         VkPipelineCoverageReductionStateCreateInfoNV coverageReduction{VK_STRUCTURE_TYPE_PIPELINE_COVERAGE_REDUCTION_STATE_CREATE_INFO_NV};
-        coverageReduction.coverageReductionMode = VK_COVERAGE_REDUCTION_MODE_MERGE_NV;
-        if (state.mergedCoverage) {
+        coverageReduction.coverageReductionMode = state.truncatedCoverage ? VK_COVERAGE_REDUCTION_MODE_TRUNCATE_NV : VK_COVERAGE_REDUCTION_MODE_MERGE_NV;
+        if (state.mergedCoverage || (state.truncatedCoverage && !context.mixedAttachmentSamples)) {
             coverageReduction.pNext = samples.pNext;
             samples.pNext = &coverageReduction;
         }
@@ -897,6 +902,7 @@ void pipelineKey(std::vector<std::byte>& key, const Context& context, const Stat
     append(key, state.samples);
     append(key, state.perSampleShading);
     append(key, state.mergedCoverage);
+    append(key, state.truncatedCoverage);
     append(key, state.customSampleLocations);
     if (state.customSampleLocations) {
         append(key, state.sampleLocationGrid);
