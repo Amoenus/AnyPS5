@@ -689,6 +689,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         imageInfo.arrayLayers = copyLayers;
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.flags = SrgbTwinFormat(context, blockFormat) != VK_FORMAT_UNDEFINED ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0u;
         imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -718,6 +719,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
         createFirstLayerView(descriptor, viewInfo);
         prepareBaseLevelView(descriptor, viewInfo);
+        prepareSrgbView(descriptor, viewInfo);
     } catch (...) {
         release();
         throw;
