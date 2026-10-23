@@ -33,7 +33,7 @@ void CheckRetainedDecode() {
     using namespace AgcDriver::DriverDetail;
     alignas(256) static std::array<std::uint32_t, 64> code{0xbf810000u};
     alignas(256) static std::array<std::uint32_t, 64> tail{0xbf810000u};
-    alignas(256) static std::array<std::array<std::uint32_t, 64>, 80> others{};
+    alignas(256) static std::array<std::array<std::uint32_t, 64>, 4097> others{};
     const auto address = reinterpret_cast<std::uintptr_t>(code.data());
     DrawProgram program{};
     program.snapshot = ReadRawShader(address);
@@ -47,6 +47,7 @@ void CheckRetainedDecode() {
         static_cast<void>(ReadRawShader(reinterpret_cast<std::uintptr_t>(other.data())));
     }
     const auto reread = ReadRawShader(address);
+    Require(reread != decode.programs.front().snapshot, "raw snapshot churn did not evict the retained snapshot");
     Require(reread->code == decode.programs.front().snapshot->code, "raw snapshot churn changed the shader contents");
     std::cout << "retained raw snapshot evicted=" << (reread != decode.programs.front().snapshot) << '\n';
     Require(DecodeProgramsCurrent(decode, registry), "an unchanged retained raw draw decode was invalidated by snapshot cache eviction");
