@@ -10,6 +10,7 @@
 #include "JisX0212.hpp"
 #include "Cp949.hpp"
 #include "Cp950.hpp"
+#include "SingleByte.hpp"
 
 namespace {
 
@@ -21,7 +22,7 @@ constexpr int CES_ERROR_UNASSIGNED_CODE = static_cast<int>(0x805C0020);
 constexpr int CES_ERROR_INVALID_DST_BUFFER = static_cast<int>(0x805C0030);
 constexpr int CES_ERROR_DST_BUFFER_END = static_cast<int>(0x805C0031);
 
-constexpr uint8_t PROFILES[3][8] = {{0}, {1}, {2}};
+constexpr uint8_t PROFILES[3 + SingleByte::Count][8] = {{0}, {1}, {2}};
 constexpr const uint8_t* CP1252_PROFILE = PROFILES[0];
 constexpr const uint8_t* CP1251_PROFILE = PROFILES[1];
 constexpr const uint8_t* CP1250_PROFILE = PROFILES[2];
@@ -59,21 +60,30 @@ constexpr uint16_t CP932_IBM_HEAD[28] = {
     0xFFE2, 0xFFE4, 0xFF07, 0xFF02, 0x3231, 0x2116, 0x2121, 0x2235,
 };
 
-uint32_t sbcToUnicode(const uint8_t* profile, uint8_t sbc) {
-    if (profile == CP1251_PROFILE || profile == CP1250_PROFILE) {
-        const uint16_t* high = profile == CP1251_PROFILE ? CP1251_HIGH : CP1250_HIGH;
-        return sbc >= 0x80 ? high[sbc - 0x80] : sbc;
+const uint8_t* singleByteProfile(SingleByte::Table table) {
+    return PROFILES[3 + table];
+}
+
+const uint16_t* sbcHighTable(const void* profile) {
+    if (profile == CP1251_PROFILE) return CP1251_HIGH;
+    if (profile == CP1250_PROFILE) return CP1250_HIGH;
+    for (std::size_t table = 0; table < SingleByte::Count; ++table) {
+        if (profile == singleByteProfile(static_cast<SingleByte::Table>(table))) return SingleByte::HIGH[table];
     }
+    return nullptr;
+}
+
+uint32_t sbcToUnicode(const uint8_t* profile, uint8_t sbc) {
+    if (const uint16_t* high = sbcHighTable(profile)) return sbc >= 0x80 ? high[sbc - 0x80] : sbc;
     return sbc >= 0x80 && sbc < 0xA0 ? CP1252_HIGH[sbc - 0x80] : sbc;
 }
 
 bool unicodeToSbc(const uint8_t* profile, uint32_t code, uint8_t& sbc) {
-    if (profile == CP1251_PROFILE || profile == CP1250_PROFILE) {
+    if (const uint16_t* high = sbcHighTable(profile)) {
         if (code < 0x80) {
             sbc = static_cast<uint8_t>(code);
             return true;
         }
-        const uint16_t* high = profile == CP1251_PROFILE ? CP1251_HIGH : CP1250_HIGH;
         for (uint32_t i = 0; i < 128; ++i) {
             if (high[i] == code) {
                 sbc = static_cast<uint8_t>(0x80 + i);
@@ -145,7 +155,7 @@ bool isSjis(const void* profile) {
 }
 
 bool isSbc(const void* profile) {
-    return profile == CP1252_PROFILE || profile == CP1251_PROFILE || profile == CP1250_PROFILE;
+    return profile == CP1252_PROFILE || sbcHighTable(profile) != nullptr;
 }
 
 const void* contextProfile(const void* context) {
@@ -532,6 +542,114 @@ const uint8_t* APS5_VABI sceCesRefersUcsProfileCp1251(void) {
 
 const void* APS5_VABI sceCesRefersUcsProfileCp1250(void) {
     return CP1250_PROFILE;
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_1(void) {
+    return singleByteProfile(SingleByte::Iso8859_1);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_2(void) {
+    return singleByteProfile(SingleByte::Iso8859_2);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_4(void) {
+    return singleByteProfile(SingleByte::Iso8859_4);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_5(void) {
+    return singleByteProfile(SingleByte::Iso8859_5);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_9(void) {
+    return singleByteProfile(SingleByte::Iso8859_9);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_10(void) {
+    return singleByteProfile(SingleByte::Iso8859_10);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_13(void) {
+    return singleByteProfile(SingleByte::Iso8859_13);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_14(void) {
+    return singleByteProfile(SingleByte::Iso8859_14);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_15(void) {
+    return singleByteProfile(SingleByte::Iso8859_15);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileIso8859_16(void) {
+    return singleByteProfile(SingleByte::Iso8859_16);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp437(void) {
+    return singleByteProfile(SingleByte::Cp437);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp737(void) {
+    return singleByteProfile(SingleByte::Cp737);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp775(void) {
+    return singleByteProfile(SingleByte::Cp775);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp850(void) {
+    return singleByteProfile(SingleByte::Cp850);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp852(void) {
+    return singleByteProfile(SingleByte::Cp852);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp855(void) {
+    return singleByteProfile(SingleByte::Cp855);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp860(void) {
+    return singleByteProfile(SingleByte::Cp860);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp861(void) {
+    return singleByteProfile(SingleByte::Cp861);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp862(void) {
+    return singleByteProfile(SingleByte::Cp862);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp863(void) {
+    return singleByteProfile(SingleByte::Cp863);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp865(void) {
+    return singleByteProfile(SingleByte::Cp865);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp866(void) {
+    return singleByteProfile(SingleByte::Cp866);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileKoi8R(void) {
+    return singleByteProfile(SingleByte::Koi8R);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileKoi8U(void) {
+    return singleByteProfile(SingleByte::Koi8U);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp1254(void) {
+    return singleByteProfile(SingleByte::Cp1254);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp1256(void) {
+    return singleByteProfile(SingleByte::Cp1256);
+}
+
+const uint8_t* APS5_VABI sceCesRefersUcsProfileCp1258(void) {
+    return singleByteProfile(SingleByte::Cp1258);
 }
 
 void* APS5_VABI sceCesUcsProfileInitSJis1997Cp932(void* sheet) {

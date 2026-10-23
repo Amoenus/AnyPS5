@@ -74,6 +74,14 @@ struct GuestSizeRec {
     void* internal;
 };
 
+struct GuestSizeRequestRec {
+    std::uint32_t type;
+    std::int64_t width;
+    std::int64_t height;
+    std::uint32_t horiResolution;
+    std::uint32_t vertResolution;
+};
+
 struct GuestGlyphMetrics {
     std::int64_t width;
     std::int64_t height;
@@ -172,6 +180,8 @@ static_assert(sizeof(GuestCharMapRec) == 16 && offsetof(GuestCharMapRec, platfor
 static_assert(sizeof(GuestSfntName) == 24 && offsetof(GuestSfntName, string) == 8 && offsetof(GuestSfntName, string_len) == 16);
 static_assert(sizeof(GuestSizeMetrics) == 56 && offsetof(GuestSizeMetrics, x_scale) == 8);
 static_assert(sizeof(GuestSizeRec) == 88 && offsetof(GuestSizeRec, metrics) == 24);
+static_assert(sizeof(GuestSizeRequestRec) == 32 && offsetof(GuestSizeRequestRec, width) == 8 && offsetof(GuestSizeRequestRec, height) == 16);
+static_assert(offsetof(GuestSizeRequestRec, horiResolution) == 24 && offsetof(GuestSizeRequestRec, vertResolution) == 28);
 static_assert(sizeof(GuestBitmap) == 40 && offsetof(GuestBitmap, buffer) == 16 && offsetof(GuestBitmap, palette) == 32);
 static_assert(sizeof(GuestOutline) == 40 && offsetof(GuestOutline, points) == 8 && offsetof(GuestOutline, flags) == 32);
 static_assert(offsetof(GuestGlyphSlotRec, glyph_index) == 0x18 && offsetof(GuestGlyphSlotRec, metrics) == 0x30);

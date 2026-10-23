@@ -773,6 +773,41 @@ static void TestSampleRate() {
     Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
 }
 
+static bool SystemOptionThrows(const Ngs2SystemOption& option) {
+    Ngs2ContextBufferInfo query{};
+    try {
+        sceNgs2SystemQueryBufferSize(&option, &query);
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+static void TestSystemOptionFlags() {
+    Ngs2SystemOption option{};
+    Require(sceNgs2SystemResetOption(&option) == SCE_NGS2_OK && option.flags == 0);
+    option.flags = 0x2;
+    Ngs2ContextBufferInfo query{};
+    Require(sceNgs2SystemQueryBufferSize(&option, &query) == SCE_NGS2_OK && query.host_buffer_size != 0);
+    const auto info = Buffer(query);
+    uintptr_t system = 0;
+    Require(sceNgs2SystemCreate(&option, &info, &system) == SCE_NGS2_OK && system != 0);
+    Require(sceNgs2SystemSetGrainSamples(system, Grain) == SCE_NGS2_OK);
+    const auto master = Mastering(system, 1);
+    const std::vector<std::int16_t> pcm{1000, 2000, 3000, 4000};
+    const auto sampler = Sampler(system, pcm, 1);
+    Patch(sampler, master);
+    Event(sampler, SCE_NGS2_VOICE_EVENT_PLAY);
+    const auto out = RenderI16(system);
+    Require(std::equal(pcm.begin(), pcm.end(), out.begin()));
+    Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
+
+    for (const std::uint32_t flags : {0x1u, 0x3u, 0x4u, 0x80000000u, 0x80000002u}) {
+        option.flags = flags;
+        Require(SystemOptionThrows(option));
+    }
+}
+
 static void TestUserData() {
     uintptr_t value = 1;
     Require(sceNgs2SystemSetUserData(0x1234, 5) == SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE);
@@ -1489,6 +1524,7 @@ int main() {
     TestReverb();
     TestReverbSetup();
     TestSampleRate();
+    TestSystemOptionFlags();
     TestUserData();
     TestPcmCallbackReset();
     TestPcmCallbackRefill();

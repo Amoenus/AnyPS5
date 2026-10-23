@@ -5,6 +5,20 @@ add_library(libSceFreeType SHARED EXCLUDE_FROM_ALL
 )
 target_include_directories(libSceFreeType PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(libSceFreeType PRIVATE freetype)
+target_sources(libSceFreeType PRIVATE src/SizeRequest.cpp)
+
+if(BUILD_TESTING)
+    add_test_executable(guest_freetype_request_size_tests ${LIBS_INCLUDE_DIR}/tests/GuestFreeTypeRequestSize.cpp)
+    target_include_directories(guest_freetype_request_size_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_freetype_request_size_tests PRIVATE libSceFreeType freetype libc)
+    configure_windows_unwind(guest_freetype_request_size_tests)
+    add_test(NAME guest_freetype_request_size COMMAND guest_freetype_request_size_tests)
+    if(WIN32)
+        set_tests_properties(guest_freetype_request_size PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceFreeType>")
+    endif()
+endif()
+
 if(MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(libSceFreeType PRIVATE LINKER:--exclude-libs,ALL)
 endif()
