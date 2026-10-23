@@ -498,6 +498,14 @@ static std::int64_t PosixResult(std::int64_t result) {
     return result < 0 ? PosixFailure(static_cast<int>(result) & 0xffff) : result;
 }
 
+static int DeviceFilesystem(KernelStatfs* fs) {
+    fs->f_bsize = 512;
+    fs->f_iosize = 512;
+    fs->f_blocks = 2;
+    fs->f_namemax = 255;
+    return 0;
+}
+
 #ifdef _WIN32
 static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     if (!File::IsDirectoryDescriptor(descriptor)) {
@@ -505,6 +513,7 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
         if (handle == INVALID_HANDLE_VALUE) return GUEST_EBADF;
         const DWORD type = ::GetFileType(handle);
         if (type == FILE_TYPE_PIPE) return GUEST_EINVAL;
+        if (type == FILE_TYPE_CHAR) return DeviceFilesystem(fs);
         if (type != FILE_TYPE_DISK)
             throw std::runtime_error("_fstatfs: descriptor " + std::to_string(descriptor) + " is not a file on a Windows volume");
     }
@@ -552,6 +561,7 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     if (::fstat(descriptor, &file) != 0) return SceErrorFromErrno(errno) & 0xffff;
     if (S_ISSOCK(file.st_mode) && (::fcntl(descriptor, F_GETFL) & O_PATH) == 0) return GUEST_EINVAL;
     if (NativeIsPipe(descriptor)) return GUEST_EINVAL;
+    if (S_ISCHR(file.st_mode)) return DeviceFilesystem(fs);
     struct statvfs host{};
     if (::fstatvfs(descriptor, &host) != 0) return SceErrorFromErrno(errno) & 0xffff;
     if (host.f_flag & ST_RDONLY) fs->f_flags |= KERNEL_MNT_RDONLY;
@@ -883,7 +893,7 @@ int APS5_VABI flock_nid_postfix(int d, int operation) {
 }
 
 int APS5_VABI _fstatfs_nid_postfix(int d, KernelStatfs* buf) {
-    if (GuestSockets::IsOpen(d)) return PosixFailure(GUEST_EINVAL);
+    if (GuestSockets::IsOpen(d) || IsKqueueDescriptor(d)) return PosixFailure(GUEST_EINVAL);
     if (d < 0) return PosixFailure(GUEST_EBADF);
     File::RefuseArchivedFile(d, "fstatfs");
     KernelStatfs result{};
