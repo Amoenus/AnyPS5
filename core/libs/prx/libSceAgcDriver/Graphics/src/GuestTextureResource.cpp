@@ -5,6 +5,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
+#include <array>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -48,6 +50,45 @@ TextureDimension resolveDimension(std::uint32_t raw) {
         case 14: return TextureDimension::k2DMsaa;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported image type " + std::to_string(raw));
     }
+}
+
+bool ZeroTail(std::span<const std::uint32_t> words) {
+    return words[4] == 0u && words[5] == 0u && words[6] == 0u && words[7] == 0u;
+}
+
+bool SameLevels(const TileMipLayout& a, const TileMipLayout& b) {
+    return a.tiledOffset == b.tiledOffset && a.tiledSize == b.tiledSize && a.width == b.width && a.height == b.height && a.blocksPerRow == b.blocksPerRow && a.pitchBytes == b.pitchBytes && a.tail == b.tail && a.tailX == b.tailX && a.tailY == b.tailY;
+}
+
+std::optional<std::array<std::uint32_t, 8>> R128ResidentLevelWords(std::span<const std::uint32_t> words) {
+    const auto baseLevel = (words[3] >> 12u) & 0xfu;
+    const auto lastLevel = (words[3] >> 16u) & 0xfu;
+    const auto typeRaw = (words[3] >> 28u) & 0xfu;
+    if (baseLevel == 0u || baseLevel > lastLevel || (typeRaw != 8u && typeRaw != 9u)) return std::nullopt;
+    const std::array<std::uint32_t, 8> chainWords{words[0], words[1], words[2], words[3], 0u, lastLevel << 4u, 0u, 0u};
+    const auto width = (((words[1] >> 30u) & 0x3u) | ((words[2] & 0xfffu) << 2u)) + 1u;
+    const auto height = ((words[2] >> 14u) & 0x3fffu) + 1u;
+    const auto minLod = (words[1] >> 8u) & 0xfffu;
+    const auto widthMinus1 = std::max(width >> baseLevel, 1u) - 1u;
+    const auto heightMinus1 = std::max(height >> baseLevel, 1u) - 1u;
+    const auto rebasedMinLod = minLod > baseLevel * 256u ? minLod - baseLevel * 256u : 0u;
+    const auto levels = lastLevel - baseLevel;
+    auto rebased = chainWords;
+    rebased[1] = (words[1] & ~((0xfffu << 8u) | (0x3u << 30u))) | (rebasedMinLod << 8u) | ((widthMinus1 & 0x3u) << 30u);
+    rebased[2] = (words[2] & ~(0xfffu | (0x3fffu << 14u))) | ((widthMinus1 >> 2u) & 0xfffu) | ((heightMinus1 & 0x3fffu) << 14u);
+    rebased[3] = (words[3] & ~(0xffu << 12u)) | (levels << 16u);
+    rebased[5] = levels << 4u;
+    try {
+        const auto chain = DescribeSurface(DecodeTextureResource(chainWords));
+        const auto view = DescribeSurface(DecodeTextureResource(rebased));
+        if (chain.mips.size() != lastLevel + 1u || view.mips.size() != levels + 1u || chain.layers != view.layers) return std::nullopt;
+        for (std::uint32_t level = baseLevel; level <= lastLevel; ++level) {
+            if (!SameLevels(chain.mips[level], view.mips[level - baseLevel])) return std::nullopt;
+        }
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    return rebased;
 }
 
 }
@@ -238,7 +279,11 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.minLod = minLod;
     result.samples = samples;
     if (baseLevel > maxMip) {
-        Require(LevelsFitAllocation(result, lastLevel + 1u), "guest texture descriptor starts past the surface's last mip level at levels that would move the surface's own" + describe());
+        const bool fits = LevelsFitAllocation(result, lastLevel + 1u);
+        if (!fits && ZeroTail(words)) {
+            if (const auto resident = R128ResidentLevelWords(words)) return DecodeTextureResource(*resident);
+        }
+        Require(fits, "guest texture descriptor starts past the surface's last mip level at levels that would move the surface's own" + describe());
         result.mipCount = lastLevel + 1u;
     }
     return result;
