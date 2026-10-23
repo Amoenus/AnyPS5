@@ -1014,7 +1014,7 @@ int main(int argc, char** argv) {
         std::shared_ptr<const AgcDriver::Recipe> recipe;
         CheckBufferLoad(*device, warm, output, &recipe);
         const auto deferredProgram = CompileBufferLoad(*device, block.Address() + Threads * 4u, output.Address());
-        const auto prepared = device->PrepareDispatch(deferredProgram, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
+        auto prepared = device->PrepareDispatch(deferredProgram, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
         const auto color = DecodeTarget(block);
         const auto state = TargetState(color);
         Draw(*device, state);
@@ -1093,6 +1093,8 @@ int main(int argc, char** argv) {
         std::string failures;
         for (const auto& item : missing) failures += " " + item;
         Require(missing.empty(), "buffer aliases of live native MSAA color memory bypassed the guard:" + failures);
+        recipe.reset();
+        prepared.reset();
         RequireRefused(*device, TargetDescriptor(block, 3u), "texture of 8 samples", "loading a 4x target as an 8x texture");
         Require(colorBytes <= other.bytes, "the 4x target's color memory does not fit one block");
         CheckUniform(LoadSamples(*device, other), {}, "from zeroed color memory no draw rendered to");
