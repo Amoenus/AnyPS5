@@ -4346,10 +4346,13 @@ VkBufferUsageFlags gpuCopyUsage(bool addressable) {
 // since store extents are not known), for the batch's latency; the staging window keeps the
 // exposure to the elements named on the [buffers] staging line and APS5_TRACE_STAGING.
 // APS5_NO_WRITTEN_SHADOW=1 and APS5_NO_ATOMIC_STAGING=1 bind those elements in place as before;
-// APS5_WRITTEN_SHADOW_MIN_KIB / APS5_WRITTEN_SHADOW_MAX_KIB (16 / 2048) bound the written window
-// (a kernel streaming once through a large buffer, the engine's memcpy kernel over 4-8 MiB video
-// frames, would only gain the two copies), APS5_ATOMIC_STAGE_MAX_KIB (1024) the atomic one.
+// APS5_WRITTEN_SHADOW_MIN_KIB / APS5_WRITTEN_SHADOW_MAX_KIB (16 / 2048, 8192 on a discrete GPU) bound
+// the written window: on an integrated GPU a kernel streaming once through a large buffer (the
+// engine's memcpy kernel over 4-8 MiB video frames) would only gain the two copies, while on a
+// discrete GPU its stores into the host import cross the bus and cost more than the copies, so the
+// window takes those elements there. APS5_ATOMIC_STAGE_MAX_KIB (1024) bounds the atomic one.
 constexpr std::uint64_t SweptShadowMax = std::uint64_t{16} << 20u;
+constexpr std::uint64_t DiscreteWrittenShadowMax = std::uint64_t{8} << 20u;
 
 bool writtenShadowEnabled() {
     static const bool disabled = std::getenv("APS5_NO_WRITTEN_SHADOW") != nullptr;
@@ -4371,9 +4374,10 @@ std::uint64_t writtenShadowMin() {
     return bytes;
 }
 
-std::uint64_t writtenShadowMax() {
-    static const std::uint64_t bytes = kibSetting("APS5_WRITTEN_SHADOW_MAX_KIB", 2048);
-    return bytes;
+std::uint64_t writtenShadowMax(bool discreteGpu) {
+    static const std::uint64_t setting = kibSetting("APS5_WRITTEN_SHADOW_MAX_KIB", 0);
+    if (setting != 0) return setting;
+    return discreteGpu ? DiscreteWrittenShadowMax : std::uint64_t{2048} << 10u;
 }
 
 std::uint64_t atomicStageMax() {
@@ -4491,7 +4495,7 @@ bool GuestBufferMemory::stagingEligible(const Region& region, bool addressable) 
     const auto bytes = region.end - region.begin;
     if (!WritesOverlap(region.begin, static_cast<std::size_t>(bytes))) return false;
     if (region.atomic && atomicStagingEnabled() && bytes <= atomicStageMax()) return true;
-    return writtenShadowEnabled() && bytes >= writtenShadowMin() && bytes <= (region.swept ? std::max(writtenShadowMax(), SweptShadowMax) : writtenShadowMax());
+    return writtenShadowEnabled() && bytes >= writtenShadowMin() && bytes <= (region.swept ? std::max(writtenShadowMax(context.discreteGpu), SweptShadowMax) : writtenShadowMax(context.discreteGpu));
 }
 
 bool GuestBufferMemory::overlayCandidate(const Region& inside, bool readOnly) const {
