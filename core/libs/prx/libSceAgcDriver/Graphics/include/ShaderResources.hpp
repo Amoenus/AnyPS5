@@ -30,7 +30,7 @@ class Recorder;
 
 void FlushCachedTextures(VkDevice device);
 void ClearCachedTextures(VkDevice device);
-std::uint64_t ReleaseTextureCaches(std::uint64_t bytes);
+std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage = false);
 std::uint64_t TextureCacheBudget(const VkPhysicalDeviceMemoryProperties& memory);
 std::uint64_t StorageTextureBudget(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported, std::uint64_t sampledBytes, std::uint64_t storageBytes);
 std::uint64_t SampledTextureBudget(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported, std::uint64_t textureBytes);
@@ -478,6 +478,7 @@ private:
         std::array<std::uint32_t, 8> words{};
         bool depthCompare = false;
         VkImageViewType multisampleViewType = VK_IMAGE_VIEW_TYPE_2D;
+        bool firstSample = false;
         std::shared_ptr<Texture> texture;
     };
     PreviousSampled previousSampled;
@@ -707,6 +708,7 @@ public:
     // meanwhile by another worker stays).
     void Remove(const Key& key, const ShaderResources* object = nullptr);
     void RemoveImage(const StorageTexture* image, std::vector<std::shared_ptr<ShaderResources>>* evicted = nullptr);
+    bool TryRemoveImage(const StorageTexture* image, std::vector<std::shared_ptr<ShaderResources>>* evicted = nullptr);
     // Moves the entry to the front of the LRU (a recipe hit uses its template without Find, and a
     // hot template must not age out under the recipes that depend on it); false when no entry.
     bool Touch(const Key& key);
@@ -729,6 +731,7 @@ private:
     void noteEvicted(const Key& key);
     void noteReturn(const Key& key);
     void noteUse(const Key& key);
+    void removeImage(const StorageTexture* image, std::vector<std::shared_ptr<ShaderResources>>* evicted);
     struct KeyHash {
         std::size_t operator()(const Key& key) const noexcept {
             constexpr std::uint64_t Prime = 0x9e3779b97f4a7c15ull;
