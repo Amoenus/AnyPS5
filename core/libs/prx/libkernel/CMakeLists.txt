@@ -254,7 +254,7 @@ if(BUILD_TESTING)
         target_sources(guest_dynamic_loader_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/GuestDynamicLoader.def")
     endif()
     add_test(NAME guest_dynamic_loader COMMAND guest_dynamic_loader_tests $<TARGET_FILE_NAME:guest_module_fixture>)
-    set_tests_properties(guest_dynamic_loader PROPERTIES
+    set_tests_properties(guest_dynamic_loader PROPERTIES TIMEOUT 30
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:guest_module_fixture>" RESOURCE_LOCK guest_dynamic_loader_files)
     if(WIN32)
         set_tests_properties(guest_dynamic_loader PROPERTIES ENVIRONMENT_MODIFICATION

@@ -81,6 +81,44 @@
 #include <utility>
 
 namespace AgcDriver {
+
+DeviceQueuePlan PlanDeviceQueues(std::span<const VkQueueFamilyProperties> families, std::uint32_t family, bool settles, bool sparseBinding) {
+    DeviceQueuePlan plan;
+    const auto count = static_cast<std::uint32_t>(families.size());
+    if (settles) {
+        if (family < count && families[family].queueCount >= 2) {
+            plan.mainCount = 2;
+            plan.settle = true;
+            plan.settleFamily = family;
+            plan.settleIndex = 1;
+        } else {
+            const auto copies = [&](std::uint32_t index) { return index != family && families[index].queueCount != 0 && (families[index].queueFlags & (VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) != 0; };
+            for (std::uint32_t i = 0; i < count && !plan.settle; ++i) {
+                if (copies(i) && (families[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) == 0) plan.settle = true, plan.settleFamily = i;
+            }
+            for (std::uint32_t i = 0; i < count && !plan.settle; ++i) {
+                if (copies(i)) plan.settle = true, plan.settleFamily = i;
+            }
+        }
+    }
+    if (!sparseBinding) return plan;
+    const auto taken = [&](std::uint32_t index) { return plan.settle && index == plan.settleFamily ? plan.settleIndex + 1 : 0u; };
+    const auto binds = [&](std::uint32_t index) { return index != family && families[index].queueCount > taken(index) && (families[index].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0; };
+    for (std::uint32_t i = 0; i < count && plan.sparseFamily == VK_QUEUE_FAMILY_IGNORED; ++i) {
+        if (binds(i) && families[i].queueFlags == VK_QUEUE_SPARSE_BINDING_BIT) plan.sparseFamily = i;
+    }
+    for (std::uint32_t i = 0; i < count && plan.sparseFamily == VK_QUEUE_FAMILY_IGNORED; ++i) {
+        if (binds(i)) plan.sparseFamily = i;
+    }
+    if (plan.sparseFamily != VK_QUEUE_FAMILY_IGNORED) {
+        plan.sparseIndex = taken(plan.sparseFamily);
+        plan.sparseBinding = true;
+    } else {
+        plan.sparseBinding = family < count && (families[family].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
+    }
+    return plan;
+}
+
 namespace {
 
 void check(VkResult result, const char* operation) {
@@ -378,8 +416,11 @@ struct VulkanDevice::State {
     bool drawInputsInPlace = true;
     bool dmaBufImport = false;
     bool sparseBinding = false;
+    bool sparseResidencyBuffer = false;
+    bool sparseResidencyAliased = false;
     std::uint32_t queueFamily = 0;
     std::uint32_t sparseFamily = VK_QUEUE_FAMILY_IGNORED;
+    std::uint32_t sparseIndex = 0;
     VkQueue sparseQueue = VK_NULL_HANDLE;
     std::mutex sparseQueueMutex;
     VkQueue settleQueue = VK_NULL_HANDLE;
@@ -1614,35 +1655,18 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &priority;
     const float priorities[2]{1.0f, 1.0f};
-    bool settleQueue = false;
-    std::uint32_t settleFamily = family;
-    std::uint32_t settleIndex = 0;
-    std::vector<VkQueueFamilyProperties> queues;
 #ifdef _WIN32
     const bool settles = true;
 #else
     const bool settles = state->dmaBufImport;
 #endif
-    if (settles) {
+    std::vector<VkQueueFamilyProperties> queues;
+    {
         std::uint32_t families = 0;
         auto getFamilies = state->InstanceFunction<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
         getFamilies(selected, &families, nullptr);
         queues.resize(families);
         getFamilies(selected, &families, queues.data());
-        if (family < families && queues[family].queueCount >= 2) {
-            queueInfo.queueCount = 2;
-            queueInfo.pQueuePriorities = priorities;
-            settleQueue = true;
-            settleIndex = 1;
-        } else {
-            const auto copies = [&](std::uint32_t index) { return index != family && queues[index].queueCount != 0 && (queues[index].queueFlags & (VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) != 0; };
-            for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
-                if (copies(i) && (queues[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) == 0) settleFamily = i, settleQueue = true;
-            }
-            for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
-                if (copies(i)) settleFamily = i, settleQueue = true;
-            }
-        }
     }
     VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     deviceInfo.queueCreateInfoCount = 1;
@@ -1677,50 +1701,38 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     // Guest shaders routinely read past descriptor ranges; robust access turns that into zeros
     // instead of a GPU fault that loses the device.
     enabled.robustBufferAccess = available.robustBufferAccess;
+    const auto plan = PlanDeviceQueues(queues, family, settles, available.sparseBinding == VK_TRUE);
+    const bool settleQueue = plan.settle;
+    const auto settleFamily = plan.settleFamily;
+    const auto settleIndex = plan.settleIndex;
     VkDeviceQueueCreateInfo queueInfos[3]{queueInfo, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
-    if (available.sparseBinding && state->dmaBufImport) {
-        std::uint32_t families = 0;
-        auto getFamilies = state->InstanceFunction<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
-        getFamilies(selected, &families, nullptr);
-        std::vector<VkQueueFamilyProperties> queues(families);
-        getFamilies(selected, &families, queues.data());
-        const auto binds = [&](std::uint32_t index) { return index != family && queues[index].queueCount != 0 && (queues[index].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0; };
-        std::uint32_t sparseFamily = families;
-        for (std::uint32_t i = 0; i < families && sparseFamily == families; ++i) {
-            if (binds(i) && queues[i].queueFlags == VK_QUEUE_SPARSE_BINDING_BIT) sparseFamily = i;
+    queueInfos[0].queueCount = plan.mainCount;
+    queueInfos[0].pQueuePriorities = plan.mainCount == 2 ? priorities : &priority;
+    deviceInfo.queueCreateInfoCount = 1;
+    const auto addQueue = [&](std::uint32_t queueFamily, std::uint32_t index) {
+        for (std::uint32_t info = 1; info < deviceInfo.queueCreateInfoCount; ++info) {
+            if (queueInfos[info].queueFamilyIndex != queueFamily) continue;
+            queueInfos[info].queueCount = std::max(queueInfos[info].queueCount, index + 1);
+            queueInfos[info].pQueuePriorities = queueInfos[info].queueCount == 2 ? priorities : &priority;
+            return;
         }
-        for (std::uint32_t i = 0; i < families && sparseFamily == families; ++i) {
-            if (binds(i)) sparseFamily = i;
-        }
-        if (sparseFamily != families) {
-            queueInfos[1].queueFamilyIndex = sparseFamily;
-            queueInfos[1].queueCount = 1;
-            queueInfos[1].pQueuePriorities = &priority;
-            deviceInfo.queueCreateInfoCount = 2;
-            state->sparseFamily = sparseFamily;
-            state->sparseBinding = true;
-        } else {
-            state->sparseBinding = family < families && (queues[family].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
-        }
-        enabled.sparseBinding = state->sparseBinding ? VK_TRUE : VK_FALSE;
-    }
+        auto& added = queueInfos[deviceInfo.queueCreateInfoCount++];
+        added = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+        added.queueFamilyIndex = queueFamily;
+        added.queueCount = index + 1;
+        added.pQueuePriorities = added.queueCount == 2 ? priorities : &priority;
+    };
+    if (plan.settle && plan.settleFamily != family) addQueue(plan.settleFamily, plan.settleIndex);
+    if (plan.sparseFamily != VK_QUEUE_FAMILY_IGNORED) addQueue(plan.sparseFamily, plan.sparseIndex);
     deviceInfo.pQueueCreateInfos = queueInfos;
-    if (settleQueue && settleFamily != family) {
-        if (deviceInfo.queueCreateInfoCount == 2 && queueInfos[1].queueFamilyIndex == settleFamily) {
-            settleQueue = queues[settleFamily].queueCount >= 2;
-            if (settleQueue) {
-                queueInfos[1].queueCount = 2;
-                queueInfos[1].pQueuePriorities = priorities;
-                settleIndex = 1;
-            }
-        } else {
-            auto& settleInfo = queueInfos[deviceInfo.queueCreateInfoCount++];
-            settleInfo = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-            settleInfo.queueFamilyIndex = settleFamily;
-            settleInfo.queueCount = 1;
-            settleInfo.pQueuePriorities = &priority;
-        }
-    }
+    state->sparseFamily = plan.sparseFamily;
+    state->sparseIndex = plan.sparseIndex;
+    state->sparseBinding = plan.sparseBinding;
+    enabled.sparseBinding = state->sparseBinding ? VK_TRUE : VK_FALSE;
+    enabled.sparseResidencyBuffer = state->sparseBinding ? available.sparseResidencyBuffer : VK_FALSE;
+    enabled.sparseResidencyAliased = state->sparseBinding ? available.sparseResidencyAliased : VK_FALSE;
+    state->sparseResidencyBuffer = enabled.sparseResidencyBuffer == VK_TRUE;
+    state->sparseResidencyAliased = enabled.sparseResidencyAliased == VK_TRUE;
     // Indirect draw records with a non-zero first instance, and several records per call.
     enabled.drawIndirectFirstInstance = available.drawIndirectFirstInstance;
     enabled.multiDrawIndirect = available.multiDrawIndirect;
@@ -2042,7 +2054,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         state->settleFamily = settleFamily;
         state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, settleFamily, settleIndex, &state->settleQueue);
     }
-    if (state->sparseFamily != VK_QUEUE_FAMILY_IGNORED) state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, state->sparseFamily, 0, &state->sparseQueue);
+    if (state->sparseFamily != VK_QUEUE_FAMILY_IGNORED) state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, state->sparseFamily, state->sparseIndex, &state->sparseQueue);
     if (checkpoints) state->checkpointMarker = state->DeviceFunction<PFN_vkCmdSetCheckpointNV>("vkCmdSetCheckpointNV");
     if (bufferMarkers) state->CreateMarkerBuffer();
     if (deviceFault || checkpoints || bufferMarkers) {
@@ -3849,6 +3861,8 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.individuallyFreeDescriptorSets = state->individuallyFreeDescriptorSets;
     context.dmaBufImport = state->dmaBufImport;
     context.sparseBinding = state->sparseBinding;
+    context.sparseResidencyBuffer = state->sparseResidencyBuffer;
+    context.sparseResidencyAliased = state->sparseResidencyAliased;
     context.queueFamily = state->queueFamily;
     context.sparseFamily = state->sparseFamily;
     context.sparseQueue = state->sparseQueue;

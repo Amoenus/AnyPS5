@@ -337,6 +337,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderResources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderAddressResources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestBufferMemory.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ResidentMirror.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/BdaResources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/BufferAddress.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderValidation.cpp
@@ -2587,12 +2588,13 @@ if(BUILD_TESTING)
     add_test(NAME agc_heap_mirror_unwatch_no_space_cache COMMAND agc_driver_graphics_tests --heap-mirror-unwatch)
     add_test(NAME agc_sparse_heap_mirror_unwatch COMMAND agc_driver_graphics_tests --sparse-heap-mirror-unwatch)
     add_test(NAME agc_sparse_heap_mirror_unwatch_no_space_cache COMMAND agc_driver_graphics_tests --sparse-heap-mirror-unwatch)
+    add_test(NAME agc_sparse_heap_mirror_budget COMMAND agc_driver_graphics_tests --sparse-heap-mirror-budget)
     add_test(NAME agc_heap_mirror_run_unwatch COMMAND agc_driver_graphics_tests --heap-mirror-run-unwatch)
     add_test(NAME agc_heap_mirror_run_unwatch_no_space_cache COMMAND agc_driver_graphics_tests --heap-mirror-run-unwatch)
     set_tests_properties(agc_heap_mirror_unwatch_no_space_cache agc_sparse_heap_mirror_unwatch_no_space_cache agc_heap_mirror_run_unwatch_no_space_cache PROPERTIES ENVIRONMENT "APS5_NO_ADDRESS_SPACE_CACHE=1")
-    set_tests_properties(agc_heap_mirror_unwatch agc_heap_mirror_unwatch_no_space_cache agc_sparse_heap_mirror_unwatch agc_sparse_heap_mirror_unwatch_no_space_cache agc_heap_mirror_run_unwatch agc_heap_mirror_run_unwatch_no_space_cache PROPERTIES TIMEOUT 30)
+    set_tests_properties(agc_heap_mirror_unwatch agc_heap_mirror_unwatch_no_space_cache agc_sparse_heap_mirror_unwatch agc_sparse_heap_mirror_unwatch_no_space_cache agc_heap_mirror_run_unwatch agc_heap_mirror_run_unwatch_no_space_cache agc_sparse_heap_mirror_budget PROPERTIES TIMEOUT 30)
     if(WIN32)
-        set_tests_properties(agc_heap_mirror_unwatch agc_heap_mirror_unwatch_no_space_cache agc_sparse_heap_mirror_unwatch agc_sparse_heap_mirror_unwatch_no_space_cache agc_heap_mirror_run_unwatch agc_heap_mirror_run_unwatch_no_space_cache PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        set_tests_properties(agc_heap_mirror_unwatch agc_heap_mirror_unwatch_no_space_cache agc_sparse_heap_mirror_unwatch agc_sparse_heap_mirror_unwatch_no_space_cache agc_heap_mirror_run_unwatch agc_heap_mirror_run_unwatch_no_space_cache agc_sparse_heap_mirror_budget PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     else()
         add_test(NAME agc_heap_mirror_unwatched_import COMMAND agc_driver_graphics_tests --heap-mirror-unwatched-import)
         set_tests_properties(agc_heap_mirror_unwatched_import PROPERTIES TIMEOUT 30)

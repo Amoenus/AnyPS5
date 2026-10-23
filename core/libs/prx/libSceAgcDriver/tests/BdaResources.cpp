@@ -3131,6 +3131,63 @@ void RunSparseHeapMirrorUnwatchTests(const Context& context, const BdaTestAccess
     std::cout << "an address-based build keeps and refreshes a sparse heap's mirror once its range has left the write watch\n";
 }
 
+void RunSparseHeapMirrorBudgetTests(const Context& context, const BdaTestAccess& access) {
+    constexpr std::size_t block = 65536;
+    constexpr std::size_t reserved = 128 * block;
+    constexpr std::size_t committed = 80 * block;
+#ifdef _WIN32
+    if (!GuestArena::GuestArenaAvailable_nid_postfix() || !GuestArena::GuestArenaWriteWatched_nid_postfix()) {
+        std::cout << "guest arena unavailable or not write-watched: sparse heaps past the heap mirror budget not tested\n";
+        return;
+    }
+    auto* guest = static_cast<std::byte*>(GuestArena::GuestArenaAllocate_nid_postfix(reserved, block));
+    Require(guest != nullptr, "cannot allocate the sparse heap in the guest arena");
+    GuestArena::GuestArenaCommit_nid_postfix(guest, committed, PAGE_READWRITE, block);
+#else
+    if (!GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix()) {
+        std::cout << "write watch unavailable: sparse heaps past the heap mirror budget not tested\n";
+        return;
+    }
+    auto* guest = reserveSparse(reserved, committed);
+    GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(guest, reserved);
+#endif
+    std::memset(guest, 0x5a, committed);
+    const auto base = reinterpret_cast<std::uintptr_t>(guest);
+    const auto registry = [&](bool add) {
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, guest, reserved, true, true, true);
+        else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, guest);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+    };
+    registry(true);
+    const auto before = MirrorCounters();
+    {
+        GuestBufferMemory memory(context);
+        memory.AddWritable(base, reserved);
+        memory.Upload(false);
+        std::uint32_t adjustment = 0;
+        const auto view = memory.Descriptor(base, reserved, adjustment);
+        const auto bytes = access.bytes(view.buffer);
+        Require(adjustment == 0 && view.range >= committed && bytes[view.offset + committed - 1] == std::byte{0x5a}, "a sparse heap past the heap mirror budget was not copied up to its last committed byte");
+        bytes[view.offset + 8] = std::byte{0x77};
+        memory.WriteBack();
+    }
+    Require(guest[8] == std::byte{0x77}, "a store to a sparse heap copied past the heap mirror budget was not written back");
+    const auto after = MirrorCounters();
+    Require(after.sparseBinds == before.sparseBinds && after.heapMirrors == before.heapMirrors && after.heapBytes == before.heapBytes, "a sparse heap past the heap mirror budget was mirrored or left heap mirror bytes held");
+    registry(false);
+    ClearImageMirrors(context.device);
+    ClearSnapshotCopies(context.device);
+#ifdef _WIN32
+    GuestArena::GuestArenaReset_nid_postfix(guest, reserved);
+    GuestArena::GuestArenaRelease_nid_postfix(guest, reserved);
+#else
+    GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(guest, reserved);
+    releaseSparse(guest, reserved);
+#endif
+    std::cout << "a sparse heap whose mirror would pass the heap mirror budget is copied\n";
+}
+
 void RunHeapMirrorRunUnwatchTests(const Context& context, const BdaTestAccess& access) {
     constexpr std::size_t block = 65536;
     constexpr std::size_t heapBytes = 32 * block;
