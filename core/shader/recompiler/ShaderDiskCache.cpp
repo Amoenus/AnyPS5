@@ -139,7 +139,7 @@ constexpr std::size_t fieldCount() {
     }
 }
 
-static_assert(fieldCount<ShaderInfo>() == 23, "ShaderInfo changed: update the info encoder");
+static_assert(fieldCount<ShaderInfo>() == 24, "ShaderInfo changed: update the info encoder");
 static_assert(fieldCount<BufferResource>() == 12, "BufferResource changed: update the info encoder");
 static_assert(fieldCount<ImageResource>() == 42, "ImageResource changed: update the info encoder");
 static_assert(fieldCount<SamplerResource>() == 8, "SamplerResource changed: update the info encoder");
@@ -509,6 +509,7 @@ void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
     writer.Value(result.barycentricEmulation.active);
     writer.Value(result.barycentricEmulation.smooth);
     writer.Value(result.barycentricEmulation.linear);
+    writer.Value(result.barycentricEmulation.smoothOffset);
     writer.Value(result.meshBarycentrics.has_value());
     if (result.meshBarycentrics) {
         writer.Value(result.meshBarycentrics->emulation.active);
@@ -568,6 +569,7 @@ void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
     reader.Value(result.barycentricEmulation.active);
     reader.Value(result.barycentricEmulation.smooth);
     reader.Value(result.barycentricEmulation.linear);
+    reader.Value(result.barycentricEmulation.smoothOffset);
     bool hasMeshBarycentrics = false;
     reader.Value(hasMeshBarycentrics);
     result.meshBarycentrics.reset();
@@ -802,6 +804,7 @@ void encodeShaderInfo(Writer& writer, const ShaderInfo& info) {
     writer.Value(info.dispatchThreadLimit);
     writer.Value(info.rasterPrimitive);
     writer.Value(info.layerExported);
+    writer.Value(info.smoothOffsetBarycentrics);
 }
 
 void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
@@ -910,6 +913,7 @@ void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
     reader.Value(info.dispatchThreadLimit);
     reader.Value(info.rasterPrimitive);
     reader.Value(info.layerExported);
+    reader.Value(info.smoothOffsetBarycentrics);
 }
 
 void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
