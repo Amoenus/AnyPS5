@@ -170,7 +170,6 @@ void verifyFrontendIdentity() {
     require((preparation.AcquireFrontend(partial) == first) == reuse, "frontend pair: partial-thread state changed the frontend identity");
     auto target = request;
     target.target.subgroupSize = 64u;
-    target.context.waveSize = 32u;
     target.context.compute->numThreads = {32u, 2u, 1u};
     require((preparation.AcquireFrontend(target) == first) == reuse, "frontend pair: translation-only state changed the frontend identity");
     const std::array<std::uint32_t, 2> changedUserData{1u, 2u};
@@ -199,6 +198,10 @@ void verifyFrontendIdentity() {
     changed.context.userDataBaseRegister = 4u;
     verifyMiss(changed, "frontend pair: changed user-data base reused the frontend");
     changed = request;
+    changed.context.waveSize = 32u;
+    changed.context.compute->numThreads = {32u, 2u, 1u};
+    verifyMiss(changed, "frontend pair: a different wave size reused the frontend");
+    changed = request;
     changed.context.userData = std::span<const std::uint32_t>(userData).first(1u);
     verifyMiss(changed, "frontend pair: changed user-data count reused the frontend");
     changed = request;
@@ -222,6 +225,25 @@ void verifyFrontendIdentity() {
     }
     require(failed, "frontend pair: invalid code did not fail during frontend construction");
     require((preparation.AcquireFrontend(request) == first) == reuse, "frontend pair: a failed miss replaced the prior frontend");
+}
+
+void verifyFrontendWaveSizeCalls() {
+    using namespace ShaderRecompiler;
+    const std::vector<std::uint32_t> code{
+        0xbb0e0005u,
+        0xd4c2000eu, 0x00020300u,
+        0xd5010002u, 0x003a0300u,
+        0xbf820001u,
+        0xbe80200eu,
+        0xbf810000u};
+    const std::array<std::uint32_t, 2> userData{};
+    for (const std::uint32_t waveSize : {32u, 64u}) {
+        auto request = FrontendRequest(code, userData);
+        request.context.waveSize = waveSize;
+        request.context.compute->numThreads = {waveSize, 1u, 1u};
+        ShaderPreparationContext preparation;
+        require(preparation.AcquireFrontend(request) != nullptr, "frontend wave size: a mask write that reuses the link pair and its v_cndmask read were refused");
+    }
 }
 
 void verifyFrontendProgram(const ShaderRecompiler::IrProgram& reused, const ShaderRecompiler::IrProgram& fresh) {
@@ -258,6 +280,7 @@ void verifyFrontendProgram(const ShaderRecompiler::IrProgram& reused, const Shad
 void verifyFrontendPair() {
     using namespace ShaderRecompiler;
     verifyFrontendIdentity();
+    verifyFrontendWaveSizeCalls();
     const bool reuse = std::getenv("APS5_NO_PERF_FRONTEND_PAIR") == nullptr;
     const std::vector<std::uint32_t> code{0xe0700000u, 0x80000000u, 0xbf810000u};
     const std::array<std::uint32_t, 4> buffer{0x10000000u, 0u, 0x40u, 0x00027facu};
@@ -320,7 +343,7 @@ void verifyFrontendPair() {
         const auto freshChanged = PrepareResourceProgram(translated);
         verifyFrontendProgram(changed, freshChanged);
         require(changed.WaveSize() != freshFull.WaveSize(), "frontend pair: changed translation inputs were ignored");
-        require((preparation.AcquireFrontend(request) == retained) == reuse, "frontend pair: translating a variant replaced the frontend");
+        require(preparation.AcquireFrontend(request) != retained, "frontend pair: a variant with another wave size reused the frontend");
     }
 
     for (const bool partialFirst : {false, true}) {
@@ -945,6 +968,72 @@ void verifyPureFlatSlots() {
     plan.requiresSpecializationMemory = false;
     plan.srtPlanComplete = false;
     require(Detail::ComputePureFlatSlots(plan) == Pure{0, 0, 0, 0}, "pure flat slots: an incomplete plan was classified");
+}
+
+void verifyLaneMaskGuardedDescriptorSources() {
+    using namespace ShaderRecompiler;
+    constexpr std::uint32_t Format8888UNorm = 56;
+    constexpr std::uint32_t Type2D = 9;
+    constexpr std::uint32_t Zero = 0x00000000u;
+    constexpr std::uint32_t NegativeZero = 0x80000000u;
+    constexpr std::uint32_t One = 0x3f800000u;
+    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
+    static Texture texture;
+    const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture.bytes.data()));
+    const std::array<std::uint32_t, 8> valid{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
+    const std::array<std::uint32_t, 8> invalid{0x43700000u, 0x43070000u, 0x3b888889u, 0x3bf2b9d6u, 0x3b088889u, 0x3b72b9d6u, 0x3f7f7777u, 0x3f7f0d46u};
+    const std::array<std::uint32_t, 4> sampler{0u, 0u, 0u, 0u};
+    std::array<std::uint32_t, 4> output{};
+    const auto outputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
+    const std::array<std::uint32_t, 4> outputV{static_cast<std::uint32_t>(outputAddress), static_cast<std::uint32_t>((outputAddress >> 32u) & 0xffffu), 16u, 0xfacu};
+    std::array<std::uint32_t, 32> srt{};
+    const auto fill = [&](const std::array<std::uint32_t, 8>& image, std::uint32_t mode) {
+        std::copy(image.begin(), image.end(), srt.begin());
+        std::copy(sampler.begin(), sampler.end(), srt.begin() + 8);
+        std::copy(outputV.begin(), outputV.end(), srt.begin() + 16);
+        srt[20] = mode;
+    };
+    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(srt.data()));
+    const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u)};
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    RecompileRequest request{};
+    const std::vector<std::uint32_t> code{0xf4000400u, 0xfa000050u, 0xf4080500u, 0xfa000020u, 0xf4080600u, 0xfa000040u, 0xbf8cc07fu, 0xd40d006au, 0x00002080u, 0xbf860006u, 0xf40c0200u, 0xfa000000u, 0xbf8cc07fu, 0xf09c0f08u, 0x00a20000u, 0xbf8c3f70u, 0xe0700000u, 0x80060000u, 0xbf810000u};
+    request.shader = {ShaderStage::Compute, 0x24000u, code, 0, {}};
+    request.context.waveSize = 32;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData;
+    request.context.compute = ShaderComputeStageInfo{{32u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32;
+    request.target.supportedCapabilities = capabilities;
+    request.target.supportedExtensions = extensions;
+    request.target.bdaAbiVersion = BdaAbi::Version;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+
+    fill(invalid, Zero);
+    const auto plan = GetResourcePlan(request);
+    require(plan->info.images.size() == 1u && plan->info.samplers.size() == 1u, "lane-mask guarded sources: the image and its sampler were not planned");
+    require(!plan->controlFlow.empty() && std::ranges::any_of(plan->controlFlow, [](const ResourceBlock& block) { return block.condition != nullptr; }), "lane-mask guarded sources: the VCC branch around the image kept no condition");
+    for (const auto mode : {Zero, NegativeZero}) {
+        fill(invalid, mode);
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::ranges::all_of(capture->snapshot.images[0].dwords, [](std::uint32_t word) { return word == 0u; }), "lane-mask guarded sources: the T# behind a branch no lane takes was not left null");
+    }
+    fill(invalid, One);
+    {
+        AgcDriver::ShaderMemory memory({});
+        expectFailure([&] { static_cast<void>(memory.Capture(request)); }, "runtime image descriptor is invalid", "lane-mask guarded sources: an invalid T# behind a branch the lanes may take was accepted");
+    }
+    fill(valid, One);
+    {
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::equal(valid.begin(), valid.end(), capture->snapshot.images[0].dwords.begin()), "lane-mask guarded sources: the T# behind a branch the lanes may take was not read");
+    }
 }
 
 void verifyGuardedDescriptorSources() {
@@ -4842,7 +4931,7 @@ void verifyPixelRequestSerialization() {
                         value.posZ, value.posW, value.frontFace, value.frontFaceAllBits, value.ancillary, value.sampleShading,
                         value.noPerspective, value.linearCentroid, value.pixelKillEnable, value.depthExportEnable,
                         value.sampleMaskExportEnable, value.earlyZ, value.executeOnNoop, value.conservativeZExport, value.orderedPixelShader,
-                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage, value.stencilRefExportEnable, value.rasterPrimitive, value.layerExported, value.ditheredAlphaToCoverage, value.reversedBlend);
+                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage, value.stencilRefExportEnable, value.rasterPrimitive, value.layerExported, value.ditheredAlphaToCoverage, value.reversedBlend, value.targetMerge);
     };
     const std::array<std::uint32_t, 1> code{0xbf810000u};
     const std::array<std::uint32_t, 3> userData{0x12345678u, 0xabcdef01u, 0x87654321u};
@@ -4890,6 +4979,7 @@ void verifyPixelRequestSerialization() {
     pixel.stencilRefExportEnable = true;
     pixel.ditheredAlphaToCoverage = true;
     pixel.reversedBlend = 0x570001u;
+    pixel.targetMerge = {1u, 0x0ff0u, 1u, {0x100u, 0x2u, 0x3u, 0x4u, 0x5u, 0x6u, 0x7u, 0x8u}};
     const std::array<std::array<std::uint8_t, 8>, 3> mappings{{
         {0x00u, 0xe4u, 0xc6u, 0x1bu, 0xffu, 0x80u, 0x55u, 0xaau},
         {0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u},
@@ -4922,6 +5012,22 @@ void verifyPixelRequestSerialization() {
         withoutReversedBlend.context.pixel->reversedBlend = 0u;
         RecompileCacheKey::Build(withoutReversedBlend, replayKey);
         require(key == replayKey && RecompileCacheKey::ContextHash(request) == RecompileCacheKey::ContextHash(withoutReversedBlend), "the reversed-order blend code changed the static shader identity");
+        auto movedMerge = request;
+        movedMerge.context.pixel->targetMerge.descriptor[0] = 0x200u;
+        RecompileCacheKey::Build(movedMerge, replayKey);
+        require(key == replayKey, "the merged target's descriptor changed the static shader identity");
+        auto depthWritingMerge = request;
+        depthWritingMerge.context.pixel->targetMerge.depthStencilWrites = true;
+        RecompileCacheKey::Build(depthWritingMerge, replayKey);
+        require(key != replayKey, "the merge draw's depth or stencil writes did not change the static shader identity");
+        auto depthTestingMerge = request;
+        depthTestingMerge.context.pixel->targetMerge.depthStencilTests = true;
+        RecompileCacheKey::Build(depthTestingMerge, replayKey);
+        require(key != replayKey, "the merge draw's depth or stencil tests did not change the static shader identity");
+        auto withoutMerge = request;
+        withoutMerge.context.pixel->targetMerge = {};
+        RecompileCacheKey::Build(withoutMerge, replayKey);
+        require(key != replayKey, "a color target merge did not change the static shader identity");
         auto withoutCoverage = request;
         withoutCoverage.context.pixel->alphaToCoverage = false;
         RecompileCacheKey::Build(withoutCoverage, replayKey);
@@ -4944,7 +5050,7 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel->layerExported = true;
     minimal.context.pixel->ditheredAlphaToCoverage = true;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQSwAAAA=", "new requests did not use serialization version 44");
+    require(requestPrefix(encoded, 8u) == "NVNQQS4AAAA=", "new requests did not use serialization version 46");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
     withFallbacks.context.linkedCallFallbacks = fallbacks;
@@ -5062,7 +5168,7 @@ void verifyPixelRequestSerialization() {
     for (std::size_t bytes = 0; bytes < 45u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class, layer export, dither or front-face flag, quad pixel mask or quad sample mask was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQS0AAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQS8AAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{
@@ -5153,6 +5259,7 @@ void verifyVertexInfoVersion19() {
     require(offset + 4u <= plain.size() && flagged[offset] == 0xefu && flagged[offset + 1u] == 0xcdu && flagged[offset + 2u] == 0xabu && flagged[offset + 3u] == 0x89u, "PA_CL_VS_OUT_CNTL is not the four bytes the version 20 vertex info adds");
     require(std::equal(plain.begin() + offset + 4u, plain.end(), flagged.begin() + offset + 4u), "PA_CL_VS_OUT_CNTL moved the fields after it");
     auto version20Vertex = flagged;
+    version20Vertex.resize(version20Vertex.size() - sizeof(std::uint32_t));
     version20Vertex.pop_back();
     version20Vertex.pop_back();
     version20Vertex.pop_back();
@@ -5165,6 +5272,7 @@ void verifyVertexInfoVersion19() {
     const auto layered = serializer.Deserialize(serializer.Serialize(vertex));
     require(layered.request.context.vertex.has_value() && layered.request.context.vertex->paClVsOutCntl == vertex.context.vertex->paClVsOutCntl, "a layered vertex info lost its clip distances or render target index");
     auto legacy = plain;
+    legacy.resize(legacy.size() - sizeof(std::uint32_t));
     legacy.pop_back();
     legacy.pop_back();
     legacy.pop_back();
@@ -5204,16 +5312,39 @@ void verifyVertexInfoVersion19() {
     while (allBitsOffset < plainPixel.size() && plainPixel[allBitsOffset] == allBitsBytes[allBitsOffset]) ++allBitsOffset;
     require(allBitsOffset == flagOffset + 2u, "the front-face all-bits flag does not follow the dithered coverage flag");
     require(blendOffset == allBitsOffset + 18u, "the reversed-order blend code is not serialized after the front-face all-bits flag, quad pixel mask and quad sample masks");
-    constexpr std::size_t sampleMaskBytes = 16u;
     constexpr std::size_t iterationBytes = 35u;
     constexpr std::size_t sampleOrderBytes = 16u;
+    constexpr std::size_t mergeBytes = 40u;
+    constexpr std::size_t sampleMaskBytes = 16u;
     const auto orderOffset = blendOffset + 4u + iterationBytes;
+    const auto mergeOffset = static_cast<std::ptrdiff_t>(orderOffset + sampleOrderBytes);
+    auto merging = pixel;
+    merging.context.pixel->targetMerge = {3u, 0xf00fu, 2u, {1u, 2u, 3u, 4u, 5u, 6u, 7u, 0x89abcdefu}, true, true};
+    const auto mergingBytes = decodeBase64(serializer.Serialize(merging));
+    require(mergingBytes.size() == plainPixel.size() && std::equal(plainPixel.begin(), plainPixel.begin() + mergeOffset, mergingBytes.begin()) && mergingBytes[mergeOffset] == 3u && mergingBytes[mergeOffset + 1] == 0x0fu && mergingBytes[mergeOffset + 2] == 0xf0u && mergingBytes[mergeOffset + 5] == 2u && mergingBytes[mergeOffset + 6] == 1u && mergingBytes[mergeOffset + 34] == 0xefu && mergingBytes[mergeOffset + 37] == 0x89u && mergingBytes[mergeOffset + 38] == 1u && mergingBytes[mergeOffset + 39] == 1u && std::equal(plainPixel.begin() + mergeOffset + static_cast<std::ptrdiff_t>(mergeBytes), plainPixel.end(), mergingBytes.begin() + mergeOffset + static_cast<std::ptrdiff_t>(mergeBytes)), "the color target merge is not the 40 bytes the version 46 pixel info adds after the sample order");
+    require(serializer.Deserialize(serializer.Serialize(merging)).request.context.pixel->targetMerge == merging.context.pixel->targetMerge, "a serialized request lost its color target merge");
+    // A version 43 request: no color target merge, and no fused arithmetic flag, pixel function LDS flag or storage size at the end.
+    const auto version43Bytes = [&](std::vector<std::uint8_t> bytes) {
+        require(bytes.end() - bytes.begin() > mergeOffset + static_cast<std::ptrdiff_t>(mergeBytes) && std::equal(plainPixel.begin() + mergeOffset, plainPixel.begin() + mergeOffset + static_cast<std::ptrdiff_t>(mergeBytes), bytes.begin() + mergeOffset), "a replay fixture does not hold the default color target merge after the sample order");
+        bytes.erase(bytes.begin() + mergeOffset, bytes.begin() + mergeOffset + static_cast<std::ptrdiff_t>(mergeBytes));
+        bytes.resize(bytes.size() - sizeof(std::uint32_t) - 2u);
+        return bytes;
+    };
+    auto version42 = version43Bytes(plainPixel);
+    version42[4] = 42u;
+    const auto replay42 = serializer.Deserialize(encodeBase64(version42));
+    require(replay42.request.context.pixel.has_value() && replay42.request.context.pixel->targetMerge == TargetMerge{} && serializer.Serialize(replay42.request) == encodedPixel, "a version 42 request read a color target merge or misread the fields after it");
+    auto version39 = version42;
+    version39.pop_back();
+    version39.erase(version39.begin() + static_cast<std::ptrdiff_t>(orderOffset), version39.begin() + mergeOffset);
+    version39[4] = 39u;
+    const auto replay39 = serializer.Deserialize(encodeBase64(version39));
+    require(replay39.request.context.pixel.has_value() && replay39.request.context.pixel->targetMerge == TargetMerge{} && replay39.request.context.pixel->sampleOrder == std::array<std::uint32_t, 4>{} && serializer.Serialize(replay39.request) == encodedPixel, "a version 39 request read a sample order or color target merge, or misread the fields after them");
     auto ordered = pixel;
     ordered.context.pixel->sampleOrder = {0x76543210u, 0x76543210u, 0x76543201u, 0x76543201u};
     const auto orderedBytes = decodeBase64(serializer.Serialize(ordered));
     require(orderedBytes.size() == plainPixel.size() && std::equal(plainPixel.begin(), plainPixel.begin() + static_cast<std::ptrdiff_t>(orderOffset), orderedBytes.begin()) && orderedBytes[orderOffset] == 0x10u && orderedBytes[orderOffset + 11u] == 0x76u && orderedBytes[orderOffset + 12u] == 0x01u && std::equal(plainPixel.begin() + static_cast<std::ptrdiff_t>(orderOffset + sampleOrderBytes), plainPixel.end(), orderedBytes.begin() + static_cast<std::ptrdiff_t>(orderOffset + sampleOrderBytes)), "the sample order is not the four words the version 42 pixel info adds after the stencil operation value export flag");
-    auto orderedVersion34 = orderedBytes;
-    orderedVersion34.pop_back();
+    auto orderedVersion34 = version43Bytes(orderedBytes);
     orderedVersion34.pop_back();
     orderedVersion34.pop_back();
     orderedVersion34.pop_back();
@@ -5221,16 +5352,15 @@ void verifyVertexInfoVersion19() {
     orderedVersion34[4] = 34u;
     const auto orderedReplay34 = serializer.Deserialize(encodeBase64(orderedVersion34));
     require(orderedReplay34.request.context.pixel.has_value() && orderedReplay34.request.context.pixel->sampleOrder == std::array<std::uint32_t, 4>{} && serializer.Serialize(orderedReplay34.request) == encodedPixel, "a version 34 request read a sample order, or misread the fields after its pixel iteration fields");
-    auto orderedVersion30 = orderedBytes;
-    orderedVersion30.resize(orderedVersion30.size() - 5u);
+    auto orderedVersion30 = version43Bytes(orderedBytes);
+    orderedVersion30.resize(orderedVersion30.size() - 4u);
     orderedVersion30.erase(orderedVersion30.begin() + static_cast<std::ptrdiff_t>(blendOffset + 4u), orderedVersion30.begin() + static_cast<std::ptrdiff_t>(orderOffset + sampleOrderBytes));
     orderedVersion30[4] = 30u;
     const auto orderedReplay30 = serializer.Deserialize(encodeBase64(orderedVersion30));
     require(orderedReplay30.request.context.pixel.has_value() && orderedReplay30.request.context.pixel->sampleOrder == std::array<std::uint32_t, 4>{} && serializer.Serialize(orderedReplay30.request) == encodedPixel, "a version 30 request read a sample order, or misread the fields after its reversed-order blend code");
     auto orderedSpanned = ordered;
     orderedSpanned.target.spannedWaves = true;
-    auto orderedVersion32 = decodeBase64(serializer.Serialize(orderedSpanned));
-    orderedVersion32.pop_back();
+    auto orderedVersion32 = version43Bytes(decodeBase64(serializer.Serialize(orderedSpanned)));
     orderedVersion32.pop_back();
     require(orderedVersion32.size() > 2u && orderedVersion32.back() == 0u && orderedVersion32[orderedVersion32.size() - 2u] == 0u && orderedVersion32[orderedVersion32.size() - 3u] == 1u, "the spanned-waves flag is not the byte before the depth remap flag");
     orderedVersion32.pop_back();
@@ -5251,8 +5381,7 @@ void verifyVertexInfoVersion19() {
     sampledPixel.context.pixel->quadSampleMask = {0x1u, 0x2u, 0x4u, 0x8u};
     const auto sampledBytes = decodeBase64(serializer.Serialize(sampledPixel));
     require(std::equal(maskedBytes.begin(), maskedBytes.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u), sampledBytes.begin()) && sampledBytes[maskOffset + 1u] == 0x1u && sampledBytes[maskOffset + 5u] == 0x2u && sampledBytes[maskOffset + 9u] == 0x4u && sampledBytes[maskOffset + 13u] == 0x8u, "the quad sample masks are not the four words after the quad pixel mask");
-    auto version30 = sampledBytes;
-    version30.pop_back();
+    auto version30 = version43Bytes(sampledBytes);
     version30.pop_back();
     version30.pop_back();
     version30.pop_back();
@@ -5263,8 +5392,7 @@ void verifyVertexInfoVersion19() {
     require(replay30.request.context.pixel.has_value() && !replay30.request.context.pixel->iteratesSamples && replay30.request.context.pixel->positionLocation == PixelPositionLocation::Center && replay30.request.context.pixel->sampleLocations == std::array<std::uint8_t, 32>{} && decodeBase64(serializer.Serialize(replay30.request)) == sampledBytes, "a version 30 request read pixel iteration, a position location or sample locations, or misread the fields after its reversed-order blend code");
     auto spanned = sampledPixel;
     spanned.target.spannedWaves = true;
-    auto version32 = decodeBase64(serializer.Serialize(spanned));
-    version32.pop_back();
+    auto version32 = version43Bytes(decodeBase64(serializer.Serialize(spanned)));
     version32.pop_back();
     require(version32.size() > 2u && version32.back() == 0u && version32[version32.size() - 2u] == 0u && version32[version32.size() - 3u] == 1u, "the spanned-waves flag is not the byte before the depth remap flag");
     version32.pop_back();
@@ -5273,15 +5401,13 @@ void verifyVertexInfoVersion19() {
     version32[4] = 32u;
     const auto replay32 = serializer.Deserialize(encodeBase64(version32));
     require(replay32.request.context.pixel.has_value() && !replay32.request.context.pixel->iteratesSamples && replay32.request.context.pixel->sampleLocations == std::array<std::uint8_t, 32>{} && replay32.request.target.spannedWaves && serializer.Serialize(replay32.request) == serializer.Serialize(spanned), "a version 32 request read pixel iteration or sample locations, or lost its spanned-waves flag");
-    auto version29 = sampledBytes;
-    version29.pop_back();
+    auto version29 = version43Bytes(sampledBytes);
     version29.pop_back();
     version29.pop_back();
     version29.pop_back();
     version29.pop_back();
     version29.erase(version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes), version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes + sampleOrderBytes));
-    auto version36 = sampledBytes;
-    version36.pop_back();
+    auto version36 = version43Bytes(sampledBytes);
     version36.pop_back();
     version36.erase(version36.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes - 1u), version36.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u + iterationBytes + sampleOrderBytes));
     version36[4] = 36u;
@@ -5290,8 +5416,7 @@ void verifyVertexInfoVersion19() {
     version29[4] = 29u;
     const auto replay29 = serializer.Deserialize(encodeBase64(version29));
     require(replay29.request.context.pixel.has_value() && replay29.request.context.pixel->quadSampleMask == std::array<std::uint16_t, 4>{0x1u, 0x2u, 0x4u, 0x8u} && replay29.request.context.pixel->reversedBlend == 0u && decodeBase64(serializer.Serialize(replay29.request)) == sampledBytes, "a version 29 request read a reversed-order blend code or misread the fields after the quad sample masks");
-    auto version28 = sampledBytes;
-    version28.pop_back();
+    auto version28 = version43Bytes(sampledBytes);
     version28.pop_back();
     version28.pop_back();
     version28.pop_back();
@@ -5300,8 +5425,7 @@ void verifyVertexInfoVersion19() {
     version28[4] = 28u;
     const auto replay28 = serializer.Deserialize(encodeBase64(version28));
     require(replay28.request.context.pixel.has_value() && replay28.request.context.pixel->quadPixelMask == 0x2u && replay28.request.context.pixel->quadSampleMask == std::array<std::uint16_t, 4>{0xffffu, 0xffffu, 0xffffu, 0xffffu} && replay28.request.context.pixel->reversedBlend == 0u && decodeBase64(serializer.Serialize(replay28.request)) == maskedBytes, "a version 28 request read quad sample masks or a reversed-order blend code, or misread the fields after them");
-    auto version27 = maskedBytes;
-    version27.pop_back();
+    auto version27 = version43Bytes(maskedBytes);
     version27.pop_back();
     version27.pop_back();
     version27.pop_back();
@@ -5310,8 +5434,7 @@ void verifyVertexInfoVersion19() {
     version27[4] = 27u;
     const auto replay27 = serializer.Deserialize(encodeBase64(version27));
     require(replay27.request.context.pixel.has_value() && replay27.request.context.pixel->quadPixelMask == 0xfu && replay27.request.context.pixel->reversedBlend == 0u && serializer.Serialize(replay27.request) == encodedPixel, "a version 27 request read a quad pixel mask or reversed-order blend code, or misread the fields after it");
-    auto legacyPixel = plainPixel;
-    legacyPixel.pop_back();
+    auto legacyPixel = version43Bytes(plainPixel);
     legacyPixel.pop_back();
     legacyPixel.pop_back();
     legacyPixel.pop_back();
@@ -5366,9 +5489,11 @@ void verifyDepthRemapRequests() {
     const auto plainBytes = decodeBase64(plain);
     const auto remappedBytes = decodeBase64(remapped);
     constexpr std::size_t pointTailBytes = 13u;
-    require(plainBytes.size() == remappedBytes.size() && plainBytes.size() > 8u + pointTailBytes && std::equal(plainBytes.begin(), plainBytes.end() - 8 - pointTailBytes, remappedBytes.begin()) && std::equal(plainBytes.end() - 1 - pointTailBytes, plainBytes.end(), remappedBytes.end() - 1 - pointTailBytes), "the depth remap flag and mode are not the 6 bytes before the f32 flush and denormal preserve flags, the point tail and the fused arithmetic flag of a vertex request");
+    require(plainBytes.size() == remappedBytes.size() && plainBytes.size() > 13u + pointTailBytes && std::equal(plainBytes.begin(), plainBytes.end() - 13 - pointTailBytes, remappedBytes.begin()) && std::equal(plainBytes.end() - 6 - pointTailBytes, plainBytes.end(), remappedBytes.end() - 6 - pointTailBytes), "the depth remap flag and mode are not the 6 bytes before the f32 flush and denormal preserve flags, the point tail, the fused arithmetic flag, the pixel function LDS flag and the pixel function storage size of a vertex request");
     for (const std::uint8_t legacyVersion : {32u, 34u}) {
         auto legacyBytes = remappedBytes;
+        legacyBytes.resize(legacyBytes.size() - sizeof(std::uint32_t));
+        legacyBytes.pop_back();
         legacyBytes.pop_back();
         legacyBytes.pop_back();
         legacyBytes[4] = legacyVersion;
@@ -5378,6 +5503,8 @@ void verifyDepthRemapRequests() {
         require(serializer.Serialize(legacy.request) == plain, ("a version " + std::to_string(legacyVersion) + " vertex request misread the fields before the depth remap").c_str());
     }
     auto version35 = remappedBytes;
+    version35.resize(version35.size() - sizeof(std::uint32_t));
+    version35.pop_back();
     version35.pop_back();
     version35.pop_back();
     version35[4] = 35u;
@@ -5427,8 +5554,8 @@ void verifyMergedHullConfiguration() {
     require(!serializer.Deserialize(separate).request.graphics->tessellation->mergedHull, "a separate hull configuration was read as merged");
     constexpr std::size_t pointTailBytes = 13u;
     auto legacy = decodeBase64(merged);
-    require(legacy.size() > 54u + pointTailBytes && legacy[4] == 44u, "a merged hull request did not use serialization version 44");
-    legacy.resize(legacy.size() - 1u - pointTailBytes);
+    require(legacy.size() > 54u + pointTailBytes && legacy[4] == 46u, "a merged hull request did not use serialization version 46");
+    legacy.resize(legacy.size() - sizeof(std::uint32_t) - 2u - pointTailBytes);
     legacy.pop_back();
     require(legacy[legacy.size() - 52u] == 1u, "the merged hull flag is not the last byte of the tessellation configuration");
     legacy.erase(legacy.end() - 52);
@@ -7554,8 +7681,19 @@ void verifyFmaskImageMode() {
     const auto modes = ResourceMaterializer::RuntimeImageModes(image);
     const auto selected = ResourceMaterializer::RuntimeImageMode(image, descriptor, modes);
     require(modes[selected].numericClass == IrTextureNumericClass::Uint && modes[selected].packedFormat == IrBufferFormat::Invalid && !modes[selected].constantSwizzle, "FMASK did not select a bound integer image mode");
-    for (std::uint32_t format = 156u; format <= 168u; ++format) {
-        if (format == 166u) continue;
+    for (const auto format : {156u, 157u, 158u, 159u, 160u, 161u, 163u, 165u}) {
+        descriptor.dwords[1] = format << 20u;
+        const auto expanded = ResourceMaterializer::RuntimeImageMode(image, descriptor, modes);
+        require(expanded != selected && modes[expanded].numericClass == IrTextureNumericClass::Uint && modes[expanded].conversionFormat == FmaskExpansion && modes[expanded].dimension == RdnaImageDimension::Dim2D, "an FMASK format of up to 8 samples did not select the FMASK expansion mode");
+    }
+    require(std::ranges::count_if(modes, [](const ImageResource& mode) { return mode.conversionFormat == FmaskExpansion; }) == 1, "FMASK expansion needs exactly one runtime image mode");
+    for (const auto format : {161u, 166u}) {
+        descriptor.dwords[1] = format << 20u;
+        descriptor.dwords[3] = 0x91800005u;
+        expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, descriptor, modes)); }, "FMASK destination channel selector is not implemented", "an FMASK load selecting Y was accepted");
+    }
+    descriptor.dwords[3] = 0x91800004u;
+    for (const auto format : {162u, 164u, 167u, 168u}) {
         descriptor.dwords[1] = format << 20u;
         expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, descriptor, modes)); }, "FMASK format is not implemented", "an unsupported FMASK format was accepted");
     }
@@ -7613,6 +7751,37 @@ void verifyVolumeArrayLoadMode() {
     expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(store, descriptor, ResourceMaterializer::RuntimeImageModes(store))); }, "incompatible with the static runtime image interface", "2D-array image atomic on a 3D T# was accepted");
 }
 
+void verifyMultisamplePlaneReadMode() {
+    using namespace ShaderRecompiler;
+    const DescriptorValue descriptor{{0x02754d00u, 0xc3800000u, 0x00cbc167u, 0xe1b20facu, 0u, 0x00700020u, 0u, 0u}, 8u};
+    ImageResource image{};
+    image.resourceClass = ImageResourceClass::Sampled;
+    image.dimension = RdnaImageDimension::Dim2D;
+    const auto modes = ResourceMaterializer::RuntimeImageModes(image);
+    const auto selected = ResourceMaterializer::RuntimeImageMode(image, descriptor, modes);
+    require(modes[selected].dimension == RdnaImageDimension::Dim2D && !modes[selected].cube && modes[selected].numericClass == IrTextureNumericClass::Float, "a 2D read of a 2D MSAA T# (PPSA18216's) did not select a 2D runtime mode");
+    for (const auto& [word1, word3, word5, numericClass] : std::array<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, IrTextureNumericClass>, 4>{{{0xc0100000u, 0xe1b20facu, 0x00700020u, IrTextureNumericClass::Float}, {0xc0500000u, 0xe1810facu, 0x00700010u, IrTextureNumericClass::Uint}, {0xc0c00000u, 0xe1b20facu, 0x00700020u, IrTextureNumericClass::Sint}, {0xc0d00000u, 0xe1830facu, 0x00700030u, IrTextureNumericClass::Float}}}) {
+        const DescriptorValue narrow{{0x02754d00u, word1, 0x00cbc167u, word3, 0u, word5, 0u, 0u}, 8u};
+        const auto mode = ResourceMaterializer::RuntimeImageMode(image, narrow, modes);
+        require(modes[mode].dimension == RdnaImageDimension::Dim2D && !modes[mode].cube && modes[mode].numericClass == numericClass, "a 2D read of a 2D MSAA T# with 8-bit or 16-bit texels did not select a 2D runtime mode");
+    }
+    const DescriptorValue depthBits{{0x02754d00u, 0xc0b00000u, 0x00cbc167u, 0xe1820facu, 0u, 0x00700020u, 0u, 0u}, 8u};
+    expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, depthBits, modes)); }, "incompatible with the static runtime image interface", "a 2D read of a 16_UINT SW_64KB_Z_X 2D MSAA T#, read as depth bits, was accepted");
+    const auto refused = [&](const ImageResource& access, const char* what) {
+        expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(access, descriptor, ResourceMaterializer::RuntimeImageModes(access))); }, "incompatible with the static runtime image interface", what);
+    };
+    auto other = image;
+    other.cubeFaceCompatible = false;
+    refused(other, "a 2D read of a 2D MSAA T# through a mip, gather, bias, gradient or offset access was accepted");
+    other = image;
+    other.depthCompare = true;
+    refused(other, "a 2D depth comparison of a 2D MSAA T# was accepted");
+    other = image;
+    other.resourceClass = ImageResourceClass::Storage;
+    other.written = true;
+    refused(other, "a 2D storage access to a 2D MSAA T# was accepted");
+}
+
 void verifyVolumeBiasTableRejection() {
     using namespace ShaderRecompiler;
     namespace Abi = ImageTableAbi;
@@ -7654,6 +7823,85 @@ void verifyVolumeBiasTableRejection() {
         require(!match.mode.has_value() && match.reason == Abi::PoisonReason::Dimension, "volume bias: an unsupported direct descriptor selected a mode");
         expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, invalid, directModes)); }, "one slice and mip level zero only", "volume bias: direct use of an unsupported descriptor was accepted");
     }
+}
+
+void verifySamplerTableDeduplication() {
+    using namespace ShaderRecompiler;
+    namespace Abi = ImageTableAbi;
+    SamplerResource sampler0{};
+    sampler0.table = 0u;
+    SamplerResource sampler1{};
+    sampler1.table = 1u;
+    ShaderInfo info{};
+    info.samplers.push_back(sampler0);
+    info.samplers.push_back(sampler1);
+    ResourceSnapshot snapshot{};
+    snapshot.tables.tables.resize(2u);
+    const DescriptorValue s0{{0x00000600u, 0x00fff000u, 0x06f03fa0u, 0u}, 4u};
+    const DescriptorValue s1{{0x00000700u, 0x00fff000u, 0x06f03fa0u, 0u}, 4u};
+    const DescriptorValue s2{{0x00000800u, 0x00fff000u, 0x06f03fa0u, 0u}, 4u};
+    std::vector<std::uint32_t> codes(300u);
+    for (std::size_t i = 0; i < 300u; ++i) codes[i] = static_cast<std::uint32_t>(i % 3u);
+    for (std::uint32_t table = 0u; table < 2u; ++table) {
+        auto& column = snapshot.tables.tables[table];
+        column.records = 300u;
+        column.keys = 300u;
+        column.codes = SharedValues<std::uint32_t>(codes);
+        column.words = SharedValues<DescriptorValue>(std::vector<DescriptorValue>{s0, s1, s2});
+    }
+    const auto resolved = ResourceMaterializer::ResolveImageTables(info, snapshot);
+    require(resolved.samplers.size() == (3u + 1u) * Abi::SamplerEntryElements, "sampler table deduplication: duplicate sampler entries across tables were not deduplicated");
+    for (std::uint32_t table = 0u; table < 2u; ++table) {
+        const auto mapStart = resolved.map.at(Abi::TableHeader(table) + Abi::TableMapStart);
+        for (std::uint32_t key = 0; key < 300u; ++key) {
+            const auto record = resolved.map.at(mapStart + key);
+            const auto element = resolved.map.at(record + Abi::SamplerRecordElement);
+            require(element == (key % 3u) * Abi::SamplerEntryElements, "sampler table deduplication: record points to the wrong deduplicated sampler element");
+            require((resolved.map.at(record + Abi::SamplerRecordFlags) & Abi::PoisonFlag) == 0u, "sampler table deduplication: deduplicated sampler was poisoned");
+        }
+    }
+
+    constexpr std::uint32_t MaxUnique = Abi::SamplerElementBudget / Abi::SamplerEntryElements;
+    std::vector<DescriptorValue> budgetWords;
+    budgetWords.reserve(MaxUnique + 1u);
+    for (std::uint32_t i = 0; i < MaxUnique + 1u; ++i) {
+        budgetWords.push_back(DescriptorValue{{0x00000600u, 0x00fff000u, 0x06f03fa0u, i + 1u}, 4u});
+    }
+    std::vector<std::uint32_t> budgetCodes(MaxUnique + 2u);
+    for (std::uint32_t i = 0; i < MaxUnique; ++i) budgetCodes[i] = i;
+    budgetCodes[MaxUnique] = 0u;
+    budgetCodes[MaxUnique + 1u] = MaxUnique;
+
+    ShaderInfo budgetInfo{};
+    SamplerResource budgetSampler{};
+    budgetSampler.table = 0u;
+    budgetInfo.samplers.push_back(budgetSampler);
+    ResourceSnapshot budgetSnapshot{};
+    budgetSnapshot.tables.tables.resize(1u);
+    auto& budgetColumn = budgetSnapshot.tables.tables[0];
+    budgetColumn.records = static_cast<std::uint32_t>(budgetCodes.size());
+    budgetColumn.keys = static_cast<std::uint32_t>(budgetCodes.size());
+    budgetColumn.codes = SharedValues<std::uint32_t>(budgetCodes);
+    budgetColumn.words = SharedValues<DescriptorValue>(budgetWords);
+
+    const auto budgetResolved = ResourceMaterializer::ResolveImageTables(budgetInfo, budgetSnapshot);
+    require(budgetResolved.samplers.size() == Abi::SamplerElementBudget, "sampler table budget: valid unique samplers did not fill budget");
+    const auto budgetMapStart = budgetResolved.map.at(Abi::TableHeader(0) + Abi::TableMapStart);
+
+    const auto dupRecord = budgetResolved.map.at(budgetMapStart + MaxUnique);
+    const auto dupFlags = budgetResolved.map.at(dupRecord + Abi::SamplerRecordFlags);
+    require((dupFlags & Abi::PoisonFlag) == 0u, "sampler table budget: duplicate of existing sampler was poisoned when budget is full");
+    require(budgetResolved.map.at(dupRecord + Abi::SamplerRecordElement) == 0u, "sampler table budget: duplicate sampler did not reuse existing element");
+
+    const auto overflowRecord = budgetResolved.map.at(budgetMapStart + MaxUnique + 1u);
+    const auto overflowFlags = budgetResolved.map.at(overflowRecord + Abi::SamplerRecordFlags);
+    require((overflowFlags & Abi::PoisonFlag) != 0u, "sampler table budget: exceeding sampler budget did not poison record");
+    require(budgetResolved.poison.at(overflowFlags & ~Abi::PoisonFlag).reason == Abi::PoisonReason::Budget, "sampler table budget: poisoned reason is not Budget");
+
+    const auto outsideRecord = budgetResolved.map.at(Abi::TableHeader(0) + Abi::TableOutsideCode);
+    const auto outsideFlags = budgetResolved.map.at(outsideRecord + Abi::SamplerRecordFlags);
+    require((outsideFlags & Abi::PoisonFlag) != 0u, "sampler table budget: TableOutsideCode did not poison when budget is full");
+    require(budgetResolved.poison.at(outsideFlags & ~Abi::PoisonFlag).reason == Abi::PoisonReason::Budget, "sampler table budget: TableOutsideCode poisoned reason is not Budget");
 }
 
 void verifyDynamicStorageMipChain() {
@@ -7821,6 +8069,7 @@ int main(int argc, char** argv) {
         verifyMayEvaluate();
         verifyPureFlatSlots();
         verifyGuardedDescriptorSources();
+        verifyLaneMaskGuardedDescriptorSources();
         verifySrtTape();
         verifyImageTableKeys();
         verifyImageTables();
@@ -7874,7 +8123,9 @@ int main(int argc, char** argv) {
         verifyCubeDepthCompareMode();
         verifyVolumeArrayLoadMode();
         verifyArrayVolumeStoreMode();
+        verifyMultisamplePlaneReadMode();
         verifyVolumeBiasTableRejection();
+        verifySamplerTableDeduplication();
         verifyDynamicStorageMipChain();
         verifySrgbDepthCompareModes();
         verifyQuadMaskNeighbourReads();
