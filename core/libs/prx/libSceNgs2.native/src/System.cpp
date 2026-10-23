@@ -345,7 +345,7 @@ int APS5_VABI sceNgs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t num
     const Ngs2Lock lock;
     auto* system = Ngs2FindSystem(system_handle);
     if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
-    if (num_samples == 0 || num_samples > system->option.max_grain_samples) APS5_INVALID_ARG_EX;
+    if (num_samples == 0 || num_samples > system->option.max_grain_samples) return SCE_NGS2_ERROR_INVALID_NUM_GRAIN_SAMPLES;
     system->option.num_grain_samples = num_samples;
     return SCE_NGS2_OK;
 }
@@ -354,7 +354,7 @@ int APS5_VABI sceNgs2SystemSetSampleRate(uintptr_t system_handle, uint32_t sampl
     const Ngs2Lock lock;
     auto* system = Ngs2FindSystem(system_handle);
     if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
-    if (sample_rate == 0) APS5_INVALID_ARG_EX;
+    if (!ValidSampleRate(sample_rate)) return SCE_NGS2_ERROR_INVALID_SAMPLE_RATE;
     for (const auto* rack : system->racks) {
         for (const auto& voice : rack->voices) {
             for (const auto& filter : voice.filters) {

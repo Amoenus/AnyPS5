@@ -723,10 +723,7 @@ static void TestReverbSetup() {
     Require(loudest > 0.0f && loudest < 1e-8f);
     Ngs2VoiceState state{};
     Require(sceNgs2VoiceGetState(reverb, &state, sizeof(state)) == SCE_NGS2_OK && (state.state_flags & SCE_NGS2_VOICE_STATE_FLAG_INUSE) != 0);
-    Require(sceNgs2SystemSetSampleRate(system, 7000) == SCE_NGS2_OK);
-    bool lowRate = false;
-    try { sceNgs2SystemRender(system, &info, 1); } catch (const std::runtime_error&) { lowRate = true; }
-    Require(lowRate);
+    Require(sceNgs2SystemSetSampleRate(system, 7000) == SCE_NGS2_ERROR_INVALID_SAMPLE_RATE);
     Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
 
     Ngs2ReverbRackOption option{};
@@ -751,13 +748,7 @@ static void TestReverbSetup() {
 static void TestSampleRate() {
     const auto system = CreateSystem();
     Require(sceNgs2SystemSetSampleRate(0x1234, 96000) == SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE);
-    bool threw = false;
-    try {
-        sceNgs2SystemSetSampleRate(system, 0);
-    } catch (const std::invalid_argument&) {
-        threw = true;
-    }
-    Require(threw);
+    Require(sceNgs2SystemSetSampleRate(system, 0) == SCE_NGS2_ERROR_INVALID_SAMPLE_RATE);
     Require(sceNgs2SystemSetSampleRate(system, 96000) == SCE_NGS2_OK);
     Ngs2SystemInfo info{};
     Require(sceNgs2SystemGetInfo(system, &info, sizeof(info)) == SCE_NGS2_OK && info.sample_rate == 96000);
