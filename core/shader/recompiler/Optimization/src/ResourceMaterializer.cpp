@@ -1873,6 +1873,12 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             volume.dimension = RdnaImageDimension::Dim3D;
             modes.push_back(volume);
         }
+        const bool arrayStore = image.dimension == RdnaImageDimension::Dim3D && storage && image.written && !image.read && !image.atomic && image.mipMode != ImageMipMode::DynamicStorage;
+        if (arrayStore && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
+            auto array = mode;
+            array.dimension = RdnaImageDimension::Dim2DArray;
+            modes.push_back(array);
+        }
         if (image.dimension == RdnaImageDimension::Dim2DMsaa && image.fmaskCompatible && image.cubeFaceCompatible && !table && !storage && !depth && conversion == IrBufferFormat::Invalid && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
             auto plane = mode;
             plane.dimension = RdnaImageDimension::Dim2D;
