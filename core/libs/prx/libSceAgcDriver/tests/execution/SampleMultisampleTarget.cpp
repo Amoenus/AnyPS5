@@ -2111,9 +2111,9 @@ int main(int argc, char** argv) {
         std::puts("DIM 2D image_load, image_sample_lz and image_sample_l reads of a 4x color target return each pixel's sample 0");
         Block swapped(4u * BlockBytes);
         Draw(*device, TargetState(DecodeSwappedTarget(swapped)), 0, 2u, Unorm8PixelCode);
-        const auto swappedSamples = LoadSamples(*device, swapped, Format8888Unorm);
+        const auto swappedSamples = LoadSamples(*device, swapped, Samples, 0u, Format8888Unorm);
         CheckSwappedSamples(swappedSamples);
-        CheckFirstSampleReads(*device, TargetDescriptor(swapped, SampleShift, Format8888Unorm), swappedSamples, true, "from a 4x BGRA8 target read through an RGBA8 descriptor");
+        CheckFirstSampleReads(*device, TargetDescriptor(swapped, SampleShift, 0u, Format8888Unorm), swappedSamples, true, "from a 4x BGRA8 target read through an RGBA8 descriptor");
         std::puts("a 4x BGRA8 color target loaded through an RGBA8 texture descriptor reads its drawn color with red and blue swapped");
         Block integer(4u * BlockBytes);
         Block signedFill(BlockBytes);
@@ -2121,11 +2121,11 @@ int main(int argc, char** argv) {
             std::puts("DIM 2D reads of 4x 8_8_8_8_UINT and 8_8_8_8_SINT targets not tested: sampledImageIntegerSampleCounts lacks VK_SAMPLE_COUNT_4_BIT");
         } else {
             Draw(*device, TargetState(DecodeUintTarget(integer)), 0, 2u, Uint8PixelCode);
-            const auto integerSamples = LoadSamples(*device, integer, Format8888Uint);
+            const auto integerSamples = LoadSamples(*device, integer, Samples, 0u, Format8888Uint);
             CheckUintSamples(integerSamples);
-            CheckFirstSampleReads(*device, TargetDescriptor(integer, SampleShift, Format8888Uint), integerSamples, true, "from a drawn 4x 8_8_8_8_UINT target");
+            CheckFirstSampleReads(*device, TargetDescriptor(integer, SampleShift, 0u, Format8888Uint), integerSamples, true, "from a drawn 4x 8_8_8_8_UINT target");
             StoreWords(signedFill, BlockBytes, FilledSint8);
-            CheckFirstSampleReads(*device, TargetDescriptor(signedFill, SampleShift, Format8888Sint), std::vector<std::array<float, 4>>(Side * Side * Samples, std::bit_cast<std::array<float, 4>>(FilledSint8Texel)), false, "from 8_8_8_8_SINT color memory no draw rendered to");
+            CheckFirstSampleReads(*device, TargetDescriptor(signedFill, SampleShift, 0u, Format8888Sint), std::vector<std::array<float, 4>>(Side * Side * Samples, std::bit_cast<std::array<float, 4>>(FilledSint8Texel)), false, "from 8_8_8_8_SINT color memory no draw rendered to");
             std::puts("DIM 2D reads of a drawn 4x 8_8_8_8_UINT target and of 8_8_8_8_SINT color memory no draw rendered to return each pixel's sample 0 bit for bit");
         }
         if (!AgcDriver::VulkanDeviceTestAccess::ContextOf(*device).storageImageMultisample) {
