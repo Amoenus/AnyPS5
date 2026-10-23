@@ -30,6 +30,8 @@
 extern "C" {
 int APS5_VABI fstatfs_nid_postfix(int, void*);
 int APS5_VABI _fstatfs_nid_postfix(int, void*);
+int APS5_VABI fstat_nid_postfix(int, FileStat*);
+std::int64_t APS5_VABI _fstat_nid_postfix(int, FileStat*);
 int APS5_VABI open_nid_postfix(const char*, int, int);
 int APS5_VABI close_nid_postfix(int);
 int APS5_VABI pipe_nid_postfix(int*);
@@ -286,8 +288,15 @@ int main() {
     Require(std::memcmp(viaPublic, viaSyscall, 4) == 0 && std::memcmp(viaPublic + 16, viaSyscall + 16, 8) == 0);
     Require(std::memcmp(viaPublic + 280, viaSyscall + 280, 16) == 0);
     Require(fstatfs_nid_postfix(descriptor, nullptr) == -1 && Error() == 14);
+    FileStat viaFstat{};
+    FileStat viaUnderscore{};
+    Require(fstat_nid_postfix(descriptor, &viaFstat) == 0 && _fstat_nid_postfix(descriptor, &viaUnderscore) == 0);
+    Require(std::memcmp(&viaFstat, &viaUnderscore, sizeof(FileStat)) == 0 && viaFstat.st_size == 1);
+    Require(fstat_nid_postfix(descriptor, nullptr) == -1 && Error() == 14);
     Require(close_nid_postfix(descriptor) == 0);
     Require(fstatfs_nid_postfix(-1, viaPublic) == -1 && Error() == 9);
+    Require(fstat_nid_postfix(descriptor, &viaFstat) == -1 && Error() == 9);
+    Require(fstat_nid_postfix(-1, &viaFstat) == -1 && Error() == 9);
     char buffer[64];
     for (const auto& component : {std::string("missing"), std::string("file.txt")}) {
         const auto prefix = root.generic_string() + "/" + component + "/../";

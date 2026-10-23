@@ -16,6 +16,8 @@ int APS5_VABI sceHttpCreateRequestWithURL(int, int, const char*, std::uint64_t);
 int APS5_VABI sceHttpDeleteRequest(int);
 int APS5_VABI sceHttpSetAutoRedirect(int, int);
 int APS5_VABI sceHttpGetAutoRedirect(int, int*);
+int APS5_VABI sceHttpSetAuthEnabled(int, int);
+int APS5_VABI sceHttpGetAuthEnabled(int, int*);
 int APS5_VABI sceHttpSetNonblock(int, int);
 int APS5_VABI sceHttpGetNonblock(int, int*);
 int APS5_VABI sceHttpTrySetNonblock(int, int);
@@ -72,6 +74,23 @@ void CheckAutoRedirect(int context) {
     int value = 0;
     Require(sceHttpGetAutoRedirect(UnknownId, &value) == InvalidId && sceHttpSetAutoRedirect(UnknownId, 1) == InvalidId, "an unknown id was not refused");
     Require(sceHttpDeleteRequest(request) == 0 && sceHttpGetAutoRedirect(request, &value) == InvalidId, "a deleted request still has options");
+    Require(sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(pattern) == 0, "delete failed");
+}
+
+void CheckAuthEnabled(int context) {
+    const int pattern = sceHttpCreateTemplate(context, "anyps5-test", 2, 0);
+    Require(Get(sceHttpGetAuthEnabled, pattern) == 0, "authentication is enabled by default");
+    Require(sceHttpSetAuthEnabled(pattern, 1) == 0 && Get(sceHttpGetAuthEnabled, pattern) == 1, "sceHttpGetAuthEnabled did not return the set value");
+    const int connection = sceHttpCreateConnectionWithURL(pattern, "http://example.com/", 1);
+    const int request = sceHttpCreateRequestWithURL(connection, 0, "http://example.com/a", 0);
+    Require(Get(sceHttpGetAuthEnabled, connection) == 1 && Get(sceHttpGetAuthEnabled, request) == 1, "a child did not inherit its parent's authentication option");
+    Require(sceHttpSetAuthEnabled(request, 0) == 0 && Get(sceHttpGetAuthEnabled, request) == 0, "authentication could not be disabled on a request");
+    Require(Get(sceHttpGetAuthEnabled, connection) == 1 && Get(sceHttpGetAuthEnabled, pattern) == 1, "setting a request changed its parent options");
+    int value = -1;
+    Require(sceHttpGetAuthEnabled(request, nullptr) == InvalidValue, "a null authentication output was not refused");
+    Require(sceHttpGetAuthEnabled(UnknownId, nullptr) == InvalidValue, "the authentication output pointer is not checked before the id");
+    Require(sceHttpGetAuthEnabled(UnknownId, &value) == InvalidId && sceHttpSetAuthEnabled(UnknownId, 1) == InvalidId, "an unknown id was not refused for authentication options");
+    Require(sceHttpDeleteRequest(request) == 0 && sceHttpGetAuthEnabled(request, &value) == InvalidId, "a deleted request still has authentication options");
     Require(sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(pattern) == 0, "delete failed");
 }
 
@@ -147,6 +166,7 @@ void CheckTermEndsOptions() {
     int value = -1;
     HttpEpollHandle bound = nullptr;
     Require(sceHttpGetAutoRedirect(pattern, &value) == BeforeInit && sceHttpSetAutoRedirect(pattern, 0) == BeforeInit, "the redirect option outlived the last sceHttpTerm");
+    Require(sceHttpGetAuthEnabled(pattern, &value) == BeforeInit && sceHttpSetAuthEnabled(pattern, 0) == BeforeInit, "the authentication option outlived the last sceHttpTerm");
     Require(sceHttpGetNonblock(connection, &value) == BeforeInit && sceHttpTryGetNonblock(connection, &value) == BeforeInit, "the nonblocking getters work after the last sceHttpTerm");
     Require(sceHttpSetNonblock(connection, 1) == BeforeInit && sceHttpTrySetNonblock(connection, 1) == BeforeInit, "the nonblocking setters work after the last sceHttpTerm");
     Require(sceHttpGetAcceptEncodingGZIPEnabled(pattern, &value) == BeforeInit && sceHttpSetAcceptEncodingGZIPEnabled(pattern, 1) == BeforeInit, "the gzip option outlived the last sceHttpTerm");
@@ -192,6 +212,7 @@ int main() {
     const int context = sceHttpInit_nid_postfix(1, 1, 0x10000);
     Require(context > 0, "sceHttpInit failed");
     CheckAutoRedirect(context);
+    CheckAuthEnabled(context);
     CheckNonblock(context);
     CheckAcceptEncodingGzip(context);
     CheckEpoll(context);

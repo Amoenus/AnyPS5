@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,7 @@
 using namespace FreeType;
 
 extern "C" {
+void APS5_VABI FT_Set_Transform_nid_postfix(GuestFaceRec*, const GuestMatrix*, const GuestVector*);
 int APS5_VABI FT_Init_FreeType_nid_postfix(void**);
 int APS5_VABI FT_Done_FreeType_nid_postfix(void*);
 int APS5_VABI FT_New_Face_nid_postfix(void*, const char*, std::int64_t, GuestFaceRec**);
@@ -33,6 +35,7 @@ std::uint32_t APS5_VABI FT_Get_Char_Index_nid_postfix(GuestFaceRec*, std::uint64
 int APS5_VABI FT_Load_Glyph_nid_postfix(GuestFaceRec*, std::uint32_t, std::int32_t);
 int APS5_VABI FT_Load_Char_nid_postfix(GuestFaceRec*, std::uint64_t, std::int32_t);
 int APS5_VABI FT_Render_Glyph_nid_postfix(GuestGlyphSlotRec*, std::int32_t);
+int APS5_VABI FT_Set_Char_Size_nid_postfix(GuestFaceRec*, std::int64_t, std::int64_t, std::uint32_t, std::uint32_t);
 }
 
 static void Check(bool value, int line) {
@@ -89,6 +92,15 @@ static void SlotMatches(const GuestGlyphSlotRec* slot, FT_GlyphSlot host) {
     Require(slot->lsb_delta == host->lsb_delta && slot->rsb_delta == host->rsb_delta && slot->control_len == host->control_len);
 }
 
+static void SizeMatches(const GuestFaceRec* face, FT_Face host) {
+    const auto& actual = face->size->metrics;
+    const auto& expected = host->size->metrics;
+    Require(actual.x_ppem == expected.x_ppem && actual.y_ppem == expected.y_ppem);
+    Require(actual.x_scale == expected.x_scale && actual.y_scale == expected.y_scale);
+    Require(actual.ascender == expected.ascender && actual.descender == expected.descender);
+    Require(actual.height == expected.height && actual.max_advance == expected.max_advance);
+}
+
 struct Finalizers {
     std::vector<int> calls;
 };
@@ -141,6 +153,93 @@ static void SetFinalizers(GuestFaceRec* face, Finalizers& events) {
     face->size->generic = {&events, GuestSizeFinalizer};
 }
 
+static void CheckTransforms(const std::vector<unsigned char>& font) {
+    FT_Library native = nullptr;
+    FT_Face host = nullptr;
+    FT_Face nativeOther = nullptr;
+    void* library = nullptr;
+    GuestFaceRec* face = nullptr;
+    GuestFaceRec* other = nullptr;
+    Require(FT_Init_FreeType(&native) == 0 && FT_Init_FreeType_nid_postfix(&library) == 0);
+    Require(FT_New_Memory_Face(native, font.data(), static_cast<FT_Long>(font.size()), 0, &host) == 0);
+    Require(FT_New_Memory_Face(native, font.data(), static_cast<FT_Long>(font.size()), 0, &nativeOther) == 0);
+    Require(FT_New_Memory_Face_nid_postfix(library, font.data(), font.size(), 0, &face) == 0);
+    Require(FT_New_Memory_Face_nid_postfix(library, font.data(), font.size(), 0, &other) == 0);
+    Require(FT_Set_Pixel_Sizes(host, 0, 100) == 0 && FT_Set_Pixel_Sizes_nid_postfix(face, 0, 100) == 0);
+    Require(FT_Set_Pixel_Sizes(nativeOther, 0, 100) == 0 && FT_Set_Pixel_Sizes_nid_postfix(other, 0, 100) == 0);
+    const std::array matrices{
+        GuestMatrix{65536, 0, 0, 65536}, GuestMatrix{0, -65536, 65536, 0}, GuestMatrix{0, 65536, -65536, 0},
+        GuestMatrix{-65536, 0, 0, 65536}, GuestMatrix{131072, 0, 0, 32768}, GuestMatrix{65536, 16384, -8192, 65536},
+        GuestMatrix{0, 0, 0, 0}
+    };
+    const std::array deltas{GuestVector{0, 0}, GuestVector{64, -128}, GuestVector{31, -63}, GuestVector{-96, 192}};
+    std::size_t comparisons = 0;
+    for (std::size_t m = 0; m <= matrices.size(); ++m) {
+        for (std::size_t d = 0; d <= deltas.size(); ++d) {
+            GuestMatrix input = m < matrices.size() ? matrices[m] : matrices[0];
+            GuestVector delta = d < deltas.size() ? deltas[d] : deltas[0];
+            FT_Matrix matrix{static_cast<FT_Fixed>(input.xx), static_cast<FT_Fixed>(input.xy), static_cast<FT_Fixed>(input.yx), static_cast<FT_Fixed>(input.yy)};
+            FT_Vector translation{static_cast<FT_Pos>(delta.x), static_cast<FT_Pos>(delta.y)};
+            std::array<unsigned char, sizeof(GuestGlyphSlotRec)> savedSlot{};
+            std::array<unsigned char, sizeof(GuestSizeRec)> savedSize{};
+            std::memcpy(savedSlot.data(), face->glyph, savedSlot.size());
+            std::memcpy(savedSize.data(), face->size, savedSize.size());
+            FT_Set_Transform_nid_postfix(face, m < matrices.size() ? &input : nullptr, d < deltas.size() ? &delta : nullptr);
+            FT_Set_Transform(host, m < matrices.size() ? &matrix : nullptr, d < deltas.size() ? &translation : nullptr);
+            Require(std::memcmp(savedSlot.data(), face->glyph, savedSlot.size()) == 0);
+            Require(std::memcmp(savedSize.data(), face->size, savedSize.size()) == 0);
+            Require(input.xx == matrix.xx && input.xy == matrix.xy && input.yx == matrix.yx && input.yy == matrix.yy);
+            Require(delta.x == translation.x && delta.y == translation.y);
+            input = matrices[0];
+            delta = deltas[0];
+            for (const auto flags : std::array<std::int32_t, 3>{FT_LOAD_DEFAULT, FT_LOAD_IGNORE_TRANSFORM, FT_LOAD_RENDER}) {
+                for (const std::uint32_t glyph : {0u, 1u}) {
+                    Require(FT_Load_Glyph_nid_postfix(face, glyph, flags) == FT_Load_Glyph(host, glyph, flags));
+                    SlotMatches(face->glyph, host->glyph);
+                    if (face->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
+                        Require(FT_Render_Glyph_nid_postfix(face->glyph, FT_RENDER_MODE_NORMAL) == FT_Render_Glyph(host->glyph, FT_RENDER_MODE_NORMAL));
+                        SlotMatches(face->glyph, host->glyph);
+                    }
+                    ++comparisons;
+                }
+            }
+            Require(FT_Load_Glyph_nid_postfix(other, 1, FT_LOAD_DEFAULT) == FT_Load_Glyph(nativeOther, 1, FT_LOAD_DEFAULT));
+            SlotMatches(other->glyph, nativeOther->glyph);
+        }
+    }
+    GuestMatrix rejected{65536, 0, 0, 65536};
+    GuestVector rejectedDelta{};
+    const auto loadUnchanged = [&] {
+        Require(FT_Load_Glyph_nid_postfix(face, 1, FT_LOAD_DEFAULT) == FT_Load_Glyph(host, 1, FT_LOAD_DEFAULT));
+        SlotMatches(face->glyph, host->glyph);
+    };
+    if constexpr (sizeof(FT_Long) < sizeof(std::int64_t)) {
+        for (const auto value : std::array<std::int64_t, 5>{-0x80000001ll, 0x80000000ll, 0x100000000ll,
+                                                          std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max()}) {
+            for (auto member : {&GuestMatrix::xx, &GuestMatrix::xy, &GuestMatrix::yx, &GuestMatrix::yy}) {
+                rejected = matrices[0];
+                rejected.*member = value;
+                Require(ThrowsWith([&] { FT_Set_Transform_nid_postfix(face, &rejected, nullptr); },
+                                   "FT_Set_Transform: a component outside the host FT_Long range is not implemented"));
+                loadUnchanged();
+            }
+            for (auto member : {&GuestVector::x, &GuestVector::y}) {
+                rejectedDelta = {};
+                rejectedDelta.*member = value;
+                Require(ThrowsWith([&] { FT_Set_Transform_nid_postfix(face, &matrices[1], &rejectedDelta); },
+                                   "FT_Set_Transform: a component outside the host FT_Long range is not implemented"));
+                loadUnchanged();
+            }
+        }
+    }
+    rejected.xx = std::numeric_limits<std::int64_t>::max();
+    rejectedDelta.x = std::numeric_limits<std::int64_t>::min();
+    FT_Set_Transform_nid_postfix(nullptr, &rejected, &rejectedDelta);
+    FT_Set_Transform_nid_postfix(nullptr, nullptr, nullptr);
+    Require(FT_Done_FreeType_nid_postfix(library) == 0 && FT_Done_FreeType(native) == 0);
+    std::printf("FT_Set_Transform: %zu native glyph and bitmap comparisons\n", comparisons);
+}
+
 int main() {
     const auto root = std::filesystem::temp_directory_path() / ("anyps5_guest_freetype-" + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(root / "app0");
@@ -191,6 +290,8 @@ int main() {
     Require(FT_New_Memory_Face_nid_postfix(library, font.data(), fontSize, -1, &probe) == 0 && probe != nullptr);
     Require(probe->num_faces == nativeProbe->num_faces && probe->face_index == nativeProbe->face_index);
     Require((probe->glyph == nullptr) == (nativeProbe->glyph == nullptr) && (probe->size == nullptr) == (nativeProbe->size == nullptr));
+    Require(FT_Set_Char_Size_nid_postfix(probe, std::numeric_limits<std::int64_t>::max(), 0, 0, 0) ==
+            FT_Set_Char_Size(nativeProbe, 64, 64, 72, 72));
     Finalizers nativeProbeEvents;
     Finalizers guestProbeEvents;
     nativeProbe->generic = {&nativeProbeEvents, NativeFaceFinalizer};
@@ -302,6 +403,64 @@ int main() {
     slot->outline.points = original;
     Require(FT_Render_Glyph_nid_postfix(slot, FT_RENDER_MODE_NORMAL) == 0 && slot->bitmap_left == 10);
 
+    {
+        struct Request {
+            std::int64_t width;
+            std::int64_t height;
+            std::uint32_t horizontal;
+            std::uint32_t vertical;
+        };
+        const std::array requests{
+            Request{0, 0, 0, 0}, Request{0, 12 * 64, 0, 0}, Request{12 * 64, 0, 0, 0},
+            Request{12 * 64, 18 * 64, 96, 144}, Request{12 * 64 + 32, 12 * 64 + 32, 72, 72},
+            Request{1, 63, 72, 72}, Request{-1, -100, 0, 0}, Request{0, -100, 96, 0},
+            Request{12 * 64, 18 * 64, 0, 144}, Request{12 * 64, 18 * 64, 96, 0},
+            Request{65535ll * 64, 64, 72, 72}, Request{65536ll * 64, 64, 72, 72},
+            Request{64, 65536ll * 64, 72, 72},
+            Request{18 * 64, 12 * 64, 72, 72}
+        };
+        std::size_t successes = 0;
+        std::size_t failures = 0;
+        for (const auto& request : requests) {
+            std::array<unsigned char, sizeof(GuestGlyphSlotRec)> previousSlot{};
+            std::memcpy(previousSlot.data(), face->glyph, previousSlot.size());
+            const auto expected = FT_Set_Char_Size(host, static_cast<FT_F26Dot6>(request.width), static_cast<FT_F26Dot6>(request.height),
+                                                   request.horizontal, request.vertical);
+            Require(FT_Set_Char_Size_nid_postfix(face, request.width, request.height, request.horizontal, request.vertical) == expected);
+            Require(std::memcmp(previousSlot.data(), face->glyph, previousSlot.size()) == 0);
+            expected == 0 ? ++successes : ++failures;
+            SizeMatches(face, host);
+            Require(FT_Load_Char_nid_postfix(face, 'A', FT_LOAD_DEFAULT) == FT_Load_Char(host, 'A', FT_LOAD_DEFAULT));
+            SlotMatches(face->glyph, host->glyph);
+        }
+        Require(successes != 0 && failures != 0);
+        for (const auto value : std::array<std::int64_t, 2>{std::numeric_limits<std::int64_t>::min(), -0x80000001ll}) {
+            Require(FT_Set_Char_Size_nid_postfix(face, value, 0, 0, 0) == FT_Set_Char_Size(host, 64, 64, 0, 0));
+            SizeMatches(face, host);
+            Require(FT_Set_Char_Size_nid_postfix(face, 0, value, 0, 0) == 0);
+            SizeMatches(face, host);
+        }
+        for (const auto value : {std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max()}) {
+            Require(FT_Set_Char_Size_nid_postfix(nullptr, value, value, 0, 0) == FT_Err_Invalid_Face_Handle);
+        }
+        if constexpr (sizeof(FT_F26Dot6) < sizeof(std::int64_t)) {
+            for (const auto value : std::array<std::int64_t, 4>{0x7FFFFFFFll, 0x80000000ll, 0x100000040ll, std::numeric_limits<std::int64_t>::max()}) {
+                for (const bool width : {false, true}) {
+                    Require(ThrowsWith([&] { FT_Set_Char_Size_nid_postfix(face, width ? value : 64, width ? 64 : value, 72, 72); },
+                                       "FT_Set_Char_Size: a character size or resolution outside the host arithmetic range is not implemented"));
+                    SizeMatches(face, host);
+                }
+            }
+            Require(ThrowsWith([&] { FT_Set_Char_Size_nid_postfix(face, 64, 64, std::numeric_limits<std::uint32_t>::max(), 72); },
+                               "FT_Set_Char_Size: a character size or resolution outside the host arithmetic range is not implemented"));
+            SizeMatches(face, host);
+        }
+        Require(FT_Set_Char_Size_nid_postfix(memoryFace, 0, 48 * 64, 0, 144) == 0);
+        Require(memoryFace->size->metrics.y_ppem == 96 && face->size->metrics.y_ppem == 1);
+        Require(FT_Set_Pixel_Sizes_nid_postfix(face, 0, 100) == 0 && FT_Set_Pixel_Sizes(host, 0, 100) == 0);
+        std::printf("FT_Set_Char_Size: %zu native request comparisons, %zu successes, %zu errors\n", requests.size(), successes, failures);
+    }
+
     Finalizers nativeDone;
     Finalizers guestDone;
     SetFinalizers(host, nativeDone);
@@ -339,6 +498,7 @@ int main() {
 
     void* empty = nullptr;
     Require(FT_Init_FreeType_nid_postfix(&empty) == 0 && FT_Done_FreeType_nid_postfix(empty) == 0);
+    CheckTransforms(font);
     std::filesystem::current_path(previous);
     std::error_code ignored;
     std::filesystem::remove_all(root, ignored);

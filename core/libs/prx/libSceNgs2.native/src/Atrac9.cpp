@@ -26,6 +26,7 @@ static constexpr std::uint32_t MAX_SAMPLE_RATE = 192000;
 static constexpr std::uint32_t WAVEFORM_TYPE_PCM_FIRST = 0x10;
 static constexpr std::uint32_t WAVEFORM_TYPE_PCM_LAST = 0x1b;
 static constexpr std::uint32_t WAVEFORM_TYPE_VAG = 0x1c;
+static constexpr std::uint32_t VAG_FRAME_SAMPLES = 28;
 static constexpr std::uint32_t PCM_BYTES_PER_SAMPLE[] = {1, 1, 2, 2, 3, 3, 4, 4, 4, 4, 8, 8};
 
 static bool IsPcmType(std::uint32_t type) {
@@ -40,6 +41,18 @@ static Ngs2WaveformBlock PcmBlock(std::uint32_t type, std::uint32_t channels, st
     block.data_offset = offset;
     block.data_size = static_cast<std::uint32_t>(end - offset);
     block.num_samples = count;
+    return block;
+}
+
+static Ngs2WaveformBlock VagBlock(std::uint32_t channels, std::uint32_t pos, std::uint32_t count) {
+    const std::uint32_t frameBytes = 16u * channels;
+    const std::uint32_t first = pos / VAG_FRAME_SAMPLES;
+    const std::uint32_t past = (pos + count + VAG_FRAME_SAMPLES - 1u) / VAG_FRAME_SAMPLES;
+    const auto offset = static_cast<std::uint32_t>(static_cast<std::uint64_t>(first) * frameBytes);
+    Ngs2WaveformBlock block{};
+    block.data_offset = offset;
+    block.data_size = static_cast<std::uint32_t>(past * frameBytes - offset);
+    block.num_samples = (past - first) * VAG_FRAME_SAMPLES;
     return block;
 }
 
@@ -432,7 +445,10 @@ int APS5_VABI sceNgs2CalcWaveformBlock(const Ngs2WaveformFormat* format, uint32_
         *block = PcmBlock(type, format->num_channels, sample_pos, num_samples);
         return SCE_NGS2_OK;
     }
-    if (type == WAVEFORM_TYPE_VAG) throw std::runtime_error("NGS2: waveform blocks of type " + Ngs2Hex(type) + " are not implemented");
+    if (type == WAVEFORM_TYPE_VAG) {
+        *block = VagBlock(format->num_channels, sample_pos, num_samples);
+        return SCE_NGS2_OK;
+    }
     if (type != SCE_NGS2_WAVEFORM_TYPE_ATRAC9) return SCE_NGS2_ERROR_UNKNOWN_WAVEFORM_FORMAT;
     if (format->num_channels == 0 || format->num_channels > NGS2_MAX_CHANNELS || format->sample_rate == 0 || format->sample_rate > MAX_SAMPLE_RATE) {
         return SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT;

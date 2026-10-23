@@ -149,6 +149,28 @@ int APS5_VABI FT_Set_Pixel_Sizes_nid_postfix(GuestFaceRec* face, std::uint32_t p
     return error;
 }
 
+int APS5_VABI FT_Set_Char_Size_nid_postfix(GuestFaceRec* face, std::int64_t charWidth, std::int64_t charHeight,
+                                        std::uint32_t horizontalResolution, std::uint32_t verticalResolution) {
+    GuestFace* owner = FaceOf(face);
+    if (!owner) return FT_Err_Invalid_Face_Handle;
+    if (!owner->host->size) return FT_Err_Invalid_Size_Handle;
+    if (!charWidth) charWidth = charHeight;
+    else if (!charHeight) charHeight = charWidth;
+    if (charWidth < 64) charWidth = 64;
+    if (charHeight < 64) charHeight = 64;
+    if (!horizontalResolution) horizontalResolution = verticalResolution;
+    else if (!verticalResolution) verticalResolution = horizontalResolution;
+    if (!horizontalResolution) horizontalResolution = verticalResolution = 72;
+    const auto maximum = std::numeric_limits<FT_Long>::max();
+    if (charWidth > (maximum - 36) / horizontalResolution || charHeight > (maximum - 36) / verticalResolution) {
+        throw std::runtime_error("FT_Set_Char_Size: a character size or resolution outside the host arithmetic range is not implemented");
+    }
+    const FT_Error error = FT_Set_Char_Size(owner->host, static_cast<FT_F26Dot6>(charWidth), static_cast<FT_F26Dot6>(charHeight),
+                                          horizontalResolution, verticalResolution);
+    SyncSize(*owner);
+    return error;
+}
+
 std::uint32_t APS5_VABI FT_Get_Char_Index_nid_postfix(GuestFaceRec* face, std::uint64_t charcode) {
     const GuestFace* owner = FaceOf(face);
     return FT_Get_Char_Index(owner ? owner->host : nullptr, static_cast<FT_ULong>(static_cast<std::uint32_t>(charcode)));
@@ -203,6 +225,22 @@ std::uint64_t APS5_VABI FT_Get_First_Char_nid_postfix(GuestFaceRec* face, std::u
 std::uint64_t APS5_VABI FT_Get_Next_Char_nid_postfix(GuestFaceRec* face, std::uint64_t charcode, std::uint32_t* glyphIndex) {
     const GuestFace* owner = FaceOf(face);
     return FT_Get_Next_Char(owner ? owner->host : nullptr, static_cast<FT_ULong>(static_cast<std::uint32_t>(charcode)), glyphIndex);
+}
+
+void APS5_VABI FT_Set_Transform_nid_postfix(GuestFaceRec* face, const GuestMatrix* matrix, const GuestVector* delta) {
+    GuestFace* owner = FaceOf(face);
+    if (!owner) return;
+    const auto component = [](std::int64_t value) {
+        if (value < std::numeric_limits<FT_Long>::min() || value > std::numeric_limits<FT_Long>::max()) {
+            throw std::runtime_error("FT_Set_Transform: a component outside the host FT_Long range is not implemented");
+        }
+        return static_cast<FT_Long>(value);
+    };
+    FT_Matrix nativeMatrix{};
+    FT_Vector nativeDelta{};
+    if (matrix) nativeMatrix = {component(matrix->xx), component(matrix->xy), component(matrix->yx), component(matrix->yy)};
+    if (delta) nativeDelta = {component(delta->x), component(delta->y)};
+    FT_Set_Transform(owner->host, matrix ? &nativeMatrix : nullptr, delta ? &nativeDelta : nullptr);
 }
 
 }

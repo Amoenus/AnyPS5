@@ -268,6 +268,26 @@ static void TestCalcPcmBlock() {
     Require(sceNgs2CalcWaveformBlock(nullptr, 0, 1, &block) == SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT && block.data_size == 0 && block.num_samples == 0);
 }
 
+static void RequireVagBlock(std::uint32_t channels, std::uint32_t pos, std::uint32_t count, std::uint64_t offset, std::uint64_t size, std::uint32_t samples) {
+    const Ngs2WaveformFormat format{0x1c, channels, 48000, 0, 0, 0};
+    Ngs2WaveformBlock block;
+    std::memset(&block, 0xab, sizeof(block));
+    Require(sceNgs2CalcWaveformBlock(&format, pos, count, &block) == SCE_NGS2_OK);
+    Require(block.data_offset == offset && block.data_size == size && block.num_samples == samples);
+    Require(block.num_repeats == 0 && block.num_skip_samples == 0 && block.reserved == 0 && block.user_data == 0);
+}
+
+static void TestCalcVagBlock() {
+    RequireVagBlock(1, 0, 28, 0, 16, 28);
+    RequireVagBlock(1, 27, 2, 0, 32, 56);
+    RequireVagBlock(1, 28, 28, 16, 16, 28);
+    RequireVagBlock(2, 30, 1, 32, 32, 28);
+    RequireVagBlock(6, 56, 57, 192, 288, 84);
+    RequireVagBlock(1, 0, 0, 0, 0, 0);
+    RequireVagBlock(1, 5, 0, 0, 16, 28);
+    RequireVagBlock(0, 100, 50, 0, 0, 84);
+}
+
 static void Set32(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t value) {
     for (int i = 0; i < 4; ++i) bytes[offset + i] = static_cast<std::uint8_t>(value >> (i * 8));
 }
@@ -579,6 +599,7 @@ int main() {
     TestCalcBlock();
     TestFrameInfo();
     TestCalcPcmBlock();
+    TestCalcVagBlock();
     TestCorruptSuperframeAtPageEnd();
     TestStreamPartitions();
     TestRefill(reference);
