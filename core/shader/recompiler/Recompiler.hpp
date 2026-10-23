@@ -3,6 +3,7 @@
 
 #include "RuntimeAbi.hpp"
 #include "PipelineSpecialization.hpp"
+#include "prx/libc/include/general/AtomicSharedPtr.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -214,6 +215,10 @@ struct ShaderVertexStageInfo {
     bool fetchEmbedded;
     std::uint32_t paClVsOutCntl = 0;
     std::uint32_t depthRemapMode = 0;
+    bool pointList = false;
+    float pointSize = 1.0f;
+    float pointSizeMin = 0.0f;
+    float pointSizeMax = 0.0f;
 };
 
 struct ShaderFloatMode {
@@ -293,6 +298,7 @@ struct SpirvTarget {
     bool float32FlushToZero = false;
     bool waveLdsMemoryBarriers = false;
     bool float32DenormPreserve = false;
+    bool fusedExactArithmetic = false;
 };
 
 struct BindingLayout {
@@ -385,6 +391,7 @@ struct BarycentricEmulation {
     bool active = false;
     bool smooth = false;
     bool linear = false;
+    bool smoothOffset = false;
     bool operator==(const BarycentricEmulation&) const = default;
 };
 
@@ -509,6 +516,7 @@ struct BarycentricEmulationLayout {
     std::uint32_t smoothLocation = NoLocation;
     std::uint32_t linearLocation = NoLocation;
     std::uint32_t positionsLocation = NoLocation;
+    std::uint32_t reciprocalWLocation = NoLocation;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> perVertexLocations;
 };
 
@@ -670,6 +678,7 @@ struct CompiledShaderArtifact {
     std::optional<MeshBarycentricLayout> meshBarycentrics;
     std::vector<std::uint32_t> stencilReferences;
     bool stencilReplaySafe = false;
+    bool bdaWrites = false;
     std::uint32_t stencilReferenceDword = 0xffffffffu;
     std::uint64_t variantId = 0;
 };
@@ -704,7 +713,18 @@ struct PipelineIdentity {
     auto operator<=>(const PipelineIdentity&) const = default;
 };
 
+struct ResultKeyMemo {
+    mutable AtomicSharedPtr<const std::vector<std::uint32_t>> words;
+    ResultKeyMemo() = default;
+    ResultKeyMemo(const ResultKeyMemo&) {}
+    ResultKeyMemo& operator=(const ResultKeyMemo&) {
+        words.store(nullptr, std::memory_order_relaxed);
+        return *this;
+    }
+};
+
 struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
+    ResultKeyMemo drawKeyMemo;
     bool cacheHit = false;
     std::uint32_t workgroupMemoryDwords = 0;
     std::vector<std::uint32_t> shaderDataUserWords;
