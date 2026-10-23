@@ -133,6 +133,8 @@ struct TextureCache {
     std::list<CachedTexture> entries;
     std::unordered_map<TextureKey, std::list<CachedTexture>::iterator, TextureKeyHash> index;
     std::unordered_multimap<const StorageTexture*, std::list<CachedTexture>::iterator> views;
+    std::vector<std::pair<std::vector<std::byte>, std::uint64_t>> spare;
+    std::uint64_t spareBytes = 0;
     std::uint64_t bytes = 0;
     std::size_t passed = 0;
     std::chrono::steady_clock::time_point passedSince{};
@@ -258,6 +260,39 @@ void dropUncachedViews(TextureCache& cache) {
 void touchTexture(TextureCache& cache, std::list<CachedTexture>::iterator it) {
     cache.entries.splice(cache.entries.begin(), cache.entries, it);
     it->present = Recorder::Presents();
+}
+
+constexpr std::uint64_t SpareSnapshotBytes = 256ull << 20;
+
+void parkSnapshot(TextureCache& cache, std::vector<std::byte>& bytes) {
+    const auto size = bytes.size();
+    if (size == 0) return;
+    const auto present = Recorder::Presents();
+    while (!cache.spare.empty() && (present - cache.spare.front().second > SpareSnapshotPresents || cache.spareBytes + size > SpareSnapshotBytes)) {
+        cache.spareBytes -= cache.spare.front().first.size();
+        cache.spare.erase(cache.spare.begin());
+    }
+    if (cache.spareBytes + size <= SpareSnapshotBytes) {
+        cache.spareBytes += size;
+        cache.spare.emplace_back(std::move(bytes), present);
+    }
+    bytes = std::vector<std::byte>{};
+}
+
+std::vector<std::byte> spareSnapshot(TextureCache& cache, std::size_t bytes) {
+    const auto present = Recorder::Presents();
+    while (!cache.spare.empty() && present - cache.spare.front().second > SpareSnapshotPresents) {
+        cache.spareBytes -= cache.spare.front().first.size();
+        cache.spare.erase(cache.spare.begin());
+    }
+    for (auto spare = cache.spare.begin(); spare != cache.spare.end(); ++spare) {
+        if (spare->first.size() != bytes) continue;
+        cache.spareBytes -= bytes;
+        std::vector<std::byte> taken = std::move(spare->first);
+        cache.spare.erase(spare);
+        return taken;
+    }
+    return {};
 }
 
 bool admitTexture(TextureCache& cache, const TextureKey& key, std::uint64_t incoming, std::uint64_t budget) {
@@ -859,6 +894,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     std::lock_guard lock(cache.mutex);
     const CacheHold held(sampledCacheHeld);
     dropUncachedViews(cache);
+    std::vector<std::byte> recycled;
     if (auto it = findTexture(cache, key); it != cache.entries.end()) {
         if (it->source != nullptr) {
             // The view follows the storage image, whatever the GPU wrote to it since; guest memory
@@ -905,10 +941,14 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
                 return it->texture;
             }
         }
+        if (it->bytes.size() == bytes) recycled = std::move(it->bytes);
+        else parkSnapshot(cache, it->bytes);
         eraseTexture(cache, it);
         ++cache.counts.stale;
     }
-    CachedTexture entry{key, address, std::vector<std::byte>(source != nullptr ? 0u : bytes), nullptr, *keys, snapshotGeneration};
+    if (source != nullptr) parkSnapshot(cache, recycled);
+    else if (recycled.empty()) recycled = spareSnapshot(cache, bytes);
+    CachedTexture entry{key, address, source != nullptr ? std::vector<std::byte>{} : (recycled.empty() ? std::vector<std::byte>(bytes) : std::move(recycled)), nullptr, *keys, snapshotGeneration};
     entry.committed = std::move(committed);
     entry.surfaceBytes = bytes;
     const auto createTexture = [&](auto&&... args) {
@@ -950,7 +990,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         entry.texture = createTexture(*context.detiler, resource, components, entry.bytes, depthCompare);
         entry.accounted = entry.texture->AllocationBytes();
         constexpr std::size_t SnapshotCompareBytes = 256u << 10u;
-        if (entry.bytes.size() > SnapshotCompareBytes && (entry.generation != 0 || entry.untracked[0] != 0)) std::vector<std::byte>().swap(entry.bytes);
+        if (entry.bytes.size() > SnapshotCompareBytes && (entry.generation != 0 || entry.untracked[0] != 0)) parkSnapshot(cache, entry.bytes);
         counters.snapshots.fetch_add(1, std::memory_order_relaxed);
     }
     const auto budget = sampledBudget(context, cache);
@@ -1266,6 +1306,8 @@ TextureCacheUse TextureCacheUsage() {
         dropUncachedViews(sampled);
         use.sampledEntries = sampled.entries.size();
         use.sampledBytes = sampled.bytes;
+        use.spareEntries = sampled.spare.size();
+        use.spareBytes = sampled.spareBytes;
     }
     use.storageBytes = storageCacheBytes();
     return use;
@@ -1311,6 +1353,8 @@ void ClearCachedTextures(VkDevice device) {
             if (it->key.device == device) eraseTexture(sampled, it++);
             else ++it;
         }
+        sampled.spare.clear();
+        sampled.spareBytes = 0;
     }
     auto& storage = StorageTextures();
     std::vector<std::shared_ptr<StorageTexture>> cleared;
