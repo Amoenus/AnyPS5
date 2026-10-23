@@ -1543,7 +1543,21 @@ void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot) {
             const auto& words = snapshot.buffers.at(i).dwords;
             char detail[64];
             std::snprintf(detail, sizeof(detail), " (buffer %u V# %08x %08x %08x %08x)", i, words[0], words[1], words[2], words[3]);
-            throw std::runtime_error(std::string("buffer descriptor uses an unsupported type") + detail);
+            auto message = std::string("buffer descriptor uses an unsupported type") + detail;
+            message += " [source " + std::to_string(buffer.source) +
+                ", firstUsePc " + std::to_string(buffer.firstUsePc) +
+                ", type " + std::to_string(decoded.Type()) +
+                ", read " + std::to_string(buffer.read) +
+                ", written " + std::to_string(buffer.written) +
+                ", atomic " + std::to_string(buffer.atomic) +
+                ", formatted " + std::to_string(buffer.formatted) +
+                ", scalar " + std::to_string(buffer.scalar) +
+                ", hasImageAlias " + std::to_string(buffer.imageAlias != BufferResource::NoImageAlias) +
+                ", controlFlowBlocks " + std::to_string(plan.controlFlow.size()) + "]";
+            if (buffer.source < plan.descriptorSources.size()) {
+                message += " [sourceWord3 " + Detail::RuntimeValueDescription(plan, plan.descriptorSources[buffer.source].dwords[3]) + "]";
+            }
+            throw std::runtime_error(message);
         }
         if (plan.stage != IrShaderStage::Compute && decoded.AddTid()) throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
     }

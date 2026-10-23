@@ -874,6 +874,50 @@ void verifyMsaaDescriptorFailureOrigin() {
     expectFailure(materialize, "sourceWord5 GetUserData(", "MSAA failure origin: the max-mip expression was omitted");
 }
 
+void verifyBufferDescriptorFailureOrigin() {
+    using namespace ShaderRecompiler;
+    IrResourcePlan plan;
+    plan.stage = IrShaderStage::Mesh;
+    plan.srtPlanComplete = true;
+    plan.resourceTrackingComplete = true;
+    plan.userDataBase = 8u;
+    plan.userDataCount = 1u;
+    plan.materializationSources = {0u};
+    std::vector<std::unique_ptr<IrValue>> values;
+    const auto make = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments = {}) -> IrValue& {
+        auto value = std::make_unique<IrValue>(opcode, type, static_cast<std::uint32_t>(values.size()));
+        for (auto* argument : arguments) value->AddArgument(argument);
+        values.push_back(std::move(value));
+        return *values.back();
+    };
+    const auto constant = [&](std::uint32_t bits) -> IrValue& {
+        auto& value = make(IrOpcode::Void, IrType::U32);
+        value.SetImmediateU32(bits);
+        return value;
+    };
+    DescriptorSource source;
+    source.dwordCount = 4u;
+    const std::array<std::uint32_t, 4> words{0x1000u, 0u, 16u, 0u};
+    for (std::uint32_t index = 0; index < words.size(); ++index) source.dwords[index] = &constant(words[index]);
+    auto& registerValue = make(IrOpcode::Void, IrType::ScalarReg);
+    registerValue.SetRegister({RegisterBank::Scalar, 8u});
+    auto& userValue = make(IrOpcode::GetUserData, IrType::U32, {&registerValue});
+    source.dwords[3] = &make(IrOpcode::BitwiseOr32, IrType::U32, {&constant(2u << 30u), &userValue});
+    plan.descriptorSources.push_back(source);
+    BufferResource buffer;
+    buffer.source = 0u;
+    buffer.firstUsePc = 24u;
+    buffer.read = true;
+    buffer.formatted = true;
+    plan.info.buffers.push_back(buffer);
+    const std::array<std::uint32_t, 1> userData{0xfacu};
+    ResourceSnapshot snapshot;
+    const auto materialize = [&] { ResourceMaterializer{}.Materialize(plan, SrtRuntime{userData}, snapshot); };
+    expectFailure(materialize, "buffer descriptor uses an unsupported type", "buffer failure origin: the invalid descriptor was accepted");
+    expectFailure(materialize, "[source 0, firstUsePc 24, type 2,", "buffer failure origin: the source or TYPE metadata was omitted");
+    expectFailure(materialize, "sourceWord3 BitwiseOr32(", "buffer failure origin: the TYPE expression was omitted");
+}
+
 void verifyOutOfRangeConstantReads() {
     std::vector<std::uint32_t> code{0xf40c0200u, 0xfa000000u, 0xf4080500u, 0xfa000020u, 0xf4080600u, 0xfa000040u, 0xf4000400u, 0xfa000050u, 0xf4080a00u, 0xfa000080u, 0xbf8cc07fu, 0xf42c0814u, 0xfa000000u, 0xbf8cc07fu, 0xbf068010u, 0xbf850008u};
     for (std::uint32_t dword = 0; dword < 8u; dword++) {
@@ -8097,6 +8141,7 @@ int main(int argc, char** argv) {
         verifySignedSrtComparison();
         verifyTypeZeroImageMaterialization();
         verifyMsaaDescriptorFailureOrigin();
+        verifyBufferDescriptorFailureOrigin();
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
         verifyMayEvaluate();
