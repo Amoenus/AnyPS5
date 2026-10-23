@@ -829,6 +829,51 @@ void verifyTypeZeroImageMaterialization() {
     }
 }
 
+void verifyMsaaDescriptorFailureOrigin() {
+    using namespace ShaderRecompiler;
+    IrResourcePlan plan;
+    plan.srtPlanComplete = true;
+    plan.resourceTrackingComplete = true;
+    plan.userDataBase = 8u;
+    plan.userDataCount = 1u;
+    plan.materializationSources = {0u};
+    std::vector<std::unique_ptr<IrValue>> values;
+    const auto make = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments = {}) -> IrValue& {
+        auto value = std::make_unique<IrValue>(opcode, type, static_cast<std::uint32_t>(values.size()));
+        for (auto* argument : arguments) value->AddArgument(argument);
+        values.push_back(std::move(value));
+        return *values.back();
+    };
+    const auto constant = [&](std::uint32_t bits) -> IrValue& {
+        auto& value = make(IrOpcode::Void, IrType::U32);
+        value.SetImmediateU32(bits);
+        return value;
+    };
+    const std::array<std::uint32_t, 8> words{0x1000u, 71u << 20u, 0u, 0u, 0u, 0u, 0u, 0u};
+    DescriptorSource source;
+    source.dwordCount = 8u;
+    for (std::uint32_t index = 0; index < words.size(); ++index) source.dwords[index] = &constant(words[index]);
+    source.dwords[3] = &make(IrOpcode::BitwiseOr32, IrType::U32, {&constant(14u << 28u), &constant(3u << 16u)});
+    auto& registerValue = make(IrOpcode::Void, IrType::ScalarReg);
+    registerValue.SetRegister({RegisterBank::Scalar, 8u});
+    source.dwords[5] = &make(IrOpcode::GetUserData, IrType::U32, {&registerValue});
+    plan.descriptorSources.push_back(source);
+    ImageResource image;
+    image.source = 0u;
+    image.resourceClass = ImageResourceClass::Sampled;
+    image.dimension = RdnaImageDimension::Dim2DMsaa;
+    image.read = true;
+    plan.info.images.push_back(image);
+    plan.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(image));
+    const std::array<std::uint32_t, 1> userData{4u << 4u};
+    const SrtRuntime runtime{userData};
+    ResourceSnapshot snapshot;
+    const auto materialize = [&] { ResourceMaterializer{}.Materialize(plan, runtime, snapshot); };
+    expectFailure(materialize, "runtime image descriptor is invalid", "MSAA failure origin: the invalid descriptor was accepted");
+    expectFailure(materialize, "sourceWord3 BitwiseOr32(", "MSAA failure origin: the last-level expression was omitted");
+    expectFailure(materialize, "sourceWord5 GetUserData(", "MSAA failure origin: the max-mip expression was omitted");
+}
+
 void verifyOutOfRangeConstantReads() {
     std::vector<std::uint32_t> code{0xf40c0200u, 0xfa000000u, 0xf4080500u, 0xfa000020u, 0xf4080600u, 0xfa000040u, 0xf4000400u, 0xfa000050u, 0xf4080a00u, 0xfa000080u, 0xbf8cc07fu, 0xf42c0814u, 0xfa000000u, 0xbf8cc07fu, 0xbf068010u, 0xbf850008u};
     for (std::uint32_t dword = 0; dword < 8u; dword++) {
@@ -8040,6 +8085,7 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--type-zero-image-materialization") {
             verifyTypeZeroImageMaterialization();
+            verifyMsaaDescriptorFailureOrigin();
             std::cout << "TYPE=0 image descriptor materialization passed\n";
             return 0;
         }
@@ -8050,6 +8096,7 @@ int main(int argc, char** argv) {
         verifyLayoutPair();
         verifySignedSrtComparison();
         verifyTypeZeroImageMaterialization();
+        verifyMsaaDescriptorFailureOrigin();
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
         verifyMayEvaluate();

@@ -1,4 +1,5 @@
 #include "Optimization/ResourceMaterializer.hpp"
+#include "Optimization/SrtWalker/SrtDescriptorEvaluation.hpp"
 #include "Optimization/SrtWalker/SrtFlatSlotClasses.hpp"
 #include "Optimization/SrtWalker/SrtEvaluator.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
@@ -1381,7 +1382,10 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
                 ", controlFlowBlocks " + std::to_string(plan.controlFlow.size()) +
                 ", compactValues " + std::to_string(plan.compact.values.size()) +
                 ", tapeReady " + std::to_string(tapeReady) +
-                ", tapeCompiled " + std::to_string(tapeReady && static_cast<bool>(plan.tapeSlot->tape)) + "] [words " + words + "]";
+                ", tapeCompiled " + std::to_string(tapeReady && static_cast<bool>(plan.tapeSlot->tape)) + "]";
+            const auto& source = plan.descriptorSources[image.source];
+            message += " [sourceWord3 " + Detail::RuntimeValueDescription(plan, source.dwords[3]) +
+                ", sourceWord5 " + Detail::RuntimeValueDescription(plan, source.dwords[5]) + "] [words " + words + "]";
             throw std::runtime_error(message);
         }
         snapshot.images[i] = descriptor;

@@ -144,12 +144,7 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
                         zeroedSources.emplace_back(sourceIndex, inaccessible);
                         break;
                     }
-                    std::string detail = DescribeValue(source->dwords[index], 4);
-                    const IrValue* dword = source->dwords[index]->Resolve();
-                    if (dword->Opcode() == IrOpcode::ReadConst && dword->ArgumentCount() == 2 && dword->Argument(1)->Resolve()->HasImmediate()) {
-                        const auto slot = dword->Argument(1)->Resolve()->ImmediateU32();
-                        if (slot < program.srtReads.size()) detail += " where slot " + std::to_string(slot) + " = " + DescribeValue(program.srtReads[slot].value, 8);
-                    }
+                    const auto detail = RuntimeValueDescription(program, source->dwords[index]);
                     return Fail("descriptor source " + std::to_string(sourceIndex) + " dword " + std::to_string(index) + ": " + detail);
                 }
             }
@@ -348,6 +343,17 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
 
 const std::string& RuntimeSourceFailureReason() {
     return failureReason();
+}
+
+std::string RuntimeValueDescription(const IrResourcePlan& program, const IrValue* value) {
+    std::string description = DescribeValue(value, 4);
+    if (value == nullptr) return description;
+    value = value->Resolve();
+    if (value->Opcode() == IrOpcode::ReadConst && value->ArgumentCount() == 2 && value->Argument(1)->Resolve()->HasImmediate()) {
+        const auto slot = value->Argument(1)->Resolve()->ImmediateU32();
+        if (slot < program.srtReads.size()) description += " where slot " + std::to_string(slot) + " = " + DescribeValue(program.srtReads[slot].value, 8);
+    }
+    return description;
 }
 
 }
