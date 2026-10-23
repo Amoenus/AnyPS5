@@ -1,4 +1,5 @@
 #include "GraphicsTests.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
@@ -57,6 +58,10 @@ struct MockDevice {
     std::vector<std::pair<VkImage, VkImageSubresourceRange>> clears;
     std::map<VkBuffer, VkDeviceSize> bufferSizes;
     std::map<VkDeviceMemory, std::vector<std::byte>> memories;
+    std::map<VkImage, VkDeviceMemory> imageMemories;
+    bool failExtraMipAllocation = false;
+    std::uint32_t imageAllocationFailures = 0;
+    std::vector<bool> imageReclaims;
 };
 
 MockDevice mock;
@@ -81,7 +86,8 @@ VKAPI_ATTR void VKAPI_CALL imageMemoryRequirements(VkDevice, VkImage, VkMemoryRe
     *requirements = {65536, 1024, 0x3};
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL bindImageMemory(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize) {
+VKAPI_ATTR VkResult VKAPI_CALL bindImageMemory(VkDevice, VkImage image, VkDeviceMemory memory, VkDeviceSize) {
+    mock.imageMemories[image] = memory;
     return VK_SUCCESS;
 }
 
@@ -106,9 +112,18 @@ VKAPI_ATTR void VKAPI_CALL bufferMemoryRequirements(VkDevice, VkBuffer buffer, V
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL allocateMemory(VkDevice, const VkMemoryAllocateInfo* info, const VkAllocationCallbacks*, VkDeviceMemory* memory) {
+    if (mock.failExtraMipAllocation && mock.images.size() == 2u && mock.imageAllocationFailures == 0u) {
+        ++mock.imageAllocationFailures;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
     *memory = newHandle<VkDeviceMemory>();
     mock.memories[*memory].resize(static_cast<std::size_t>(info->allocationSize));
     return VK_SUCCESS;
+}
+
+VkDeviceSize reclaimExtraMipMemory(VkDeviceSize bytes, bool newImage) {
+    mock.imageReclaims.push_back(newImage);
+    return bytes;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL bindBufferMemory(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize) {
@@ -328,6 +343,7 @@ GuestTextureResource arrayTexture(std::uint64_t address, std::uint32_t format, s
 
 void clearRecords() {
     mock.images.clear();
+    mock.imageMemories.clear();
     mock.copies.clear();
     mock.uploads.clear();
     mock.barriers.clear();
@@ -547,6 +563,40 @@ void TestRepackCopyLevels(const Context& context, TextureDetiler& detiler) {
     }
 }
 
+void TestExtraMipAllocationRecovery() {
+    auto context = mockContext();
+    context.cacheReclaim = reclaimExtraMipMemory;
+    const auto pool = GetBufferPool(context);
+    TextureDetiler detiler(context);
+    auto descriptor = storageSurface(28u, 1u, 10u);
+    GuestSurface memory(static_cast<std::size_t>(DescribeSurface(descriptor).guestBytes));
+    descriptor.baseAddress = memory.Address();
+    clearRecords();
+    mock.imageAllocationFailures = 0u;
+    mock.imageReclaims.clear();
+    mock.failExtraMipAllocation = true;
+    {
+        const auto texture = StorageTexture::Create(context, detiler, descriptor, 0u);
+        mock.failExtraMipAllocation = false;
+        Require(mock.imageAllocationFailures == 1u && mock.imageReclaims.size() == 1u, "extra-mip allocation recovery did not exercise its allocation failure");
+        Require(texture->AllocationBytes() == 6u * 65536u, "extra-mip allocation bytes do not include every physical image");
+    }
+    const auto retained = pool->RetainedImages();
+    std::size_t matched = 0;
+    std::vector<std::unique_ptr<OwnedImage>> reused;
+    for (std::uint32_t index = 0; index < 6u; ++index) {
+        auto image = std::make_unique<OwnedImage>(context, VK_NULL_HANDLE, VK_NULL_HANDLE);
+        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocation.allocationSize = 65536u;
+        allocation.memoryTypeIndex = 0u;
+        image->Allocate(context, allocation, 1u, "extra-mip allocation reuse", true);
+        matched += std::ranges::any_of(mock.imageMemories, [&](const auto& entry) { return entry.second == image->memory; });
+        reused.push_back(std::move(image));
+    }
+    Require(mock.imageReclaims.front() && retained == 6u && matched == 6u,
+        "extra-mip allocation recovery omitted new-image eligibility or allocation identity: new-image=" + std::to_string(mock.imageReclaims.front()) + ", retained=" + std::to_string(retained) + "/6, reused=" + std::to_string(matched) + "/6");
+}
+
 void TestStorageLevelsPastTheFullChain(const Context& context, TextureDetiler& detiler) {
     auto descriptor = storageSurface(28, 1, 10);
     GuestSurface memory(static_cast<std::size_t>(DescribeSurface(descriptor).guestBytes));
@@ -746,6 +796,7 @@ void RunTextureMipChainTests() {
         TestFullChainsAreUnchanged(context, detiler);
         TestSrgbExpansionLevels(context, detiler);
         TestRepackCopyLevels(context, detiler);
+        TestExtraMipAllocationRecovery();
         TestStorageLevelsPastTheFullChain(context, detiler);
         TestStorageFullChainIsUnchanged(context, detiler);
         TestShaderLevelsPastTheView(context, detiler);

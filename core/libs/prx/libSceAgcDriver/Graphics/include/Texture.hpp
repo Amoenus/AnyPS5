@@ -384,7 +384,7 @@ public:
     std::uint64_t GuestBytes() const;
     std::uint64_t BudgetBytes() const;
     std::size_t OriginalSnapshotBytes() const { return original.capacity(); }
-    VkDeviceSize AllocationBytes() const { return memoryBytes; }
+    VkDeviceSize AllocationBytes() const { return memoryBytes + extraMipMemoryBytes; }
 
 private:
     std::atomic<std::uint64_t> provedEpoch{0};
@@ -629,6 +629,7 @@ private:
     std::vector<std::unique_ptr<OwnedImage>> extraMipImages;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize memoryBytes = 0;
+    VkDeviceSize extraMipMemoryBytes = 0;
     std::uint32_t memoryType = 0;
     VkImageView view = VK_NULL_HANDLE;
     std::uint32_t defaultMip = 0;

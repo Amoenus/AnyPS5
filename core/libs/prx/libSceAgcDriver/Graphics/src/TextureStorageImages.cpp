@@ -28,10 +28,10 @@ void StorageTexture::allocateExtraMipImages(VkImageCreateInfo info) {
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
         allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "extra storage mip");
-        extra->memory = AllocateImageMemory(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory extra storage mip");
+        extra->Allocate(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory extra storage mip", true);
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, extra->image, extra->memory, 0u), "vkBindImageMemory extra storage mip");
-        Require(memoryBytes <= std::numeric_limits<VkDeviceSize>::max() - requirements.size, "storage image memory accounting overflows");
-        memoryBytes += requirements.size;
+        Require(extraMipMemoryBytes <= std::numeric_limits<VkDeviceSize>::max() - memoryBytes && requirements.size <= std::numeric_limits<VkDeviceSize>::max() - memoryBytes - extraMipMemoryBytes, "storage image memory accounting overflows");
+        extraMipMemoryBytes += requirements.size;
         extraMipImages.push_back(std::move(extra));
     }
 }
