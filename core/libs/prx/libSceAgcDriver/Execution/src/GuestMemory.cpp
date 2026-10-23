@@ -775,7 +775,29 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     if (!reason.empty()) {
         // Debug aid: APS5_TRACE_UNREADABLE names the code that checked an inaccessible range.
         static const bool trace = std::getenv("APS5_TRACE_UNREADABLE") != nullptr;
-        if (trace) std::fprintf(stderr, "[unreadable] %s from +0x%llx\n", reason.c_str(), ModuleOffset(__builtin_return_address(0)));
+        if (trace) {
+            std::fprintf(stderr, "[unreadable] %s from +0x%llx\n", reason.c_str(), ModuleOffset(__builtin_return_address(0)));
+#ifdef _WIN32
+            MEMORY_BASIC_INFORMATION memory{};
+            const auto queried = VirtualQuery(pointer, &memory, sizeof(memory));
+            if (queried == sizeof(memory)) {
+                std::ostringstream details;
+                details << "[unreadable] request-start mapping after refusal (unsynchronized): address 0x" << std::hex << address
+                        << " base 0x" << reinterpret_cast<std::uintptr_t>(memory.BaseAddress)
+                        << " bytes 0x" << memory.RegionSize << " state 0x" << memory.State;
+                if (memory.State != MEM_FREE) {
+                    details << " allocation 0x" << reinterpret_cast<std::uintptr_t>(memory.AllocationBase) << " type 0x" << memory.Type;
+                }
+                if (memory.State == MEM_COMMIT) details << " protect 0x" << memory.Protect;
+                std::fprintf(stderr, "%s\n", details.str().c_str());
+            } else if (queried == 0) {
+                const auto error = GetLastError();
+                std::fprintf(stderr, "[unreadable] request-start mapping query failed after refusal (unsynchronized): address 0x%llx error %lu\n", static_cast<unsigned long long>(address), error);
+            } else {
+                std::fprintf(stderr, "[unreadable] request-start mapping query returned %zu bytes after refusal (unsynchronized): address 0x%llx\n", queried, static_cast<unsigned long long>(address));
+            }
+#endif
+        }
         require(false, reason.c_str());
     }
 }
