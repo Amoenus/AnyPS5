@@ -237,6 +237,77 @@ void importSpanTests(const Context& context) {
     ::operator delete(block, std::align_val_t{piece});
 }
 
+void importRunGrowthTests(const Context& context) {
+    constexpr std::size_t piece = 65536;
+    void* block = ::operator new(2 * piece, std::align_val_t{piece});
+    auto* guest = static_cast<std::uint8_t*>(block);
+    const auto first = reinterpret_cast<std::uintptr_t>(block);
+    std::memset(block, 0x3c, 2 * piece);
+    auto importing = context;
+    importing.hostImportAlignment = piece;
+    const auto change = [&](void* range, std::size_t bytes, bool add) {
+        GuestAllocations::Mutation mutation;
+        if (add) mutation.Add(range, bytes, true, false, true);
+        else mutation.Remove(range);
+    };
+    const auto build = [&](std::size_t pieces, const std::string& step) {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.AddReadable(first + 64, 16);
+        leased.Upload(true);
+        const auto ranges = leased.AddressRanges();
+        leased.WriteBack();
+        Require(std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) { return range.begin <= first && first + pieces * piece <= range.end; }), "the import of a run does not cover its " + std::to_string(pieces) + " registered pieces " + step);
+    };
+    change(guest, piece, true);
+    build(1, "before its neighbour was registered");
+    change(guest + piece, piece, true);
+    build(2, "after its neighbour was registered");
+    change(guest, 0, false);
+    change(guest + piece, 0, false);
+    ::operator delete(block, std::align_val_t{piece});
+}
+
+void importRunReplacedTests(const Context& context) {
+    constexpr std::size_t piece = 65536;
+    void* block = ::operator new(3 * piece, std::align_val_t{piece});
+    auto* guest = static_cast<std::uint8_t*>(block);
+    const auto first = reinterpret_cast<std::uintptr_t>(block);
+    std::memset(block, 0x3c, 3 * piece);
+    auto importing = context;
+    importing.hostImportAlignment = piece;
+    const auto add = [&](void* range, bool writable) {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(range, piece, true, writable, true);
+    };
+    const auto remove = [&](void* range) {
+        GuestAllocations::Mutation mutation;
+        mutation.Remove(range);
+    };
+    const auto build = [&](std::size_t pieces, const std::string& step) {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.AddReadable(first + 64, 16);
+        leased.Upload(true);
+        const auto ranges = leased.AddressRanges();
+        leased.WriteBack();
+        Require(std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) { return range.begin <= first && first + pieces * piece <= range.end; }), "the import of a run does not cover its " + std::to_string(pieces) + " registered pieces " + step);
+    };
+    add(guest, true);
+    add(guest + piece, false);
+    add(guest + 2 * piece, true);
+    build(1, "while the read-only middle piece ends it");
+    for (int round = 0; round < 4; ++round) {
+        remove(guest + piece);
+        add(guest + piece, round % 2 == 0);
+        build(round % 2 == 0 ? 3 : 1, "after the middle piece was replaced by one that " + std::string(round % 2 == 0 ? "continues" : "ends") + " the run, with as many ranges registered as before");
+    }
+    remove(guest);
+    remove(guest + piece);
+    remove(guest + 2 * piece);
+    ::operator delete(block, std::align_val_t{piece});
+}
+
 void spaceWritableWritesTests(const Context& context) {
     if (!AddressSpaceCounters().enabled) return;
     constexpr std::size_t piece = 65536;
@@ -1329,6 +1400,18 @@ void importBlockFailureTests(const Context& context, const BdaTestAccess& access
     window.Add(remapped, PieceWindow::Piece);
     window.Build();
     Require(window.Imports(0, PieceWindow::Window) == 1 && window.Block(0, PieceWindow::Window), "a block that failed was not tried again after one of its ranges was mapped again: " + blockText(window, 0, PieceWindow::Window));
+}
+
+void importRunFailureShrinkTests(const Context& context, const BdaTestAccess& access) {
+    PieceWindow window(context);
+    constexpr auto half = PieceWindow::Window / 2;
+    window.AddPieces(0, PieceWindow::Window);
+    Require(HostImportFor(window.importing, window.Address(0), 16) != nullptr && window.Block(0, PieceWindow::Window), "a window of registered pieces was not imported as one 8 MiB block: " + blockText(window, 0, PieceWindow::Window));
+    ClearHostImports(window.importing.device);
+    access.limitImports(half);
+    Require(HostImportFor(window.importing, window.Address(0), 16) != nullptr && window.Block(0, half), "a lookup on an unchanged registry whose 8 MiB block failed after an earlier lookup did not shrink to the 4 MiB block: " + blockText(window, 0, PieceWindow::Window));
+    access.limitImports(std::nullopt);
+    Require(HostImportFor(window.importing, window.Address(half), 16) != nullptr && window.Block(0, half) && window.Block(half, half), "a lookup on an unchanged registry after its 8 MiB block failed imported the failed block again: " + blockText(window, 0, PieceWindow::Window));
 }
 
 void importBlockBudgetTests(const Context& context) {
@@ -3482,6 +3565,8 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     addressTableKeyTests();
     snapshotTableTests(context, access);
     importSpanTests(context);
+    importRunGrowthTests(context);
+    importRunReplacedTests(context);
     failedImportRemapTests(context, access);
     spaceImportRunTests(context);
     spaceWritableWritesTests(context);
@@ -3513,6 +3598,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     importBlockFlagTests(context);
     importBlockRemapTests(context);
     importBlockFailureTests(context, access);
+    importRunFailureShrinkTests(context, access);
     importBlockBudgetTests(context);
     importRefusalMemoryTests(context);
     evictingRefusalMemoryTests(context);
