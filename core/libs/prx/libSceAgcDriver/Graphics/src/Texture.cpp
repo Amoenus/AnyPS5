@@ -4317,6 +4317,42 @@ bool PendingStorageOverlaps(std::uint64_t address, std::size_t bytes, const Stor
     return false;
 }
 
+std::uint64_t StorageTexture::StampKeepingNewerResults(std::uint64_t address, std::size_t bytes, std::uint64_t recorded, const std::function<std::uint64_t()>& stamp) {
+    std::vector<std::pair<std::shared_ptr<StorageTexture>, std::uint32_t>> kept;
+    if (recorded != 0 && bytes != 0) {
+        auto& pending = Pending();
+        std::lock_guard lock(pending.mutex);
+        for (auto* texture : pending.textures) {
+            if (!texture->blockUnits || !texture->overlaps(address, bytes)) continue;
+            auto alive = texture->weak_from_this().lock();
+            if (alive == nullptr) continue;
+            for (std::uint32_t unit = 0; unit < texture->trackedLayers; ++unit) {
+                const auto begin = texture->layerBegin(unit);
+                const auto unitBytes = texture->layerBytes(unit);
+                if (!texture->layerPending[unit] || begin >= address + bytes || address >= begin + unitBytes) continue;
+                if (texture->layerGeneration[unit] >= recorded) kept.emplace_back(alive, unit);
+            }
+        }
+    }
+    std::erase_if(kept, [](const auto& entry) {
+        const auto& [texture, unit] = entry;
+        const auto begin = texture->layerBegin(unit);
+        const auto unitBytes = static_cast<std::size_t>(texture->layerBytes(unit));
+        GuestMemory::CollectWritesUncached(begin, unitBytes);
+        return !GuestMemory::UnchangedSince(begin, unitBytes, texture->layerGeneration[unit]);
+    });
+    const auto generation = stamp();
+    if (generation == 0 || kept.empty()) return generation;
+    auto& pending = Pending();
+    std::lock_guard lock(pending.mutex);
+    for (const auto& [texture, unit] : kept) {
+        if (!texture->layerPending[unit]) continue;
+        texture->layerGeneration[unit] = generation;
+        texture->refreshGeneration();
+    }
+    return generation;
+}
+
 bool StorageTexture::AnyPendingOverlaps(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
     if (ranges.empty()) return false;
     auto& pending = Pending();
