@@ -246,9 +246,17 @@ int main() {
         array.dstSelW = 7;
         Require(AgcDriver::Graphics::DescribeSurface(array).layerBytes == PlaneBytes, "a layer of the 384x200 R32 array is not six 64 KiB tiles");
         const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*device);
+        std::uint32_t lookupCount = 0;
         const auto lookup = [&](std::uint32_t first, std::uint32_t count) {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-            return AgcDriver::Graphics::CachedStorageLayers(context, array, first, count);
+            using AgcDriver::Graphics::LookupOutcomes;
+            const auto& outcomes = AgcDriver::Graphics::ThreadLookupOutcomes();
+            const auto unchangedBefore = outcomes.counts[LookupOutcomes::RefreshUnchanged];
+            const auto comparedBefore = outcomes.counts[LookupOutcomes::RefreshCompared];
+            const auto provedBefore = outcomes.counts[LookupOutcomes::RefreshProved];
+            auto texture = AgcDriver::Graphics::CachedStorageLayers(context, array, first, count);
+            if (++lookupCount <= 3) std::printf("array lookup %u first=%u count=%u: RefreshUnchanged=%llu RefreshCompared=%llu RefreshProved=%llu\n", lookupCount, first, count, static_cast<unsigned long long>(outcomes.counts[LookupOutcomes::RefreshUnchanged] - unchangedBefore), static_cast<unsigned long long>(outcomes.counts[LookupOutcomes::RefreshCompared] - comparedBefore), static_cast<unsigned long long>(outcomes.counts[LookupOutcomes::RefreshProved] - provedBefore));
+            return texture;
         };
         Fill(layerPlane, 1.0f);
         const auto arrayImage = lookup(0, 1);
