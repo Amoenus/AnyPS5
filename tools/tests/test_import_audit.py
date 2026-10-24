@@ -1924,6 +1924,44 @@ class ImportAuditTests(unittest.TestCase):
         self.assertIn("input", err)
         self.assertEqual(registry.read_bytes(), before)
 
+    def test_json_output_preserves_shared_source_cmake_inputs(self):
+        work = self.work
+        name = "scePending"
+        nid = nid_names.compute_nid(name)
+        write_source(work.source, "libOwner", STUB_SOURCE.format(name=name))
+        shared = work.source / "libShared"
+        shared.mkdir()
+        cmake = shared / "CMakeLists.txt"
+        cmake.write_text('include(${CMAKE_CURRENT_SOURCE_DIR}/../libOwner/OwnerLibrary.cmake)\n', encoding="utf-8")
+        before = cmake.read_bytes()
+        (work.libs / "libShared.prx").write_bytes(exporting(nid))
+        registry = work.root / "game.json"
+        write_registry(registry, [(nid, "libShared.prx")])
+        outputs = [cmake]
+        for kind in ("symlink", "hardlink"):
+            alias = work.root / (kind + ".json")
+            try:
+                if kind == "symlink":
+                    alias.symlink_to(cmake)
+                else:
+                    os.link(cmake, alias)
+            except (OSError, NotImplementedError):
+                continue
+            outputs.append(alias)
+        for output in outputs:
+            with self.subTest(output=output):
+                code, out, err = work.run(registry, "--json", str(output))
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("JSON output would overwrite an input file", err)
+                self.assertEqual(cmake.read_bytes(), before)
+                self.assertEqual(output.read_bytes(), before)
+        report = work.root / "audit.json"
+        code, _, err = work.run(registry, "--json", str(report))
+        self.assertEqual((code, err), (0, ""))
+        record, = json.loads(report.read_text(encoding="utf-8"))["imports"]
+        self.assertEqual((record["class"], record["name"]), ("stub", name))
+        self.assertEqual(cmake.read_bytes(), before)
+
     def test_git_stamp_uses_selected_source_tree(self):
         completed = type("Completed", (), {"stdout": "abcdef\n"})()
         with patch.object(import_audit.subprocess, "run", return_value=completed) as run:
