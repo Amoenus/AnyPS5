@@ -36,6 +36,7 @@ int APS5_VABI scePthreadRwlockRdlock(PthreadRwlock* rwlock);
 int APS5_VABI scePthreadRwlockWrlock(PthreadRwlock* rwlock);
 int APS5_VABI scePthreadRwlockTryrdlock(PthreadRwlock* rwlock);
 int APS5_VABI scePthreadRwlockUnlock(PthreadRwlock* rwlock);
+int APS5_VABI scePthreadRwlockattrSettype(PthreadRwlockattr* attr, int type);
 }
 
 using TimedLock = int (APS5_VABI *)(PthreadRwlock*, const KernelTimespec*);
@@ -402,13 +403,29 @@ static void CheckAttrProcessSharing() {
     Require(pthread_rwlockattr_destroy_nid_postfix(&attr) == 0);
 }
 
+static void CheckAttrSettype() {
+    PthreadRwlockattr attr = nullptr;
+    Require(pthread_rwlockattr_init_nid_postfix(&attr) == 0);
+    for (const int type : {1, 2}) {
+        Require(scePthreadRwlockattrSettype(&attr, type) == SCE_OK);
+        PthreadRwlock rwlock = nullptr;
+        Require(pthread_rwlock_init_nid_postfix(&rwlock, &attr) == 0);
+        Require(pthread_rwlock_wrlock_nid_postfix(&rwlock) == 0 && pthread_rwlock_unlock_nid_postfix(&rwlock) == 0);
+        Require(pthread_rwlock_destroy_nid_postfix(&rwlock) == 0);
+    }
+    for (const int type : {0, 3, -1, static_cast<int>(0x80000000u)}) Require(scePthreadRwlockattrSettype(&attr, type) == SCE_KERNEL_ERROR_EINVAL);
+    Require(pthread_rwlockattr_destroy_nid_postfix(&attr) == 0);
+    Require(scePthreadRwlockattrSettype(&attr, 1) == SCE_KERNEL_ERROR_EINVAL);
+    Require(scePthreadRwlockattrSettype(nullptr, 1) == SCE_KERNEL_ERROR_EINVAL);
+}
+
 static void CheckAttrType() {
     PthreadRwlockattr attr = nullptr;
     Require(pthread_rwlockattr_init_nid_postfix(&attr) == 0);
     int type = -1;
     Require(pthread_rwlockattr_gettype_np_nid_postfix(&attr, &type) == 0 && type == 0);
     Require(scePthreadRwlockattrGettype(&attr, &type) == SCE_OK && type == 0);
-    for (const int set : {1, 2, 0}) {
+    for (const int set : {1, 2}) {
         Require(scePthreadRwlockattrSettype(&attr, set) == SCE_OK);
         Require(pthread_rwlockattr_gettype_np_nid_postfix(&attr, &type) == 0 && type == set);
         Require(scePthreadRwlockattrGettype(&attr, &type) == SCE_OK && type == set);
@@ -426,6 +443,7 @@ static void CheckAttrType() {
 }
 
 int main() {
+    CheckAttrSettype();
     CheckAttrProcessSharing();
     CheckAttrType();
     CheckWaitingWriterHoldsBackNewReaders();

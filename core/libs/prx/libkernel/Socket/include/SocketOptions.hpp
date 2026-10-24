@@ -21,6 +21,7 @@ struct SocketOptionState {
     unsigned int tcpKeepIdle = 0;
     unsigned int tcpKeepInterval = 0;
     unsigned int tcpKeepCount = 0;
+    int keptFlags = 0;
 };
 
 bool NativeListening(std::uintptr_t native, bool& listening);
