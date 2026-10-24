@@ -28,6 +28,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_BDA_BYTE_READS` | presence | `core/shader/recompiler/SpirvBackend/src/SpirvBdaRead.cpp` |  | forces one address lookup and byte load per byte for BDA reads instead of a wide dword load |
 | `APS5_BDA_DWORD_STORES` | presence | `core/shader/recompiler/Translation/src/MemoryInstructions/FlatInstructions.cpp` |  | reverts BDA writes to one address store per dword instead of a wide multi-dword store |
 | `APS5_DUMP_IR` | string | `core/shader/recompiler/Recompiler.cpp` |  | hex code address (or all) of the programs whose IR is printed after each front-end pass |
+| `APS5_EXACT_RCP` | presence | `core/shader/recompiler/SpirvBackend/src/SpirvAlu/SpirvAluEmitterReciprocal.cpp` |  | emits `v_rcp_f32` and `v_rcp_iflag_f32` as the RDNA hardware reciprocal (bit-exact for normal inputs and results) instead of the driver's division; adds about 13k SPIR-V words to each shader that uses them |
 | `APS5_GATHER_CONST` | integer | `core/shader/recompiler/SpirvBackend/src/SpirvImageEmitter.cpp` |  | integer every non-depth gather returns in all four texels instead of the sampled value |
 | `APS5_IMAGE_TABLE_KEY_SCAN` | integer | `core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp` | 256 | number of image-table entries the key scan examines |
 | `APS5_IMAGE_TABLE_STRICT` | presence | `core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp` |  | sets image-table materialization to its strict form; 0 leaves it off |
