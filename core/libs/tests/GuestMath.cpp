@@ -683,6 +683,35 @@ static long double MakeExtended(std::uint64_t mantissa, std::uint16_t signExpone
     return value;
 }
 
+static void CheckExpm1ConsoleBits() {
+    constexpr struct {
+        std::uint64_t input;
+        std::uint64_t expected;
+        int error;
+    } cases[] = {
+        {0x0000000000000000ull, 0x0000000000000000ull, 0}, {0x8000000000000000ull, 0x8000000000000000ull, 0},
+        {0x3c8fffffffffffffull, 0x3c8fffffffffffffull, 0}, {0x3c90000000000000ull, 0x3c90000000000000ull, 0},
+        {0x3fd62e42fefa39efull, 0x3fda827999fcef32ull, 0}, {0x3fd62e4300000000ull, 0x3fda82799b6f2366ull, 0},
+        {0x3ff0a2b1ffffffffull, 0x3ffd413c1a24d411ull, 0}, {0x3ff0a2b200000000ull, 0x3ffd413c1a24d414ull, 0},
+        {0xbfd0000000000000ull, 0xbfcc5041854df7d4ull, 0}, {0xbfe0000000000000ull, 0xbfd92e9a0720d3ecull, 0},
+        {0x3ff0000000000000ull, 0x3ffb7e151628aed2ull, 0}, {0xbff0000000000000ull, 0xbfe43a54e4e98864ull, 0},
+        {0x4043687a00000000ull, 0x436fffd8395c0c41ull, 0}, {0xc043687a00000000ull, 0xbff0000000000000ull, 0},
+        {0x4049000000000000ull, 0x44719103e4080b45ull, 0}, {0x40862e42fefa39efull, 0x7fefffffffffff2aull, 0},
+        {0x40862e42fefa39f0ull, 0x7ff0000000000000ull, ERANGE}, {0xc08f400000000000ull, 0xbff0000000000000ull, 0},
+        {0x7fefffffffffffffull, 0x7ff0000000000000ull, ERANGE}, {0xffefffffffffffffull, 0xbff0000000000000ull, 0},
+        {0x7ff0000000000000ull, 0x7ff0000000000000ull, 0}, {0xfff0000000000000ull, 0xbff0000000000000ull, 0},
+        {0x7ff8000000000001ull, 0x7ff8000000000001ull, 0}, {0xfff8000000000002ull, 0xfff8000000000002ull, 0},
+        {0x3fc78b9e474afed8ull, 0x3fc9d99e60806b35ull, 0}, {0xbf887a99bea50fb1ull, 0xbf88554c5b9d0cbbull, 0},
+        {0x3ff790fb0ae85390ull, 0x400ae5103402894bull, 0}, {0xbf840fe48e07e54dull, 0xbf83f6d1bcda4943ull, 0},
+        {0xbfbb1276066a31c7ull, 0xbfb9b098289dab68ull, 0}, {0x3fc07bc20a0c887eull, 0x3fc197828317c86cull, 0},
+    };
+    for (const auto& item : cases) {
+        errno = 1234;
+        Require(std::bit_cast<std::uint64_t>(expm1_nid_postfix(std::bit_cast<double>(item.input))) == item.expected);
+        Require(errno == (item.error != 0 ? item.error : 1234));
+    }
+}
+
 static void CheckAsinl() {
     const struct { std::uint64_t inputMantissa; std::uint16_t inputSignExponent; std::uint64_t outputMantissa; std::uint16_t outputSignExponent; } cases[] = {
         {0, 0x0000, 0, 0x0000}, {0, 0x8000, 0, 0x8000},
@@ -1639,6 +1668,7 @@ int main() {
     CheckFegetenv();
     CheckLongDouble();
     CheckNearbyintl();
+    CheckExpm1ConsoleBits();
     CheckAsinl();
     Require(scalbn_nid_postfix(0.75, -2) == 0.1875);
     Require(scalbnf_nid_postfix(0.75f, 4) == 12.f);

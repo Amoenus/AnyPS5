@@ -228,6 +228,17 @@ if(BUILD_TESTING)
         set_tests_properties(guest_process_arguments PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND Python3_Interpreter_FOUND)
+        add_test_executable(guest_runtime_lifecycle_tests ${LIBS_INCLUDE_DIR}/tests/GuestRuntimeLifecycle.cpp)
+        target_include_directories(guest_runtime_lifecycle_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_runtime_lifecycle_tests PRIVATE libkernel libc ${CMAKE_DL_LIBS})
+        set_target_properties(guest_runtime_lifecycle_tests PROPERTIES ENABLE_EXPORTS ON)
+        add_dependencies(guest_runtime_lifecycle_tests relinker)
+        add_test(NAME guest_runtime_lifecycle COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/core/relinker/relinker/tests/test_guest_runtime_lifecycle.py
+            $<TARGET_FILE:relinker> $<TARGET_FILE:guest_runtime_lifecycle_tests> $<TARGET_FILE_DIR:libkernel>)
+    endif()
     add_library(guest_module_fixture SHARED ${LIBS_INCLUDE_DIR}/tests/GuestModuleFixture.cpp)
     target_include_directories(guest_module_fixture PRIVATE ${LIBS_INCLUDE_DIR})
     add_custom_command(TARGET guest_module_fixture POST_BUILD
@@ -236,7 +247,6 @@ if(BUILD_TESTING)
     add_dependencies(guest_module_fixture nid_patcher)
     configure_windows_unwind(guest_module_fixture)
     set_target_properties(guest_module_fixture PROPERTIES BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "$ORIGIN")
-    find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND AND NOT WIN32)
         target_link_options(guest_module_fixture PRIVATE -Wl,--no-as-needed)
         add_test(NAME nid_patcher_dynamic_strings COMMAND ${Python3_EXECUTABLE}
