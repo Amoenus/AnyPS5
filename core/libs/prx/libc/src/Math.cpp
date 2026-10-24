@@ -491,7 +491,29 @@ double APS5_VABI sin_nid_postfix(double x) { return std::sin(x); }
 double APS5_VABI cos_nid_postfix(double x) { return std::cos(x); }
 double APS5_VABI sinh_nid_postfix(double x) { return std::sinh(x); }
 double APS5_VABI cosh_nid_postfix(double x) { return std::cosh(x); }
-float APS5_VABI coshf_nid_postfix(float x) { return std::cosh(x); }
+float APS5_VABI coshf_nid_postfix(float x) {
+    const std::uint32_t magnitude = std::bit_cast<std::uint32_t>(x) & 0x7fffffffu;
+    if (magnitude >= 0x7f800000u) return x * x;
+    const float absolute = std::fabs(x);
+    if (magnitude < 0x3eb17218u) {
+        const float t = SinhfExpm1(absolute);
+        const float w = 1.0f + t;
+        if (magnitude < 0x39800000u) return 1.0f;
+        return 1.0f + (t * t) / (w + w);
+    }
+    if (magnitude < 0x41100000u) {
+        const float t = SinhfExp(absolute);
+        return 0.5f * t + 0.5f / t;
+    }
+    if (magnitude < 0x42b17217u) return 0.5f * SinhfExp(absolute);
+    if (magnitude <= 0x42b2d4fcu) {
+        const float w = SinhfExp(0.5f * absolute);
+        const float t = 0.5f * w;
+        return t * w;
+    }
+    volatile float huge = 1.0e30f;
+    return huge * huge;
+}
 
 float APS5_VABI sinhf_nid_postfix(float x) {
     const std::uint32_t magnitude = std::bit_cast<std::uint32_t>(x) & 0x7fffffffu;

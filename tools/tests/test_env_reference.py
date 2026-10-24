@@ -30,6 +30,8 @@ static bool q = _wgetenv(L"APS5_WIDE_PRESENT") != nullptr;
 static int r = _wtoi(_wgetenv(L"APS5_WIDE_INT"));
 static const wchar_t* s = _wgetenv(L"ANYPS5_WIDE_CONFIG");
 static const char* t = std::getenv("NOT_AN_ENV");
+static std::uint64_t u = std::min<std::uint64_t>(EnvironmentNumber("APS5_CRASH_STACK_BYTES"), std::uint64_t{1} << 20);
+static std::uint64_t v = MyEnvironmentNumber("APS5_NOT_A_NUMBER_READ");
 """
 
 
@@ -52,7 +54,8 @@ class EnvReferenceTests(unittest.TestCase):
              "APS5_CRASH_INDIRECT_MEMORY", "APS5_PIPELINE_JOURNAL_MAX_MIB",
              "APS5_PIPELINE_STORE_ENTRIES", "APS5_PIPELINE_JOURNAL_THREADS", "APS5_PM4_RING",
              "ANYPS5_LOADEXEC_ARGV_SKIP", "ANYPS5_LOADEXEC_PARENT",
-             "ANYPS5_WIDE_CONFIG", "APS5_WIDE_PRESENT", "APS5_WIDE_INT"})
+             "ANYPS5_WIDE_CONFIG", "APS5_WIDE_PRESENT", "APS5_WIDE_INT",
+             "APS5_CRASH_STACK_BYTES"})
         self.assertEqual(found["APS5_PROFILE_DRAW"][0][1], 1)
         self.assertEqual(found["APS5_THREAD_NICE"][0][2:], ("integer", "-10"))
         self.assertEqual(found["APS5_HOST_IMPORT_MIB"][0][2:], ("integer", "6144"))
@@ -65,6 +68,7 @@ class EnvReferenceTests(unittest.TestCase):
         self.assertEqual(found["ANYPS5_WIDE_CONFIG"][0][2:], ("string", ""))
         self.assertEqual(found["APS5_WIDE_PRESENT"][0][2:], ("presence", ""))
         self.assertEqual(found["APS5_WIDE_INT"][0][2:], ("integer", ""))
+        self.assertEqual(found["APS5_CRASH_STACK_BYTES"][0][2:], ("integer", ""))
 
     def test_reads_environmental_variable_with_multiline_getenv(self):
         root = self.fixture()
