@@ -7505,6 +7505,127 @@ void verifyFunctionLdsUpdates() {
     }
 }
 
+void verifyScalarImageWords() {
+    using namespace ShaderRecompiler;
+    IrProgram program;
+    auto& resources = program.Resources();
+    resources.stage = IrShaderStage::Fragment;
+    resources.userDataBase = 0u;
+    resources.userDataCount = 8u;
+    resources.memoryInfo.resize(16u);
+    auto& block = program.CreateBlock();
+    program.SetEntryBlock(block);
+    program.BlockOrder().push_back(&block);
+    IrBuilder builder(program);
+    builder.SetInsertionPoint(block);
+    auto& reg = program.CreateValue(IrOpcode::Void, IrType::ScalarReg);
+    reg.SetRegister({RegisterBank::UserData, 2u});
+    auto& low = builder.Emit(IrOpcode::GetUserData, IrType::U32, {&reg});
+    auto& address = builder.Emit(IrOpcode::GetAddressResource, IrType::AddressResource, {&low, &builder.Constant(2u)});
+    auto& active = program.CreateValue(IrOpcode::Void, IrType::U1);
+    active.SetImmediateBool(true);
+    for (std::uint32_t index = 0; index < 16u; ++index) {
+        const auto memory = index < 8u ? index + 8u : index - 8u;
+        resources.memoryInfo[memory].kind = ResourceKind::ScalarAddress;
+        resources.memoryInfo[memory].offset = index < 8u ? 128u + index * 4u : (index - 8u) * 4u;
+        builder.Emit(IrOpcode::LoadAddressU32, IrType::U32, {&address, &builder.Constant(0u), &builder.Constant(0u), &active}, MemoryFlags{memory, index < 8u ? 4u : 8u});
+    }
+    SrtWalker{}.BuildPlan(program);
+    require(resources.srtReads.size() == 16u, "scalar image words: the planned flat layout changed");
+    require(resources.srtReads[11].value->Flags<MemoryFlags>().index == 3u && resources.srtReads[13].value->Flags<MemoryFlags>().index == 5u, "scalar image words: the descriptor origins do not map to slots 11 and 13");
+    resources.descriptorSources.emplace_back();
+    DescriptorSource imageSource;
+    imageSource.dwordCount = 8u;
+    auto& srt = builder.Emit(IrOpcode::GetSrtResource, IrType::SrtResource, {});
+    for (std::uint32_t word = 0; word < 8u; ++word) imageSource.dwords[word] = &builder.Emit(IrOpcode::ReadConst, IrType::U32, {&srt, &builder.Constant(8u + word)});
+    resources.descriptorSources.push_back(imageSource);
+    ImageResource image{};
+    image.source = 1u;
+    image.resourceClass = ImageResourceClass::Sampled;
+    image.dimension = RdnaImageDimension::Dim2DMsaa;
+    image.numericClass = IrTextureNumericClass::Float;
+    image.read = true;
+    resources.info.images.push_back(image);
+    resources.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(image));
+    resources.resourceTrackingComplete = true;
+    const auto plan = ResourceMaterializer{}.ExtractPlan(program);
+    std::vector<std::byte> encoded;
+    require(ShaderDiskCache::EncodePlan(plan, encoded), "scalar image words: cannot encode the owned plan");
+    IrResourcePlan decoded;
+    IrResourcePlan decodedIr;
+    require(ShaderDiskCache::DecodePlan(encoded, decoded) && ShaderDiskCache::DecodePlan(encoded, decodedIr), "scalar image words: cannot decode the owned plan");
+    decodedIr.compact = {};
+    struct Context {
+        std::uint64_t base = 0;
+        std::array<std::uint32_t, 40> words{};
+        std::vector<std::uint64_t> reads;
+        std::uint32_t invalidReads = 0;
+    } context;
+    const auto reader = [](void* opaque, std::uint64_t address, std::uint32_t* value) {
+        auto& data = *static_cast<Context*>(opaque);
+        if (address < data.base || address - data.base >= sizeof(data.words) || (address - data.base) % 4u != 0u) {
+            ++data.invalidReads;
+            return false;
+        }
+        data.reads.push_back(address);
+        *value = data.words[(address - data.base) / 4u];
+        return true;
+    };
+    std::uint32_t checks = 0;
+    for (const auto& extent : std::array<std::array<std::uint32_t, 2>, 2>{{{1u, 1u}, {3840u, 2160u}}}) {
+        for (const auto baseLow : {0x100000u, 0xfffffff0u}) {
+            context.base = (std::uint64_t{2} << 32u) | baseLow;
+            std::array<std::uint32_t, 8> users{};
+            users[2] = baseLow;
+            SrtRuntime runtime{users};
+            runtime.userContext = &context;
+            runtime.readMemory = reader;
+            runtime.readSpecializationMemory = reader;
+            for (const auto& levels : std::array<std::array<std::uint32_t, 2>, 4>{{{1u, 1u}, {2u, 2u}, {3u, 3u}, {3u, 4u}}}) {
+                context.words = {};
+                context.words[0] = 0x1000u;
+                context.words[1] = (71u << 20u) | (((extent[0] - 1u) & 3u) << 30u);
+                context.words[2] = ((extent[0] - 1u) >> 2u) | ((extent[1] - 1u) << 14u);
+                context.words[3] = (14u << 28u) | (27u << 20u) | (levels[0] << 16u) | 0xfacu;
+                context.words[5] = levels[1] << 4u;
+                for (std::uint32_t index = 32u; index < 40u; ++index) context.words[index] = 0xa1000000u + index;
+                for (const IrResourcePlan* current : {&plan, static_cast<const IrResourcePlan*>(&decoded), static_cast<const IrResourcePlan*>(&decodedIr)}) {
+                    const std::vector<std::uint32_t> sourceCopy(current->materializationSources.begin(), current->materializationSources.end());
+                    const std::vector<std::uint8_t> cleanCopy(current->cleanFlatSlots.begin(), current->cleanFlatSlots.end());
+                    for (const bool tape : {false, true}) {
+                        context.reads.clear();
+                        context.invalidReads = 0;
+                        std::vector<DescriptorValue> values;
+                        std::vector<std::uint32_t> flat;
+                        std::vector<std::uint8_t> enabled;
+                        std::vector<SrtReadPoison> poison;
+                        const auto* compiled = tape ? Detail::SrtTape::For(*current) : nullptr;
+                        if (tape) require(compiled != nullptr, "scalar image words: no tape was compiled");
+                        const bool ok = tape ? compiled->Run(*current, runtime, values, flat, enabled) : Detail::EvaluateRuntimeSourcesImpl(*current, sourceCopy, runtime, values, flat, true, cleanCopy, enabled, &poison, nullptr);
+                        require(ok && values.size() == 1u && values[0].dwordCount == 8u, "scalar image words: evaluation did not return one complete descriptor");
+                        require(std::equal(values[0].dwords.begin(), values[0].dwords.end(), context.words.begin()), "scalar image words: evaluator changed descriptor words");
+                        require(flat.size() >= 16u && flat[11] == context.words[3] && flat[13] == context.words[5], "scalar image words: flat slots changed or duplicated the descriptor fields");
+                        require(context.invalidReads == 0u && poison.empty(), "scalar image words: evaluator read outside the synthetic span");
+                        require(std::ranges::find(context.reads, context.base + 12u) != context.reads.end() && std::ranges::find(context.reads, context.base + 20u) != context.reads.end(), "scalar image words: descriptor word addresses were not read");
+                        ResourceSnapshot snapshot;
+                        const auto materialize = [&] { ResourceMaterializer{}.Materialize(*current, runtime, snapshot); };
+                        if (levels[0] == levels[1]) {
+                            materialize();
+                            require(snapshot.images.size() == 1u && snapshot.images[0].dwords == values[0].dwords, "scalar image words: valid multisample contents changed during materialization");
+                        } else {
+                            expectFailure(materialize, "runtime image descriptor is invalid", "scalar image words: unequal multisample fields were accepted");
+                        }
+                        ++checks;
+                    }
+                }
+            }
+        }
+    }
+    require(checks == 96u, "scalar image words: incomplete evaluator matrix");
+    std::cout << "scalar image words: 96 transport/materialization checks passed, including unequal-field refusals and 64-bit carry\n";
+}
+
+
 void verifySrtReadPatching() {
     using namespace ShaderRecompiler;
     IrProgram program;
@@ -8400,6 +8521,10 @@ int main(int argc, char** argv) {
             std::cout << "Direct samplers count toward the sampled pair limit beside selected image-table records\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--scalar-image-words") {
+            verifyScalarImageWords();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--srt-read-patching") {
             verifySrtReadPatching();
             std::cout << "SRT read patching replaces repeated and multiple uses\n";
@@ -8474,6 +8599,7 @@ int main(int argc, char** argv) {
         verifyFunctionLdsBound();
         verifyFunctionLdsUpdates();
         verifySrtReadPatching();
+        verifyScalarImageWords();
         verifyGuardedDirectRoot();
         verifyGuardedNullPointers();
         verifyFmaskImageMode();
