@@ -1045,6 +1045,21 @@ static void CheckHyperbolic() {
     Require(Near(acosh_nid_postfix(1e300), 691.4686750787736, 1e-15));
 }
 
+static void CheckAcoshfMsunBoundaries() {
+    Require(acoshf_nid_postfix(1.0f) == 0.0f && !std::signbit(acoshf_nid_postfix(1.0f)));
+    errno = EINTR;
+    std::feclearexcept(FE_ALL_EXCEPT);
+    Require(std::isnan(acoshf_nid_postfix(0.5f)) && errno == EINTR && (std::fetestexcept(FE_INVALID) & FE_INVALID) != 0);
+    for (const std::uint32_t bits : {0x3f800001u, 0x3fffffffu, 0x40000000u, 0x40000001u,
+                                     0x4d7fffffu, 0x4d800000u, 0x4d800001u, 0x7f7fffffu}) {
+        const float x = std::bit_cast<float>(bits);
+        Require(Near(acoshf_nid_postfix(x), std::acosh(static_cast<double>(x)), 1e-6));
+    }
+    Require(std::isinf(acoshf_nid_postfix(INFINITY)) && acoshf_nid_postfix(INFINITY) > 0.0f);
+    Require(std::isnan(acoshf_nid_postfix(-INFINITY)));
+    Require(std::isnan(acoshf_nid_postfix(std::numeric_limits<float>::quiet_NaN())));
+}
+
 static void CheckCoshfMsunBoundaries() {
     static constexpr struct {
         std::uint32_t input;
@@ -1831,6 +1846,7 @@ int main() {
     Require(std::isinf(__powidf2_nid_postfix(-0.0, -3)) && std::signbit(__powidf2_nid_postfix(-0.0, -3)));
     Require(__powidf2_nid_postfix(2.0, -127) == 0x1p-127);
     CheckHyperbolic();
+    CheckAcoshfMsunBoundaries();
     CheckCoshfMsunBoundaries();
     CheckScaledHyperbolic();
     CheckSinhf();
