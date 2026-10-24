@@ -255,6 +255,8 @@ int main() {
         device->WaitIdle();
         const auto provedBefore = AgcDriver::Graphics::StorageTexture::RefreshesProved();
         Require(lookup(0, 1) == arrayImage && lookup(0, 1) == arrayImage, "a lookup of the first layer of an unchanged array replaced its cached image");
+        const auto provedAfter = AgcDriver::Graphics::StorageTexture::RefreshesProved();
+        std::printf("array refresh proof: WriteWatched=%d Watched=%d RefreshesProved before=%llu after=%llu\n", AgcDriver::GuestMemory::WriteWatched() ? 1 : 0, AgcDriver::GuestMemory::Watched(array.baseAddress, 3u * PlaneBytes) ? 1 : 0, static_cast<unsigned long long>(provedBefore), static_cast<unsigned long long>(provedAfter));
         if (!AgcDriver::GuestMemory::WriteWatched() || !AgcDriver::GuestMemory::Watched(array.baseAddress, 3u * PlaneBytes)) {
             std::puts("guest memory is not write-watched here: lookups of array layers through a refresh proof are not exercised");
         } else {
