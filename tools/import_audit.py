@@ -798,6 +798,7 @@ def main(argv=None):
             inputs += [file for directory in args.libs for file in directory_files(directory, "*.prx")]
             inputs += [file for directory in args.modules for file in directory_files(directory, "*")]
             inputs += list(Path(args.source).rglob("*.cpp"))
+            inputs += [file for file in Path(args.source).glob("*/CMakeLists.txt") if file.is_file()]
             output = args.json.resolve()
             if any(output == path.resolve() or (args.json.exists() and args.json.samefile(path)) for path in inputs):
                 raise AuditError(f"{args.json}: JSON output would overwrite an input file")
