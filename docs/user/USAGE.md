@@ -389,6 +389,8 @@ python3 tools/import_audit.py app.registry.json app.libc.prx.guest.prx.registry.
 | `absent` | No built library exports the NID: the loader fails. |
 | `module` | The import names a file found in `--modules` (the title's own library), which is trusted to provide it. |
 
+An import that names a library requires the literal export name. If its implementation is found only by hashing the import name, it still counts as `implemented` or `stub`, but the report lists the name mismatch, sets `symbol_mismatch` on the JSON import record and counts it in the summary, and exits with code 1. A strong import with a name mismatch is a current stop. Imports without a library retain the audit's name-to-NID fallback.
+
 Module registries mark ELF weak imports with `"weak": true`, allowing the audit's current-stop selection to skip them. Strong imports omit the field. Older module registries do not preserve weak bindings; regenerate them to distinguish optional imports.
 
 ELF modules in `--modules` are audited regardless of filename: their undefined symbols are classified against the built libraries and the other modules' exports, with the module file named in the report, and the libraries they need must have a file in `--libs` or `--modules`. Ordinary non-module sidecars are ignored; malformed ELF, PE/SELF containers and non-ELF files with module extensions remain errors. The audit reads dynamic tables from ELF section headers or, for sectionless files, from `PT_DYNAMIC` and a SysV or GNU hash table.
