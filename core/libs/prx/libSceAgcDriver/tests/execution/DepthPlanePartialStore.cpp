@@ -251,11 +251,13 @@ int main() {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
             using AgcDriver::Graphics::LookupOutcomes;
             const auto& outcomes = AgcDriver::Graphics::ThreadLookupOutcomes();
-            const auto unchangedBefore = outcomes.counts[LookupOutcomes::RefreshUnchanged];
-            const auto comparedBefore = outcomes.counts[LookupOutcomes::RefreshCompared];
-            const auto provedBefore = outcomes.counts[LookupOutcomes::RefreshProved];
+            const auto before = outcomes.counts;
             auto texture = AgcDriver::Graphics::CachedStorageLayers(context, array, first, count);
-            if (++lookupCount <= 3) std::printf("array lookup %u first=%u count=%u: RefreshUnchanged=%llu RefreshCompared=%llu RefreshProved=%llu\n", lookupCount, first, count, static_cast<unsigned long long>(outcomes.counts[LookupOutcomes::RefreshUnchanged] - unchangedBefore), static_cast<unsigned long long>(outcomes.counts[LookupOutcomes::RefreshCompared] - comparedBefore), static_cast<unsigned long long>(outcomes.counts[LookupOutcomes::RefreshProved] - provedBefore));
+            if (++lookupCount <= 4) {
+                std::printf("array lookup %u first=%u count=%u:", lookupCount, first, count);
+                for (std::size_t kind = 0; kind < LookupOutcomes::Count; ++kind) std::printf(" %s=%llu;", LookupOutcomes::Name(static_cast<LookupOutcomes::Kind>(kind)), static_cast<unsigned long long>(outcomes.counts[kind] - before[kind]));
+                std::printf("\n");
+            }
             return texture;
         };
         Fill(layerPlane, 1.0f);
@@ -263,6 +265,9 @@ int main() {
         device->WaitIdle();
         const auto provedBefore = AgcDriver::Graphics::StorageTexture::RefreshesProved();
         Require(lookup(0, 1) == arrayImage && lookup(0, 1) == arrayImage, "a lookup of the first layer of an unchanged array replaced its cached image");
+        std::printf("array proof after lookup 3=%llu\n", static_cast<unsigned long long>(AgcDriver::Graphics::StorageTexture::RefreshesProved()));
+        Require(lookup(0, 1) == arrayImage, "the fourth array lookup replaced its image");
+        std::printf("array proof after lookup 4=%llu\n", static_cast<unsigned long long>(AgcDriver::Graphics::StorageTexture::RefreshesProved()));
         const auto provedAfter = AgcDriver::Graphics::StorageTexture::RefreshesProved();
         std::printf("array refresh proof: WriteWatched=%d Watched=%d RefreshesProved before=%llu after=%llu\n", AgcDriver::GuestMemory::WriteWatched() ? 1 : 0, AgcDriver::GuestMemory::Watched(array.baseAddress, 3u * PlaneBytes) ? 1 : 0, static_cast<unsigned long long>(provedBefore), static_cast<unsigned long long>(provedAfter));
         if (!AgcDriver::GuestMemory::WriteWatched() || !AgcDriver::GuestMemory::Watched(array.baseAddress, 3u * PlaneBytes)) {
