@@ -1299,6 +1299,7 @@ int APS5_VABI accept_nid_postfix(int descriptor, void* address, std::uint32_t* l
             std::lock_guard modeLock(listener->modeMutex);
             inheritNonblocking = listener->options.nonblocking;
             accepted->options.noSignal = listener->options.noSignal;
+            accepted->options.keptFlags = listener->options.keptFlags;
             accepted->options.sendTimeout = listener->options.sendTimeout;
             accepted->options.receiveTimeout = listener->options.receiveTimeout;
             accepted->options.sendBuffer = listener->options.sendBuffer;
