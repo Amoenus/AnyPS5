@@ -2309,6 +2309,9 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
             if (!outsideChanged || !outside[layer]) layerGeneration[layer] = currentFor(layer);
         }
         refreshGeneration();
+        if (std::getenv("APS5_TRACE_UPLOAD") != nullptr) {
+            std::fprintf(stderr, "[refresh-proof] image=0x%llx generation=%llu savedProof=%llu alias=%d gpuMutex=%d dcc=0x%llx keyGeneration=%llu keyMatch=%d otherPending=%d behind=%zu tracked=%u takeProof=%d\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(generation), static_cast<unsigned long long>(refreshProof.generation), alias != nullptr ? 1 : 0, GuestMemory::GpuMutex().HeldByThisThread() ? 1 : 0, static_cast<unsigned long long>(descriptor.dccAddress), static_cast<unsigned long long>(keyProof.generation), keyProof.keys == uploadedKeys ? 1 : 0, otherPendingOverlaps() ? 1 : 0, static_cast<std::size_t>(std::count(layerBehind.begin(), layerBehind.end(), true)), trackedLayers, layerBehind.empty() ? 1 : 0);
+        }
         if (layerBehind.empty()) takeRefreshProof(alias != nullptr);
         if (profile) LookupOutcomes::Add(stamped ? LookupOutcomes::RefreshUnchanged : LookupOutcomes::RefreshCompared, start);
         return true;
