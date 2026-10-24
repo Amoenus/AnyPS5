@@ -250,6 +250,8 @@ int main() {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
             return AgcDriver::Graphics::CachedStorageLayers(context, array, first, count);
         };
+        Fill(reinterpret_cast<float*>(arrayBlocks), 1.0f);
+        Fill(reinterpret_cast<float*>(arrayBlocks + 2u * PlaneBytes), 1.0f);
         Fill(layerPlane, 1.0f);
         const auto arrayImage = lookup(0, 1);
         device->WaitIdle();
