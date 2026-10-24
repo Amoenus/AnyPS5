@@ -500,6 +500,23 @@ static void CheckReleaseFindsEveryDirectMapping() {
     for (std::size_t index = 0; index < pieces; ++index) Require(sceKernelVirtualQuery(mapped[index], 0, &info, sizeof(info)) != 0);
 }
 
+static void CheckReleaseSkipsFreePages() {
+    constexpr std::size_t page = 0x4000;
+    std::int64_t phys = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * 4, 0, 0, &phys) == 0);
+    void* mapped = nullptr;
+    Require(sceKernelMapDirectMemory(&mapped, page * 4, 3, 0, phys, 0) == 0);
+    Require(sceKernelReleaseDirectMemory(phys + static_cast<std::int64_t>(page), page) == 0);
+    Require(sceKernelReleaseDirectMemory(phys + static_cast<std::int64_t>(page), page) == 0);
+    Require(sceKernelReleaseDirectMemory(phys, page * 3) == 0);
+    VirtualQueryInfo info{};
+    Require(sceKernelVirtualQuery(mapped, 0, &info, sizeof(info)) != 0);
+    Require(sceKernelVirtualQuery(static_cast<unsigned char*>(mapped) + page * 3, 0, &info, sizeof(info)) == 0);
+    Require(sceKernelCheckedReleaseDirectMemory(phys, page) == SCE_KERNEL_ERROR_ENOENT);
+    Require(sceKernelCheckedReleaseDirectMemory(phys + static_cast<std::int64_t>(page * 3), page) == 0);
+    Require(sceKernelReleaseDirectMemory(phys, page * 4) == 0);
+}
+
 static void CheckCheckedReleaseDirectMemory() {
     constexpr std::size_t page = 0x4000;
     std::int64_t phys = 0;
@@ -3361,6 +3378,7 @@ int main(int argc, char** argv) {
     CheckGuestModuleUsesFlexibleMemory();
     CheckBatchMapStopsAtInvalidEntry();
     CheckCheckedReleaseDirectMemory();
+    CheckReleaseSkipsFreePages();
     CheckAudioCoprocessorProtection();
     CheckMprotectIgnoresUndefinedBits();
     CheckStrictMemoryProtectionBits();

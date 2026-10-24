@@ -324,6 +324,7 @@ CompiledVariant sampleVariant() {
     image.volumeArraySampleCompatible = true;
     image.flatLineCompatible = false;
     image.flatVolumeLineCompatible = false;
+    image.dimensionQueryOnly = false;
     image.foldTexelOffsetsOnly = true;
     image.remappedDepth1D = true;
     image.byElements = 4;

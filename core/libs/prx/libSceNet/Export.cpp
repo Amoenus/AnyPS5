@@ -2637,7 +2637,7 @@ int APS5_VABI sceNetShowNetstatForBuffer(char* buffer, std::int32_t bufferSize, 
 }
 
 int APS5_VABI sceNetShowNetstatEx(std::uint32_t flags) {
-    NotImplemented_nid_no_patch(__func__);
+    (void)flags;
     return 0;
 }
 
