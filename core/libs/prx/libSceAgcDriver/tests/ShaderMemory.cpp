@@ -7594,6 +7594,38 @@ void verifyFunctionLdsUpdates() {
     }
 }
 
+void verifyRuntimeValueDescriptions() {
+    using namespace ShaderRecompiler;
+    IrResourcePlan plan;
+    MemoryInfo firstMemory;
+    firstMemory.kind = ResourceKind::ScalarAddress;
+    firstMemory.offset = 12u;
+    MemoryInfo secondMemory = firstMemory;
+    secondMemory.offset = 20u;
+    plan.memoryInfo = {firstMemory, secondMemory};
+    IrValue firstRegister(IrOpcode::Void, IrType::ScalarReg, 0);
+    IrValue secondRegister(IrOpcode::Void, IrType::ScalarReg, 1);
+    firstRegister.SetRegister({RegisterBank::Scalar, 8u});
+    secondRegister.SetRegister({RegisterBank::Scalar, 12u});
+    IrValue firstUserData(IrOpcode::GetUserData, IrType::U32, 2);
+    IrValue secondUserData(IrOpcode::GetUserData, IrType::U32, 3);
+    firstUserData.AddArgument(&firstRegister);
+    secondUserData.AddArgument(&secondRegister);
+    require(Detail::RuntimeValueDescription(plan, &firstUserData) != Detail::RuntimeValueDescription(plan, &secondUserData), "SRT descriptions hide different register indices");
+    secondRegister.SetRegister({RegisterBank::UserData, 8u});
+    require(Detail::RuntimeValueDescription(plan, &firstRegister) != Detail::RuntimeValueDescription(plan, &secondRegister), "SRT descriptions hide different register banks");
+    IrValue firstRead(IrOpcode::LoadAddressU32, IrType::U32, 4);
+    IrValue secondRead(IrOpcode::LoadAddressU32, IrType::U32, 5);
+    firstRead.SetFlags(MemoryFlags{0u, 16u});
+    secondRead.SetFlags(MemoryFlags{1u, 24u});
+    require(Detail::RuntimeValueDescription(plan, &firstRead) != Detail::RuntimeValueDescription(plan, &secondRead), "SRT descriptions hide scalar memory offsets");
+    const auto description = Detail::RuntimeValueDescription(plan, &secondRead);
+    require(description.find("memory 1") != std::string::npos && description.find("pc 24") != std::string::npos && description.find("offset 20") != std::string::npos, "SRT descriptions omit scalar memory origin");
+    secondRead.SetFlags(MemoryFlags{2u, 24u});
+    require(Detail::RuntimeValueDescription(plan, &secondRead).find("unavailable") != std::string::npos, "SRT descriptions index missing memory metadata");
+    require(Detail::RuntimeValueDescription(plan, nullptr) == "null", "SRT descriptions reject a null value");
+}
+
 void verifySrtReadPatching() {
     using namespace ShaderRecompiler;
     IrProgram program;
@@ -8491,6 +8523,7 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--srt-read-patching") {
             verifySrtReadPatching();
+            verifyRuntimeValueDescriptions();
             std::cout << "SRT read patching replaces repeated and multiple uses\n";
             return 0;
         }
@@ -8566,6 +8599,7 @@ int main(int argc, char** argv) {
         verifyFunctionLdsBound();
         verifyFunctionLdsUpdates();
         verifySrtReadPatching();
+        verifyRuntimeValueDescriptions();
         verifyGuardedDirectRoot();
         verifyGuardedNullPointers();
         verifyFmaskImageMode();
