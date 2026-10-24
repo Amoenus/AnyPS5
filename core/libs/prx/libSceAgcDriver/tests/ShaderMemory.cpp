@@ -37,6 +37,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdlib>
+#include <cstdio>
+#include <exception>
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
@@ -64,8 +66,10 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <io.h>
 #else
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -8770,6 +8774,133 @@ struct NestedRequest {
     }
 };
 
+class StderrCapture {
+public:
+    StderrCapture() {
+        std::fflush(stderr);
+        file.reset(std::tmpfile());
+        require(file != nullptr, "capture read provenance: cannot open stderr capture");
+#ifdef _WIN32
+        saved = _dup(_fileno(stderr));
+#else
+        saved = dup(fileno(stderr));
+#endif
+        require(saved >= 0, "capture read provenance: cannot duplicate stderr");
+#ifdef _WIN32
+        const int status = _dup2(_fileno(file.get()), _fileno(stderr));
+#else
+        const int status = dup2(fileno(file.get()), fileno(stderr));
+#endif
+        if (status < 0) {
+            restore();
+            throw std::runtime_error("capture read provenance: cannot redirect stderr");
+        }
+    }
+
+    ~StderrCapture() {
+        if (saved >= 0) restore();
+    }
+
+    std::string Finish() {
+        require(saved >= 0 && restore() >= 0, "capture read provenance: cannot restore stderr");
+        require(std::fseek(file.get(), 0, SEEK_SET) == 0, "capture read provenance: cannot rewind stderr capture");
+        std::string text;
+        char buffer[4096];
+        for (std::size_t count = 0; (count = std::fread(buffer, 1, sizeof(buffer), file.get())) != 0;) text.append(buffer, count);
+        require(std::ferror(file.get()) == 0, "capture read provenance: cannot read stderr capture");
+        require(std::fwrite(text.data(), 1, text.size(), stderr) == text.size(), "capture read provenance: cannot report stderr capture");
+        return text;
+    }
+
+private:
+    int restore() {
+        std::fflush(stderr);
+#ifdef _WIN32
+        const int status = _dup2(saved, _fileno(stderr));
+        _close(saved);
+#else
+        const int status = dup2(saved, fileno(stderr));
+        close(saved);
+#endif
+        saved = -1;
+        return status;
+    }
+
+    std::unique_ptr<std::FILE, decltype(&std::fclose)> file{nullptr, &std::fclose};
+    int saved = -1;
+};
+
+void verifyCaptureReadFailureProvenance() {
+    using namespace ShaderRecompiler;
+    struct ReaderFailure final : std::exception {
+        const char* what() const noexcept override { return "synthetic capture reader failure"; }
+        std::uint32_t token = 0x51u;
+    };
+    struct Context {
+        std::uint64_t root;
+        std::uint64_t output;
+        std::uint64_t payload;
+        std::uint32_t reads = 0;
+        std::uint64_t first = 0;
+        bool failing = false;
+    };
+    alignas(256) static std::array<std::uint32_t, 64> output{};
+    alignas(256) static std::array<std::uint32_t, 16> root{};
+    static std::uint32_t payload = 0x3f800000u;
+    const auto outputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
+    const auto rootAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(root.data()));
+    const auto payloadAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&payload));
+    root = {static_cast<std::uint32_t>(outputAddress), static_cast<std::uint32_t>((outputAddress >> 32u) & 0xffffu), static_cast<std::uint32_t>(sizeof(output)), 0x30027facu, 0u};
+    const std::vector<std::uint32_t> code{0xf4080100u, 0xfa000000u, 0xf4000200u, 0xfa000010u, 0xbe8a0302u, 0xbe8b0303u, 0xbe8c03ffu, 0x11111111u,
+        0xbf8cc07fu, 0xbf068008u, 0xbf850003u, 0xf4000305u, 0xfa000000u, 0xbf8cc07fu, 0x7e02020cu, 0x34040082u, 0xe0701000u, 0x80010102u, 0xbf810000u};
+    const std::array<std::uint32_t, 4> users{static_cast<std::uint32_t>(rootAddress), static_cast<std::uint32_t>(rootAddress >> 32u), static_cast<std::uint32_t>(payloadAddress), static_cast<std::uint32_t>(payloadAddress >> 32u)};
+    for (const bool cached : {false, true}) {
+        NestedRequest request(code, root.data());
+        request.request.context.userData = users;
+        request.request.useCache = cached;
+        Context context{rootAddress, outputAddress, payloadAddress};
+        SrtRuntime runtime{users};
+        runtime.shaderBase = request.request.shader.codeAddress;
+        runtime.userContext = &context;
+        runtime.readMemory = [](void* opaque, std::uint64_t address, std::uint32_t* value) -> bool {
+            auto& context = *static_cast<Context*>(opaque);
+            if (context.reads++ == 0u) context.first = address;
+            if (context.failing) throw ReaderFailure{};
+            const bool allowed = (address >= context.root && address - context.root <= sizeof(root) - sizeof(*value)) ||
+                (address >= context.output && address - context.output <= sizeof(output) - sizeof(*value)) || address == context.payload;
+            require(allowed, "capture read provenance: synthetic reader escaped its inputs");
+            std::memcpy(value, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address)), sizeof(*value));
+            return true;
+        };
+        runtime.readSpecializationMemory = runtime.readMemory;
+        std::shared_ptr<const ResourceCapture> first;
+        {
+            StderrCapture log;
+            first = CaptureResources(request.request, runtime);
+            require(log.Finish().find("last attempted resource read") == std::string::npos, "capture read provenance: a successful capture logged a failure");
+        }
+        require(!first->userDataUse.reads.empty() && first->userDataUse.reads.front().first == context.first && first->userDataUse.reads.front().second == 0, "capture read provenance: the public fixture lost its direct user-word origin");
+        const auto expected = first->userDataUse.reads.front();
+        context.reads = 0;
+        context.first = 0;
+        context.failing = true;
+        bool caught = false;
+        StderrCapture log;
+        try {
+            static_cast<void>(CaptureResources(request.request, runtime));
+        } catch (const ReaderFailure& error) {
+            caught = true;
+            require(error.token == 0x51u && std::string_view(error.what()) == "synthetic capture reader failure", "capture read provenance: the reader exception changed");
+        }
+        const auto text = log.Finish();
+        require(caught && context.reads == 1u && context.first == expected.first, "capture read provenance: a thrown reader was retried or replaced");
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "last attempted resource read: address=0x%llx userDataWord=%d reads=1", static_cast<unsigned long long>(expected.first), expected.second);
+        require(text.find(detail) != std::string::npos, "capture read provenance: failure lost the last attempted read context");
+    }
+    std::cout << "Capture reader exceptions retain provenance without extra reads\n";
+}
+
 bool RegionsCover(const std::vector<ShaderRecompiler::MemoryRegion>& regions, const void* pointer, std::size_t bytes) {
     auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer));
     const auto end = address + bytes;
@@ -9585,6 +9716,10 @@ int main(int argc, char** argv) {
         setenv("ANYPS5_NO_SHADER_CACHE", "1", 1);
 #endif
         using namespace ShaderRecompiler;
+        if (argc == 2 && std::string_view(argv[1]) == "--capture-read-failure") {
+            verifyCaptureReadFailureProvenance();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--specialized-bda-abi") {
             verifySpecializedBufferAtomicBindings(true);
             std::cout << "Specialized programs retain the BDA ABI only while a fault buffer remains\n";
@@ -9766,6 +9901,7 @@ int main(int argc, char** argv) {
         verifyFunctionLdsBound();
         verifyFunctionLdsUpdates();
         verifySrtReadPatching();
+        verifyCaptureReadFailureProvenance();
         verifyGuardedDirectRoot();
         verifyGuardedNullPointers();
         verifyFmaskImageMode();
