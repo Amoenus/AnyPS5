@@ -870,6 +870,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNpGameIntent>")
     endif()
 
+    add_test_executable(guest_gnm_neo_shaders_tests tests/GuestGnmNeoShaders.cpp)
+    target_include_directories(guest_gnm_neo_shaders_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_gnm_neo_shaders_tests PRIVATE libSceGnmDriverForNeoMode libc)
+    configure_windows_unwind(guest_gnm_neo_shaders_tests)
+    add_test(NAME guest_gnm_neo_shaders COMMAND guest_gnm_neo_shaders_tests)
+    if(WIN32)
+        set_tests_properties(guest_gnm_neo_shaders PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceGnmDriverForNeoMode>")
+    endif()
+
     add_test_executable(guest_vorbis_dec_tests tests/GuestVorbisDec.cpp)
     target_include_directories(guest_vorbis_dec_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(guest_vorbis_dec_tests PRIVATE OV_EXCLUDE_STATIC_CALLBACKS)
