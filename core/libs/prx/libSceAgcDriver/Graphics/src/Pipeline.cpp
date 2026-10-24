@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <list>
 #include <mutex>
+#include <spirv/unified1/spirv.hpp>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
@@ -103,6 +104,18 @@ void ValidateDepthBounds(const Context& context, const State& state) {
 
 bool BarycentricPatches(const State& state, std::span<const CompiledShader> shaders) {
     return !state.rectList && state.stages.path == ShaderPath::Vertex && std::any_of(shaders.begin(), shaders.end(), [](const CompiledShader& shader) { return shader.stage == ShaderRecompiler::ShaderStage::TessellationControl; });
+}
+
+bool FragmentInterlock(std::span<const CompiledShader> shaders) {
+    return std::any_of(shaders.begin(), shaders.end(), [](const CompiledShader& shader) {
+        if (shader.stage != ShaderRecompiler::ShaderStage::Fragment || shader.program == nullptr) return false;
+        const auto words = shader.program->spirv.Words();
+        for (std::size_t cursor = 5; cursor + 1 < words.size() && (words[cursor] & 0xffffu) == spv::OpCapability && (words[cursor] >> 16u) == 2u; cursor += 2) {
+            const auto capability = words[cursor + 1];
+            if (capability == spv::CapabilityFragmentShaderPixelInterlockEXT || capability == spv::CapabilityFragmentShaderSampleInterlockEXT || capability == spv::CapabilityFragmentShaderShadingRateInterlockEXT) return true;
+        }
+        return false;
+    });
 }
 
 void ValidateProvokingVertex(const Context& context, const State& state, std::span<const CompiledShader> shaders) {
@@ -280,7 +293,7 @@ void appendKey(std::vector<std::byte>& key, const TValue& value) {
 
 bool libraryKeys(PipelineLibraryKeys& keys, const Context& context, const State& state, const VertexInputLayout& input, const PipelineSetLayouts& resources, std::span<const CompiledShader> shaders) {
     using Stage = ShaderRecompiler::ShaderStage;
-    if (!context.graphicsPipelineLibrary || context.pipelineExecutableInfo || state.depthBiasPerFace || state.rectList || BarycentricPatches(state, shaders) || SplitsAlternateAlpha(state) || std::ranges::any_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && shader.program->functionLdsBuffer; })) return false;
+    if (!context.graphicsPipelineLibrary || context.pipelineExecutableInfo || state.depthBiasPerFace || state.rectList || BarycentricPatches(state, shaders) || SplitsAlternateAlpha(state) || std::ranges::any_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && shader.program->functionLdsBuffer; }) || FragmentInterlock(shaders)) return false;
     keys = {};
     for (const auto& shader : shaders) {
         const auto identity = shader.program->Identity();

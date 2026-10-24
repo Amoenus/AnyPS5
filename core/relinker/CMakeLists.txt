@@ -615,6 +615,13 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_executables.py $<TARGET_FILE:relinker>)
         add_test(NAME game_patches COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_game_patches.py $<TARGET_FILE:relinker>)
+        if(Python3_VERSION VERSION_GREATER_EQUAL 3.11)
+            add_test(NAME patch_advisor_unit COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tools/tests/test_suggest_patches.py)
+            add_test(NAME patch_advisor_integration COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_patch_advisor.py $<TARGET_FILE:relinker>)
+            set_tests_properties(patch_advisor_integration PROPERTIES TIMEOUT 40)
+        endif()
         add_test(NAME sce_module_path COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_sce_module_path.py $<TARGET_FILE:relinker>)
         add_test(NAME linux_guest_stack COMMAND ${Python3_EXECUTABLE}

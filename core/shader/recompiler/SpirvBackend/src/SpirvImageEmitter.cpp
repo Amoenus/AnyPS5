@@ -474,6 +474,10 @@ std::uint32_t QueryDimensions(SpirvValueEmitContext& ctx, const ImageEmitAccess&
     if (access.mem.imageDimension == RdnaImageDimension::Dim3D && dimension == RdnaImageDimension::Dim2D) {
         result[2] = ConstantU32(state, 1);
     }
+    const auto requested = access.mem.imageDimension;
+    if ((requested == RdnaImageDimension::Dim1D || requested == RdnaImageDimension::Dim2D || requested == RdnaImageDimension::Dim2DMsaa) && dimension != RdnaImageDimension::Dim3D) {
+        result[2] = ConstantU32(state, 0);
+    }
     if (info.multisampled == 0u) {
         for (std::uint32_t index = 0; index < 3u; ++index) result[index] = Select(state, TypeU32(state), outsideLevels, ConstantU32(state, 0u), result[index]);
         result[3] = levels;

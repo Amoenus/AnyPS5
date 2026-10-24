@@ -99,6 +99,32 @@ The `--skip-sce-module`, `--exclude-sce-module <file>`, `--skip-syscall-check`, 
 
 A patch file changes bytes of the input executable or of a bundled module before conversion, for a title that hard-codes a value the host cannot meet. The relinker checks the bytes it replaces, so a patch for another version of the title fails instead of corrupting it. With no patch file the output is unchanged.
 
+The advisor requires Python 3.11 or newer. To check a local patch catalog, run:
+
+```sh
+python3 tools/suggest_patches.py --catalog <directory> --param-json <sce_sys/param.json> --input <input.elf> --relinker <relinker> [--sce-module-path <directory>] [--module-dir <directory>]... [--executable <path>]... [--skip-sce-module] [--timeout-seconds <seconds>]
+```
+
+The advisor reads `titleId` and `contentVersion` from the specified `param.json`, checks the SHA-256 of every file targeted by a candidate patch, then calls the relinker specified by `--relinker` to run `--verify-patches`. A relative path such as `--relinker ./relinker` resolves to that local file. The explicit metadata path also works when `param.json` and the unwrapped ELF files are stored separately. The catalog directory must contain an `index.json` with `format: 1` and an `entries` array. Each entry has `titleId`, `contentVersion`, a relative `patch` path, and `targets` mapping every patch target to its SHA-256. Hexadecimal digests are case-insensitive. For example:
+
+```json
+{
+  "format": 1,
+  "entries": [{
+    "titleId": "TEST00001",
+    "contentVersion": "01.000.000",
+    "patch": "patch.toml",
+    "targets": {"Media/Modules/module.prx": "<SHA-256 in hexadecimal>"}
+  }]
+}
+```
+
+The advisor validates patch files only for entries matching the requested title and version. It reports and skips a malformed matching entry or a relinker verification error, so another valid entry can still be recommended. Verification times out after 120 seconds per entry by default; use `--timeout-seconds <positive integer>` to change the limit. For synthetic inputs without system modules, use `--skip-sce-module` if conversion also uses it; this option conflicts with `--sce-module-path`. No matching entry or no verified patch exits `1`; invalid input or no verified patch after a relinker error exits `2`. If multiple entries verify, the advisor recommends none because it cannot choose or combine them. The tool does not fetch or apply patches. A recommendation prints `--patches` and the module and executable options to use when converting. Keep catalog patch files outside the input executable's directory to avoid automatic `relinker-patches.toml` discovery.
+
+The target hashes identify the exact unwrapped files changed by a patch, which might not include the main executable. Different dump tools could produce different bytes for the same title version; the advisor then rejects a patch even if it would work. It has not been confirmed that all dump tools produce identical files. The hashes do not authenticate a catalog or establish that a patch is safe or that the title is fully playable. Use catalogs from sources you trust and review the patch before applying it.
+
+If the patch targets another title executable, pass `--executable <path>` to the advisor for each additional executable, using paths relative to the module parent directory, such as `picker/picker.bin`. The advisor hashes those target files and forwards the same options to `relinker --verify-patches`. Use the same `--executable` options when converting with `--patches`.
+
 `relinker-patches.toml` in the directory of the input executable is loaded automatically and announced as `Patches: <path>`. `--patches <file>` names another file, and `--no-patches` loads none. Each applied patch is reported:
 
 ```

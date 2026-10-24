@@ -115,6 +115,28 @@ target_include_directories(libc PRIVATE
 
 target_link_libraries(libc PRIVATE zarchive)
 
+if(BUILD_TESTING)
+    add_test_executable(guest_update_env_tests ${LIBS_INCLUDE_DIR}/tests/GuestUpdateEnv.cpp)
+    target_include_directories(guest_update_env_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_update_env_tests PRIVATE libc ${CMAKE_DL_LIBS})
+    configure_windows_unwind(guest_update_env_tests)
+    add_test(NAME guest_update_env COMMAND guest_update_env_tests $<TARGET_FILE:libc>)
+    foreach(bit RANGE 0 5)
+        foreach(source RANGE 0 2)
+            add_test(NAME guest_update_env_pending_${bit}_${source} COMMAND guest_update_env_tests $<TARGET_FILE:libc> ${bit} ${source})
+            set_tests_properties(guest_update_env_pending_${bit}_${source} PROPERTIES TIMEOUT 10)
+            if(WIN32)
+                set_tests_properties(guest_update_env_pending_${bit}_${source} PROPERTIES ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+            endif()
+        endforeach()
+    endforeach()
+    if(WIN32)
+        set_tests_properties(guest_update_env PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 target_sources(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/FloatingPoint.cpp)
 
 if(BUILD_TESTING)
