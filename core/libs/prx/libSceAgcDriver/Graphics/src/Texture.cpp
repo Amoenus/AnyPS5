@@ -2620,6 +2620,8 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     const auto linearBytes = sliceLinearBytes * arrayLayers;
     if (layers != nullptr && ((!blockUnits && trackedLayers != arrayLayers) || std::all_of(layers->begin(), layers->end(), [](bool selected) { return selected; }))) layers = nullptr;
     const auto now = GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+    static const bool traceUploadGeneration = std::getenv("APS5_TRACE_UPLOAD") != nullptr;
+    if (traceUploadGeneration) std::fprintf(stderr, "[upload-generation] collected image=0x%llx bytes=0x%llx collected=%llu tracker=%llu partial=%d\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), static_cast<unsigned long long>(now), static_cast<unsigned long long>(GuestMemory::WriteGeneration()), layers != nullptr ? 1 : 0);
     const auto stampLayers = [&](bool selectedOnly) {
         const bool whole = !selectedOnly || layers == nullptr;
         if (guestBytes > GenerationBaselineBytes || !guestBytesSettled()) generationBaseline.clear();
@@ -2630,6 +2632,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
             if (!whole && !(*layers)[layer]) continue;
             layerGeneration[layer] = collectedLayerGeneration(layer, now);
+            if (traceUploadGeneration) std::fprintf(stderr, "[upload-generation] unit image=0x%llx unit=%u saved=%llu tracker=%llu\n", static_cast<unsigned long long>(descriptor.baseAddress), layer, static_cast<unsigned long long>(layerGeneration[layer]), static_cast<unsigned long long>(GuestMemory::WriteGeneration()));
             if (whole || generationBaseline.size() != guestBytes) continue;
             const auto offset = static_cast<std::size_t>(layerBegin(layer) - descriptor.baseAddress);
             GuestMemory::ReadCommitted(layerBegin(layer), std::span<std::byte>(generationBaseline).subspan(offset, static_cast<std::size_t>(layerBytes(layer))));
@@ -2699,6 +2702,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         return;
     }
     if (const auto* import = uploadedKeys == DccKeys::Uncompressed ? HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) : nullptr) {
+        if (traceUploadGeneration) std::fprintf(stderr, "[upload-generation] imported image=0x%llx collected=%llu tracker=%llu\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(now), static_cast<unsigned long long>(GuestMemory::WriteGeneration()));
         if (GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
             layerOriginal.assign(trackedLayers, false);
             cancelStoredSaves();

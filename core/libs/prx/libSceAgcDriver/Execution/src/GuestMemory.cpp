@@ -1252,6 +1252,8 @@ struct WriteTracker {
     void stamp(std::uint64_t block, std::uint32_t stampGeneration, StampKind kind) {
         const bool cpu = kind == StampKind::Cpu || kind == StampKind::ImportWindow;
         const bool stored = kind != StampKind::ImportWindow;
+        static const bool trace = std::getenv("APS5_TRACE_UPLOAD") != nullptr;
+        if (trace) std::fprintf(stderr, "[write-stamp] address=0x%llx generation=%u kind=%u cpu=%d stored=%d previous=%u previousCpu=%u\n", static_cast<unsigned long long>(blockBegin(block)), stampGeneration, static_cast<unsigned>(kind), cpu ? 1 : 0, stored ? 1 : 0, stampOf(block), cpuStampOf(block));
         auto& leaf = leafFor(block);
         if (stored) {
             leaf.blocks[block % LeafBlocks] = stampGeneration;
