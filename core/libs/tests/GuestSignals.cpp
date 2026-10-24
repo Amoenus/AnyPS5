@@ -399,6 +399,54 @@ int main() {
     Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == 0);
     Require(sigprocmask_nid_postfix(3, &noneBlocked, nullptr) == 0);
     Require(sigaction_nid_postfix(30, &restored, nullptr) == 0);
+
+    const GuestSigaction caught{callback, 0, {}};
+    received = 0;
+    Require(sigaction_nid_postfix(30, &caught, nullptr) == 0);
+    Require(sigprocmask_nid_postfix(3, &userSignal, nullptr) == 0);
+    Require(raise_nid_postfix(30) == 0 && received == 0);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == userSignal.bits[0]);
+    Require(sigaction_nid_postfix(30, &restored, nullptr) == 0);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == userSignal.bits[0]);
+    Require(sigaction_nid_postfix(30, &ignored, nullptr) == 0);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == 0);
+    Require(sigaction_nid_postfix(30, &caught, nullptr) == 0);
+    Require(sigprocmask_nid_postfix(3, &noneBlocked, nullptr) == 0 && received == 0);
+    Require(sigprocmask_nid_postfix(3, &userSignal, nullptr) == 0);
+    Require(raise_nid_postfix(30) == 0 && received == 0);
+    Require(signal_nid_postfix(30, ignore) == Callback);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == 0);
+    Require(signal_nid_postfix(30, Callback) == ignore);
+    Require(sigprocmask_nid_postfix(3, &noneBlocked, nullptr) == 0 && received == 0);
+    Require(signal_nid_postfix(30, nullptr) == Callback);
+
+    const GuestSignalSet windowSignal{{1u << 27, 0, 0, 0}};
+    Require(sigaction_nid_postfix(28, &caught, nullptr) == 0);
+    Require(sigprocmask_nid_postfix(3, &windowSignal, nullptr) == 0);
+    Require(raise_nid_postfix(28) == 0 && received == 0);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == windowSignal.bits[0]);
+    Require(sigaction_nid_postfix(28, &restored, nullptr) == 0);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == 0);
+    Require(sigaction_nid_postfix(28, &caught, nullptr) == 0);
+    Require(sigprocmask_nid_postfix(3, &noneBlocked, nullptr) == 0 && received == 0);
+    Require(sigaction_nid_postfix(28, &restored, nullptr) == 0);
+
+    const GuestSignalSet continueSignal{{1u << 18, 0, 0, 0}};
+    Require(sigprocmask_nid_postfix(3, &continueSignal, nullptr) == 0);
+    Require(raise_nid_postfix(19) == 0);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == continueSignal.bits[0]);
+    Require(signal_nid_postfix(19, nullptr) == nullptr);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == 0);
+    Require(sigprocmask_nid_postfix(3, &noneBlocked, nullptr) == 0 && received == 0);
+
+    const GuestSignalSet highSignal{{0, 1u << 7, 0, 0}};
+    Require(sigprocmask_nid_postfix(3, &highSignal, nullptr) == 0);
+    Require(raise_nid_postfix(40) == 0);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[1] == highSignal.bits[1]);
+    Require(sigaction_nid_postfix(40, &ignored, nullptr) == 0);
+    Require(sigpending_nid_postfix(&pendingIgnored) == 0 && pendingIgnored.bits[0] == 0 && pendingIgnored.bits[1] == 0);
+    Require(sigaction_nid_postfix(40, &restored, nullptr) == 0);
+    Require(sigprocmask_nid_postfix(3, &noneBlocked, nullptr) == 0);
     Require(_sigintr_nid_postfix.bits[0] == 0 && _sigintr_nid_postfix.bits[1] == 0 && _sigintr_nid_postfix.bits[2] == 0 &&
         _sigintr_nid_postfix.bits[3] == 0);
     GuestSigaction interruptible{};

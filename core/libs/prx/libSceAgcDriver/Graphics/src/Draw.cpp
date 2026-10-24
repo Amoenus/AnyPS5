@@ -3189,6 +3189,7 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
 }
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipeOut) {
+    const DepthCopySourceScope depthCopySource(state.depthCopySource);
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PreparedDraw prepared(profile);
     prepared.recipeOut = recipeOut;
@@ -3196,6 +3197,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
 }
 
 DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, const DrawRecipe& recipe) {
+    const DepthCopySourceScope depthCopySource(state.depthCopySource);
     if (context.recorder != nullptr) context.recorder->BoundKeptBytes();
     static_cast<void>(snapshots);
     PerformanceTimer timing("Graphics.DrawWithRecipe");
@@ -3324,12 +3326,6 @@ std::shared_ptr<StorageTexture> metadataPassResident(const Context& context, con
     return resident != nullptr && resident->GuestBytes() == color.bytes ? resident : nullptr;
 }
 
-}
-
-void RunDepthCopyPass(const Context& context, const DepthCopyPass& pass) {
-    Require(pass.color.tileMode != ColorTileMode::Linear && context.detiler != nullptr, "DB depth copy into a target without a resident image is not implemented");
-    const auto resident = CachedStorageSurface(context, SurfaceForTarget(pass.color));
-    CopyDepthSample(context, pass.depthAddress, pass.samples, pass.sample, *resident, resident->StorageView(0, false), pass.extent);
 }
 
 std::vector<std::pair<std::uint64_t, std::uint64_t>> PipelinedColorMetadataPassWrites(const ColorMetadataPass& pass) {

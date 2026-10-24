@@ -422,6 +422,40 @@ static void CheckTrackerDevices(int handle) {
     }
 }
 
+static void CheckSystemRemote(int handle) {
+    constexpr int noHandle = static_cast<int>(0x80920008);
+    Require(scePadGetHandle(PAD_USER_ID_SYSTEM, PAD_PORT_TYPE_REMOTE, 0) == noHandle);
+    const int remote = scePadOpen_nid_postfix(PAD_USER_ID_SYSTEM, PAD_PORT_TYPE_REMOTE, 0, nullptr);
+    Require(remote > 0 && remote != handle);
+    Require(scePadGetHandle(PAD_USER_ID_SYSTEM, PAD_PORT_TYPE_REMOTE, 0) == remote);
+    Require(scePadGetHandle(PAD_USER_ID_SYSTEM, PAD_PORT_TYPE_REMOTE, 1) == noHandle);
+    PadData drained[64]{};
+    scePadRead_nid_postfix(handle, drained, 64);
+    PadInputState pressed;
+    pressed.buttons = static_cast<std::uint32_t>(Pad::PadButton::Cross);
+    PadPublishInput_nid_postfix(pressed);
+    PadData data{};
+    data.buttons = ~0u;
+    data.connected = true;
+    Require(scePadReadState(remote, &data) == PAD_OK);
+    Require(data.buttons == 0 && !data.connected);
+    Require(scePadReadState(remote, nullptr) == PAD_ERROR_INVALID_ARG);
+    PadData queued[4]{};
+    queued[0].connected = true;
+    Require(scePadRead_nid_postfix(remote, queued, 4) == 1);
+    Require(queued[0].buttons == 0 && !queued[0].connected);
+    PadLightBarParam lightBar{1, 2, 3};
+    Require(scePadSetLightBar(remote, &lightBar) == PAD_ERROR_INVALID_HANDLE);
+    Require(scePadReadState(handle, &data) == PAD_OK);
+    Require((data.buttons & pressed.buttons) != 0 && data.connected);
+    PadPublishInput_nid_postfix(PadInputState{});
+    scePadRead_nid_postfix(handle, drained, 64);
+    Require(scePadClose_nid_postfix(remote) == PAD_OK);
+    Require(scePadGetHandle(PAD_USER_ID_SYSTEM, PAD_PORT_TYPE_REMOTE, 0) == noHandle);
+    Require(scePadReadState(remote, &data) == PAD_ERROR_INVALID_HANDLE);
+    Require(scePadReadState(handle, &data) == PAD_OK);
+}
+
 static void CheckAccessibilityControllerState(int handle) {
     std::uint32_t state = 7;
     Require(scePadGetAccessibilityControllerState(handle + 1, nullptr) == PAD_ERROR_INVALID_ARG);
@@ -639,7 +673,7 @@ int main() {
     Require(scePadSetVibrationMode(handle, 5) == 0);
     Require(scePadSetVibrationMode(handle, 6) == PAD_ERROR_INVALID_ARG);
     Require(scePadSetVibrationMode(handle, -1) == PAD_ERROR_INVALID_ARG);
-    Require(scePadGetHandle(0xff, 16, 0) == handle);
+    CheckSystemRemote(handle);
     Require(scePadGetHandle(user, 16, 0) == noHandle);
     Require(scePadGetHandle(user, 0, 1) == noHandle);
     Require(scePadClose_nid_postfix(handle) == 0);

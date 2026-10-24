@@ -266,6 +266,55 @@ void NullValues() {
     Require(close_nid_postfix(stream) == 0, "close failed");
 }
 
+int GetIp(int descriptor, int option) {
+    int value = -12345;
+    std::uint32_t size = sizeof(value);
+    Require(getsockopt_nid_postfix(descriptor, 0, option, &value, &size) == 0 && size == sizeof(value), "getsockopt of an IPPROTO_IP option failed");
+    return value;
+}
+
+bool SetIp(int descriptor, int option, int value) {
+    return setsockopt_nid_postfix(descriptor, 0, option, &value, sizeof(value)) == 0;
+}
+
+void IpLevelFollowsThePs5() {
+    constexpr int IpTypeOfService = 3;
+    constexpr int IpTimeToLive = 4;
+    constexpr int IpMulticastTimeToLive = 10;
+    constexpr int IpMulticastLoop = 11;
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    const int datagram6 = socket_nid_postfix(28, Datagram, 0);
+    Require(datagram >= 0 && datagram6 >= 0, "socket failed");
+    Require(GetIp(datagram, IpTimeToLive) == 64 && GetIp(datagram, IpTypeOfService) == 0, "IP_TTL starts at 64 and IP_TOS at 0");
+    Require(GetIp(datagram, IpMulticastTimeToLive) == 1 && GetIp(datagram, IpMulticastLoop) == 1, "IP_MULTICAST_TTL and IP_MULTICAST_LOOP start at 1");
+    Require(SetIp(datagram, IpTimeToLive, 32) && GetIp(datagram, IpTimeToLive) == 32, "IP_TTL reads back");
+    Require(SetIp(datagram, IpTimeToLive, 300) && GetIp(datagram, IpTimeToLive) == 44, "IP_TTL keeps the low byte");
+    Require(SetIp(datagram, IpTimeToLive, -1) && GetIp(datagram, IpTimeToLive) == 255, "IP_TTL of -1 reads back as 255");
+    Require(SetIp(datagram, IpTimeToLive, 0) && GetIp(datagram, IpTimeToLive) == 0, "IP_TTL of 0 is kept");
+    const unsigned char byte = 9;
+    Require(SetFails(datagram, 0, IpTimeToLive, &byte, 1, ErrorInvalid), "a one-byte IP_TTL must fail with EINVAL (22)");
+    Require(SetIp(datagram, IpTypeOfService, 0x1ff) && GetIp(datagram, IpTypeOfService) == 0xff, "IP_TOS keeps the low byte");
+    const unsigned char seven = 7;
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastTimeToLive, &seven, 1) == 0 && GetIp(datagram, IpMulticastTimeToLive) == 7, "a one-byte IP_MULTICAST_TTL is accepted");
+    const int tooLarge = 300;
+    Require(SetFails(datagram, 0, IpMulticastTimeToLive, &tooLarge, sizeof(tooLarge), ErrorInvalid) && GetIp(datagram, IpMulticastTimeToLive) == 7, "IP_MULTICAST_TTL above 255 must fail with EINVAL (22)");
+    unsigned char narrow = 0xaa;
+    std::uint32_t size = 1;
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastTimeToLive, &narrow, &size) == 0 && size == 1 && narrow == 7, "a one-byte read gets the IP_MULTICAST_TTL byte");
+    Require(SetIp(datagram, IpMulticastLoop, 5) && GetIp(datagram, IpMulticastLoop) == 1, "IP_MULTICAST_LOOP reads back as 1");
+    Require(SetIp(datagram, IpMulticastLoop, 0) && GetIp(datagram, IpMulticastLoop) == 0, "IP_MULTICAST_LOOP can be turned off");
+    Require(SetIp(datagram, IpMulticastLoop, 1) && SetIp(datagram, IpMulticastLoop, 0x100) && GetIp(datagram, IpMulticastLoop) == 0, "an int IP_MULTICAST_LOOP keeps only its low byte");
+    int value = 0;
+    size = sizeof(value);
+    Require(getsockopt_nid_postfix(datagram6, 0, IpTimeToLive, &value, &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "IPPROTO_IP on an AF_INET6 socket must fail with EINVAL (22)");
+    size = sizeof(value);
+    Require(getsockopt_nid_postfix(datagram, 0, 0x7777, &value, &size) == -1 && *__error_nid_postfix() == ErrorNoProtocolOption, "an unknown IPPROTO_IP option must fail with ENOPROTOOPT (42)");
+    size = sizeof(value);
+    Require(getsockopt_nid_postfix(datagram, 99, 1, &value, &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "an unknown level must fail with EINVAL (22)");
+    Require(SetFails(datagram, 99, 1, &value, sizeof(value), ErrorInvalid), "setsockopt at an unknown level must fail with EINVAL (22)");
+    Require(close_nid_postfix(datagram) == 0 && close_nid_postfix(datagram6) == 0, "close failed");
+}
+
 void UnknownRequestsFail() {
     const int stream = socket_nid_postfix(2, Stream, 0);
     Require(stream >= 0, "socket failed");
@@ -288,6 +337,7 @@ int main() {
     LengthsFollowFreeBsd();
     BuffersFollowThePs5();
     NullValues();
+    IpLevelFollowsThePs5();
     UnknownRequestsFail();
     return 0;
 }
