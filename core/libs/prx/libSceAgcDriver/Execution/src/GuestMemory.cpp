@@ -1252,6 +1252,8 @@ struct WriteTracker {
     void stamp(std::uint64_t block, std::uint32_t stampGeneration, StampKind kind) {
         const bool cpu = kind == StampKind::Cpu || kind == StampKind::ImportWindow;
         const bool stored = kind != StampKind::ImportWindow;
+        static const bool trace = std::getenv("APS5_TRACE_UPLOAD") != nullptr;
+        if (trace) std::fprintf(stderr, "[write-stamp] address=0x%llx generation=%u kind=%u cpu=%d stored=%d previous=%u previousCpu=%u\n", static_cast<unsigned long long>(blockBegin(block)), stampGeneration, static_cast<unsigned>(kind), cpu ? 1 : 0, stored ? 1 : 0, stampOf(block), cpuStampOf(block));
         auto& leaf = leafFor(block);
         if (stored) {
             leaf.blocks[block % LeafBlocks] = stampGeneration;
@@ -1788,9 +1790,13 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
             hashes[static_cast<std::size_t>((cursor - first) / page)] = HashPage(reinterpret_cast<const std::byte*>(cursor));
         }
     }
+    static const bool trace = std::getenv("APS5_TRACE_UPLOAD") != nullptr;
+    if (trace) std::fprintf(stderr, "[import-watch] before-walk address=0x%llx bytes=0x%llx tracker=%u\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), tracker.generation.load(std::memory_order_relaxed));
     std::erase_if(spans, [&](const auto& span) { return !walkWrites(tracker, span.first, span.second, StampKind::Cpu, true); });
+    if (trace) std::fprintf(stderr, "[import-watch] before-driver-import address=0x%llx tracker=%u\n", static_cast<unsigned long long>(address), tracker.generation.load(std::memory_order_relaxed));
     if (!runImport()) return false;
     const WindowCopy window{first, hashes};
+    if (trace) std::fprintf(stderr, "[import-watch] before-window-walk address=0x%llx tracker=%u\n", static_cast<unsigned long long>(address), tracker.generation.load(std::memory_order_relaxed));
     auto unwatchedFrom = first;
     for (const auto& [begin, end] : spans) {
         if (!walkWrites(tracker, begin, end, StampKind::Cpu, true, &window)) continue;
@@ -1798,6 +1804,7 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
         unwatchedFrom = end;
     }
     if (unwatchedFrom < stop) unwatchLocked(tracker, unwatchedFrom, static_cast<std::size_t>(stop - unwatchedFrom));
+    if (trace) std::fprintf(stderr, "[import-watch] after-window-walk address=0x%llx tracker=%u\n", static_cast<unsigned long long>(address), tracker.generation.load(std::memory_order_relaxed));
     return true;
 }
 
