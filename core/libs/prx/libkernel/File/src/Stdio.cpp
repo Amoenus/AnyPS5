@@ -706,7 +706,7 @@ int APS5_VABI chflags_nid_postfix(const char* path, std::uint64_t flags) {
 }
 
 int APS5_VABI fchflags_nid_postfix(int d, std::uint64_t flags) {
-    if (GuestSockets::IsOpen(d) || File::IsSharedMemoryDescriptor_nid_no_patch(d)) return PosixFailure(GUEST_EINVAL);
+    if (GuestSockets::IsOpen(d) || IsKqueueDescriptor(d) || File::IsSharedMemoryDescriptor_nid_no_patch(d)) return PosixFailure(GUEST_EINVAL);
     File::RefuseArchivedFile(d, "fchflags");
     if (!File::IsVnode(d)) {
         if (!DescriptorIsOpen_nid_no_patch(d)) return PosixFailure(GUEST_EBADF);

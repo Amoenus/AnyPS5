@@ -960,6 +960,37 @@ static void CheckHyperbolic() {
     Require(Near(acosh_nid_postfix(1e300), 691.4686750787736, 1e-15));
 }
 
+static void CheckCoshfMsunBoundaries() {
+    static constexpr struct {
+        std::uint32_t input;
+        std::uint32_t output;
+    } cases[] = {
+        {0x00000000u, 0x3f800000u},
+        {0x80000000u, 0x3f800000u},
+        {0x00000001u, 0x3f800000u},
+        {0x397fffffu, 0x3f800000u},
+        {0x39800000u, 0x3f800000u},
+        {0x3eb17217u, 0x3f87c3b6u},
+        {0x3eb17218u, 0x3f87c3b6u},
+        {0x3f800000u, 0x3fc583aau},
+        {0xbf800000u, 0x3fc583aau},
+        {0x410fffffu, 0x457d389cu},
+        {0x41100000u, 0x457d38acu},
+        {0x42b17216u, 0x7effff04u},
+        {0x42b17217u, 0x7effff84u},
+        {0x42b17218u, 0x7f000002u},
+        {0x42b2d4fbu, 0x7f7fff6cu},
+        {0x42b2d4fcu, 0x7f7fffecu},
+        {0xc2b2d4fcu, 0x7f7fffecu},
+    };
+    for (const auto& test : cases)
+        Require(std::bit_cast<std::uint32_t>(coshf_nid_postfix(std::bit_cast<float>(test.input))) == test.output);
+    Require(std::bit_cast<std::uint32_t>(coshf_nid_postfix(std::bit_cast<float>(0x42b2d4fdu))) == 0x7f800000u);
+    Require(std::bit_cast<std::uint32_t>(coshf_nid_postfix(INFINITY)) == 0x7f800000u);
+    Require(std::bit_cast<std::uint32_t>(coshf_nid_postfix(-INFINITY)) == 0x7f800000u);
+    Require(std::bit_cast<std::uint32_t>(coshf_nid_postfix(std::bit_cast<float>(0x7fc12345u))) == 0x7fc12345u);
+}
+
 static void CheckScaledHyperbolic() {
     const int rounding = std::fegetround();
     Require(std::fesetround(FE_TONEAREST) == 0);
@@ -1692,6 +1723,7 @@ int main() {
     Require(std::isinf(__powidf2_nid_postfix(-0.0, -3)) && std::signbit(__powidf2_nid_postfix(-0.0, -3)));
     Require(__powidf2_nid_postfix(2.0, -127) == 0x1p-127);
     CheckHyperbolic();
+    CheckCoshfMsunBoundaries();
     CheckScaledHyperbolic();
     CheckSinhf();
     CheckAtanhf();
