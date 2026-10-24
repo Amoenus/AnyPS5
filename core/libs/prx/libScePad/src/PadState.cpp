@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 #include <deque>
 #include <mutex>
 #include <stdexcept>
@@ -215,14 +216,19 @@ Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
     static Pad::InputCommandFile commands([] {
 #ifdef _WIN32
         const auto* path = _wgetenv(L"APS5_PAD_INPUT_FILE");
+        std::fprintf(stderr, "[pad-input] command file configured=%d path=%ls\n", path && *path != L'\0', path ? path : L"<unset>");
 #else
         const auto* path = std::getenv("APS5_PAD_INPUT_FILE");
+        std::fprintf(stderr, "[pad-input] command file configured=%d path=%s\n", path && *path != '\0', path ? path : "<unset>");
 #endif
         return path ? std::filesystem::path(path) : std::filesystem::path{};
     }());
     static Pad::InputCommandFile::Input lastInjected;
     const auto injected = commands.Poll(now);
     if (injected != lastInjected) {
+        std::fprintf(stderr, "[pad-input] transition time=%llu buttons=0x%x sticks=%d touchLeft=%d touchRight=%d\n",
+            static_cast<unsigned long long>(now), static_cast<unsigned>(injected.buttons),
+            injected.hasSticks, injected.touchLeft, injected.touchRight);
         lastInjected = injected;
         timestamp = now;
         injectedTimestamp = now;
