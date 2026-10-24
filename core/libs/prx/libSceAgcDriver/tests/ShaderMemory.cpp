@@ -7571,7 +7571,8 @@ void verifyScalarImageWords() {
             return false;
         }
         data.reads.push_back(address);
-        *value = data.words[(address - data.base) / 4u];
+        const auto index = (address - data.base) / 4u;
+        *value = data.words[index == 3u ? 5u : index];
         return true;
     };
     std::uint32_t checks = 0;
