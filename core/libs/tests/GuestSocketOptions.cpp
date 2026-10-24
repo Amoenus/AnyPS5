@@ -340,6 +340,64 @@ void IpLevelFollowsThePs5() {
     Require(close_nid_postfix(datagram) == 0 && close_nid_postfix(datagram6) == 0, "close failed");
 }
 
+void MulticastMembership() {
+    constexpr int IpMulticastInterface = 9;
+    constexpr int IpAddMembership = 12;
+    constexpr int IpDropMembership = 13;
+    constexpr int ErrorNotSupported = 45;
+    constexpr int ErrorAddressNotAvailable = 49;
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    const int stream = socket_nid_postfix(2, Stream, 0);
+    Require(datagram >= 0 && stream >= 0, "socket failed");
+    const std::array<std::uint8_t, 8> group{224, 0, 0, 251, 0, 0, 0, 0};
+    const std::array<std::uint8_t, 8> unicast{10, 0, 0, 1, 0, 0, 0, 0};
+    const std::array<std::uint8_t, 8> other{224, 0, 0, 253, 0, 0, 0, 0};
+    Require(SetFails(stream, 0, IpAddMembership, group.data(), group.size(), ErrorNotSupported), "a stream socket must fail a membership with EOPNOTSUPP (45)");
+    Require(SetFails(datagram, 0, IpAddMembership, group.data(), 7, ErrorInvalid), "a short membership must fail with EINVAL (22)");
+    Require(SetFails(datagram, 0, IpAddMembership, unicast.data(), unicast.size(), ErrorInvalid), "a group that is not multicast must fail with EINVAL (22)");
+    Require(SetFails(datagram, 0, IpDropMembership, other.data(), other.size(), ErrorAddressNotAvailable), "dropping a group never joined must fail with EADDRNOTAVAIL (49)");
+    std::array<std::uint8_t, 4> address{0xaa, 0xaa, 0xaa, 0xaa};
+    std::uint32_t size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && size == 4 && address == std::array<std::uint8_t, 4>{}, "IP_MULTICAST_IF starts at INADDR_ANY");
+    const std::array<std::uint8_t, 4> loopback{127, 0, 0, 1};
+    const std::array<std::uint8_t, 12> anyIndex{};
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastInterface, anyIndex.data(), anyIndex.size()) == 0, "an ip_mreqn without an index selects the default interface");
+    size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && address == std::array<std::uint8_t, 4>{}, "the default interface reads back as INADDR_ANY");
+    Require(SetFails(datagram, 0, IpMulticastInterface, loopback.data(), 2, ErrorInvalid), "a short IP_MULTICAST_IF must fail with EINVAL (22)");
+    Require(close_nid_postfix(datagram) == 0 && close_nid_postfix(stream) == 0, "close failed");
+}
+
+void MulticastOnTheHost() {
+    constexpr int IpMulticastInterface = 9;
+    constexpr int IpAddMembership = 12;
+    constexpr int IpDropMembership = 13;
+    constexpr int ErrorAddressInUse = 48;
+    constexpr int ErrorAddressNotAvailable = 49;
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    Require(datagram >= 0, "socket failed");
+    const std::array<std::uint8_t, 8> group{224, 0, 0, 251, 0, 0, 0, 0};
+    Require(setsockopt_nid_postfix(datagram, 0, IpAddMembership, group.data(), group.size()) == 0, "joining 224.0.0.251 through INADDR_ANY failed");
+    Require(SetFails(datagram, 0, IpAddMembership, group.data(), group.size(), ErrorAddressInUse), "joining twice must fail with EADDRINUSE (48)");
+    Require(setsockopt_nid_postfix(datagram, 0, IpDropMembership, group.data(), group.size()) == 0, "drop failed");
+    Require(SetFails(datagram, 0, IpDropMembership, group.data(), group.size(), ErrorAddressNotAvailable), "dropping twice must fail with EADDRNOTAVAIL (49)");
+    const std::array<std::uint8_t, 8> throughLoopback{224, 0, 0, 252, 127, 0, 0, 1};
+    const std::array<std::uint8_t, 8> anyInterface{224, 0, 0, 252, 0, 0, 0, 0};
+    Require(setsockopt_nid_postfix(datagram, 0, IpAddMembership, throughLoopback.data(), throughLoopback.size()) == 0, "joining 224.0.0.252 through 127.0.0.1 failed");
+    Require(setsockopt_nid_postfix(datagram, 0, IpDropMembership, anyInterface.data(), anyInterface.size()) == 0, "a drop through INADDR_ANY leaves the group on any interface");
+    Require(SetFails(datagram, 0, IpDropMembership, anyInterface.data(), anyInterface.size(), ErrorAddressNotAvailable), "dropping it again must fail with EADDRNOTAVAIL (49)");
+    const std::array<std::uint8_t, 4> loopback{127, 0, 0, 1};
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastInterface, loopback.data(), loopback.size()) == 0, "selecting the loopback interface for IP_MULTICAST_IF failed");
+    std::array<std::uint8_t, 4> address{0xaa, 0xaa, 0xaa, 0xaa};
+    std::uint32_t size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && size == 4 && address == loopback, "IP_MULTICAST_IF reads back");
+    const std::array<std::uint8_t, 12> anyIndex{};
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastInterface, anyIndex.data(), anyIndex.size()) == 0, "an ip_mreqn without an index selects the default interface");
+    size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && address == std::array<std::uint8_t, 4>{}, "the default interface reads back as INADDR_ANY");
+    Require(close_nid_postfix(datagram) == 0, "close failed");
+}
+
 void UnknownRequestsFail() {
     const int stream = socket_nid_postfix(2, Stream, 0);
     Require(stream >= 0, "socket failed");
@@ -354,7 +412,11 @@ void UnknownRequestsFail() {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "multicast") == 0) {
+        MulticastOnTheHost();
+        return 0;
+    }
     ReportsTypeAndListening();
     ReportsAndClearsTheConnectError();
     BooleanOptionsReportTheirBit();
@@ -364,6 +426,7 @@ int main() {
     BuffersFollowThePs5();
     NullValues();
     IpLevelFollowsThePs5();
+    MulticastMembership();
     UnknownRequestsFail();
     return 0;
 }

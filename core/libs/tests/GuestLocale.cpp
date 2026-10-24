@@ -46,6 +46,7 @@ std::size_t APS5_VABI _ZNSt7codecvtIcc9_MbstatetE7_GetcatEPPKNSt6locale5facetEPK
 std::size_t APS5_VABI _ZNSt8numpunctIcE7_GetcatEPPKNSt6locale5facetEPKS1__nid_postfix(GuestLocale::Facet** facet, const GuestLocale::Implementation* const* locale);
 std::size_t APS5_VABI _ZNSt7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE7_GetcatEPPKNSt6locale5facetEPKS5__nid_postfix(GuestLocale::Facet** facet, const GuestLocale::Implementation* const* locale);
 std::size_t APS5_VABI _ZNSt8time_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE7_GetcatEPPKNSt6locale5facetEPKS5__nid_postfix(GuestLocale::Facet** facet, const GuestLocale::Implementation* const* locale);
+extern std::uintptr_t _ZTVSt7collateIcE_nid_postfix[9];
 
 }
 
@@ -87,6 +88,15 @@ static void CheckInputFacetObjects() {
 
 static void CheckCodecvtWideVtableObject() {
     for (std::uintptr_t& slot : _ZTVSt7codecvtIwc9_MbstatetE_nid_postfix) {
+        Require(slot == 0);
+        slot = 0x1111;
+        Require(slot == 0x1111);
+        slot = 0;
+    }
+}
+
+static void CheckCollateVtableObject() {
+    for (std::uintptr_t& slot : _ZTVSt7collateIcE_nid_postfix) {
         Require(slot == 0);
         slot = 0x1111;
         Require(slot == 0x1111);
@@ -357,6 +367,7 @@ int main() {
     CheckCodecvtWideVtableObject();
     CheckWideNumPutVtableObject();
     CheckFacetGetcat();
+    CheckCollateVtableObject();
     _Locksyslock_nid_postfix();
     _Locksyslock_nid_postfix();
     _Unlocksyslock_nid_postfix();

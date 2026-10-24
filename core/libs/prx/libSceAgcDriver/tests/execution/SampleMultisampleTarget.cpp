@@ -684,6 +684,24 @@ bool Refused(std::uint64_t address, std::size_t bytes, const char* access) {
     return false;
 }
 
+void CheckOneFragmentGuard(AgcDriver::VulkanDevice& device) {
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    Block block(BlockBytes);
+    auto target = DecodeTarget(block.Address(), 0u);
+    target.coverageSamples = 4;
+    target.fmaskAddress = block.Address();
+    AgcDriver::Graphics::GuardOneFragmentFmask(context, target);
+    AgcDriver::Graphics::ClaimMultisampleTargetMemory(block.Address(), BlockBytes);
+    std::string refusal;
+    try {
+        AgcDriver::Graphics::RequireNoMultisampleColorTarget(block.Address(), BlockBytes, "a read of claimed one-fragment FMASK memory");
+    } catch (const std::exception& error) {
+        refusal = error.what();
+    }
+    Require(refusal.find("overlaps the FMASK") != std::string::npos, "a memory claim retired the one-fragment FMASK refusal");
+    std::puts("a claim of one-fragment FMASK memory preserves its explicit guest-access refusal");
+}
+
 void CheckClaimedTargets(AgcDriver::VulkanDevice& device) {
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
     if ((context.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_2_BIT) == 0 || (context.limits.framebufferStencilSampleCounts & VK_SAMPLE_COUNT_2_BIT) == 0) {
@@ -2128,6 +2146,7 @@ int main(int argc, char** argv) {
             CheckFirstSampleReads(*device, TargetDescriptor(signedFill, SampleShift, 0u, Format8888Sint), std::vector<std::array<float, 4>>(Side * Side * Samples, std::bit_cast<std::array<float, 4>>(FilledSint8Texel)), false, "from 8_8_8_8_SINT color memory no draw rendered to");
             std::puts("DIM 2D reads of a drawn 4x 8_8_8_8_UINT target and of 8_8_8_8_SINT color memory no draw rendered to return each pixel's sample 0 bit for bit");
         }
+        CheckOneFragmentGuard(*device);
         if (!AgcDriver::VulkanDeviceTestAccess::ContextOf(*device).storageImageMultisample) {
             std::puts("multisampled target fills, stores and swizzle modes not tested: storage image multisampling unavailable");
             return VulkanTestSkipped;
