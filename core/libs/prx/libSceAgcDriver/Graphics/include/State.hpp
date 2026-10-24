@@ -98,6 +98,7 @@ struct State {
     std::optional<DepthTarget> depth;
     bool depthTest = false;
     bool depthWrite = false;
+    bool depthCopySource = false;
     VkCompareOp depthCompare = VK_COMPARE_OP_ALWAYS;
     bool depthBoundsTest = false;
     float minDepthBounds = 0.0f;
@@ -217,9 +218,7 @@ struct ColorMetadataPass {
 };
 std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue);
 struct DepthCopyPass {
-    std::uint64_t depthAddress;
-    VkExtent2D extent;
-    std::uint32_t samples;
+    DepthTarget source;
     std::uint32_t sample;
     ColorTarget color;
 };

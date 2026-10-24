@@ -16,6 +16,11 @@ int APS5_VABI pthread_rwlockattr_init_nid_postfix(PthreadRwlockattr* attr);
 int APS5_VABI pthread_rwlockattr_destroy_nid_postfix(PthreadRwlockattr* attr);
 int APS5_VABI pthread_rwlockattr_getpshared_nid_postfix(const PthreadRwlockattr* attr, int* pshared);
 int APS5_VABI pthread_rwlockattr_setpshared_nid_postfix(PthreadRwlockattr* attr, int pshared);
+int APS5_VABI pthread_rwlockattr_gettype_np_nid_postfix(const PthreadRwlockattr* attr, int* type);
+int APS5_VABI scePthreadRwlockattrSettype(PthreadRwlockattr* attr, int type);
+int APS5_VABI scePthreadRwlockattrGettype(const PthreadRwlockattr* attr, int* type);
+int APS5_VABI scePthreadRwlockattrSetpshared(PthreadRwlockattr* attr, int pshared);
+int APS5_VABI scePthreadRwlockattrGetpshared(const PthreadRwlockattr* attr, int* pshared);
 int APS5_VABI pthread_rwlock_rdlock_nid_postfix(PthreadRwlock* rwlock);
 int APS5_VABI pthread_rwlock_wrlock_nid_postfix(PthreadRwlock* rwlock);
 int APS5_VABI pthread_rwlock_unlock_nid_postfix(PthreadRwlock* rwlock);
@@ -397,8 +402,32 @@ static void CheckAttrProcessSharing() {
     Require(pthread_rwlockattr_destroy_nid_postfix(&attr) == 0);
 }
 
+static void CheckAttrType() {
+    PthreadRwlockattr attr = nullptr;
+    Require(pthread_rwlockattr_init_nid_postfix(&attr) == 0);
+    int type = -1;
+    Require(pthread_rwlockattr_gettype_np_nid_postfix(&attr, &type) == 0 && type == 0);
+    Require(scePthreadRwlockattrGettype(&attr, &type) == SCE_OK && type == 0);
+    for (const int set : {1, 2, 0}) {
+        Require(scePthreadRwlockattrSettype(&attr, set) == SCE_OK);
+        Require(pthread_rwlockattr_gettype_np_nid_postfix(&attr, &type) == 0 && type == set);
+        Require(scePthreadRwlockattrGettype(&attr, &type) == SCE_OK && type == set);
+    }
+    Require(Throws([&] { pthread_rwlockattr_gettype_np_nid_postfix(&attr, nullptr); }));
+    int pshared = -1;
+    Require(scePthreadRwlockattrGetpshared(&attr, &pshared) == SCE_OK && pshared == PROCESS_PRIVATE);
+    Require(scePthreadRwlockattrSetpshared(&attr, 1) == SCE_KERNEL_ERROR_EINVAL);
+    Require(scePthreadRwlockattrSetpshared(&attr, PROCESS_PRIVATE) == SCE_OK);
+    Require(pthread_rwlockattr_destroy_nid_postfix(&attr) == 0);
+    PthreadRwlockattr unset = nullptr;
+    Require(Throws([&] { pthread_rwlockattr_gettype_np_nid_postfix(nullptr, &type); }));
+    Require(Throws([&] { pthread_rwlockattr_gettype_np_nid_postfix(&unset, &type); }));
+    Require(Throws([&] { scePthreadRwlockattrGettype(&unset, &type); }));
+}
+
 int main() {
     CheckAttrProcessSharing();
+    CheckAttrType();
     CheckWaitingWriterHoldsBackNewReaders();
     CheckConcurrentFirstWrlockExcludes();
     CheckDeadlinesBeyondTheClockRange();

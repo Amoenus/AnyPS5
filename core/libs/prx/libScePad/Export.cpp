@@ -111,6 +111,7 @@ constexpr int PAD_ERROR_ALREADY_OPENED = static_cast<int>(0x80920004);
 constexpr int PAD_ERROR_UNKNOWN_USER = static_cast<int>(0x809b0081);
 
 bool g_opened = false;
+bool g_remoteOpened = false;
 std::array<int, PAD_SPECIAL_HANDLE_COUNT> g_specialUsers{};
 std::atomic_bool g_initialized{false};
 
@@ -138,10 +139,17 @@ PadData SpecialData() {
     return data;
 }
 
+bool SystemRemote(int userId, int type) {
+    return userId == PAD_USER_ID_SYSTEM && type == PAD_PORT_TYPE_REMOTE;
+}
+
+bool RemoteHandle(int handle) {
+    return g_remoteOpened && handle == PAD_REMOTE_HANDLE;
+}
+
 bool ValidPort(int userId, int type, int index) {
     const bool personalPort = type == PAD_PORT_TYPE_STANDARD || type == PAD_PORT_TYPE_SPECIAL;
-    const bool systemRemote = userId == PAD_USER_ID_SYSTEM && type == PAD_PORT_TYPE_REMOTE;
-    return index == 0 && (personalPort || systemRemote);
+    return index == 0 && (personalPort || SystemRemote(userId, type));
 }
 
 }
@@ -165,6 +173,10 @@ static_assert(sizeof(PadMotionSensorPosition) == 12);
 extern "C" {
 
 int APS5_VABI scePadClose_nid_postfix(int handle) {
+ if (RemoteHandle(handle)) {
+  g_remoteOpened = false;
+  return PAD_OK;
+ }
  if (SpecialHandle(handle)) {
   g_specialUsers[handle - PAD_SPECIAL_HANDLE] = 0;
   return PAD_OK;
@@ -233,6 +245,7 @@ int APS5_VABI scePadGetControllerInformation(int handle, PadControllerInformatio
 int APS5_VABI scePadGetHandle(int user_id, int type, int index) {
  if (!ValidPort(user_id, type, index)) return PAD_ERROR_DEVICE_NO_HANDLE;
  if (type == PAD_PORT_TYPE_SPECIAL) return SpecialHandleOf(user_id);
+ if (SystemRemote(user_id, type)) return g_remoteOpened ? PAD_REMOTE_HANDLE : PAD_ERROR_DEVICE_NO_HANDLE;
  if (!g_opened) return PAD_ERROR_DEVICE_NO_HANDLE;
  return PAD_HANDLE;
 }
@@ -308,6 +321,10 @@ int APS5_VABI scePadOpen_nid_postfix(int userId, int type, int index, const void
   }
   return PAD_ERROR_UNKNOWN_USER;
  }
+ if (SystemRemote(userId, type)) {
+  g_remoteOpened = true;
+  return PAD_REMOTE_HANDLE;
+ }
  g_opened = true;
  return PAD_HANDLE;
 }
@@ -329,8 +346,12 @@ int APS5_VABI scePadSetFeatureReport(std::int32_t handle, std::uint8_t reportId,
 int APS5_VABI scePadOutputReport(std::int32_t handle, std::uint8_t reportId, const void* data, std::uint64_t size) { NotImplemented_nid_no_patch(__func__); return 0; }
 
 int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
- if (!KnownHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
+ if (!KnownHandle(handle) && !RemoteHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
  if (data == nullptr || num <= 0) return PAD_ERROR_INVALID_ARG;
+ if (RemoteHandle(handle)) {
+  data[0] = PadData{};
+  return 1;
+ }
  if (SpecialHandle(handle)) {
   data[0] = SpecialData();
   return 1;
@@ -339,10 +360,10 @@ int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
 }
 
 int APS5_VABI scePadReadState(int handle, PadData* data) {
- if (!KnownHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
+ if (!KnownHandle(handle) && !RemoteHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
  if (data == nullptr) return PAD_ERROR_INVALID_ARG;
 
- *data = SpecialHandle(handle) ? SpecialData() : Pad::ReadState();
+ *data = RemoteHandle(handle) ? PadData{} : SpecialHandle(handle) ? SpecialData() : Pad::ReadState();
 
  return 0;
 }
