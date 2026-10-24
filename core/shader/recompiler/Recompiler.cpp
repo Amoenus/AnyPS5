@@ -1948,12 +1948,23 @@ void materializeCapture(ResourceCapture& capture, const SrtRuntime& runtime) {
     const auto& plan = *capture.plan;
     SrtRuntime traced = runtime;
     traced.userDataUse = &capture.userDataUse;
+    const auto materialize = [&] {
+        try {
+            ResourceMaterializer{}.Materialize(plan, traced, capture.snapshot);
+        } catch (...) {
+            if (!capture.userDataUse.reads.empty()) {
+                const auto [address, origin] = capture.userDataUse.reads.back();
+                std::fprintf(stderr, "[capture] last attempted resource read: address=0x%llx userDataWord=%d reads=%zu\n", static_cast<unsigned long long>(address), origin, capture.userDataUse.reads.size());
+            }
+            throw;
+        }
+    };
     if (std::none_of(plan.pureFlatSlots.begin(), plan.pureFlatSlots.end(), [](std::uint8_t pure) { return pure != 0u; })) {
-        ResourceMaterializer{}.Materialize(plan, traced, capture.snapshot);
+        materialize();
         return;
     }
     traced.readTrace = &capture.readTrace;
-    ResourceMaterializer{}.Materialize(plan, traced, capture.snapshot);
+    materialize();
     auto& other = capture.readTrace.otherReads;
     if (other.size() > 1) {
         std::sort(other.begin(), other.end());
