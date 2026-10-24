@@ -499,11 +499,7 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPr
             std::vector<std::byte> planKey;
             if (disk) {
                 ShaderDiskCache::BuildPlanKey(request, HostSubgroupSize(request), planKey);
-                IrResourcePlan loaded;
-                if (ShaderDiskCache::LoadPlan(planKey, loaded)) {
-                    loaded.shaderHash = request.shader.codeAddress;
-                    source->plan = std::make_shared<const IrResourcePlan>(std::move(loaded));
-                }
+                source->plan = ShaderDiskCache::LoadSharedPlan(planKey, request.shader.codeAddress);
             }
             if (source->plan == nullptr) {
                 try {
@@ -1091,7 +1087,13 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             formatComponents = 1u;
             for (std::uint32_t component = 0; component < 4u; ++component) {
                 const auto selector = (input.outputMask & (1u << component)) != 0u ? (resource.fields[3] >> (component * 3u)) & 7u : 0u;
-                if (selector == 2u || selector == 3u) throw std::runtime_error("reserved prepared vertex component selector");
+                if (selector == 2u || selector == 3u) {
+                    const auto& fields = resource.fields;
+                    char message[192];
+                    std::snprintf(message, sizeof(message), "reserved prepared vertex component selector %u at location %u component %u (V#=[%08x %08x %08x %08x])",
+                        selector, input.location, component, fields[0], fields[1], fields[2], fields[3]);
+                    throw std::runtime_error(message);
+                }
                 if (selector >= 4u) formatComponents = std::max(formatComponents, selector - 3u);
                 selectors |= selector << (component * 3u);
             }
