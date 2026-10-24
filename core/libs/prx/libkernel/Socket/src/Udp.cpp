@@ -716,6 +716,17 @@ int SetNonBlocking(Socket& socket) {
     socket.options.nonblocking = true;
     return 0;
 }
+bool ReadableNow(const Socket& socket) {
+    NativePollDescriptor entry{};
+    entry.fd = socket.value;
+#ifdef _WIN32
+    entry.events = POLLRDNORM;
+    return WSAPoll(&entry, 1, 0) > 0;
+#else
+    entry.events = POLLIN;
+    return ::poll(&entry, 1, 0) > 0;
+#endif
+}
 int ReceiveAnsweredHere(Socket& socket, std::uint64_t length) {
 #ifdef _WIN32
     {
@@ -723,7 +734,8 @@ int ReceiveAnsweredHere(Socket& socket, std::uint64_t length) {
         if (socket.receiveShut) return 0;
     }
 #endif
-    if (length != 0 || socket.type != 1) return -1;
+    if (length != 0) return -1;
+    if (socket.type != 1) return ReadableNow(socket) ? -1 : 0;
     sockaddr_storage peer{};
     socklen_t size = sizeof(peer);
     return ::getpeername(socket.value, reinterpret_cast<sockaddr*>(&peer), &size) == 0 ? 0 : NativeError();
@@ -1593,22 +1605,26 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
         return Fail(55);
     }
     sockaddr_storage native{};
-    socklen_t size = sizeof(native);
-    if (const int waited = WaitForTransfer(*socket, false, flags)) return Fail(waited);
-    std::int64_t received = ::recvfrom(socket->value, buffer.data(), static_cast<int>(buffer.size()),
-        NativeReceiveFlags(flags, socket->type), reinterpret_cast<sockaddr*>(&native), &size);
-    if (received < 0) {
+    socklen_t size = 0;
+    std::int64_t received = 0;
+    if (total != 0 || socket->type == 1 || ReadableNow(*socket)) {
+        size = sizeof(native);
+        if (const int waited = WaitForTransfer(*socket, false, flags)) return Fail(waited);
+        received = ::recvfrom(socket->value, buffer.data(), static_cast<int>(buffer.size()),
+            NativeReceiveFlags(flags, socket->type), reinterpret_cast<sockaddr*>(&native), &size);
+        if (received < 0) {
 #ifdef _WIN32
-        if (!records || WSAGetLastError() != WSAEMSGSIZE) return Fail(NativeError());
-        received = static_cast<std::int64_t>(buffer.size());
+            if (!records || WSAGetLastError() != WSAEMSGSIZE) return Fail(NativeError());
+            received = static_cast<std::int64_t>(buffer.size());
 #else
-        return Fail(NativeError());
+            return Fail(NativeError());
 #endif
+        }
     }
-    header.flags = 0;
+    header.flags = flags;
     if (received > total) {
         received = total;
-        header.flags = 0x10;
+        header.flags |= 0x10;
     }
     std::size_t offset = 0;
     for (const auto& vector : vectors) {
