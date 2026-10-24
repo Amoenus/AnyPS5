@@ -21,16 +21,31 @@ std::string& failureReason() {
     return HostThreadLocal<std::string, FailureReasonStorage>();
 }
 
-std::string DescribeValue(const IrValue* value, std::uint32_t depth) {
+std::string DescribeValue(const IrResourcePlan& program, const IrValue* value, std::uint32_t depth) {
     if (value == nullptr) return "null";
     value = value->Resolve();
     std::string text(IrOpcodeName(value->Opcode()));
     if (value->HasImmediate() && value->Type() == IrType::U32) return text + "(" + std::to_string(value->ImmediateU32()) + ")";
+    if (value->Type() == IrType::ScalarReg || value->Type() == IrType::VectorReg) {
+        const auto reg = value->Register();
+        text += "[register bank " + std::to_string(static_cast<std::uint32_t>(reg.bank)) + ", index " + std::to_string(reg.index) + "]";
+    }
+    if (value->Opcode() == IrOpcode::LoadAddressU32 || value->Opcode() == IrOpcode::ReadConstBuffer) {
+        const auto flags = value->Flags<MemoryFlags>();
+        text += "[memory " + std::to_string(flags.index) + ", pc " + std::to_string(flags.pc);
+        if (flags.index < program.memoryInfo.size()) {
+            const auto& memory = program.memoryInfo[flags.index];
+            text += ", kind " + std::to_string(static_cast<std::uint32_t>(memory.kind)) + ", offset " + std::to_string(memory.offset);
+        } else {
+            text += ", metadata unavailable";
+        }
+        text += "]";
+    }
     if (depth == 0 || value->ArgumentCount() == 0) return text;
     text += "(";
     for (std::size_t index = 0; index < value->ArgumentCount(); ++index) {
         if (index != 0) text += ", ";
-        text += DescribeValue(value->Argument(index), depth - 1);
+        text += DescribeValue(program, value->Argument(index), depth - 1);
     }
     return text + ")";
 }
@@ -52,7 +67,7 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
     failureReason().clear();
     static const bool debug = std::getenv("APS5_SRT_DEBUG") != nullptr;
     if (debug) {
-        for (std::size_t slot = 0; slot < program.srtReads.size(); ++slot) std::fprintf(stderr, "[srt] slot %zu = %s"  "\n", slot, DescribeValue(program.srtReads[slot].value, 6).c_str());
+        for (std::size_t slot = 0; slot < program.srtReads.size(); ++slot) std::fprintf(stderr, "[srt] slot %zu = %s"  "\n", slot, DescribeValue(program, program.srtReads[slot].value, 6).c_str());
     }
     if (!program.srtPlanComplete) {
         return Fail("SRT plan is incomplete");
@@ -179,7 +194,7 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
                 continue;
             }
             if (!evaluated) {
-                return Fail(std::string(clean ? "clean " : "") + "SRT read at flat offset " + std::to_string(read.flatOffset) + ": " + DescribeValue(read.value, 4));
+                return Fail(std::string(clean ? "clean " : "") + "SRT read at flat offset " + std::to_string(read.flatOffset) + ": " + DescribeValue(program, read.value, 4));
             }
         }
         for (const auto& [sourceIndex, read] : zeroedSources) {
@@ -346,12 +361,12 @@ const std::string& RuntimeSourceFailureReason() {
 }
 
 std::string RuntimeValueDescription(const IrResourcePlan& program, const IrValue* value) {
-    std::string description = DescribeValue(value, 4);
+    std::string description = DescribeValue(program, value, 4);
     if (value == nullptr) return description;
     value = value->Resolve();
     if (value->Opcode() == IrOpcode::ReadConst && value->ArgumentCount() == 2 && value->Argument(1)->Resolve()->HasImmediate()) {
         const auto slot = value->Argument(1)->Resolve()->ImmediateU32();
-        if (slot < program.srtReads.size()) description += " where slot " + std::to_string(slot) + " = " + DescribeValue(program.srtReads[slot].value, 8);
+        if (slot < program.srtReads.size()) description += " where slot " + std::to_string(slot) + " = " + DescribeValue(program, program.srtReads[slot].value, 8);
     }
     return description;
 }
