@@ -2488,7 +2488,7 @@ static void CheckReadsIntoSharedWriteTracking() {
     KernelAioRwRequest request{static_cast<std::int64_t>(page), page, bytes, &result, fd};
     std::int32_t id = 0;
     std::int32_t state = 0;
-    Require(sceKernelAioSubmitReadCommands(&request, 1, 0, &id) == 0);
+    Require(sceKernelAioSubmitReadCommands(&request, 1, 1, &id) == 0);
     Require(sceKernelAioWaitRequest(id, &state, nullptr) == 0);
     Require(result.state == 3 && result.return_value == static_cast<std::int64_t>(page));
     Require(std::memcmp(bytes, seed.data() + page, page) == 0);
@@ -2499,7 +2499,7 @@ static void CheckReadsIntoSharedWriteTracking() {
     Require(sceKernelPread(fd, mapped, page, 0) == static_cast<std::int64_t>(SCE_KERNEL_ERROR_EFAULT));
     KernelAioResult refusedResult{-1, 0};
     KernelAioRwRequest refusedRequest{0, page, bytes, &refusedResult, fd};
-    Require(sceKernelAioSubmitReadCommands(&refusedRequest, 1, 0, &id) == 0);
+    Require(sceKernelAioSubmitReadCommands(&refusedRequest, 1, 1, &id) == 0);
     Require(sceKernelAioWaitRequest(id, &state, nullptr) == 0);
     Require(refusedResult.return_value == static_cast<std::int64_t>(SCE_KERNEL_ERROR_EFAULT));
     Require(sceKernelAioDeleteRequest(id, &deleted) == 0);

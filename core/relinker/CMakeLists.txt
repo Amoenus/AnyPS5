@@ -52,6 +52,7 @@ add_library(relinker_core STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreOperands.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/ScalarCompareOperands.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/MaskedStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/AndnLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/parsing/ElfReader.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/SyscallScanner.cpp
@@ -97,6 +98,11 @@ if(BUILD_TESTING)
     target_link_libraries(andn_lowering_tests PRIVATE relinker_core)
     add_test(NAME andn_lowering COMMAND andn_lowering_tests)
     set_tests_properties(andn_lowering PROPERTIES TIMEOUT 20)
+
+    add_test_executable(masked_store_lowering_tests ${CMAKE_CURRENT_SOURCE_DIR}/codegen/tests/MaskedStoreLoweringTests.cpp)
+    target_link_libraries(masked_store_lowering_tests PRIVATE relinker_core)
+    add_test(NAME masked_store_lowering COMMAND masked_store_lowering_tests)
+    set_tests_properties(masked_store_lowering PROPERTIES TIMEOUT 20)
 
     add_test_executable(relinker_conversion_tests ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/ConversionTests.cpp)
     target_link_libraries(relinker_conversion_tests PRIVATE relinker_core)
@@ -203,6 +209,7 @@ if(WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreOperands.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/ScalarCompareOperands.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/MaskedStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/AndnLowering.cpp
     )
     target_include_directories(amd64_only_windows_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/include ${CMAKE_CURRENT_SOURCE_DIR}/domain/include ${CMAKE_CURRENT_SOURCE_DIR}/io/include ${CMAKE_CURRENT_SOURCE_DIR}/codegen/include ${CMAKE_CURRENT_SOURCE_DIR}/../libs/prx/libc/src/specifics/windows)
@@ -432,6 +439,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreOperands.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/ScalarCompareOperands.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/MaskedStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/AndnLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/linux/LinuxElfPatcher.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/general/SegmentFilter.cpp
