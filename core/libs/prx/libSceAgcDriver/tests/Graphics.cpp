@@ -3871,7 +3871,7 @@ void multisampleTests() {
     }
     queue = multisampled();
     queue.context[0x31d] = 0x1000;
-    expectFailure([&] { DecodeState(queue); }, "fewer fragments than samples");
+    expectFailure([&] { DecodeState(queue); }, "a color target's sample count differs from the rasterizer's");
     queue.context[0x31d] = 0;
     queue.context[0x293] = 0x10000u;
     Require(DecodeState(queue).samples == 1 && !DecodeState(queue).perSampleShading, "PS_ITER_SAMPLE into a one-sample target did not rasterize sample 0 alone");
@@ -4366,6 +4366,53 @@ void multisampledDepthTests() {
     Require(state.truncatedCoverage && state.perSampleShading && state.samples == 2 && state.colors[0].samples == 1, "PS_ITER_SAMPLE into a one-sample color target beside a 2x depth target (PPSA02225's registers) did not run per sample with sample 0's color");
     queue = truncatedTwoSample();
     queue.context[0x31d] = 0x12000;
+    expectFailure([&] { DecodeState(queue); }, "a color target's sample count differs from the rasterizer's");
+    const auto oneFragment = [&] {
+        auto queue = singleSampleScan();
+        queue.context[0x2f8] = 0x00210002;
+        queue.context[0x292] = 3;
+        for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0x622ae6ae;
+        queue.context[0x31d] = 0x2000;
+        queue.context[0x201] = 0x112202;
+        return queue;
+    };
+    queue = oneFragment();
+    state = DecodeState(queue);
+    Require(state.samples == 4 && !state.customSampleLocations && state.depth && state.depth->samples == 4 && state.colors.size() == 1 && state.colors[0].samples == 1 && state.truncatedCoverage && !state.mergedCoverage && !state.perSampleShading, "a 4-sample color target with one fragment beside a 4x depth target (PPSA02015's registers) did not keep sample 0's color in its one fragment");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck refused a 4-sample color target with one fragment beside a 4x depth target");
+    queue = oneFragment();
+    queue.context[0x31c] |= 0x4000u;
+    queue.context[0x321] = 0x00c3a1b2u;
+    queue.context[0x3a0] = 0x01u;
+    state = DecodeState(queue);
+    Require(state.colors.size() == 1 && state.colors[0].fmaskAddress == ((1ull << 40u) | 0xc3a10000ull), "a compressed one-fragment color target did not decode its FMASK address");
+    queue.context[0x321] = 0u;
+    queue.context[0x3a0] = 0u;
+    expectFailure([&] { DecodeState(queue); }, "a compressed one-fragment color target without an FMASK address is unsupported");
+    queue.context[0x321] = 0xa5u;
+    expectFailure([&] { DecodeState(queue); }, "a compressed one-fragment color target without an FMASK address is unsupported");
+    queue = oneFragment();
+    Require(DecodeState(queue).colors[0].fmaskAddress == 0u, "an uncompressed one-fragment color target noted an FMASK address");
+    queue = oneFragment();
+    queue.context[0x31d] = 0xa000;
+    expectFailure([&] { DecodeState(queue); }, "color targets with more than one but fewer fragments than samples (EQAA) are unsupported");
+    queue = oneFragment();
+    queue.context[0x31d] = 0x8000;
+    expectFailure([&] { DecodeState(queue); }, "color targets with more fragments than samples are unsupported");
+    queue = oneFragment();
+    queue.context[0x201] = 0x012202;
+    expectFailure([&] { DecodeState(queue); }, "a one-fragment color target is supported only with static DB_EQAA anchors at the depth target's sample count");
+    queue = oneFragment();
+    queue.context[0x201] = 0x112201;
+    expectFailure([&] { DecodeState(queue); }, "a one-fragment color target is supported only with static DB_EQAA anchors at the depth target's sample count");
+    queue = oneFragment();
+    queue.context[0x2f8] = 0x00100001;
+    queue.context[0x010] = 0x22900987;
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0xcc44;
+    expectFailure([&] { DecodeState(queue); }, "a one-fragment color target's sample count differs from the rasterizer's");
+    queue = oneFragment();
+    queue.context[0x010] = 0;
+    queue.context[0x011] = 0;
     expectFailure([&] { DecodeState(queue); }, "a color target's sample count differs from the rasterizer's");
     queue = singleSampleScan();
     queue.context[0x010] = 0x22900983;
@@ -10767,6 +10814,21 @@ void validationTests() {
         attribute.components = 2;
         attribute.resource.fields[1] |= 0x80000000u;
         expectFailure([&] { AgcDriver::Graphics::BuildVertexInputLayout(context, std::span(&attribute, 1)); }, "descriptor flags");
+        attribute.resource.fields = {0x1000, 8u << 16u, 3, 71u << 12u};
+        attribute.components = 3;
+        context.formatProperties = [](VkPhysicalDevice, VkFormat format, VkFormatProperties* properties) {
+            *properties = {};
+            if (format == VK_FORMAT_R16G16B16A16_SFLOAT || format == VK_FORMAT_R8G8B8A8_UNORM) properties->bufferFeatures = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+        };
+        Require(AgcDriver::Graphics::DecodeVertexFormat(attribute).format == VK_FORMAT_R16G16B16_SFLOAT && AgcDriver::Graphics::DecodeVertexFormat(attribute).bytes == 6, "a 3-component 16_16_16_16 float attribute was not decoded as 3 components");
+        const auto widened = AgcDriver::Graphics::BuildVertexInputLayout(context, std::span(&attribute, 1));
+        Require(widened.attributes[0].format == VK_FORMAT_R16G16B16A16_SFLOAT && widened.bindings[0].stride == 8 && AgcDriver::Graphics::VertexReadBytes(attribute, widened.attributes[0].format) == 8, "a 3-component 16_16_16_16 float attribute was not widened to the format the device supports");
+        Require(AgcDriver::Graphics::VertexAttributeSignature(attribute) == "f32x3", "widening the vertex format changed the shader input");
+        attribute.resource.fields = {0x1000, 4u << 16u, 3, 56u << 12u};
+        Require(AgcDriver::Graphics::BuildVertexInputLayout(context, std::span(&attribute, 1)).attributes[0].format == VK_FORMAT_R8G8B8A8_UNORM, "a 3-component 8_8_8_8 unorm attribute was not widened to the format the device supports");
+        attribute.resource.fields = {0x1000, 12u << 16u, 3, 74u << 12u};
+        expectFailure([&] { AgcDriver::Graphics::BuildVertexInputLayout(context, std::span(&attribute, 1)); }, "device does not support vertex format 106");
+        expectFailure([&] { AgcDriver::Graphics::VertexReadBytes(attribute, VK_FORMAT_R32G32B32A32_SFLOAT); }, "is not a form of");
     }
     for (const auto capability : {spv::CapabilityInt64Atomics, spv::CapabilityInt64ImageEXT}) {
         ShaderRecompiler::RecompileResult vertex;
