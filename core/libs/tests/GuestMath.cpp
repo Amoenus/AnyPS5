@@ -97,6 +97,7 @@ float APS5_VABI remquof_nid_postfix(float, float, int*);
 float APS5_VABI fmaf_nid_postfix(float, float, float);
 long double APS5_VABI ceill_nid_postfix(long double);
 long double APS5_VABI floorl_nid_postfix(long double);
+float APS5_VABI cbrtf_nid_postfix(float);
 float APS5_VABI tanf_nid_postfix(float);
 int APS5_VABI rand_nid_postfix();
 void APS5_VABI srand_nid_postfix(unsigned int);
@@ -126,6 +127,7 @@ float APS5_VABI nextafterf_nid_postfix(float, float);
 double APS5_VABI nextafter_nid_postfix(double, double);
 double APS5_VABI frexp_nid_postfix(double, int*);
 float APS5_VABI frexpf_nid_postfix(float, int*);
+float APS5_VABI logf_nid_postfix(float);
 std::int64_t APS5_VABI lround_nid_postfix(double);
 std::div_t APS5_VABI div_nid_postfix(int, int);
 double APS5_VABI sinh_nid_postfix(double);
@@ -715,6 +717,21 @@ static void CheckAsinl() {
     *__error_nid_postfix() = 0;
 }
 
+static void CheckCbrtfConsoleBits() {
+    constexpr std::uint32_t cases[][2] = {
+        {0x00000123u, 0x28059605u}, {0x00400327u, 0x2a4b334bu}, {0x3f000555u, 0x3f4b32c7u}, {0x3fc00778u, 0x3f9287e5u},
+        {0x42000999u, 0x404b3509u}, {0x7e000bbcu, 0x544b362au}, {0xbf400dddu, 0xbf689d01u}, {0x80201002u, 0xaa215ff8u},
+        {0x00000000u, 0x00000000u}, {0x80000000u, 0x80000000u}, {0x00000001u, 0x26a14518u}, {0x007fffffu, 0x2a7fffffu},
+        {0x00800000u, 0x2a800000u}, {0x3f800000u, 0x3f800000u}, {0x41000000u, 0x40000000u}, {0xc1000000u, 0xc0000000u},
+        {0x7f7fffffu, 0x54cb2ff5u}, {0x7f800000u, 0x7f800000u}, {0xff800000u, 0xff800000u}, {0x7fc00001u, 0x7fc00001u},
+        {0xffc00002u, 0xffc00002u},
+    };
+    for (const auto& [input, expected] : cases) {
+        errno = 1234;
+        Require(std::bit_cast<std::uint32_t>(cbrtf_nid_postfix(std::bit_cast<float>(input))) == expected && errno == 1234);
+    }
+}
+
 static void CheckIntegerConversions() {
     for (const long long numerator : {4294967301LL, -4294967301LL}) {
         for (const long long denominator : {3LL, -3LL}) {
@@ -1181,6 +1198,26 @@ static void RequireBytes(const void* constant, std::initializer_list<unsigned ch
     while (index < 16) Require(bytes[index++] == 0);
 }
 
+static void CheckLogfConsoleBits() {
+    constexpr struct {
+        std::uint32_t input;
+        std::uint32_t expected;
+        int error;
+    } cases[] = {
+        {0x00000983u, 0xc2bef664u, 0}, {0x3e003791u, 0xc004f9cfu, 0}, {0x3f7f0a10u, 0xbb76666fu, 0}, {0x3f81086bu, 0x3c03adacu, 0},
+        {0x40400de0u, 0x3f8ca894u, 0}, {0x5f00a041u, 0x422eb14eu, 0}, {0x3f800000u, 0x00000000u, 0}, {0x40000000u, 0x3f317218u, 0},
+        {0x00000001u, 0xc2ce8ed0u, 0}, {0x00800000u, 0xc2aeac50u, 0}, {0x7f7fffffu, 0x42b17218u, 0}, {0x7f800000u, 0x7f800000u, 0},
+        {0x3f800001u, 0x33ffffffu, 0}, {0x3f7fffffu, 0xb3800000u, 0}, {0x7fc00001u, 0x7fc00001u, 0},
+        {0x00000000u, 0xff800000u, ERANGE}, {0x80000000u, 0xff800000u, ERANGE}, {0x80000001u, 0xffc00000u, EDOM},
+        {0xbf800000u, 0xffc00000u, EDOM}, {0xff800000u, 0xffc00000u, EDOM}, {0xffc00002u, 0xffc00002u, EDOM},
+    };
+    for (const auto& item : cases) {
+        errno = 1234;
+        Require(std::bit_cast<std::uint32_t>(logf_nid_postfix(std::bit_cast<float>(item.input))) == item.expected);
+        Require(errno == (item.error != 0 ? item.error : 1234));
+    }
+}
+
 static void CheckDinkumwareConstants() {
     RequireBytes(&_Inf_nid_postfix, {0, 0, 0, 0, 0, 0, 0xf0, 0x7f});
     RequireBytes(&_Denorm_nid_postfix, {1});
@@ -1446,6 +1483,7 @@ int main() {
     CheckMissingClassificationExports();
     CheckFloatMathExports();
     CheckIntegerConversions();
+    CheckCbrtfConsoleBits();
     CheckExtendedMath();
     Require(atof_nid_postfix(" -12.5tail") == -12.5);
     char* end = nullptr;
@@ -1727,6 +1765,7 @@ int main() {
     CheckScaledHyperbolic();
     CheckSinhf();
     CheckAtanhf();
+    CheckLogfConsoleBits();
     CheckHypotSpecialValue();
     CheckAtanfConsoleBits();
     CheckFloatUnderflowErrno();

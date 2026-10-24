@@ -153,6 +153,10 @@ std::uint32_t DeviceMemoryLdsBytes(const RecompileRequest& request) {
     return bytes + 4u > request.target.maxWorkgroupSharedMemoryBytes ? static_cast<std::uint32_t>(bytes) : 0u;
 }
 
+bool HardwareFloat32Flush(const RecompileRequest& request) {
+    return request.target.float32FlushToZero && (!request.context.floatMode.has_value() || ((request.context.floatMode->floatMode >> 4u) & 3u) == 0u);
+}
+
 std::atomic<std::uint64_t> frontEndBuilds{0};
 
 }
@@ -240,7 +244,7 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
     translateOptions.nativeFloat16 = supports(spv::CapabilityFloat16) && supports(spv::CapabilityRoundingModeRTE) && supports(spv::CapabilityDenormPreserve);
     translateOptions.interpolationFunctions = supports(spv::CapabilityInterpolationFunction);
     translateOptions.floatMode = request.context.floatMode;
-    translateOptions.float32FlushToZero = request.target.float32FlushToZero;
+    translateOptions.float32FlushToZero = HardwareFloat32Flush(request);
     translateOptions.inputInfo = inputInfo;
 
     constexpr InstructionTranslator translator;
@@ -605,7 +609,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     targetOptions.float16DenormPreserve = request.target.float16DenormPreserve;
     targetOptions.spannedWaves = request.target.spannedWaves;
     targetOptions.robustBufferAccess2 = request.target.robustBufferAccess2;
-    targetOptions.float32FlushToZero = request.target.float32FlushToZero;
+    targetOptions.float32FlushToZero = HardwareFloat32Flush(request);
     targetOptions.float32DenormPreserve = request.target.float32DenormPreserve;
     targetOptions.fusedExactArithmetic = request.target.fusedExactArithmetic;
     targetOptions.largePixelFunctionLdsBuffer = request.target.largePixelFunctionLdsBuffer;
