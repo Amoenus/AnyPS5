@@ -3761,9 +3761,13 @@ std::uint64_t StorageTexture::collectedLayerGeneration(std::uint32_t layer, std:
 
 void StorageTexture::noteLayersBehind(std::uint32_t firstLayer, std::uint32_t lastLayer, const std::vector<bool>& outside) {
     if (layerBehind.size() != trackedLayers) layerBehind.assign(trackedLayers, false);
+    static const bool trace = std::getenv("APS5_TRACE_UPLOAD") != nullptr;
+    if (trace) std::fprintf(stderr, "[layer-behind] begin image=0x%llx first=%u last=%u tracked=%u imageLayers=%u layerBytes=0x%llx generation=%llu imported=%d watched=%d alias=%d otherPending=%d\n", static_cast<unsigned long long>(descriptor.baseAddress), firstLayer, lastLayer, trackedLayers, geometry.imageLayers, static_cast<unsigned long long>(geometry.layerBytes), static_cast<unsigned long long>(generation), ExistingHostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) != nullptr ? 1 : 0, GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) ? 1 : 0, pendingAlias() != nullptr ? 1 : 0, otherPendingOverlaps() ? 1 : 0);
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
+        const bool before = layerBehind[layer];
         if (layer >= firstLayer && layer < lastLayer) layerBehind[layer] = false;
         else if (layer < outside.size() && outside[layer]) layerBehind[layer] = true;
+        if (trace) std::fprintf(stderr, "[layer-behind] scope image=0x%llx unit=%u range=0x%llx+0x%llx was=%d now=%d outside=%d unitGeneration=%llu selfPending=%d\n", static_cast<unsigned long long>(descriptor.baseAddress), layer, static_cast<unsigned long long>(layerBegin(layer)), static_cast<unsigned long long>(layerBytes(layer)), before ? 1 : 0, layerBehind[layer] ? 1 : 0, layer < outside.size() && outside[layer] ? 1 : 0, static_cast<unsigned long long>(layerGeneration[layer]), layerPending[layer] ? 1 : 0);
     }
     const auto layersEnd = layerBegin(lastLayer - 1) + layerBytes(lastLayer - 1);
     const std::array<std::pair<std::uint64_t, std::uint64_t>, 2> ranges{{{descriptor.baseAddress, layerBegin(firstLayer)}, {layersEnd, descriptor.baseAddress + guestBytes}}};
@@ -3778,11 +3782,16 @@ void StorageTexture::noteLayersBehind(std::uint32_t firstLayer, std::uint32_t la
                 if (end <= begin) continue;
                 const auto first = static_cast<std::uint32_t>((begin - descriptor.baseAddress) / trackedLayerBytes);
                 const auto last = static_cast<std::uint32_t>(std::min<std::uint64_t>((end - descriptor.baseAddress + trackedLayerBytes - 1) / trackedLayerBytes, trackedLayers));
-                for (auto layer = first; layer < last; ++layer) layerBehind[layer] = true;
+                for (auto layer = first; layer < last; ++layer) {
+                    const bool before = layerBehind[layer];
+                    layerBehind[layer] = true;
+                    if (trace) std::fprintf(stderr, "[layer-behind] pending image=0x%llx unit=%u range=0x%llx+0x%llx was=%d now=1 otherImage=0x%llx otherUnit=%u otherPending=%d whole=%d\n", static_cast<unsigned long long>(descriptor.baseAddress), layer, static_cast<unsigned long long>(layerBegin(layer)), static_cast<unsigned long long>(layerBytes(layer)), before ? 1 : 0, static_cast<unsigned long long>(other->descriptor.baseAddress), unit, other->layerPending[unit] ? 1 : 0, whole ? 1 : 0);
+                }
             }
         }
     }
     if (std::none_of(layerBehind.begin(), layerBehind.end(), [](bool behind) { return behind; })) layerBehind.clear();
+    if (trace) std::fprintf(stderr, "[layer-behind] end image=0x%llx behind=%zu\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<std::size_t>(std::count(layerBehind.begin(), layerBehind.end(), true)));
 }
 
 void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count) {
