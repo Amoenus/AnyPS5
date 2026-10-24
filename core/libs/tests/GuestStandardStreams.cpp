@@ -745,9 +745,11 @@ int main(int argc, char** argv) {
     Require(wideBuf[0] == u'E' && wideBuf[1] == u'n' && wideBuf[2] == u'd' && wideBuf[3] == 0);
     Require(fgetws_nid_postfix(wideBuf, 16, &wideIo) == nullptr);
     Require(feof_nid_postfix(&wideIo));
-    Require(fgetws_nid_postfix(wideBuf, 0, &wideIo) == nullptr && *__error_nid_postfix() == 22);
-    Require(ferror_nid_postfix(&wideIo));
     clearerr_nid_postfix(&wideIo);
+    *__error_nid_postfix() = 0;
+    Require(fgetws_nid_postfix(wideBuf, 0, &wideIo) == nullptr && *__error_nid_postfix() == 0);
+    Require(fgetws_nid_postfix(wideBuf, -1, &wideIo) == nullptr && *__error_nid_postfix() == 0);
+    Require(!ferror_nid_postfix(&wideIo));
     Require(fgetws_nid_postfix(nullptr, 16, &wideIo) == nullptr && *__error_nid_postfix() == 22);
     Require(ferror_nid_postfix(&wideIo));
     clearerr_nid_postfix(&wideIo);
@@ -755,7 +757,7 @@ int main(int argc, char** argv) {
     wideBuf[0] = u'X';
     wideBuf[1] = u'Y';
     std::rewind(wideIo.GetHandle());
-    Require(fgetws_nid_postfix(wideBuf, 1, &wideIo) == wideBuf && wideBuf[0] == 0 && wideBuf[1] == u'Y');
+    Require(fgetws_nid_postfix(wideBuf, 1, &wideIo) == nullptr && wideBuf[0] == u'X' && wideBuf[1] == u'Y');
     Require(fgetc_nid_postfix(&wideIo) == 'H');
     wideIo.Close();
 
@@ -779,7 +781,7 @@ int main(int argc, char** argv) {
     Require(fputc_nid_postfix(0xff, &midErr) == 0xff);
     std::rewind(midErr.GetHandle());
     char16_t midBuf[16]{};
-    Require(fgetws_nid_postfix(midBuf, 16, &midErr) == nullptr);
+    Require(fgetws_nid_postfix(midBuf, 16, &midErr) == midBuf && midBuf[0] == u'A' && midBuf[1] == 0);
     Require(ferror_nid_postfix(&midErr));
     midErr.Close();
 
