@@ -7509,7 +7509,7 @@ void verifyScalarImageWords() {
     using namespace ShaderRecompiler;
     IrProgram program;
     auto& resources = program.Resources();
-    resources.stage = IrShaderStage::Fragment;
+    resources.stage = IrShaderStage::Pixel;
     resources.userDataBase = 0u;
     resources.userDataCount = 8u;
     resources.memoryInfo.resize(16u);
@@ -7528,7 +7528,7 @@ void verifyScalarImageWords() {
         const auto memory = index < 8u ? index + 8u : index - 8u;
         resources.memoryInfo[memory].kind = ResourceKind::ScalarAddress;
         resources.memoryInfo[memory].offset = index < 8u ? 128u + index * 4u : (index - 8u) * 4u;
-        builder.Emit(IrOpcode::LoadAddressU32, IrType::U32, {&address, &builder.Constant(0u), &builder.Constant(0u), &active}, MemoryFlags{memory, index < 8u ? 4u : 8u});
+        static_cast<void>(builder.Emit(IrOpcode::LoadAddressU32, IrType::U32, {&address, &builder.Constant(0u), &builder.Constant(0u), &active}, MemoryFlags{memory, index < 8u ? 4u : 8u}));
     }
     SrtWalker{}.BuildPlan(program);
     require(resources.srtReads.size() == 16u, "scalar image words: the planned flat layout changed");
