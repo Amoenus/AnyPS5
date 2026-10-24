@@ -243,10 +243,12 @@ if(BUILD_TESTING)
     add_dependencies(guest_module_fixture nid_patcher)
     configure_windows_unwind(guest_module_fixture)
     set_target_properties(guest_module_fixture PROPERTIES BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "$ORIGIN")
-    if(Python3_Interpreter_FOUND AND NOT WIN32)
-        target_link_options(guest_module_fixture PRIVATE -Wl,--no-as-needed)
-        add_test(NAME nid_patcher_dynamic_strings COMMAND ${Python3_EXECUTABLE}
-            ${LIBS_INCLUDE_DIR}/nid/tests/test_dynamic_strings.py $<TARGET_FILE:guest_module_fixture>)
+    if(Python3_Interpreter_FOUND)
+        if(NOT WIN32)
+            target_link_options(guest_module_fixture PRIVATE -Wl,--no-as-needed)
+            add_test(NAME nid_patcher_dynamic_strings COMMAND ${Python3_EXECUTABLE}
+                ${LIBS_INCLUDE_DIR}/nid/tests/test_dynamic_strings.py $<TARGET_FILE:guest_module_fixture>)
+        endif()
         add_test(NAME nid_patcher_symbol_versions COMMAND ${Python3_EXECUTABLE}
             ${LIBS_INCLUDE_DIR}/nid/tests/test_symbol_versions.py $<TARGET_FILE:nid_patcher>)
     endif()
