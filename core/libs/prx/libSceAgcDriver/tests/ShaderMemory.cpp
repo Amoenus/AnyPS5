@@ -7533,6 +7533,7 @@ void verifyScalarImageWords() {
     SrtWalker{}.BuildPlan(program);
     require(resources.srtReads.size() == 16u, "scalar image words: the planned flat layout changed");
     require(resources.srtReads[11].value->Flags<MemoryFlags>().index == 3u && resources.srtReads[13].value->Flags<MemoryFlags>().index == 5u, "scalar image words: the descriptor origins do not map to slots 11 and 13");
+    require(resources.srtReads[11].value->Flags<MemoryFlags>().pc == 8u && resources.memoryInfo[3].offset == 12u && resources.srtReads[13].value->Flags<MemoryFlags>().pc == 8u && resources.memoryInfo[5].offset == 20u, "scalar image words: the scalar memory origin changed");
     resources.descriptorSources.emplace_back();
     DescriptorSource imageSource;
     imageSource.dwordCount = 8u;
@@ -7549,11 +7550,13 @@ void verifyScalarImageWords() {
     resources.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(image));
     resources.resourceTrackingComplete = true;
     const auto plan = ResourceMaterializer{}.ExtractPlan(program);
+    require(!plan.compact.values.empty(), "scalar image words: the owned plan did not compact");
     std::vector<std::byte> encoded;
     require(ShaderDiskCache::EncodePlan(plan, encoded), "scalar image words: cannot encode the owned plan");
     IrResourcePlan decoded;
     IrResourcePlan decodedIr;
     require(ShaderDiskCache::DecodePlan(encoded, decoded) && ShaderDiskCache::DecodePlan(encoded, decodedIr), "scalar image words: cannot decode the owned plan");
+    require(!decoded.compact.values.empty(), "scalar image words: the cached plan did not preserve compact values");
     decodedIr.compact = {};
     struct Context {
         std::uint64_t base = 0;
