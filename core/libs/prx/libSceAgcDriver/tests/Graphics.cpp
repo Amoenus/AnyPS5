@@ -3118,6 +3118,22 @@ void depthCopyPassTests() {
 void metadataPassTests() {
     using AgcDriver::Graphics::ColorMetadataPass;
     using AgcDriver::Graphics::DecodeColorMetadataPass;
+    for (const auto mode : {ColorMetadataPass::Mode::Resolve, ColorMetadataPass::Mode::EliminateFastClear, ColorMetadataPass::Mode::DccDecompress}) {
+        for (const auto tileMode : {AgcDriver::Graphics::ColorTileMode::Linear, AgcDriver::Graphics::ColorTileMode::Standard4KB, AgcDriver::Graphics::ColorTileMode::RenderTarget, AgcDriver::Graphics::ColorTileMode::S4KBX}) {
+            for (const bool volume : {false, true}) {
+                AgcDriver::Graphics::ColorTarget target{};
+                target.surfaceAddress = 0x10000u;
+                target.address = 0x18000u;
+                target.bytes = 0x10000u;
+                target.tileMode = tileMode;
+                target.volume = volume;
+                target.mipCount = 2u;
+                const auto begin = volume && tileMode != AgcDriver::Graphics::ColorTileMode::Linear ? target.surfaceAddress : target.address;
+                const auto writes = AgcDriver::Graphics::PipelinedColorMetadataPassWrites({mode, {target}, target});
+                Require(writes == std::vector<std::pair<std::uint64_t, std::uint64_t>>{{begin, begin + target.bytes}}, "a pipelined color metadata write shifted its backing interval");
+            }
+        }
+    }
     auto queue = makeState();
     queue.context[0x0] = 0;
     Require(!DecodeColorMetadataPass(queue).has_value(), "normal color rendering decoded as a metadata pass");
