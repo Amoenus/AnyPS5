@@ -1,3 +1,4 @@
+#include "prx/libSceAjm.native/include/Api.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
@@ -15,34 +16,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
-
-extern "C" {
-int APS5_VABI sceAjmInitialize(std::int64_t, std::uint32_t*);
-int APS5_VABI sceAjmFinalize(std::uint32_t);
-int APS5_VABI sceAjmDecAt9ParseConfigData(const void*, AjmDecAt9ConfigDataInfo*);
-int APS5_VABI sceAjmDecMp3ParseFrame(const std::uint8_t*, std::uint32_t, int, AjmDecMp3ParseFrame*);
-int APS5_VABI sceAjmInstanceCreate(std::uint32_t, std::uint32_t, std::uint64_t, std::uint32_t*);
-int APS5_VABI sceAjmInstanceDestroy(std::uint32_t, std::uint32_t);
-int APS5_VABI sceAjmBatchInitialize(void*, std::size_t, AjmBatchInfo*);
-int APS5_VABI sceAjmBatchJobInitialize(AjmBatchInfo*, std::uint32_t, const void*, std::size_t, void*);
-int APS5_VABI sceAjmBatchJobDecode(AjmBatchInfo*, std::uint32_t, const void*, std::size_t, void*, std::size_t, void*);
-int APS5_VABI sceAjmBatchJobDecodeSingle(AjmBatchInfo*, std::uint32_t, const void*, std::size_t, void*, std::size_t, void*);
-int APS5_VABI sceAjmBatchJobRun(AjmBatchInfo*, std::uint32_t, std::uint64_t, const void*, std::size_t, void*, std::size_t, void*, std::size_t);
-int APS5_VABI sceAjmBatchJobRunSplit(AjmBatchInfo*, std::uint32_t, std::uint64_t, const AjmBuffer*, std::size_t, const AjmBuffer*, std::size_t, void*, std::size_t);
-int APS5_VABI sceAjmBatchJobSetGaplessDecode(AjmBatchInfo*, std::uint32_t, const void*, int, void*);
-int APS5_VABI sceAjmBatchJobControl(AjmBatchInfo*, std::uint32_t, std::uint64_t, const void*, std::size_t, void*, std::size_t);
-int APS5_VABI sceAjmBatchJobGetGaplessDecode(AjmBatchInfo*, std::uint32_t, void*);
-int APS5_VABI sceAjmBatchJobGetCodecInfo(AjmBatchInfo*, std::uint32_t, void*, std::size_t);
-int APS5_VABI sceAjmBatchJobGetInfo(AjmBatchInfo*, std::uint32_t, void*);
-int APS5_VABI sceAjmBatchStart(std::uint32_t, const AjmBatchInfo*, int, AjmBatchError*, std::uint32_t*);
-int APS5_VABI sceAjmBatchWait(std::uint32_t, std::uint32_t, std::uint32_t, AjmBatchError*);
-int APS5_VABI sceAjmBatchCancel(std::uint32_t, std::uint32_t);
-int APS5_VABI sceAjmBatchJobClearContext(AjmBatchInfo*, std::uint32_t, void*);
-int APS5_VABI sceAjmBatchJobSetResampleParameters(AjmBatchInfo*, std::uint32_t, float, std::uint32_t, void*);
-int APS5_VABI sceAjmBatchJobGetResampleInfo(AjmBatchInfo*, std::uint32_t, void*);
-int APS5_VABI sceAjmBatchJobSetResampleParametersEx(AjmBatchInfo*, std::uint32_t, float, float, std::uint32_t, void*);
-int APS5_VABI sceAjmBatchJobDecodeSplit(AjmBatchInfo*, std::uint32_t, const AjmBuffer*, std::size_t, const AjmBuffer*, std::size_t, void*);
-}
 
 static void Require(bool value) { if (!value) std::abort(); }
 
@@ -866,6 +839,69 @@ void TestGetInfo(std::uint32_t context) {
     Require(decoded.result == 0 && decoded.inputConsumed == 96);
     Require(mp3.result == 0 && mp3.internalResult == 0 && mp3.numChannels == 1 && mp3.channelMask == 0x4 && mp3.sampleRate == 48000 && mp3.sampleEncoding == 0 && mp3.bitrate == 32000 && mp3.reserved == 0);
     Require(sceAjmInstanceDestroy(context, instance) == 0);
+}
+
+void TestBatchBounds(std::uint32_t context) {
+    constexpr int invalidParameter = static_cast<int>(0x80930005);
+    std::vector<std::uint8_t> storage(128);
+    AjmBatchInfo info{};
+    Require(sceAjmBatchInitialize(storage.data(), storage.size(), &info) == 0);
+    const std::uint32_t parameters[3] = {2, 48000, 0};
+    std::int32_t result[2] = {-1, -1};
+    Require(sceAjmBatchJobInitialize(&info, 0, parameters, sizeof(parameters), result) == 0);
+    const auto completeBytes = info.offset;
+#ifdef _WIN32
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    const std::size_t pageSize = system.dwPageSize;
+    auto* pages = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 2 * pageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    Require(pages != nullptr);
+    DWORD oldProtection = 0;
+    Require(VirtualProtect(pages + pageSize, pageSize, PAGE_NOACCESS, &oldProtection) != 0);
+#else
+    const long hostPageSize = sysconf(_SC_PAGESIZE);
+    Require(hostPageSize > 0);
+    const std::size_t pageSize = static_cast<std::size_t>(hostPageSize);
+    auto* pages = static_cast<std::uint8_t*>(mmap(nullptr, 2 * pageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    Require(pages != MAP_FAILED);
+    Require(mprotect(pages + pageSize, pageSize, PROT_NONE) == 0);
+#endif
+    Require(completeBytes < pageSize);
+    for (std::size_t bytes = 1; bytes < completeBytes; ++bytes) {
+        auto* truncated = pages + pageSize - bytes;
+        std::memcpy(truncated, storage.data(), bytes);
+        AjmBatchInfo partial{truncated, bytes, bytes};
+        std::uint32_t batch = 0xdeadbeef;
+        bool threw = false;
+        try {
+            sceAjmBatchStart(context, &partial, 0, nullptr, &batch);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        Require(threw && batch == 0xdeadbeef && result[0] == -1 && result[1] == -1);
+    }
+    for (std::uint8_t value : {std::uint8_t{0}, std::uint8_t{0xff}}) {
+        std::fill(storage.begin(), storage.end(), value);
+        std::uint32_t batch = 0xdeadbeef;
+        bool threw = false;
+        try {
+            sceAjmBatchStart(context, &info, 0, nullptr, &batch);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        Require(threw && batch == 0xdeadbeef && result[0] == -1 && result[1] == -1);
+    }
+    std::uint32_t batch = 0xdeadbeef;
+    AjmBatchInfo invalid{pages + pageSize, 1, 0};
+    Require(sceAjmBatchStart(context, &invalid, 0, nullptr, &batch) == invalidParameter);
+    invalid = {nullptr, 1, 1};
+    Require(sceAjmBatchStart(context, &invalid, 0, nullptr, &batch) == invalidParameter);
+    Require(batch == 0xdeadbeef);
+#ifdef _WIN32
+    Require(VirtualFree(pages, 0, MEM_RELEASE) != 0);
+#else
+    Require(munmap(pages, 2 * pageSize) == 0);
+#endif
 }
 
 void TestBatchWaitRelease(std::uint32_t context) {
@@ -1999,6 +2035,7 @@ int main() {
     bool nullBuffersThrow = false;
     try {
         sceAjmBatchJobRunSplit(&batchInfo, 0, 0, nullptr, 1, nullptr, 0, nullptr, 0);
+
     } catch (const std::runtime_error&) {
         nullBuffersThrow = true;
     }
@@ -2029,6 +2066,7 @@ int main() {
     TestGaplessDecode(context);
     TestCodecInfo(context);
     TestGetInfo(context);
+    TestBatchBounds(context);
     TestBatchWaitRelease(context);
     TestInstanceHandleLifetime(context);
     TestBatchCancel(context);
