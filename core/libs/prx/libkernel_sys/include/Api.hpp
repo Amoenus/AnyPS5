@@ -62,6 +62,7 @@ int APS5_VABI chown_nid_postfix(const char* path, std::uint32_t uid, std::uint32
 int APS5_VABI lchown_nid_postfix(const char* path, std::uint32_t uid, std::uint32_t gid);
 int APS5_VABI fchownat_nid_postfix(int fd, const char* path, std::uint32_t uid, std::uint32_t gid, int flag);
 int APS5_VABI fstatat_nid_postfix(int fd, const char* path, FileStat* sb, int flag);
+int APS5_VABI settimeofday_nid_postfix(const KernelTimeval* tv, const KernelTimezone* tz);
 int APS5_VABI unlinkat_nid_postfix(int fd, const char* path, int flag);
 int APS5_VABI scePthreadCondattrGetclock(const PthreadCondattr* attr, KernelClockid* clockId);
 int APS5_VABI renameat_nid_postfix(int oldfd, const char* from, int newfd, const char* to);
@@ -533,7 +534,6 @@ int APS5_VABI sched_setscheduler_nid_postfix(void);
 int APS5_VABI sem_setname_nid_postfix(void);
 int APS5_VABI set_phys_fmem_limit_nid_postfix(void);
 int APS5_VABI setlogin_nid_postfix(void);
-int APS5_VABI settimeofday_nid_postfix(void);
 int APS5_VABI sigqueue_nid_postfix(void);
 int APS5_VABI sigreturn_nid_postfix(void);
 int APS5_VABI statfs_nid_postfix(void);
