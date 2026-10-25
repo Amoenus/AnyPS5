@@ -1028,6 +1028,7 @@ ResourceCache::Key DrawResourceKey(const Context& context, std::span<const Compi
 // would have failed its build fails its hit.
 void CheckBufferAliases(std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::uint64_t indexBytes) {
     const auto overlap = [](std::uint64_t first, std::uint64_t firstSize, std::uint64_t second, std::uint64_t secondSize) { return first < second + secondSize && second < first + firstSize; };
+    const auto targetAddress = target.MemoryAddress();
     for (const auto& shader : shaders) {
         for (const auto& binding : shader.program->bindings) {
             if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
@@ -1039,8 +1040,8 @@ void CheckBufferAliases(std::span<const CompiledShader> shaders, const ColorTarg
                 if (size == 0 || address == 0) continue;
                 const auto element = offset / 4;
                 const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
-                if (const std::uint64_t stride = descriptor.Stride(); !written && stride != 0 && address < target.address && address + size > target.address && address + size - target.address < stride) size = target.address - address;
-                Require(!overlap(address, size, target.address, target.bytes), "shader buffer aliases the render target");
+                if (const std::uint64_t stride = descriptor.Stride(); !written && stride != 0 && address < targetAddress && address + size > targetAddress && address + size - targetAddress < stride) size = targetAddress - address;
+                Require(!overlap(address, size, targetAddress, target.bytes), "shader buffer aliases the render target");
                 Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
             }
         }
@@ -1341,7 +1342,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     Require(indexBytes <= std::numeric_limits<std::size_t>::max(), "index buffer size overflow");
     if (draw.indexed) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
     APS5_LOG_CHARS_OUT_DEBUG("Index buffer range OK");
-    Require(!draw.indexed || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.address || state.color.address + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
+    Require(!draw.indexed || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.MemoryAddress() || state.color.MemoryAddress() + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
     if (draw.indexed) RequireNoMultisampleTarget(draw.indexAddress, static_cast<std::size_t>(indexBytes), "an index buffer read");
     if (state.pixelKill && !state.pixelEarlyZ && std::ranges::any_of(state.colors, [](const ColorTarget& color) { return color.partialWriteMask != 0; })) {
         const auto* recorder = Recorder::Active();
@@ -1558,7 +1559,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
         const auto firstByte = args == nullptr ? VertexBufferReadOffset(attribute, draw.firstVertex, draw.firstInstance) : 0;
-        Require(!state.hasColorTarget || address + bytes <= state.color.address || state.color.address + state.color.bytes <= address + firstByte, "vertex buffer aliases the render target");
+        Require(!state.hasColorTarget || address + bytes <= state.color.MemoryAddress() || state.color.MemoryAddress() + state.color.bytes <= address + firstByte, "vertex buffer aliases the render target");
         const auto stride = (fields[1] >> 16u) & 0x3fffu;
         fetchOf[i] = fetches.size();
         fetches.push_back({address, address + bytes, stride, attribute.fetchIndex, DecodeVertexFormat(attribute).alignment});
@@ -2654,7 +2655,7 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
         };
         for (const auto& target : targets) {
             const bool imageRead = target.resident != nullptr && std::ranges::any_of(readImages, [&](const auto& image) { return image.first == target.resident->Image(); });
-            Require(!imageRead && !resources->ReadsImage(target.resident.get()) && !resources->ReadsOverlap(target.color.address, static_cast<std::size_t>(target.color.bytes)) && !inputOverlaps(target.color.address, target.color.bytes), "stencil replay refuses attachment feedback reads");
+            Require(!imageRead && !resources->ReadsImage(target.resident.get()) && !resources->ReadsOverlap(target.color.MemoryAddress(), static_cast<std::size_t>(target.color.bytes)) && !inputOverlaps(target.color.MemoryAddress(), target.color.bytes), "stencil replay refuses attachment feedback reads");
         }
         if (state.depth) {
             const auto bytes = static_cast<std::size_t>(state.depth->extent.width) * state.depth->extent.height * 4u;
@@ -3165,7 +3166,7 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
     if (checkRecords) checkRecords();
     timer.phase(PhaseSync);
     APS5_LOG_CHARS_OUT_DEBUG("SubmitAndWait OK");
-    for (const auto& binding : targets) GuestMemory::CheckRange(reinterpret_cast<const void*>(binding.color.address), binding.color.bytes, 256, true);
+    for (const auto& binding : targets) GuestMemory::CheckRange(reinterpret_cast<const void*>(binding.color.MemoryAddress()), binding.color.bytes, 256, true);
     for (auto& binding : targets) {
         if (!binding.dump) continue;
         std::lock_guard lock(dumpMutex);
@@ -3377,14 +3378,14 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> PipelinedColorMetadataPassW
         if (!pass.source.has_value() || pass.targets.size() != 1) return writes;
         const auto& destination = pass.targets.front();
         if (destination.samples != 1u || destination.bytes == 0 || destination.cmaskAddress != 0) return writes;
-        writes.emplace_back(destination.address, destination.address + destination.bytes);
+        writes.emplace_back(destination.MemoryAddress(), destination.MemoryAddress() + destination.bytes);
         if (destination.dccAddress != 0) writes.emplace_back(destination.dccAddress, destination.dccAddress + std::max<std::size_t>(colorKeyCount(destination, destination.bytes), 1u));
         return writes;
     }
     if (pass.mode != ColorMetadataPass::Mode::EliminateFastClear && pass.mode != ColorMetadataPass::Mode::DccDecompress) return writes;
     for (const auto& color : pass.targets) {
         if (color.samples != 1u || color.bytes == 0) return {};
-        writes.emplace_back(color.address, color.address + color.bytes);
+        writes.emplace_back(color.MemoryAddress(), color.MemoryAddress() + color.bytes);
         if (color.cmaskAddress != 0) writes.emplace_back(color.cmaskAddress, color.cmaskAddress + std::max<std::size_t>(color.cmaskBytes, 1u));
         if (color.dccAddress != 0) writes.emplace_back(color.dccAddress, color.dccAddress + std::max<std::size_t>(colorKeyCount(color, color.bytes), 1u));
     }
