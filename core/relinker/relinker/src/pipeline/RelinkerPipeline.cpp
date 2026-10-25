@@ -314,8 +314,8 @@ RelinkResult RelinkerPipeline::Relink() {
         return type == R_X86_64_DTPMOD64 || type == R_X86_64_DTPOFF64 || type == R_X86_64_TPOFF64;
     };
 
-    const bool hasTlsSegment = std::any_of(programHeaders.begin(), programHeaders.end(),
-                                           [](const ProgramHeader& ph) { return ph.Type == PT_TLS; });
+    const bool hasNonEmptyTlsSegment = std::any_of(programHeaders.begin(), programHeaders.end(),
+                                                   [](const ProgramHeader& ph) { return ph.Type == PT_TLS && ph.MemorySize != 0; });
 
     const auto definedTlsSymbolValue = [&](const std::uint32_t symIdx, const FileByteOffset pos) -> std::optional<std::uint64_t> {
         const FileByteOffset symOff = symbolEntryPos(symIdx);
@@ -576,8 +576,8 @@ RelinkResult RelinkerPipeline::Relink() {
                     continue;
                 offset = *value;
             }
-            if (!hasTlsSegment)
-                throw RelinkerException("TLS relocation in an executable without a PT_TLS segment", pos);
+            if (!hasNonEmptyTlsSegment)
+                throw RelinkerException("TLS relocation in an executable without a non-empty PT_TLS segment", pos);
             if (relType == R_X86_64_DTPMOD64 && rAddend != 0)
                 throw RelinkerException("DTPMOD64 relocation has a nonzero addend", pos);
             const auto addend = relType == R_X86_64_DTPMOD64 ? 0 : static_cast<std::int64_t>(offset + static_cast<std::uint64_t>(rAddend));
