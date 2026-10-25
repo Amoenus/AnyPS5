@@ -1,11 +1,10 @@
-#include "prx/libSceJobManager/include/Api.hpp"
+#include "prx/libSceJobManager/libSceJobManager.hpp"
 #include "SceTypes.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <windows.h>
 
-struct SequenceFactory;
 
 int RunJobManagerCase(const char* name);
 
@@ -55,12 +54,12 @@ int APS5_VABI _ZN3sce3Job10JobManager8shutdownEv(void* self) {
     return call(self);
 }
 
-SequenceFactory* APS5_VABI _ZN3sce3Job10JobManager27getSequenceFactoryInterfaceENS1_8PriorityE(void* self, std::uint32_t priority) {
+ISequenceFactory* APS5_VABI _ZN3sce3Job10JobManager27getSequenceFactoryInterfaceENS1_8PriorityE(void* self, std::uint32_t priority) {
     static const auto call = Resolve<decltype(&_ZN3sce3Job10JobManager27getSequenceFactoryInterfaceENS1_8PriorityE)>("W-yXgQmaozU");
     return call(self, priority);
 }
 
-SequenceFactory* APS5_VABI _ZN3sce3Job10JobManager34getUnifiedSequenceFactoryInterfaceENS1_8PriorityE(void* self, std::uint32_t priority) {
+ISequenceFactory* APS5_VABI _ZN3sce3Job10JobManager34getUnifiedSequenceFactoryInterfaceENS1_8PriorityE(void* self, std::uint32_t priority) {
     static const auto call = Resolve<decltype(&_ZN3sce3Job10JobManager34getUnifiedSequenceFactoryInterfaceENS1_8PriorityE)>("L5jTAtk3HKA");
     return call(self, priority);
 }
