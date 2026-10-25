@@ -155,9 +155,9 @@ bool DeclaresLayer(std::span<const std::uint32_t> words) {
     return false;
 }
 
-void Run(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarget& color, bool mesh, std::span<const std::uint32_t> pixelCode, bool layerField) {
+void Run(AgcDriver::VulkanDevice& device, const AgcDriver::Graphics::ColorTarget& color, bool mesh, std::span<const std::uint32_t> pixelCode, bool layerField, std::span<const Vertex> vertices = Vertices) {
     const auto target = device.Target();
-    const auto vertexBuffer = BufferDescriptor(Vertices.data(), sizeof(Vertex), static_cast<std::uint32_t>(Vertices.size()));
+    const auto vertexBuffer = BufferDescriptor(vertices.data(), sizeof(Vertex), static_cast<std::uint32_t>(vertices.size()));
     const AgcDriver::Pm4::DrawParameters draw{0, 6u * color.layers, 0, 1, 0, false};
     ShaderRecompiler::ShaderVertexStageInfo vertexInfo{};
     vertexInfo.paClVsOutCntl = color.layers > 1u ? LayerExport : 0u;
@@ -317,7 +317,7 @@ void MipTargets(AgcDriver::VulkanDevice& device) {
         const auto block = geometry.thick ? ThickBlockExtent(surface.tileMode, 4u) : std::array<std::uint32_t, 3>{thin[1], thin[2], 1u};
         const auto* equation = linear ? nullptr : FindTextureSwizzleEquation((geometry.thick ? 0x100u : 0u) | static_cast<std::uint32_t>(mode), 4u);
         Require(linear || equation != nullptr, "missing volume mip swizzle equation");
-        const GuestVolume volume((geometry.guestBytes + 65535u) & ~std::size_t{65535u});
+        const GuestVolume volume((geometry.guestBytes + sizeof(Vertices) + 65535u) & ~std::size_t{65535u});
         const auto address = reinterpret_cast<std::uintptr_t>(volume.Data()) | pipeBankXor;
         AgcDriver::QueueState queue;
         auto& registers = queue.context;
@@ -331,7 +331,10 @@ void MipTargets(AgcDriver::VulkanDevice& device) {
         color.uintExport = uintExport;
         Require(SurfaceForTarget(color).dimension == TextureDimension::k3D, "a depth-one volume mip was treated as a 2D image");
         BuildBands(layers);
-        Run(device, color, false, uintExport ? std::span<const std::uint32_t>(UintPixelCode) : std::span<const std::uint32_t>(PixelCode), false);
+        auto* adjacentVertices = reinterpret_cast<Vertex*>(volume.Data() + geometry.guestBytes);
+        std::memcpy(adjacentVertices, Vertices.data(), sizeof(Vertices));
+        Run(device, color, false, uintExport ? std::span<const std::uint32_t>(UintPixelCode) : std::span<const std::uint32_t>(PixelCode), false, {adjacentVertices, Vertices.size()});
+        Require(std::memcmp(adjacentVertices, Vertices.data(), sizeof(Vertices)) == 0, "a volume mip draw changed the adjacent vertex buffer");
         for (std::uint32_t mipLevel = 0u; mipLevel < levels; ++mipLevel) {
             const auto& mip = geometry.mips.at(mipLevel);
             for (std::uint32_t slice = 0u; geometry.HasLayer(mipLevel, slice) && slice < depth; ++slice) {
