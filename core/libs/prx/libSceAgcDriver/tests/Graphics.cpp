@@ -2686,6 +2686,7 @@ void VolumeColorMipTests() {
                 Require(surface.dimension == AgcDriver::Graphics::TextureDimension::k3D && surface.depthOrLastArray + 1u == depth && surface.mipCount == 3u, "a mipmapped volume lost its base depth or dimension");
                 Require(color.extent.width == (96u >> level) && color.extent.height == (32u >> level) && color.depthSlice == slice && color.layers == 1u, "a volume mip selected the wrong extent or depth slice");
                 Require(color.surfaceAddress == address && color.address == address + mip.tiledOffset && color.mipTail == mip.tail, "a volume mip did not use its volume surface layout");
+                if (mode != AgcDriver::Graphics::ColorTileMode::Linear) Require(color.MemoryAddress() == address && color.MemoryAddress() + color.bytes == address + geometry.guestBytes, "a volume mip memory range extends beyond its surface");
                 queue.context[0x31b] = (level << 26u) | ((viewDepth + 3u) << 13u);
                 Require(AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0).layers == viewDepth, "a volume mip did not clamp the view to its minified depth");
                 queue.context[0x31b] = (level << 26u) | (viewDepth << 13u) | viewDepth;

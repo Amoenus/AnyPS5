@@ -74,6 +74,10 @@ struct ColorTarget {
     std::uint64_t fmaskAddress = 0;
     std::uint32_t fmaskPipeBankXor = 0;
     std::uint16_t partialWriteMask = 0;
+
+    std::uint64_t MemoryAddress() const {
+        return volume && tileMode != ColorTileMode::Linear ? surfaceAddress : address;
+    }
 };
 
 struct DepthTarget {
