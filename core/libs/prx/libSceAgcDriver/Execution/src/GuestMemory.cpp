@@ -1923,8 +1923,22 @@ bool UnchangedCommittedSince(std::span<const std::pair<std::uint64_t, std::uint6
     return true;
 }
 
+static GuestAllocations::Lease::Ranges pinStoreRanges(std::uint64_t address, std::size_t bytes) {
+    GuestAllocations::Lease::Ranges pinned;
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - address) return pinned;
+    const auto end = address + bytes;
+    for (auto at = address; at < end;) {
+        auto range = GuestAllocations::GuestAllocationsLookup_nid_postfix(at, true);
+        if (range == nullptr || range->address >= end) break;
+        at = range->address + range->bytes;
+        pinned.push_back(std::move(range));
+    }
+    return pinned;
+}
+
 std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::function<std::pair<std::uint64_t, std::uint64_t>()>& store) {
     if (bytes == 0) return 0;
+    const auto pinned = pinStoreRanges(address, bytes);
     BreakProofs();
     const auto stampStored = [](WriteTracker& tracker, std::pair<std::uint64_t, std::uint64_t> stored) -> std::uint64_t {
         if (stored.second <= stored.first) return 0;
@@ -1960,13 +1974,15 @@ std::uint64_t StoreOwnBytes(std::uint64_t address, std::size_t bytes, const std:
     });
 }
 
-std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> source) {
-    return StoreOwnBytes(address, source.size(), [&] {
+static void copyOwnBytes(std::uint64_t address, std::span<const std::byte> source) {
 #ifndef _WIN32
-        if (GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix() && GuestArena::GuestArenaWriteSharedBacking_nid_no_patch(address, source.data(), source.size())) return;
+    if (GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix() && GuestArena::GuestArenaWriteSharedBacking_nid_no_patch(address, source.data(), source.size())) return;
 #endif
-        std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
-    });
+    std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
+}
+
+std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> source) {
+    return StoreOwnBytes(address, source.size(), [&] { copyOwnBytes(address, source); });
 }
 
 static std::uint64_t markWritten(std::uint64_t address, std::size_t bytes, bool complete) {
@@ -2702,10 +2718,10 @@ void WriteChanged(std::uint64_t address, std::span<const std::byte> current, std
     FlushGpuWrites(address, current.size());
     const TimedAccess timed(CounterChangedWrite, current.size());
     auto* destination = reinterpret_cast<std::byte*>(address);
-    CheckRange(destination, current.size(), 1, true);
     const auto size = current.size();
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
     storeOwn(address, size, [&] {
+        CheckRange(destination, size, 1, true);
         std::size_t firstChanged = size;
         std::size_t lastChanged = 0;
         std::size_t at = 0;
@@ -2737,43 +2753,44 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
     const ReadSiteScope site(ReadSite::Store);
     FlushGpuWrites(address, source.size());
     const TimedAccess timed(CounterWrite, source.size());
-    CountWriteCaller(__builtin_return_address(0));
+    const auto* caller = __builtin_return_address(0);
+    CountWriteCaller(caller);
     auto* destination = reinterpret_cast<void*>(address);
-    try {
-        CheckRange(destination, source.size(), alignment, true);
-    } catch (const std::runtime_error&) {
-        static const bool trace = std::getenv("APS5_TRACE_UNREADABLE") != nullptr;
-        if (trace) {
-            const auto* caller = __builtin_return_address(0);
-            std::fprintf(stderr, "[unreadable]   write from +0x%llx\n", ModuleOffset(caller));
+    StoreOwnBytes(address, source.size(), [&] {
+        try {
+            CheckRange(destination, source.size(), alignment, true);
+        } catch (const std::runtime_error&) {
+            static const bool trace = std::getenv("APS5_TRACE_UNREADABLE") != nullptr;
+            if (trace) {
+                std::fprintf(stderr, "[unreadable]   write from +0x%llx\n", ModuleOffset(caller));
 #ifdef _WIN32
-            HMODULE module = nullptr;
-            if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, static_cast<LPCSTR>(caller), &module)) {
-                std::fprintf(stderr, "[unreadable]   writer module unavailable (lookup error %lu)\n", GetLastError());
-            } else {
-                char path[MAX_PATH]{};
-                const auto length = GetModuleFileNameA(module, path, sizeof(path));
-                const auto error = GetLastError();
-                FreeLibrary(module);
-                if (length == 0) {
-                    std::fprintf(stderr, "[unreadable]   writer module unavailable (name error %lu)\n", error);
-                } else if (length >= sizeof(path)) {
-                    std::fprintf(stderr, "[unreadable]   writer module unavailable (name truncated)\n");
+                HMODULE module = nullptr;
+                if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, static_cast<LPCSTR>(caller), &module)) {
+                    std::fprintf(stderr, "[unreadable]   writer module unavailable (lookup error %lu)\n", GetLastError());
                 } else {
-                    const char* name = path;
-                    for (const char* at = path; *at != '\0'; ++at) {
-                        if (*at == '\\' || *at == '/') name = at + 1;
+                    char path[MAX_PATH]{};
+                    const auto length = GetModuleFileNameA(module, path, sizeof(path));
+                    const auto error = GetLastError();
+                    FreeLibrary(module);
+                    if (length == 0) {
+                        std::fprintf(stderr, "[unreadable]   writer module unavailable (name error %lu)\n", error);
+                    } else if (length >= sizeof(path)) {
+                        std::fprintf(stderr, "[unreadable]   writer module unavailable (name truncated)\n");
+                    } else {
+                        const char* name = path;
+                        for (const char* at = path; *at != '\0'; ++at) {
+                            if (*at == '\\' || *at == '/') name = at + 1;
+                        }
+                        std::fprintf(stderr, "[unreadable]   writer module=%s\n", name);
                     }
-                    std::fprintf(stderr, "[unreadable]   writer module=%s\n", name);
                 }
-            }
 #endif
+            }
+            throw;
         }
-        throw;
-    }
-    // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
-    if (source.size() >= PageBytes) StoreOwnBytes(address, source);
-    else StoreOwnBytes(address, source.size(), [&] { std::memcpy(destination, source.data(), source.size()); });
+        if (source.size() >= PageBytes) copyOwnBytes(address, source);
+        else std::memcpy(destination, source.data(), source.size());
+    });
 }
 
 }
@@ -2783,8 +2800,8 @@ extern "C" void AgcDriverCheckGuestMemory_nid_postfix(const void* pointer, std::
 }
 
 extern "C" void AgcDriverStoreGuestLabel_nid_postfix(std::uint64_t* pointer, std::uint64_t value) {
-    AgcDriver::GuestMemory::CheckRange(pointer, sizeof(*pointer), std::atomic_ref<std::uint64_t>::required_alignment, true);
     AgcDriver::GuestMemory::StoreOwnBytes(reinterpret_cast<std::uintptr_t>(pointer), sizeof(*pointer), [&] {
+        AgcDriver::GuestMemory::CheckRange(pointer, sizeof(*pointer), std::atomic_ref<std::uint64_t>::required_alignment, true);
         std::atomic_ref(*pointer).store(value, std::memory_order_release);
     });
 }
