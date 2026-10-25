@@ -2734,7 +2734,13 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
     const TimedAccess timed(CounterWrite, source.size());
     CountWriteCaller(__builtin_return_address(0));
     auto* destination = reinterpret_cast<void*>(address);
-    CheckRange(destination, source.size(), alignment, true);
+    try {
+        CheckRange(destination, source.size(), alignment, true);
+    } catch (const std::runtime_error&) {
+        static const bool trace = std::getenv("APS5_TRACE_UNREADABLE") != nullptr;
+        if (trace) std::fprintf(stderr, "[unreadable]   write from +0x%llx\n", ModuleOffset(__builtin_return_address(0)));
+        throw;
+    }
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
     if (source.size() >= PageBytes) StoreOwnBytes(address, source);
     else StoreOwnBytes(address, source.size(), [&] { std::memcpy(destination, source.data(), source.size()); });
