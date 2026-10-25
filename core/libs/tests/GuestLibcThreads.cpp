@@ -28,6 +28,7 @@ static void RequireThrows(TCall call) {
 }
 
 constexpr int success = 0;
+constexpr int timedout = 2;
 constexpr int busy = 3;
 constexpr int plain = 0x01;
 constexpr int tryable = 0x02;
@@ -38,6 +39,14 @@ static void* CreateMutex(int type) {
     void* mutex = reinterpret_cast<void*>(std::uintptr_t{1});
     Require(_Mtx_init_nid_postfix(&mutex, type) == success && mutex != nullptr);
     return mutex;
+}
+
+static Xtime RelativeTime(int milliseconds) {
+    const auto point = std::chrono::system_clock::now() + std::chrono::milliseconds(milliseconds);
+    const auto since = point.time_since_epoch();
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since);
+    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(since - seconds);
+    return {seconds.count(), nanos.count()};
 }
 
 static void MutexBasics() {
@@ -108,6 +117,37 @@ static void RecursiveMutex() {
     Require(acquired);
     _Mtx_destroy_nid_postfix(&mutex);
 
+}
+
+static void TimedMutex() {
+    void* mutex = CreateMutex(tryable);
+    Xtime future = RelativeTime(60000);
+    Require(_Mtx_timedlock_nid_postfix(&mutex, &future) == success);
+    Require(_Mtx_timedlock_nid_postfix(&mutex, &future) == busy);
+    Require(_Mtx_unlock_nid_postfix(&mutex) == success);
+
+    Require(_Mtx_lock_nid_postfix(&mutex) == success);
+    int result = -1;
+    std::thread worker([&] {
+        Xtime deadline = RelativeTime(30);
+        result = _Mtx_timedlock_nid_postfix(&mutex, &deadline);
+    });
+    worker.join();
+    Require(result == timedout);
+    Require(_Mtx_unlock_nid_postfix(&mutex) == success);
+
+    void* empty = nullptr;
+    RequireThrows<std::invalid_argument>([&] { _Mtx_timedlock_nid_postfix(&empty, &future); });
+    RequireThrows<std::invalid_argument>([&] { _Mtx_timedlock_nid_postfix(nullptr, &future); });
+    RequireThrows<std::invalid_argument>([&] { _Mtx_timedlock_nid_postfix(&mutex, nullptr); });
+    _Mtx_destroy_nid_postfix(&mutex);
+
+    void* recursiveMutex = CreateMutex(recursive);
+    Require(_Mtx_timedlock_nid_postfix(&recursiveMutex, &future) == success);
+    Require(_Mtx_timedlock_nid_postfix(&recursiveMutex, &future) == success);
+    Require(_Mtx_unlock_nid_postfix(&recursiveMutex) == success);
+    Require(_Mtx_unlock_nid_postfix(&recursiveMutex) == success);
+    _Mtx_destroy_nid_postfix(&recursiveMutex);
 }
 
 static void MutualExclusion() {
@@ -443,6 +483,7 @@ int main() {
     ForwardedCalls();
     MutexBasics();
     RecursiveMutex();
+    TimedMutex();
     MutualExclusion();
     ConditionBroadcast();
     ConditionSignal();
