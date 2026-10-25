@@ -2738,7 +2738,32 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
         CheckRange(destination, source.size(), alignment, true);
     } catch (const std::runtime_error&) {
         static const bool trace = std::getenv("APS5_TRACE_UNREADABLE") != nullptr;
-        if (trace) std::fprintf(stderr, "[unreadable]   write from +0x%llx\n", ModuleOffset(__builtin_return_address(0)));
+        if (trace) {
+            const auto* caller = __builtin_return_address(0);
+            std::fprintf(stderr, "[unreadable]   write from +0x%llx\n", ModuleOffset(caller));
+#ifdef _WIN32
+            HMODULE module = nullptr;
+            if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, static_cast<LPCSTR>(caller), &module)) {
+                std::fprintf(stderr, "[unreadable]   writer module unavailable (lookup error %lu)\n", GetLastError());
+            } else {
+                char path[MAX_PATH]{};
+                const auto length = GetModuleFileNameA(module, path, sizeof(path));
+                const auto error = GetLastError();
+                FreeLibrary(module);
+                if (length == 0) {
+                    std::fprintf(stderr, "[unreadable]   writer module unavailable (name error %lu)\n", error);
+                } else if (length >= sizeof(path)) {
+                    std::fprintf(stderr, "[unreadable]   writer module unavailable (name truncated)\n");
+                } else {
+                    const char* name = path;
+                    for (const char* at = path; *at != '\0'; ++at) {
+                        if (*at == '\\' || *at == '/') name = at + 1;
+                    }
+                    std::fprintf(stderr, "[unreadable]   writer module=%s\n", name);
+                }
+            }
+#endif
+        }
         throw;
     }
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.

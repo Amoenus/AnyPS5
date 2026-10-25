@@ -13,9 +13,11 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/UnitShadow.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 
 namespace AgcDriver::DriverDetail {
 
@@ -444,7 +446,13 @@ void Driver::commitLabel(std::uint32_t queue, std::uint64_t address, std::span<c
         reason = localDevice != nullptr ? localDevice->WriteLabelOnGpu(address, bytes, stamp, queue) : 4;
         if (reason != 0 && reason != 5 && reason != 6) {
             if (reason != 1 && localDevice != nullptr) localDevice->WaitIdle();
-            GuestMemory::Write(address, bytes, 4);
+            try {
+                GuestMemory::Write(address, bytes, 4);
+            } catch (const std::runtime_error&) {
+                static const bool trace = std::getenv("APS5_TRACE_UNREADABLE") != nullptr;
+                if (trace) std::fprintf(stderr, "[unreadable]   commitLabel CPU store refused: queue=%u reason=%d bytes=%zu eop=%u\n", queue, reason, bytes.size(), static_cast<unsigned>(endOfPipeInterrupt));
+                throw;
+            }
         }
         noteLabelStore(address, bytes, stamp, queue);
         Graphics::Recorder::CloseLabelGroup(GuestMemory::TrackerGeneration());
