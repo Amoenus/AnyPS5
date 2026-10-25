@@ -28,6 +28,7 @@ constexpr int CES_ERROR_SRC_BUFFER_END = static_cast<int>(0x805C0011);
 constexpr int CES_ERROR_INVALID_ENCODE = static_cast<int>(0x805C0014);
 constexpr int CES_ERROR_ILLEGAL_CODE = static_cast<int>(0x805C0015);
 constexpr int CES_ERROR_UNASSIGNED_CODE = static_cast<int>(0x805C0020);
+constexpr int CES_ERROR_UNSUPPORTED_CODE = static_cast<int>(0x805C0024);
 constexpr int CES_ERROR_INVALID_DST_BUFFER = static_cast<int>(0x805C0030);
 constexpr int CES_ERROR_DST_BUFFER_END = static_cast<int>(0x805C0031);
 
@@ -745,6 +746,21 @@ const std::vector<JisCell>& jisReverse(bool strict) {
     return reverse;
 }
 
+uint32_t jisAlias(uint32_t code) {
+    switch (code) {
+    case 0x00A2: return 0xFFE0;
+    case 0x00A3: return 0xFFE1;
+    case 0x00A5: return 0xFFE5;
+    case 0x00AC: return 0xFFE2;
+    case 0x2014: return 0x2015;
+    case 0x2016: return 0x2225;
+    case 0x203E: return 0xFFE3;
+    case 0x2212: return 0xFF0D;
+    case 0x301C: return 0xFF5E;
+    default: return code;
+    }
+}
+
 int encodeMbcs(const void* profile, uint32_t code, uint8_t* mbcs, uint32_t& length) {
     if (isEucKr(profile) || isUhc(profile)) return encodeDbcs(cp949Reverse(), isEucKr(profile), code, mbcs, length);
     if (isBig5(profile)) return encodeDbcs(cp950Reverse(), false, code, mbcs, length);
@@ -762,6 +778,12 @@ int encodeMbcs(const void* profile, uint32_t code, uint8_t* mbcs, uint32_t& leng
             mbcs[0] = static_cast<uint8_t>(code);
             return 0;
         }
+        if (!strict && code <= 0x9F) return CES_ERROR_UNSUPPORTED_CODE;
+        if (!strict && code == 0xFEFF) {
+            length = 0;
+            return 0;
+        }
+        if (!strict) code = jisAlias(code);
         if (code >= 0xFF61 && code <= 0xFF9F) {
             length = 1;
             mbcs[0] = static_cast<uint8_t>(0xA1 + (code - 0xFF61));
@@ -776,11 +798,18 @@ int encodeMbcs(const void* profile, uint32_t code, uint8_t* mbcs, uint32_t& leng
         length = 2;
         return 0;
     }
-    if (code < 0x80) {
+    const bool strict = isEucJpX0208(profile);
+    if (!strict && code == 0x0E) return CES_ERROR_UNASSIGNED_CODE;
+    if (code < 0x80 || (!strict && code < 0xA0 && code != 0x8E && code != 0x8F)) {
         length = 1;
         mbcs[0] = static_cast<uint8_t>(code);
         return 0;
     }
+    if (!strict && code == 0xFEFF) {
+        length = 0;
+        return 0;
+    }
+    if (!strict) code = jisAlias(code);
     if (code >= 0xFF61 && code <= 0xFF9F) {
         if (!hasSs2(profile)) return CES_ERROR_UNASSIGNED_CODE;
         length = 2;
@@ -789,7 +818,6 @@ int encodeMbcs(const void* profile, uint32_t code, uint8_t* mbcs, uint32_t& leng
         return 0;
     }
     if (code > 0xFFFF) return CES_ERROR_UNASSIGNED_CODE;
-    const bool strict = isEucJpX0208(profile);
     if (strict && code == JIS_X0208_UNSETTLED_CODE) throw std::runtime_error(JIS_X0208_UNSETTLED);
     const auto& reverse = jisReverse(strict);
     const auto found = std::lower_bound(reverse.begin(), reverse.end(), static_cast<uint16_t>(code), [](const JisCell& entry, uint16_t value) { return entry.code < value; });

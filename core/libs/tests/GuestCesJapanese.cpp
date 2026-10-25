@@ -1,8 +1,10 @@
 #include "prx/libSceCesCs/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -339,8 +341,10 @@ int main() {
     std::memcpy(&utf32Le, "\xE5\x65\x00\x00", 4);
     Require(sceCesUtf32leToEucJp(&utf32Le, euc, mbcs, sizeof(mbcs), &produced) == 0 && std::memcmp(mbcs, "\xC6\xFC", 2) == 0);
 
+    constexpr int microsoftForms[] = {0x00A2, 0x00A3, 0x00A5, 0x00AC, 0x2014, 0x2016, 0x203E, 0x2212, 0x301C, 0xFEFF};
     for (int code = 1; code < 0x10000; ++code) {
         if (code >= 0xD800 && code <= 0xDFFF) continue;
+        if (std::find(std::begin(microsoftForms), std::end(microsoftForms), code) != std::end(microsoftForms)) continue;
         std::uint8_t encoded[4] = {};
         std::uint32_t size = 0;
         if (sceCesUcs2ToSJis(static_cast<std::uint16_t>(code), sjis, encoded, sizeof(encoded), &size) == 0) {
