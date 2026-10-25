@@ -56,6 +56,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/Module.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/DynamicLoader.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/ModuleInfo.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/Tls.cpp
         ${LIBS_INCLUDE_DIR}/nid/src/NidCompute.cpp
         ${LIBS_INCLUDE_DIR}/nid/src/Sha1.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Aio/src/Aio.cpp
@@ -243,10 +244,12 @@ if(BUILD_TESTING)
     add_dependencies(guest_module_fixture nid_patcher)
     configure_windows_unwind(guest_module_fixture)
     set_target_properties(guest_module_fixture PROPERTIES BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "$ORIGIN")
-    if(Python3_Interpreter_FOUND AND NOT WIN32)
-        target_link_options(guest_module_fixture PRIVATE -Wl,--no-as-needed)
-        add_test(NAME nid_patcher_dynamic_strings COMMAND ${Python3_EXECUTABLE}
-            ${LIBS_INCLUDE_DIR}/nid/tests/test_dynamic_strings.py $<TARGET_FILE:guest_module_fixture>)
+    if(Python3_Interpreter_FOUND)
+        if(NOT WIN32)
+            target_link_options(guest_module_fixture PRIVATE -Wl,--no-as-needed)
+            add_test(NAME nid_patcher_dynamic_strings COMMAND ${Python3_EXECUTABLE}
+                ${LIBS_INCLUDE_DIR}/nid/tests/test_dynamic_strings.py $<TARGET_FILE:guest_module_fixture>)
+        endif()
         add_test(NAME nid_patcher_symbol_versions COMMAND ${Python3_EXECUTABLE}
             ${LIBS_INCLUDE_DIR}/nid/tests/test_symbol_versions.py $<TARGET_FILE:nid_patcher>)
     endif()
@@ -560,6 +563,16 @@ if(BUILD_TESTING)
     add_asan_test_options(guest_kernel_stack_protect detect_stack_use_after_return=0)
     if(WIN32)
         set_tests_properties(guest_kernel_stack_protect PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_tls_get_addr_tests ${LIBS_INCLUDE_DIR}/tests/GuestTlsGetAddr.cpp)
+    target_include_directories(guest_tls_get_addr_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_tls_get_addr_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_tls_get_addr_tests)
+    add_test(NAME guest_tls_get_addr COMMAND guest_tls_get_addr_tests)
+    set_tests_properties(guest_tls_get_addr PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_tls_get_addr PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_thread_self_tests ${LIBS_INCLUDE_DIR}/tests/GuestThreadSelf.cpp)
@@ -1208,6 +1221,16 @@ if(BUILD_TESTING)
         set_tests_properties(guest_sched_priority PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(guest_rtprio_thread_tests ${LIBS_INCLUDE_DIR}/tests/GuestRtprioThread.cpp)
+    target_include_directories(guest_rtprio_thread_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_rtprio_thread_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_rtprio_thread_tests)
+    add_test(NAME guest_rtprio_thread COMMAND guest_rtprio_thread_tests)
+    set_tests_properties(guest_rtprio_thread PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_rtprio_thread PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_operation_mode_tests ${LIBS_INCLUDE_DIR}/tests/GuestOperationMode.cpp)
     target_include_directories(guest_operation_mode_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_operation_mode_tests PRIVATE libkernel libc)
@@ -1334,6 +1357,19 @@ if(BUILD_TESTING)
         set_tests_properties(guest_named_shm_concurrency PROPERTIES TIMEOUT 20)
     endif()
     if(WIN32)
+        add_test_executable(guest_named_shm_windows_tests ${LIBS_INCLUDE_DIR}/tests/GuestNamedShmWindows.cpp)
+        target_include_directories(guest_named_shm_windows_tests PRIVATE ${LIBS_INCLUDE_DIR} ${LIBS_INCLUDE_DIR}/nid/include)
+        target_link_libraries(guest_named_shm_windows_tests PRIVATE libkernel libc advapi32)
+        configure_windows_unwind(guest_named_shm_windows_tests)
+        add_test(NAME guest_named_shm_windows COMMAND guest_named_shm_windows_tests)
+        set_tests_properties(guest_named_shm_windows PROPERTIES TIMEOUT 20 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        add_test(NAME guest_named_shm_windows_short_temp COMMAND guest_named_shm_windows_tests --short-temp)
+        set_tests_properties(guest_named_shm_windows_short_temp PROPERTIES TIMEOUT 20 SKIP_RETURN_CODE 77 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        add_test(NAME guest_named_shm_windows_long_short_temp COMMAND guest_named_shm_windows_tests --long-short-temp)
+        set_tests_properties(guest_named_shm_windows_long_short_temp PROPERTIES TIMEOUT 20 SKIP_RETURN_CODE 77 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
         set_tests_properties(guest_shm_open PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
@@ -1400,9 +1436,10 @@ if(BUILD_TESTING)
     target_link_libraries(guest_socket_options_tests PRIVATE libkernel libc)
     configure_windows_unwind(guest_socket_options_tests)
     add_test(NAME guest_socket_options COMMAND guest_socket_options_tests)
-    set_tests_properties(guest_socket_options PROPERTIES TIMEOUT 30)
+    add_test(NAME guest_socket_options_multicast COMMAND guest_socket_options_tests multicast)
+    set_tests_properties(guest_socket_options guest_socket_options_multicast PROPERTIES TIMEOUT 30)
     if(WIN32)
-        set_tests_properties(guest_socket_options PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_socket_options guest_socket_options_multicast PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_socket_stream_options_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketStreamOptions.cpp)
@@ -1698,6 +1735,7 @@ if(BUILD_TESTING)
     target_link_libraries(guest_flexible_memory_budget_tests PRIVATE libkernel libc)
     configure_windows_unwind(guest_flexible_memory_budget_tests)
     add_library(guest_flexible_memory_module SHARED ${LIBS_INCLUDE_DIR}/tests/GuestFlexibleMemoryModule.cpp)
+    target_include_directories(guest_flexible_memory_module PRIVATE ${LIBS_INCLUDE_DIR})
     set_target_properties(guest_flexible_memory_module PROPERTIES PREFIX "" SUFFIX ".guest.prx")
     add_dependencies(guest_flexible_memory_budget_tests guest_flexible_memory_module)
     target_compile_definitions(guest_flexible_memory_budget_tests PRIVATE GUEST_FLEXIBLE_MEMORY_MODULE="$<TARGET_FILE:guest_flexible_memory_module>")

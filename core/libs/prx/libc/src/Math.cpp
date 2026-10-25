@@ -1,4 +1,6 @@
+#include "prx/libc/include/Api.hpp"
 #include <mutex>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -327,6 +329,49 @@ double APS5_VABI hypot_nid_postfix(double x, double y) {
 }
 float APS5_VABI log10f_nid_postfix(float x) { return std::log10(x); }
 float APS5_VABI logbf_nid_postfix(float x) { return std::logb(x); }
+float APS5_VABI exp2f_nid_postfix(float x) {
+    static constexpr double exp2ft[16] = {
+        0x1.6a09e667f3bcdp-1, 0x1.7a11473eb0187p-1, 0x1.8ace5422aa0dbp-1, 0x1.9c49182a3f090p-1,
+        0x1.ae89f995ad3adp-1, 0x1.c199bdd85529cp-1, 0x1.d5818dcfba487p-1, 0x1.ea4afa2a490dap-1,
+        0x1.0000000000000p+0, 0x1.0b5586cf9890fp+0, 0x1.172b83c7d517bp+0, 0x1.2387a6e756238p+0,
+        0x1.306fe0a31b715p+0, 0x1.3dea64c123422p+0, 0x1.4bfdad5362a27p+0, 0x1.5ab07dd485429p+0,
+    };
+    static volatile float huge = 0x1p100f;
+    static volatile float twom100 = 0x1p-100f;
+    const float redux = 0x1.8p23f / 16;
+    const float P1 = 0x1.62e430p-1f;
+    const float P2 = 0x1.ebfbe0p-3f;
+    const float P3 = 0x1.c6b348p-5f;
+    const float P4 = 0x1.3b2c9cp-7f;
+    const std::uint32_t hx = std::bit_cast<std::uint32_t>(x);
+    const std::uint32_t ix = hx & 0x7fffffff;
+    if (ix >= 0x43000000) {
+        if (ix >= 0x7f800000) {
+            return (ix & 0x7fffff) != 0 || (hx & 0x80000000) == 0 ? x + x : 0.0f;
+        }
+        if (x >= 0x1.0p7f) {
+            errno = ERANGE;
+            return huge * huge;
+        }
+        if (x <= -0x1.2cp7f) {
+            errno = ERANGE;
+            return twom100 * twom100;
+        }
+    } else if (ix <= 0x33000000) {
+        return 1.0f + x;
+    }
+    volatile float rounded = x + redux;
+    float t = rounded;
+    std::uint32_t i0 = std::bit_cast<std::uint32_t>(t) + 8;
+    const std::int32_t k = static_cast<std::int32_t>(i0 >> 4) << 20;
+    i0 &= 15;
+    t -= redux;
+    const double z = x - t;
+    const double twopk = std::bit_cast<double>(static_cast<std::uint64_t>(static_cast<std::uint32_t>(0x3ff00000 + k)) << 32);
+    const double u = exp2ft[i0] * z;
+    const double tv = exp2ft[i0] + u * (P1 + z * P2) + u * (z * z) * (P3 + z * P4);
+    return static_cast<float>(tv * twopk);
+}
 double APS5_VABI exp2_nid_postfix(double x) {
     int saved_errno = errno;
     double result = std::exp2(x);
@@ -1021,7 +1066,6 @@ double APS5_VABI __powidf2_nid_postfix(double base, int exponent) {
     return reciprocal ? 1.0 / result : result;
 }
 float APS5_VABI expf_nid_postfix(float x) { return std::exp(x); }
-float APS5_VABI exp2f_nid_postfix(float x) { return std::exp2(x); }
 float APS5_VABI logf_nid_postfix(float x) {
     const float ln2_hi = static_cast<float>(6.9313812256e-01);
     const float ln2_lo = static_cast<float>(9.0580006145e-06);
@@ -1305,19 +1349,43 @@ int APS5_VABI _Fltrounds_nid_postfix(void) {
     return SonyFltrounds();
 }
 
-struct GuestFloatingPointEnvironment {
-    std::uint32_t control;
-    std::uint32_t status;
-    std::uint32_t tag;
-    unsigned char other[16];
-    std::uint32_t mxcsr;
-};
-static_assert(sizeof(GuestFloatingPointEnvironment) == 32 && offsetof(GuestFloatingPointEnvironment, mxcsr) == 28);
+static_assert(sizeof(GuestFloatingPointEnvironment) == 32 && alignof(GuestFloatingPointEnvironment) == 4 && offsetof(GuestFloatingPointEnvironment, mxcsr) == 28);
+
+int APS5_VABI feupdateenv_nid_postfix(const GuestFloatingPointEnvironment* environment) {
+    if (environment == nullptr) throw std::invalid_argument("feupdateenv: null environment");
+    const auto saved = *environment;
+    alignas(16) std::array<std::uint32_t, 128> state;
+    asm volatile("fxsave %0" : "=m"(state));
+    const auto supported = state[7] != 0 ? state[7] : 0xffbfu;
+    if ((saved.mxcsr & ~supported) != 0) throw std::invalid_argument("feupdateenv: unsupported MXCSR bits");
+    std::uint16_t status;
+    asm volatile("fnstsw %0" : "=am"(status));
+    const auto pending = (status | _mm_getcsr()) & 0x3f;
+    asm volatile("fldenv %0" : : "m"(saved) : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)");
+    _mm_setcsr(saved.mxcsr);
+    GuestFloatingPointEnvironment raised;
+    asm volatile("fnstenv %0" : "=m"(raised));
+    raised.status |= pending;
+    const auto mxcsr = _mm_getcsr() | pending;
+    asm volatile("fldenv %0" : : "m"(raised) : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)");
+    _mm_setcsr(mxcsr);
+    asm volatile("fwait");
+    return 0;
+}
 
 int APS5_VABI fegetenv_nid_postfix(GuestFloatingPointEnvironment* environment) {
     if (environment == nullptr) throw std::invalid_argument("fegetenv: null environment");
     asm volatile("fnstenv %0\n\tfldcw %0" : "+m"(*environment));
     environment->mxcsr = _mm_getcsr();
+    return 0;
+}
+
+int APS5_VABI feholdexcept_nid_postfix(GuestFloatingPointEnvironment* environment) {
+    if (environment == nullptr) throw std::invalid_argument("feholdexcept: null environment");
+    const auto csr = _mm_getcsr();
+    asm volatile("fnstenv %0\n\tfnclex" : "=m"(*environment));
+    environment->mxcsr = csr;
+    _mm_setcsr((csr & ~0x3fu) | 0x1f80u);
     return 0;
 }
 
