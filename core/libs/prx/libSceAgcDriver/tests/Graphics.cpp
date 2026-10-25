@@ -2709,6 +2709,20 @@ void VolumeColorMipTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0u); }, "CMASK fast clears of mipmapped 3D color targets");
 }
 
+void LinearVolumeNonResidentTests() {
+    alignas(256) static std::array<std::byte, (1u << 20u) + 65535u> memory{};
+    const auto address = (reinterpret_cast<std::uintptr_t>(memory.data()) + 65535u) & ~std::uintptr_t{65535u};
+    for (const auto depth : {1u, 4u}) {
+        auto queue = makeState();
+        queue.context[0x318] = static_cast<std::uint32_t>(address >> 8u);
+        queue.context[0x390] = static_cast<std::uint32_t>(address >> 40u);
+        queue.context[0x3b0] = (2u << 28u) | (95u << 14u) | 31u;
+        queue.context[0x3b8] = 0x0a000000u | (static_cast<std::uint32_t>(AgcDriver::Graphics::ColorTileMode::Linear) << 14u) | (depth - 1u);
+        const auto color = AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0);
+        Require(color.volume && color.depth == depth && color.tileMode == AgcDriver::Graphics::ColorTileMode::Linear, "a Linear volume was not decoded as a non-resident volume");
+    }
+}
+
 void OneDimensionalColorTests() {
     auto queue = makeState();
     queue.context[0x3b8] = 0x08000000;
@@ -11831,6 +11845,10 @@ int main(int argc, char** argv) {
     setenv("APS5_HEAP_MIRROR_MIB", "4", 1);
 #endif
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--linear-volume-nonresident") {
+            LinearVolumeNonResidentTests();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-cache") {
             descriptorCacheTests();
             return 0;
