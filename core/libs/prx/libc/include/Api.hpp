@@ -786,6 +786,7 @@ int APS5_VABI iswpunct_nid_postfix(std::uint32_t c);
 int APS5_VABI iswspace_nid_postfix(std::uint32_t c);
 int APS5_VABI iswupper_nid_postfix(std::uint32_t c);
 int APS5_VABI iswxdigit_nid_postfix(std::uint32_t c);
+int APS5_VABI iswascii_nid_postfix(std::uint32_t c);
 int APS5_VABI iswctype_nid_postfix(std::uint32_t c, std::uint64_t mask);
 int APS5_VABI _Iswctype_nid_postfix(std::uint32_t c, std::uint64_t type);
 std::uint64_t APS5_VABI wctype_nid_postfix(const char* property);
