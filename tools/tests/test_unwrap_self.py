@@ -117,6 +117,34 @@ class UnwrapTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(output.exists())
 
+    def test_segment_stale_offset_before_the_recorded_shift_is_refused(self):
+        segments = default_segments() + [(SCE_COMMENT, 4, 0x100, 0, 0x20, 1)]
+        container = build_container(segments, default_records(), default_payloads())
+        source = Path(self.directory) / "input.self"
+        output = Path(self.directory) / "output.elf"
+        source.write_bytes(container)
+        result = subprocess.run([sys.executable, str(Path(unwrap_self.__file__)), str(source), str(output)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("does not fit the file", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(output.exists())
+
+    def test_huge_stale_offset_is_refused_instead_of_exhausting_memory(self):
+        segments = default_segments()
+        segments[2] = (PT_DYNAMIC, 6, 0x49000000001580, 0x1040, 0x10, 8)
+        segments.append((SCE_COMMENT, 4, 0x1600, 0, 0x4000000000000000, 1))
+        container = build_container(segments, default_records(), default_payloads())
+        source = Path(self.directory) / "input.self"
+        output = Path(self.directory) / "output.elf"
+        source.write_bytes(container)
+        result = subprocess.run([sys.executable, str(Path(unwrap_self.__file__)), str(source), str(output)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("does not fit the file", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(output.exists())
+
     def test_write_failure_preserves_output_and_removes_temporary_files(self):
         directory = Path(self.directory)
         source = directory / "input.self"

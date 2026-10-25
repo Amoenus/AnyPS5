@@ -218,7 +218,7 @@ def place_segments(data, headers, records):
     for header in headers:
         if header["type"] == PT_LOAD and header["size"] == 0:
             continue
-        if header["source"] > len(data) or header["size"] > len(data) - header["source"]:
+        if header["source"] < 0 or header["source"] > len(data) or header["size"] > len(data) - header["source"]:
             raise Refused("segment %d does not fit the file" % header["index"])
 
 
