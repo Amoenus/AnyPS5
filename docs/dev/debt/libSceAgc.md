@@ -48,3 +48,4 @@
 - [sceAgcDcbEventWrite](../../../core/libs/prx/libSceAgc/DcbFlow/src/Sync.cpp) (libSceAgc) - non-sample-dump event types (any event other than 0x38 and 0x39) emit a 2-dword PM4 packet 0x46 without address dwords; the address argument is ignored for these events. Void Terrarium (PPSA03061, #5055) passes a non-null address buffer (0x00000002d2a10000) with event type 0x16 (cache flush).
 
 - This pending declaration has an unverified signature and behavior; it is a parameterless import-resolution declaration that throws through `NotImplemented_nid_no_patch`: [`sceAgcAcbInitializeDefaultHardwareState`](../../../core/libs/prx/libSceAgc/Unimplemented.cpp).
+- [sceAgcAcquireMemSetEngine, sceAgcCbMemsetExclusive](../../../core/libs/prx/libSceAgc/Unimplemented.cpp) (libSceAgc) - declared with canonical signatures from decrypted headers; behavior on retail consoles remains unmeasured. Both throw through `NotImplemented_nid_no_patch`.
