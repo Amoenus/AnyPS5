@@ -120,9 +120,6 @@ RelinkResult RelinkerPipeline::Relink() {
     };
 
     auto getTagValue = [&](const std::int64_t tag) -> std::uint64_t {
-        for (const auto& t : dynTags)
-            if (t.Tag == tag)
-                return t.Value;
         const char* name = "unknown";
         switch (tag) {
         case DT_OS_STRTAB: name = "DT_OS_STRTAB"; break;
@@ -149,6 +146,16 @@ RelinkResult RelinkerPipeline::Relink() {
         case DT_RELAENT: name = "DT_RELAENT"; break;
         case DT_OS_SYMTABSZ: name = "DT_OS_SYMTABSZ"; break;
         }
+        std::optional<std::uint64_t> value;
+        for (const auto& t : dynTags) {
+            if (t.Tag != tag)
+                continue;
+            if (value && *value != t.Value)
+                throw RelinkerException(std::string("Conflicting duplicate ") + name + " tags");
+            value = t.Value;
+        }
+        if (value)
+            return *value;
         std::ostringstream message;
         message << "Required dynamic tag " << name << " (0x" << std::hex << tag << ") not found";
         throw RelinkerException(message.str());
