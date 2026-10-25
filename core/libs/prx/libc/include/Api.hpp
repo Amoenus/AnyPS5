@@ -995,6 +995,7 @@ int APS5_VABI _Mtx_init_with_name_nid_postfix(void** handle, int type, const cha
 void APS5_VABI _Mtx_destroy_nid_postfix(void** handle);
 int APS5_VABI _Mtx_lock_nid_postfix(void** handle);
 int APS5_VABI _Mtx_trylock_nid_postfix(void** handle);
+int APS5_VABI _Mtx_timedlock_nid_postfix(void** handle, const Xtime* target);
 int APS5_VABI _Mtx_unlock_nid_postfix(void** handle);
 int APS5_VABI _Cnd_init_nid_postfix(void** handle);
 int APS5_VABI _Cnd_init_with_default_name_override_nid_postfix(void** handle, const char*);
