@@ -221,20 +221,24 @@ bool TwinFormatsShareTheirSamples(AgcDriver::VulkanDevice& device) {
     }
     auto& other = NewBlock();
     const auto unorm = Acquire(device, context, MultisampledTarget(other, VK_FORMAT_R8G8B8A8_UNORM));
+    constexpr std::uint32_t pattern = 0x3c003800u;
+    std::fill_n(reinterpret_cast<std::uint32_t*>(other.Address()), BlockBytes / sizeof(pattern), pattern);
+    const auto floating = Acquire(device, context, MultisampledTarget(other, VK_FORMAT_R16G16_SFLOAT));
+    Require(floating.image != unorm.image && floating.owner != unorm.owner, "an unrelated format reused the other format's samples");
+    const auto again = Acquire(device, context, MultisampledTarget(other, VK_FORMAT_R16G16_SFLOAT));
+    Require(again.image == floating.image && again.view == floating.view && again.owner == floating.owner, "returning to an unrelated-format replacement changed its owner");
+    {
+        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+        Require(UniformTexel(context, floating.image, VK_FORMAT_R16G16_SFLOAT) == Bytes(pattern), "an unrelated-format replacement did not import the guest's new values");
+    }
     std::string refusal;
     try {
-        static_cast<void>(Acquire(device, context, MultisampledTarget(other, VK_FORMAT_R16G16_SFLOAT)));
+        AgcDriver::Graphics::RequireNoMultisampleColorTarget(other.Address(), BlockBytes, "reading the unrelated-format replacement");
     } catch (const std::exception& error) {
         refusal = error.what();
     }
-    Require(refusal.find("overlaps multisampled color target") != std::string::npos, "an unrelated-format owner over host-only samples was not refused");
-    const auto unchanged = Acquire(device, context, MultisampledTarget(other, VK_FORMAT_R8G8B8A8_UNORM));
-    Require(unchanged.image == unorm.image && unchanged.view == unorm.view && unchanged.owner == unorm.owner, "refusing an unrelated-format owner changed the resident target");
-    {
-        std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
-        Require(UniformTexel(context, unchanged.image, VK_FORMAT_R8G8B8A8_UNORM) == Bytes(0u), "refusing an unrelated-format owner changed the resident samples");
-    }
-    std::cout << "unrelated-format owner refused; resident owner and samples preserved\n";
+    Require(refusal.find("overlaps multisampled color target") != std::string::npos, "the unrelated-format replacement lost its host-only guard");
+    std::cout << "unrelated-format replacement imports guest values and retains its host-only guard\n";
     return true;
 }
 
