@@ -1289,6 +1289,7 @@ void APS5_VABI _ZNSt11range_errorD1Ev_nid_postfix(LibcException::ExceptionObject
 void APS5_VABI _ZNSt11range_errorD2Ev_nid_postfix(LibcException::ExceptionObject* self);
 void APS5_VABI _ZNSt11range_errorD0Ev_nid_postfix(LibcException::ExceptionObject* self);
 void APS5_VABI _ZNSt14overflow_errorD1Ev_nid_postfix(LibcException::ExceptionObject* self);
+void APS5_VABI _ZNSt15underflow_errorD1Ev_nid_postfix(LibcException::ExceptionObject* self);
 void APS5_VABI _ZNSt8ios_base7failureD1Ev_nid_postfix(LibcException::ExceptionObject* self);
 void APS5_VABI _ZNSt8ios_base7failureD2Ev_nid_postfix(LibcException::ExceptionObject* self);
 void APS5_VABI _ZNSt8ios_base7failureD0Ev_nid_postfix(LibcException::ExceptionObject* self);
