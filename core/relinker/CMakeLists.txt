@@ -548,7 +548,7 @@ if(BUILD_TESTING)
         foreach(opcode IN ITEMS add or adc sbb and sub xor cmp)
             list(APPEND tlsCoverageGroups alu_${opcode})
         endforeach()
-        list(APPEND tlsCoverageGroups gs_traps gs_traps_implicit)
+        list(APPEND tlsCoverageGroups gs_traps gs_traps_implicit gs_non_memory)
         foreach(group IN LISTS tlsCoverageGroups)
             add_test(NAME tls_function_coverage_${group} COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_tls_function_coverage.py $<TARGET_FILE:relinker> ${group})
@@ -618,6 +618,9 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_syscall_trap.py $<TARGET_FILE:relinker>)
         add_test(NAME guest_tls COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_tls.py $<TARGET_FILE:relinker>)
+        add_test(NAME guest_tls_export_references COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_tls_export_references.py $<TARGET_FILE:relinker>)
+        set_tests_properties(guest_tls_export_references PROPERTIES TIMEOUT 30)
         add_test(NAME guest_needed_modules COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_needed_modules.py $<TARGET_FILE:relinker>)
         add_test(NAME guest_module_dir COMMAND ${Python3_EXECUTABLE}
@@ -641,6 +644,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_guest_stack.py $<TARGET_FILE:relinker>)
         add_test(NAME guest_symbol_names COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_symbol_names.py $<TARGET_FILE:relinker>)
+        add_test(NAME import_symbol_types COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_import_symbol_types.py $<TARGET_FILE:relinker>)
         add_test(NAME guest_registry COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_registry.py $<TARGET_FILE:relinker>)
         add_test(NAME needed_libraries COMMAND ${Python3_EXECUTABLE}
@@ -719,7 +724,7 @@ if(BUILD_TESTING)
                 set(msvcrtImportLibrary "${CMAKE_CURRENT_BINARY_DIR}/windows_stdio_msvcrt_import.a")
                 add_custom_command(OUTPUT "${msvcrtImportLibrary}"
                     COMMAND "${mingwDlltoolExecutable}" -d "${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/tests/WindowsMsvcrt.def"
-                        -l "${msvcrtImportLibrary}" -D msvcrt.dll
+                        -l "${msvcrtImportLibrary}" -D msvcrt.dll --temp-prefix windows_stdio_msvcrt_import
                     DEPENDS elfpatcher/tests/WindowsMsvcrt.def
                     VERBATIM)
                 add_custom_target(windows_stdio_msvcrt_import DEPENDS "${msvcrtImportLibrary}")
