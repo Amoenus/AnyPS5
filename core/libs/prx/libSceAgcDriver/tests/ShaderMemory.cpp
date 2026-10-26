@@ -47,6 +47,7 @@
 #include <atomic>
 #include <functional>
 #include <new>
+#include <chrono>
 #include <thread>
 #include <string>
 #include <string_view>
@@ -404,6 +405,120 @@ void verifyFrontendPair() {
         verifyResult(pixelReference, *MaterializeShader(pixel, *pixelCapture, *pixelHandle));
         verifyResult(zeroReference, *MaterializeShader(zero, *zeroCapture, *zeroHandle));
     }
+}
+
+void verifySpecializedModuleRelease() {
+    using namespace ShaderRecompiler;
+    const std::array<std::uint32_t, 1> color{0x3f800000u};
+    const std::vector<std::uint32_t> code{0xbf800003u, 0x7e000200u, 0xf800180fu, 0u, 0xbf810000u};
+    auto pixel = FrontendRequest(code, color);
+    pixel.shader.stage = ShaderStage::Fragment;
+    pixel.context.compute.reset();
+    pixel.context.pixel = ShaderPixelStageInfo{};
+    pixel.context.pixel->wave32 = true;
+    pixel.context.pixel->targetOutputMode[0] = 9u;
+    pixel.context.waveSize = 32u;
+    pixel.useCache = true;
+    SharedSpirv::Weak released;
+    std::uint64_t specializationId = 0;
+    std::vector<std::uint32_t> words;
+    {
+        const auto first = Recompile(pixel);
+        require(first.specializationId != 0u, "specialized module release: the pixel fixture was not specialized");
+        released = first.spirv.Weaken();
+        specializationId = first.specializationId;
+        words = first.spirv.Copy();
+    }
+    require(released.Expired(), "specialized module release: the module caches kept the words of a module no result uses");
+    const auto again = Recompile(pixel);
+    require(again.specializationId == specializationId, "specialized module release: a module built again from its key got another specialization ID");
+    require(std::ranges::equal(again.spirv.Words(), words), "specialized module release: a module built again from its key has other words");
+    const auto shared = Recompile(pixel);
+    require(shared.spirv.data() == again.spirv.data(), "specialized module release: a second result of a live module copied its words");
+}
+
+const std::vector<std::uint32_t>& resultMemoPixelCode() {
+    static const std::vector<std::uint32_t> code{0xbf800000u, 0x7e000200u, 0xf800180fu, 0u, 0xbf810000u};
+    return code;
+}
+
+bool compileResultMemoPixel(std::uint32_t value) {
+    using namespace ShaderRecompiler;
+    std::array<std::uint32_t, 1> color{value};
+    auto request = FrontendRequest(resultMemoPixelCode(), color);
+    request.shader.stage = ShaderStage::Fragment;
+    request.context.compute.reset();
+    request.context.pixel = ShaderPixelStageInfo{};
+    request.context.pixel->wave32 = true;
+    request.context.pixel->targetOutputMode[0] = 9u;
+    request.context.waveSize = 32u;
+    request.useCache = true;
+    AgcDriver::ShaderMemory memory({});
+    const auto capture = memory.Capture(request);
+    const auto regions = memory.Regions();
+    request.context.memory = regions;
+    bool hit = false;
+    static_cast<void>(Recompile(request, *capture, &hit));
+    return hit;
+}
+
+void verifyResultMemoBudgetThreads() {
+    using namespace ShaderRecompiler;
+    require(!compileResultMemoPixel(1u) && compileResultMemoPixel(1u), "result memo budget threads: the memo did not keep a result");
+    const auto one = ResultMemoBytes();
+    const auto budget = 3u * one;
+    SetResultMemoBudget(budget);
+    static_cast<void>(compileResultMemoPixel(2u));
+    static_cast<void>(compileResultMemoPixel(3u));
+    require(ResultMemoBytes() == budget, "result memo budget threads: three results did not fill a budget of three");
+    std::vector<std::thread> late;
+    SetResultMemoTrimHook([&] {
+        const auto before = ResultMemoBytes();
+        for (const auto value : {5u, 6u}) late.emplace_back([value] { static_cast<void>(compileResultMemoPixel(value)); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (ResultMemoBytes() < before + 2u * one && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    });
+    static_cast<void>(compileResultMemoPixel(4u));
+    for (auto& thread : late) thread.join();
+    require(late.size() == 2u, "result memo budget threads: the fourth result did not start a trim");
+    require(ResultMemoBytes() <= budget, "result memo budget threads: results inserted during a trim left the memo over its budget");
+    SetResultMemoBudget(0u);
+}
+
+void verifyResultMemoBudgetMasked() {
+    using namespace ShaderRecompiler;
+    require(ResultMemoBytes() == 0u, "result memo budget masked: the memo held results before the first compile");
+    require(!compileResultMemoPixel(1u), "result memo budget masked: the first compile hit the memo");
+    const auto first = ResultMemoBytes();
+    require(!compileResultMemoPixel(2u), "result memo budget masked: a new snapshot hit the memo");
+    const auto second = ResultMemoBytes() - first;
+    require(second != 0u && second < first, std::string("result memo budget masked: the masked table's entry was not counted (first result " + std::to_string(first) + " bytes, patched result " + std::to_string(second) + ")").c_str());
+    SetResultMemoBudget(1u);
+    require(ResultMemoBytes() == 0u, std::string("result memo budget masked: a trim to one byte left " + std::to_string(ResultMemoBytes()) + " bytes").c_str());
+    SetResultMemoBudget(0u);
+    require(!compileResultMemoPixel(3u), "result memo budget masked: a snapshot after the trim hit the memo");
+    require(ResultMemoBytes() == first, std::string("result memo budget masked: the trim left a masked entry to patch from (" + std::to_string(ResultMemoBytes()) + " bytes after one compile, " + std::to_string(first) + " for a full one)").c_str());
+}
+
+void verifyResultMemoBudget() {
+    using namespace ShaderRecompiler;
+    const auto compile = [](std::uint32_t value) { return compileResultMemoPixel(value); };
+    require(ResultMemoBytes() == 0u, "result memo budget: the memo held results before the first compile");
+    require(!compile(1u) && compile(1u), "result memo budget: the memo did not keep a result");
+    const auto one = ResultMemoBytes();
+    require(one != 0u, "result memo budget: a memo'd result counted no bytes");
+    const auto budget = 3u * one;
+    SetResultMemoBudget(budget);
+    for (const auto value : {2u, 3u, 4u}) {
+        require(!compile(value), "result memo budget: a new snapshot hit the memo");
+        require(ResultMemoBytes() <= budget, "result memo budget: the memo holds more than its budget");
+    }
+    require(ResultMemoBytes() < budget, "result memo budget: a fourth result over a budget of three was not trimmed");
+    require(compile(4u) && compile(3u), "result memo budget: the most recently used results were dropped");
+    require(!compile(1u), "result memo budget: the least recently used result outlived the trim");
+    SetResultMemoBudget(0u);
+    for (const auto value : {5u, 6u, 7u}) static_cast<void>(compile(value));
+    require(ResultMemoBytes() > budget, "result memo budget: clearing the budget kept bounding the memo");
 }
 
 ShaderRecompiler::RecompileRequest LayoutPairRequest(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, bool registration, std::uint32_t wordLimit) {
@@ -1324,6 +1439,69 @@ void verifyLaneMaskGuardedDescriptorSources() {
         AgcDriver::ShaderMemory memory({});
         const auto capture = memory.Capture(request);
         require(capture->snapshot.images.size() == 1u && std::equal(valid.begin(), valid.end(), capture->snapshot.images[0].dwords.begin()), "lane-mask guarded sources: the T# behind a branch the lanes may take was not read");
+    }
+}
+
+void verifyExecGuardedDescriptorSources() {
+    using namespace ShaderRecompiler;
+    constexpr std::uint32_t Format8888UNorm = 56;
+    constexpr std::uint32_t Type2D = 9;
+    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
+    static Texture texture;
+    const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture.bytes.data()));
+    const std::array<std::uint32_t, 8> valid{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
+    const std::array<std::uint32_t, 8> invalid{0x43700000u, 0x43070000u, 0x3b888889u, 0x3bf2b9d6u, 0x3b088889u, 0x3b72b9d6u, 0x3f7f7777u, 0x3f7f0d46u};
+    const std::array<std::uint32_t, 4> sampler{0u, 0u, 0u, 0u};
+    std::array<std::uint32_t, 4> output{};
+    const auto outputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
+    const std::array<std::uint32_t, 4> outputV{static_cast<std::uint32_t>(outputAddress), static_cast<std::uint32_t>((outputAddress >> 32u) & 0xffffu), 16u, 0xfacu};
+    std::array<std::uint32_t, 32> srt{};
+    const auto fill = [&](const std::array<std::uint32_t, 8>& image, std::uint32_t mode) {
+        std::copy(image.begin(), image.end(), srt.begin());
+        std::copy(sampler.begin(), sampler.end(), srt.begin() + 8);
+        std::copy(outputV.begin(), outputV.end(), srt.begin() + 16);
+        srt[20] = mode;
+    };
+    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(srt.data()));
+    const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u)};
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    RecompileRequest request{};
+    const std::vector<std::uint32_t> code{0xf4000400u, 0xfa000050u, 0xf4080500u, 0xfa000020u, 0xf4080600u, 0xfa000040u, 0xbf8cc07fu, 0x7da80010u, 0xbf880006u, 0xf40c0200u, 0xfa000000u, 0xbf8cc07fu, 0xf09c0f08u, 0x00a20000u, 0xbf8c3f70u, 0xe0700000u, 0x80060000u, 0xbf810000u};
+    request.shader = {ShaderStage::Compute, 0x24000u, code, 0, {}};
+    request.context.waveSize = 32;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData;
+    request.context.compute = ShaderComputeStageInfo{{32u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32;
+    request.target.supportedCapabilities = capabilities;
+    request.target.supportedExtensions = extensions;
+    request.target.bdaAbiVersion = BdaAbi::Version;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+
+    fill(invalid, 0u);
+    const auto plan = GetResourcePlan(request);
+    require(plan->info.images.size() == 1u && plan->info.samplers.size() == 1u, "exec guarded sources: the image and its sampler were not planned");
+    require(!plan->controlFlow.empty() && std::ranges::any_of(plan->controlFlow, [](const ResourceBlock& block) { return block.condition != nullptr; }), "exec guarded sources: the EXEC branch around the image kept no condition");
+    {
+        fill(invalid, 0u);
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::ranges::all_of(capture->snapshot.images[0].dwords, [](std::uint32_t word) { return word == 0u; }), "exec guarded sources: the T# behind a branch no lane takes was not left null");
+    }
+    fill(invalid, 1u);
+    {
+        AgcDriver::ShaderMemory memory({});
+        expectFailure([&] { static_cast<void>(memory.Capture(request)); }, "runtime image descriptor is invalid", "exec guarded sources: an invalid T# behind a branch the lanes may take was accepted");
+    }
+    fill(valid, 1u);
+    {
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::equal(valid.begin(), valid.end(), capture->snapshot.images[0].dwords.begin()), "exec guarded sources: the T# behind a branch the lanes may take was not read");
     }
 }
 
@@ -2276,7 +2454,10 @@ void verifyTableSnapshotReuse() {
     const auto otherBuffer = CompileTable(request);
     std::copy(outputV.begin(), outputV.end(), guest.srt.begin() + 12);
     const auto resolvedShared = ResourceMaterializer::TableReuse();
-    require(otherBuffer.result != compiled.result && otherBuffer.result->variantId == compiled.result->variantId && resolvedShared.resolutionsShared - resolvedBefore.resolutionsShared == 1u && resolvedShared.resolutions == resolvedBefore.resolutions && TableMap(*otherBuffer.result) == map && TableBinding(*otherBuffer.result, DescriptorRole::ImageTable)->guestDescriptor == images->guestDescriptor, "table snapshot reuse: a result for another buffer did not reuse the unchanged table's resolution");
+    const bool resolves = std::getenv("APS5_NO_MASKED_RESULT_MEMO") != nullptr || std::getenv("APS5_VERIFY_MASKED_RESULT_MEMO") != nullptr;
+    require(otherBuffer.result != compiled.result && otherBuffer.result->variantId == compiled.result->variantId && resolvedShared.resolutionsShared - resolvedBefore.resolutionsShared == (resolves ? 1u : 0u) && resolvedShared.resolutions == resolvedBefore.resolutions && TableMap(*otherBuffer.result) == map && TableBinding(*otherBuffer.result, DescriptorRole::ImageTable)->guestDescriptor == images->guestDescriptor, "table snapshot reuse: a result for another buffer did not reuse the unchanged table's resolution");
+    const auto* otherBuffers = TableBinding(*otherBuffer.result, DescriptorRole::GuestBuffers);
+    require(otherBuffers != nullptr && std::search(otherBuffers->guestDescriptor.begin(), otherBuffers->guestDescriptor.end(), otherOutputV.begin(), otherOutputV.end()) != otherBuffers->guestDescriptor.end(), "table snapshot reuse: a result for another buffer does not hold that buffer's descriptor");
     const auto storedWord = heap[5u * 8u];
     heap[5u * 8u] = heap[6u * 8u];
     const auto restoredMap = map;
@@ -3301,6 +3482,19 @@ void verifyImageTableRegistration() {
     const auto* atomicTable = TableBinding(*atomic.result, DescriptorRole::ImageStorageTable);
     require((atomicFault & Abi::PoisonFlag) == 0u && atomicTable != nullptr && atomicTable->count != 0u && atomicTable->imageAtomic.size() == atomicTable->count && std::all_of(atomicTable->imageWritten.begin(), atomicTable->imageWritten.end(), [](bool written) { return written; }) && std::all_of(atomicTable->imageAtomic.begin(), atomicTable->imageAtomic.end(), [](bool atomic) { return atomic; }), "image table registration: the image_atomic_add table was not bound as atomic storage elements");
     require(TableBinding(*atomic.result, DescriptorRole::ImageTable) == nullptr || TableBinding(*atomic.result, DescriptorRole::ImageTable)->count == 0u, "image table registration: an atomic-only table bound sampled elements");
+    auto atomic64Code = storeCode;
+    atomic64Code[8] = 0xf0440308u;
+    guest.heap[0] = TableT(texture.bytes.data(), TableFormat32_32UInt, TableType2D);
+    static constexpr std::array<std::uint32_t, 5> int64ImageCapabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess, spv::CapabilityInt64ImageEXT};
+    auto atomic64Request = TableRequest(atomic64Code, userData);
+    atomic64Request.target.supportedCapabilities = int64ImageCapabilities;
+    const auto atomic64 = CompileTable(atomic64Request);
+    const auto& atomic64Plan = *atomic64.capture->plan;
+    require(atomic64Plan.info.images.size() == 1u && atomic64Plan.info.images[0].table == 0u && atomic64Plan.info.images[0].tableOperation == TableOperation::Supported, "image table registration: a table T# feeding image_atomic64_add was not a supported table operation");
+    const auto& atomic64Map = TableMap(*atomic64.result);
+    const auto atomic64Fault = atomic64Map[Abi::TableHeader(0) + Abi::TableFault];
+    const auto* atomic64Table = TableBinding(*atomic64.result, DescriptorRole::ImageStorageTable);
+    require((atomic64Fault & Abi::PoisonFlag) == 0u && atomic64Table != nullptr && atomic64Table->count != 0u && atomic64Table->imageAtomic64.size() == atomic64Table->count && std::all_of(atomic64Table->imageAtomic64.begin(), atomic64Table->imageAtomic64.end(), [](bool atomic) { return atomic; }), "image table registration: the image_atomic64_add table was not bound as 64-bit atomic storage elements");
     const std::array<std::pair<std::uint32_t, const char*>, 2> unsupportedStores{{{0xf0240f08u, "image_store_mip"}, {0xf0280f08u, "image_store_pck"}}};
     for (const auto& [instruction, name] : unsupportedStores) {
         auto code = storeCode;
@@ -3731,7 +3925,7 @@ void verifySelectedRecordDirectOperations() {
         require(word0 == 0xf0440308u || (TableBinding(*compiled.result, DescriptorRole::ImageTable) == nullptr && compiled.result->imageTableFaults == 0u && TableCovered(compiled.regions, &heap[2], sizeof(heap[2]))), (what + " through a T# whose record the CPU evaluates was not bound from its record").c_str());
         const auto wholeCode = WithImageOperation(TableWholeCode, word0, false);
         const auto whole = GetResourcePlan(TableRequest(wholeCode, userData));
-        require(whole->info.images.size() == 1u && whole->info.images[0].table == 0u && whole->info.images[0].tableOperation == (word0 == 0xf0200f08u || word0 == 0xf0440108u ? TableOperation::Supported : TableOperation::Unsupported), (what + " through a T# keyed per lane left the image table or has the wrong table operation").c_str());
+        require(whole->info.images.size() == 1u && whole->info.images[0].table == 0u && whole->info.images[0].tableOperation == (word0 == 0xf0200f08u || word0 == 0xf0440108u || word0 == 0xf0440308u ? TableOperation::Supported : TableOperation::Unsupported), (what + " through a T# keyed per lane left the image table or has the wrong table operation").c_str());
     }
     const auto mixedCode = WithImageOperation(TableSrtKeyCode, 0xf0200f08u, true);
     const auto mixed = GetResourcePlan(TableRequest(mixedCode, userData));
@@ -6724,6 +6918,12 @@ void verifyUnnormalizedSamplers() {
     const auto adjusted = recompile(reservedDword3(0xf0800f09u), userData(normalized));
     require(proven(adjusted, false), "sampler dword 3: an image_sample_a whose S# dword 3 holds only a ballot in its reserved bits was not compiled");
     expectFailure([&] { static_cast<void>(recompile(reservedDword3(0xf0800f08u), userData(normalized))); }, "GetSamplerResource dword 3 is not a valid runtime value", "sampler dword 3: an image_sample whose S# dword 3 holds a ballot was accepted");
+    for (const auto& [adjust, plain, compiled, accepted] : {
+             std::tuple{0xf1200109u, 0xf1200108u, "sampler dword 3: an image_gather4_c_a whose S# dword 3 holds only a ballot in its reserved bits was not compiled", "sampler dword 3: an image_gather4_c with a computed S# dword 3 was accepted"},
+             std::tuple{0xf1600109u, 0xf1600108u, "sampler dword 3: an image_gather4_c_o_a whose S# dword 3 holds only a ballot in its reserved bits was not compiled", "sampler dword 3: an image_gather4_c_o with a computed S# dword 3 was accepted"}}) {
+        require(proven(recompile(reservedDword3(adjust), imageData(normalized, Type2D, Format32Float, 0u)), false), compiled);
+        expectFailure([&] { static_cast<void>(recompile(reservedDword3(plain), imageData(normalized, Type2D, Format32Float, 0u))); }, "GetSamplerResource dword 3 is not a valid runtime value", accepted);
+    }
     reject(0xf09c0f18u, imageData(unnormalized, TypeCube, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a cube T# was accepted");
     reject(0xf09c0f10u, imageData(unnormalized, Type3D, Format8888UNorm, 3u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 3D T# was accepted");
     reject(0xf09c0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 2D-array sample was accepted");
@@ -8370,6 +8570,21 @@ int main(int argc, char** argv) {
             std::cout << "Prepared frontend reuse preserves full and partial-thread programs\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--result-memo-budget") {
+            verifyResultMemoBudget();
+            std::cout << "The result memo keeps its most recently used results within its byte budget\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--result-memo-budget-masked") {
+            verifyResultMemoBudgetMasked();
+            std::cout << "The result memo budget counts and trims the masked table's entries\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--result-memo-budget-threads") {
+            verifyResultMemoBudgetThreads();
+            std::cout << "The result memo ends within its byte budget when results are inserted during a trim\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--layout-pair") {
             verifyLayoutPair();
             std::cout << "Both push-constant layouts of a pixel shader compile from one program unchanged\n";
@@ -8462,10 +8677,12 @@ int main(int argc, char** argv) {
         verifyPlanCopyAnswers();
         verifyGuardedDescriptorSources();
         verifyLaneMaskGuardedDescriptorSources();
+        verifyExecGuardedDescriptorSources();
         verifySrtTape();
         verifyTargetFeatureKey();
         verifyImageTableKeys();
         verifyImageTables();
+        verifySpecializedModuleRelease();
         verifyImageTableRegistration();
         verifyScalarAddressRule();
         verifyPointerImageTable();
