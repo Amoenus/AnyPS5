@@ -116,6 +116,21 @@ const void* APS5_VABI __std_find_trivial_unsized_1_nid_postfix(const void* first
 const void* APS5_VABI __std_find_trivial_unsized_2_nid_postfix(const void* first, std::uint16_t value) { return FindUnsized(first, value); }
 const void* APS5_VABI __std_find_trivial_unsized_4_nid_postfix(const void* first, std::uint32_t value) { return FindUnsized(first, value); }
 const void* APS5_VABI __std_find_trivial_unsized_8_nid_postfix(const void* first, std::uint64_t value) { return FindUnsized(first, value); }
+
+std::int64_t APS5_VABI __std_max_8i_nid_postfix(const void* first, const void* last) {
+    const auto beginAddress = reinterpret_cast<std::uintptr_t>(first);
+    const auto endAddress = reinterpret_cast<std::uintptr_t>(last);
+    if (!first || !last || endAddress <= beginAddress || (endAddress - beginAddress) % sizeof(std::int64_t) != 0) NotImplemented_nid_no_patch(__func__);
+    auto* current = static_cast<const unsigned char*>(first);
+    const auto* end = static_cast<const unsigned char*>(last);
+    std::int64_t maximum = Read<std::int64_t>(current);
+    for (current += sizeof(std::int64_t); current != end; current += sizeof(std::int64_t)) {
+        const auto value = Read<std::int64_t>(current);
+        if (value > maximum) maximum = value;
+    }
+    return maximum;
+}
+
 std::size_t APS5_VABI __std_count_trivial_1_nid_postfix(const void* first, const void* last, std::uint8_t value) { return Count(first, last, value); }
 std::size_t APS5_VABI __std_count_trivial_2_nid_postfix(const void* first, const void* last, std::uint16_t value) { return Count(first, last, value); }
 std::size_t APS5_VABI __std_count_trivial_4_nid_postfix(const void* first, const void* last, std::uint32_t value) { return Count(first, last, value); }
