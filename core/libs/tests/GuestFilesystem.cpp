@@ -484,6 +484,8 @@ int main() {
             for (int whence = 0; whence < 3; ++whence) {
                 Require(lseek_nid_postfix(end, 0, whence) == -1 && *__error_nid_postfix() == 29);
                 Require(sceKernelLseek(end, 1, whence) == static_cast<int>(0x8002001du));
+                Require(lseek_nid_postfix(end, -1, whence) == -1 && *__error_nid_postfix() == 29);
+                Require(sceKernelLseek(end, -100, whence) == static_cast<int>(0x8002001du));
             }
         }
         char piped[8]{};
@@ -1119,6 +1121,18 @@ int main() {
         Require(stat_nid_postfix(fileLink.string().c_str(), &followed) == 0 && (followed.st_mode & 0170000) == 0100000);
         Require(followed.st_ino == status.st_ino && linkStatus.st_ino != status.st_ino && linkStatus.st_dev == status.st_dev);
         Require(stat_nid_postfix(directoryLink.string().c_str(), &followed) == 0 && (followed.st_mode & 0170000) == 0040000);
+        const auto renameThroughLoop = statLoop.string() + "\\inside";
+        const auto renameTarget = (root / "rename-target").string();
+        Require(sceKernelRename(renameThroughLoop.c_str(), renameTarget.c_str()) == static_cast<int>(0x8002003eu));
+        Require(rename_nid_postfix(renameThroughLoop.c_str(), renameTarget.c_str()) == -1 && *__error_nid_postfix() == 62);
+        Require(sceKernelRename(present.string().c_str(), renameThroughLoop.c_str()) == static_cast<int>(0x8002003eu));
+        Require(rename_nid_postfix(present.string().c_str(), renameThroughLoop.c_str()) == -1 && *__error_nid_postfix() == 62);
+        const auto missingSource = (root / "missing-source").string();
+        const auto underFile = present.string() + "\\child";
+        Require(sceKernelRename(missingSource.c_str(), renameThroughLoop.c_str()) == static_cast<int>(0x80020002u));
+        Require(rename_nid_postfix(missingSource.c_str(), renameThroughLoop.c_str()) == -1 && *__error_nid_postfix() == 2);
+        Require(sceKernelRename(underFile.c_str(), renameThroughLoop.c_str()) == static_cast<int>(0x80020014u));
+        Require(rename_nid_postfix(underFile.c_str(), renameThroughLoop.c_str()) == -1 && *__error_nid_postfix() == 20);
         Require(stat_nid_postfix(fileLink.string().c_str(), &status) == 0 && status.st_size == 5);
         FileStat absoluteStatus{};
         Require(lstat_nid_postfix(absoluteLink.string().c_str(), &absoluteStatus) == 0);
@@ -1182,6 +1196,22 @@ int main() {
             nullptr, 0, &returned, nullptr) != 0);
         Require(CloseHandle(taggedCleanup) != 0 && std::filesystem::remove(tagged));
     }
+
+    const auto fullTarget = root / "junction-full-target";
+    const auto fullJunction = root / "junction-full";
+    Require(std::filesystem::create_directory(fullTarget));
+    FILE* const inside = std::fopen((fullTarget / "inside.txt").string().c_str(), "wb");
+    Require(inside != nullptr);
+    std::fclose(inside);
+    const auto fullCommand = L"cmd /c mklink /J \"" + fullJunction.wstring() + L"\" \"" + fullTarget.wstring() + L"\"";
+    Require(_wsystem(fullCommand.c_str()) == 0);
+    Require(rmdir_nid_postfix(fullJunction.string().c_str()) == -1 && *__error_nid_postfix() == 20);
+    Require(sceKernelRmdir(fullJunction.string().c_str()) == static_cast<int>(0x80020014u));
+    Require(std::filesystem::is_regular_file(fullTarget / "inside.txt"));
+    Require(sceKernelUnlink(fullJunction.string().c_str()) == 0);
+    Require(!std::filesystem::exists(std::filesystem::symlink_status(fullJunction)));
+    Require(std::filesystem::is_regular_file(fullTarget / "inside.txt"));
+    Require(std::filesystem::remove(fullTarget / "inside.txt") && std::filesystem::remove(fullTarget));
 #endif
     FileStat identity{};
     FileStat byDescriptor{};
@@ -1315,6 +1345,11 @@ int main() {
     Require(sceKernelPread(directoryDescriptor, directoryBytes, sizeof(directoryBytes), 0) == static_cast<int>(0x80020015u));
     Require(sceKernelPreadv(directoryDescriptor, directoryVector, 2, 0) == static_cast<int>(0x80020015u));
     Require(sceKernelPwrite(directoryDescriptor, "x", 1, 0) == static_cast<int>(0x80020009u));
+    Require(sceKernelWrite(directoryDescriptor, "x", 1) == static_cast<int>(0x80020009u));
+    Require(write_nid_postfix(directoryDescriptor, "x", 1) == -1 && *__error_nid_postfix() == 9);
+    Require(pwrite_nid_disambig1_nid_postfix(directoryDescriptor, "x", 1, 0) == -1 && *__error_nid_postfix() == 9);
+    Require(sceKernelWritev(directoryDescriptor, directoryVector, 2) == static_cast<int>(0x80020009u));
+    Require(sceKernelPwritev(directoryDescriptor, directoryVector, 2, 0) == static_cast<int>(0x80020009u));
     std::vector<char> listing(4096);
     Require(sceKernelGetdents(directoryDescriptor, listing.data(), static_cast<int>(listing.size())) > 0);
     const int plainFile = open_nid_postfix(presentName.c_str(), 0, 0);
