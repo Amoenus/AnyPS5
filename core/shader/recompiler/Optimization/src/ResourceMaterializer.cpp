@@ -135,10 +135,15 @@ bool multisamplePlaneRead(const ImageResource& image) {
     return image.dimension == RdnaImageDimension::Dim2D && image.resourceClass == ImageResourceClass::Sampled && image.table == NoTable && !image.depthCompare && !image.r128 && image.cubeFaceCompatible;
 }
 
+bool undefinedImageWords(const DescriptorValue& descriptor) {
+    const auto type = static_cast<std::uint32_t>(rawImageType(descriptor));
+    return !nullImageDescriptor(descriptor) && type >= 2u && (type < static_cast<std::uint32_t>(ImageType::Color1D) || !IsDefinedImageFormat(rawImageFormat(descriptor)));
+}
+
 bool validImageDescriptor(const DescriptorValue& descriptor, bool r128) {
     const auto type = rawImageType(descriptor);
     const auto format = rawImageFormat(descriptor);
-    if (type < ImageType::Color1D || format == IrBufferFormat::Invalid) {
+    if (type < ImageType::Color1D || !IsDefinedImageFormat(format)) {
         return false;
     }
     if (r128 && type != ImageType::Color1D && type != ImageType::Color2D && type != ImageType::Color2DMsaa) {
@@ -180,7 +185,7 @@ PoisonReason invalidImageReason(const DescriptorValue& descriptor) {
     if (type < ImageType::Color1D) {
         return PoisonReason::NotImage;
     }
-    if (rawImageFormat(descriptor) == IrBufferFormat::Invalid) {
+    if (!IsDefinedImageFormat(rawImageFormat(descriptor))) {
         return PoisonReason::InvalidFormat;
     }
     if (type == ImageType::Color2DMsaa || type == ImageType::Color2DMsaaArray) {
@@ -268,11 +273,11 @@ ImageDecode inspectImageDescriptor(const DescriptorValue& descriptor, const Imag
                                                                      : "MIMG BY2/BY4 requires a direct, identity-swizzled 2D image whose elements fill one dword: R8, R16 or RG8 for BY2, R8 for BY4");
         }
     }
-    const bool nativeRepacked = format == IrBufferFormat::Format10_11_11Float && !storage && !base.packed;
+    const bool nativeRepacked = (format == IrBufferFormat::Format10_11_11Float || format == IrBufferFormat::Format11_11_10Float) && !storage && !base.packed;
     const auto remappedFormat = storage ? RemapStorageTextureFormat(format) : RemapTextureFormat(format);
     decoded.conversionFormat = remappedFormat != format && !nativeRepacked ? format : IrBufferFormat::Invalid;
-    if (format == IrBufferFormat::Format11_11_10UNorm || (format == IrBufferFormat::Format10_11_11Float && !nativeRepacked)) {
-        const bool floating = format == IrBufferFormat::Format10_11_11Float;
+    if (format == IrBufferFormat::Format11_11_10UNorm || ((format == IrBufferFormat::Format10_11_11Float || format == IrBufferFormat::Format11_11_10Float) && !nativeRepacked)) {
+        const bool floating = format == IrBufferFormat::Format10_11_11Float || format == IrBufferFormat::Format11_11_10Float;
         if (!base.srgbDecodeCompatible) {
             if (floating) return rejectImage(PoisonReason::Conversion, "samples or gathers a converted float image, or queries its LOD, which is not implemented");
             if (storage || base.depthCompare || (base.emulatedCompare & EmulatedCompare::ConvertedSampleUnsupported) != 0u) return rejectImage(PoisonReason::Conversion, "sampling, gathering or querying LOD of a converted unorm image is not implemented");
@@ -296,6 +301,8 @@ ImageDecode inspectImageDescriptor(const DescriptorValue& descriptor, const Imag
     const bool wideSint = format == IrBufferFormat::Format32SInt || format == IrBufferFormat::Format32_32SInt || format == IrBufferFormat::Format32_32_32_32SInt;
     const bool narrowSint = format == IrBufferFormat::Format16SInt || format == IrBufferFormat::Format8_8SInt || format == IrBufferFormat::Format16_16SInt || format == IrBufferFormat::Format8_8_8_8SInt || format == IrBufferFormat::Format16_16_16_16SInt;
     const bool rawSintStorage = storage && (wideSint || (narrowSint && !base.packed)) && base.written && !base.read && !base.atomic;
+    const bool rawFloat16Storage = storage && base.written && !base.read && !base.atomic &&
+        (remappedFormat == IrBufferFormat::Format16Float || remappedFormat == IrBufferFormat::Format16_16Float || remappedFormat == IrBufferFormat::Format16_16_16_16Float);
     decoded.numericClass = base.atomic || decoded.fmask ? IrTextureNumericClass::Uint : nativeRepacked ? IrTextureNumericClass::Float : SampledTextureNumericClass(remappedFormat);
     if (!storage && !base.depthCompare && IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3])) {
         decoded.depthBits = true;
@@ -311,7 +318,10 @@ ImageDecode inspectImageDescriptor(const DescriptorValue& descriptor, const Imag
         if (rawSintStorage) {
             decoded.numericClass = IrTextureNumericClass::Uint;
         }
-        if ((rawSintStorage || (base.atomic && format == IrBufferFormat::Format32SInt)) && !base.packed) {
+        if (rawFloat16Storage) {
+            decoded.numericClass = IrTextureNumericClass::Uint;
+        }
+        if ((rawSintStorage || rawFloat16Storage || (base.atomic && format == IrBufferFormat::Format32SInt)) && !base.packed) {
             decoded.conversionFormat = format;
         }
     } else if (decoded.numericClass == IrTextureNumericClass::Unsupported || (base.depthCompare && decoded.numericClass != IrTextureNumericClass::Float)) {
@@ -1358,38 +1368,13 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
             descriptor.dwordCount = 8u;
         }
         if (!validImageDescriptor(descriptor, image.r128) && !nullImageDescriptor(image, descriptor)) {
-            const auto type = rawImageType(descriptor);
-            auto message = "runtime image descriptor is invalid (image " + std::to_string(i) +
-                ", type " + std::to_string(static_cast<std::uint32_t>(type)) +
-                ", format " + std::to_string(static_cast<std::uint32_t>(rawImageFormat(descriptor))) +
-                ", r128 " + std::to_string(image.r128) + ", read " + std::to_string(image.read) +
-                ", written " + std::to_string(image.written) + ", atomic " + std::to_string(image.atomic) +
-                ", levelUses " + std::to_string(image.levelUses) + ", fmaskCompatible " + std::to_string(image.fmaskCompatible) +
-                ", samplerFree " + std::to_string(image.srgbDecodeCompatible) + ", imageCount " + std::to_string(plan.info.images.size());
-            if (type == ImageType::Color2DMsaa || type == ImageType::Color2DMsaaArray) {
-                message += ", baseLevel " + std::to_string((descriptor.dwords[3] >> 12u) & 0xfu) +
-                    ", fragmentsLog2 " + std::to_string((descriptor.dwords[3] >> 16u) & 0xfu) +
-                    ", maxMip " + std::to_string((descriptor.dwords[5] >> 4u) & 0xfu);
+            if (!image.optionalDescriptor || !undefinedImageWords(descriptor)) {
+                char detail[256];
+                std::snprintf(detail, sizeof(detail), ": image %u first used at pc 0x%x (%s, read %d, written %d, r128 %d), T# %08x %08x %08x %08x %08x %08x %08x %08x", i, image.firstUsePc, image.optionalDescriptor ? "optional" : "required", image.read ? 1 : 0, image.written ? 1 : 0, image.r128 ? 1 : 0, descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4], descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
+                throw std::runtime_error(std::string("runtime image descriptor is invalid") + detail);
             }
-            const auto address = (static_cast<std::uint64_t>(descriptor.dwords[0]) | (static_cast<std::uint64_t>(descriptor.dwords[1] & 0xffu) << 32u)) << 8u;
-            const auto width = ((descriptor.dwords[1] >> 30u) | ((descriptor.dwords[2] & 0x3fffu) << 2u)) + 1u;
-            const auto height = ((descriptor.dwords[2] >> 14u) & 0xffffu) + 1u;
-            char words[80]{};
-            std::snprintf(words, sizeof(words), "%08x %08x %08x %08x %08x %08x %08x %08x", descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4], descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
-            const bool tapeReady = plan.tapeSlot && plan.tapeSlot->ready.load(std::memory_order_acquire);
-            message += ", address " + std::to_string(address) + ", width " + std::to_string(width) + ", height " + std::to_string(height) + ") [source " + std::to_string(image.source) +
-                ", firstUsePc " + std::to_string(image.firstUsePc) +
-                ", plannedDimension " + std::to_string(static_cast<std::uint32_t>(image.dimension)) +
-                ", activeSource " + (image.source < activeSources.size() ? std::to_string(activeSources[image.source]) : "unknown") +
-                ", activeImage " + (activity < activeSources.size() ? std::to_string(activeSources[activity]) : "unknown") +
-                ", controlFlowBlocks " + std::to_string(plan.controlFlow.size()) +
-                ", compactValues " + std::to_string(plan.compact.values.size()) +
-                ", tapeReady " + std::to_string(tapeReady) +
-                ", tapeCompiled " + std::to_string(tapeReady && static_cast<bool>(plan.tapeSlot->tape)) + "]";
-            const auto& source = plan.descriptorSources[image.source];
-            message += " [sourceWord3 " + Detail::RuntimeValueDescription(plan, source.dwords[3]) +
-                ", sourceWord5 " + Detail::RuntimeValueDescription(plan, source.dwords[5]) + "] [words " + words + "]";
-            throw std::runtime_error(message);
+            descriptor = DescriptorValue{};
+            descriptor.dwordCount = 8u;
         }
         snapshot.images[i] = descriptor;
     }
@@ -1433,7 +1418,7 @@ void materializeForcedDegamma(const IrResourcePlan& plan, ResourceSnapshot& snap
 
 std::uint32_t colorCompareReference(IrBufferFormat format) {
     const auto value = static_cast<std::uint32_t>(format);
-    if (((value >= 1u && value <= 77u) || (value >= 128u && value <= 130u)) && SampledTextureNumericClass(format) == IrTextureNumericClass::Float && format != IrBufferFormat::Format11_11_10UNorm && format != IrBufferFormat::Format10_11_11Float) return EmulatedCompare::ReferenceZero;
+    if (((value >= 1u && value <= 77u) || (value >= 128u && value <= 130u)) && (SampledTextureNumericClass(format) == IrTextureNumericClass::Float || format == IrBufferFormat::Format11_11_10Float) && format != IrBufferFormat::Format11_11_10UNorm && format != IrBufferFormat::Format10_11_11Float) return EmulatedCompare::ReferenceZero;
     throw std::runtime_error("comparison sampling of a color texture is implemented only for floating-point, UNORM and SNORM formats (format " + std::to_string(value) + ")");
 }
 
@@ -1946,7 +1931,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
         mode.cube = false;
         mode.mipCount = mode.mipMode == ImageMipMode::DynamicStorage ? RuntimeAbi::StorageMipSlots : 1u;
         mode.shaderSwizzle = ShaderImageIdentitySwizzle;
-        if (conversion == IrBufferFormat::Format11_11_10UNorm || conversion == IrBufferFormat::Format10_11_11Float) mode.shaderSwizzle = 0x2acu;
+        if (conversion == IrBufferFormat::Format11_11_10UNorm || conversion == IrBufferFormat::Format11_11_10Float || conversion == IrBufferFormat::Format10_11_11Float) mode.shaderSwizzle = 0x2acu;
         modes.push_back(mode);
         const bool volumeLoad = (image.dimension == RdnaImageDimension::Dim2D || image.dimension == RdnaImageDimension::Dim2DArray) && image.fmaskCompatible && conversion != FmaskExpansion;
         const bool volumeStore = image.dimension == RdnaImageDimension::Dim2DArray && storage && image.written && !image.read && !image.atomic && image.mipMode != ImageMipMode::DynamicStorage;
@@ -1980,7 +1965,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             line.dimension = RdnaImageDimension::Dim1D;
             modes.push_back(line);
         }
-        if (image.dimension == RdnaImageDimension::Dim2D && storage && image.written && !image.read && !image.atomic && image.mipMode != ImageMipMode::DynamicStorage && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
+        if ((image.dimension == RdnaImageDimension::Dim2D || image.dimension == RdnaImageDimension::Dim2DArray) && storage && image.written && !image.read && !image.atomic && image.mipMode != ImageMipMode::DynamicStorage && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
             auto line = mode;
             line.dimension = RdnaImageDimension::Dim1D;
             modes.push_back(line);
@@ -2050,7 +2035,10 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             if (!storage) append(IrTextureNumericClass::Sint, IrBufferFormat::Invalid, IrBufferFormat::Invalid, false, false);
             append(IrTextureNumericClass::Uint, IrBufferFormat::Format11_11_10UInt, IrBufferFormat::Invalid, false, false);
             if ((image.srgbDecodeCompatible || (image.convertedSamples && convertedSampleCompatible(image))) && image.depthBitsCompatible) append(IrTextureNumericClass::Uint, IrBufferFormat::Format11_11_10UNorm, IrBufferFormat::Invalid, false, false);
-            if (image.srgbDecodeCompatible && image.depthBitsCompatible) append(IrTextureNumericClass::Uint, IrBufferFormat::Format10_11_11Float, IrBufferFormat::Invalid, false, false);
+            if (image.srgbDecodeCompatible && image.depthBitsCompatible) {
+                append(IrTextureNumericClass::Uint, IrBufferFormat::Format11_11_10Float, IrBufferFormat::Invalid, false, false);
+                append(IrTextureNumericClass::Uint, IrBufferFormat::Format10_11_11Float, IrBufferFormat::Invalid, false, false);
+            }
             if (storage) {
                 for (const auto format : {IrBufferFormat::Format5_6_5UNorm, IrBufferFormat::Format5_5_5_1UNorm, IrBufferFormat::Format4_4_4_4UNorm}) {
                     append(IrTextureNumericClass::Uint, format, IrBufferFormat::Invalid, false, false);
@@ -2071,6 +2059,10 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             if (image.atomic && format != IrBufferFormat::Format32SInt) continue;
             append(IrTextureNumericClass::Uint, format, IrBufferFormat::Invalid, false, false);
         }
+    }
+    if (storage && !image.packed && image.written && !image.read && !image.atomic) {
+        constexpr std::array formats{IrBufferFormat::Format16Float, IrBufferFormat::Format16_16Float, IrBufferFormat::Format16_16_16_16Float};
+        for (const auto format : formats) append(IrTextureNumericClass::Uint, format, IrBufferFormat::Invalid, false, false);
     }
     if (image.depthCompare && !table && (image.emulatedCompare & EmulatedCompare::Unsupported) == 0u && (image.dimension == RdnaImageDimension::Dim2D || image.dimension == RdnaImageDimension::Dim2DArray)) {
         auto mode = image;
