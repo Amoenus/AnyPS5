@@ -6630,6 +6630,8 @@ void resourceTests() {
         color.surfaceAddress = reinterpret_cast<std::uintptr_t>(guestSecond.data()) - sizeof(guestSecond);
         color.address = color.surfaceAddress + sizeof(guestSecond) / 2u;
         color.bytes = sizeof(guestSecond);
+        Require(AgcDriver::Graphics::ShaderResources::BytesUpToTarget(color.surfaceAddress - 240u, 256u, 32u, &color) == 240u, "a strided buffer before a volume was not cut at its backing allocation");
+        Require(AgcDriver::Graphics::ShaderResources::BytesUpToTarget(color.address - 8u, 16u, 32u, &color) == 16u, "a strided buffer inside a volume was cut at its selected mip");
         ShaderRecompiler::RecompileResult vertex;
         ShaderRecompiler::RecompileResult fragment;
         vertex.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 1, vsharp(guestSecond.data(), 8)));
