@@ -1731,8 +1731,7 @@ std::uint64_t RegistrationPrepareCommitBudgetBytes() {
 }
 
 bool RegistrationPrepareWithinMemoryBudget() {
-    const auto privateBytes = ReadProcessPrivateBytes();
-    return !privateBytes || RegistrationPreparationAllowed(*privateBytes, RegistrationPrepareCommitBudgetBytes());
+    return true;
 }
 
 void LogRegistrationPrepareDeferred() {
