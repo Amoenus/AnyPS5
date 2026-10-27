@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <cstdlib>
 #include <cstdio>
 #include <deque>
@@ -282,6 +283,13 @@ PadData Pad::ReadState(int port) {
     slot.pressedSinceRead = 0;
     if (slot.lastReadAt != 0) slot.readInterval = now - slot.lastReadAt;
     slot.lastReadAt = now;
+    static std::uint32_t reportedButtons = 0;
+    static unsigned reportCount = 0;
+    if (port == 0 && injected.buttons != reportedButtons && reportCount < 16) {
+        reportedButtons = injected.buttons;
+        ++reportCount;
+        std::fprintf(stderr, "[pad-read-validation] requested=0x%x returned=0x%x intercepted=%d connected=%d port=%d\n", static_cast<unsigned>(injected.buttons), static_cast<unsigned>(data.buttons), slot.state.intercepted ? 1 : 0, data.connected ? 1 : 0, port);
+    }
     return data;
 }
 
