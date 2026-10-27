@@ -133,6 +133,44 @@ static void CheckFindAndCount() {
     Require(__std_find_trivial_unsized_4_nid_postfix(words + 8, 42) == words + 12);
 }
 
+static void CheckSignedMax64Value() {
+    const std::int64_t edges[] = {INT64_MIN, INT64_MIN + 1, -0x100000001ll, -0x100000000ll, -1, 0, 1, 0x7fffffff, 0xffffffff, 0x100000000, INT64_MAX - 1, INT64_MAX};
+    for (const auto& left : edges) {
+        Require(__std_max_8i_nid_postfix(&left, &left + 1) == left);
+        for (const auto& right : edges) {
+            const std::int64_t pair[] = {left, right};
+            Require(__std_max_8i_nid_postfix(pair, pair + 2) == std::max(left, right));
+        }
+    }
+    std::uint64_t state = 0x2e791fa84d6c530b;
+    for (const std::size_t count : {1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 257}) {
+        std::vector<std::int64_t> values(count);
+        for (auto& value : values) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            std::memcpy(&value, &state, sizeof(value));
+        }
+        const auto expected = *std::max_element(values.begin(), values.end());
+        for (std::size_t offset = 0; offset < 32; ++offset) {
+            std::vector<unsigned char> storage(count * sizeof(std::int64_t) + 64, 0xff);
+            std::memcpy(storage.data() + offset, values.data(), count * sizeof(std::int64_t));
+            const auto original = storage;
+            Require(__std_max_8i_nid_postfix(storage.data() + offset, storage.data() + offset + count * sizeof(std::int64_t)) == expected);
+            Require(storage == original);
+        }
+        std::fill(values.begin(), values.end(), INT64_MIN);
+        Require(__std_max_8i_nid_postfix(values.data(), values.data() + count) == INT64_MIN);
+        for (std::size_t position = 0; position < count; ++position) {
+            values[position] = -0x100000005ll;
+            Require(__std_max_8i_nid_postfix(values.data(), values.data() + count) == -0x100000005ll);
+            values[position] = INT64_MIN;
+        }
+    }
+    const std::int64_t repeated[] = {-9, -9, -9, -9};
+    Require(__std_max_8i_nid_postfix(repeated, repeated + 4) == -9);
+}
+
 static void CheckUnsizedRescan() {
     alignas(32) unsigned char bytes[96] = {};
     bytes[3] = 'x';
@@ -290,6 +328,7 @@ int main() {
     CheckFindAndCount();
     CheckUnsignedMin32Value();
     CheckUnsizedRescan();
+    CheckSignedMax64Value();
     CheckMinMax();
     CheckMaxValue();
     CheckReverseAndSwap();
