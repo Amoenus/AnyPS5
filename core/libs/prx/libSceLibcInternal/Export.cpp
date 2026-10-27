@@ -19,12 +19,6 @@ extern "C" const char* __progname_nid_postfix;
 
 extern "C" {
 
-int APS5_VABI sceLibcInternalPending4_001_nid_no_patch() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-APS5_EXPORT("NEemVJeMwd0", sceLibcInternalPending4_001_nid_no_patch);
-
 int APS5_VABI sceLibcInternalPending4_002_nid_no_patch() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
