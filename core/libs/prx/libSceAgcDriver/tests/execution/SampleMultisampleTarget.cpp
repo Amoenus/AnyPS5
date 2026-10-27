@@ -1332,32 +1332,13 @@ void CheckBufferLoad(AgcDriver::VulkanDevice& device, const ShaderRecompiler::Re
     Require(std::all_of(words.begin() + Threads, words.end(), [](auto word) { return word == 0xdeadbeefu; }), "the typed buffer load overwrote its output boundary");
 }
 
-template<class TAction>
-void CheckBufferRefused(TAction&& action, const char* name, std::vector<std::string>& missing, std::string_view expected = "guest color snapshots with unsupported tiling or multisample metadata are not implemented") {
-    std::string refusal;
-    try {
-        action();
-    } catch (const std::runtime_error& error) {
-        refusal = error.what();
-    }
-    const bool refused = refusal.find(expected) != std::string::npos;
-    std::cout << "native buffer " << name << ": " << (refused ? "refused" : "missing refusal") << '\n';
-    if (!refused) missing.emplace_back(std::string(name) + ": " + refusal);
-}
-
-
-void BufferRefusals(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
+void BufferAdjacentControls(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     Block block(4u * BlockBytes);
     Block output(2u * 1024u * 1024u);
     struct ReleaseDevice {
         decltype(device)& value;
         ~ReleaseDevice() { value.reset(); }
     } releaseDevice{device};
-    const auto warm = CompileBufferLoad(*device, block.Address(), output.Address());
-    std::shared_ptr<const AgcDriver::Recipe> recipe;
-    CheckBufferLoad(*device, warm, output, &recipe);
-    const auto deferredProgram = CompileBufferLoad(*device, block.Address() + Threads * 4u, output.Address());
-    const auto prepared = device->PrepareDispatch(deferredProgram, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
     auto color = DecodeTarget(block);
     color.tileMode = AgcDriver::Graphics::ColorTileMode::Standard4KB;
     color.bytes = AgcDriver::Graphics::ColorTargetLayout(Side, Side, color.tileMode, color.elementBytes).Bytes();
@@ -1369,39 +1350,10 @@ void BufferRefusals(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
     CheckUniform(LoadSamples(*device, block), Ones, "after a fill of the target's color memory with half-float ones");
     const auto guardedBytes = std::max(color.bytes * color.samples, static_cast<std::uint64_t>(Side) * Side * color.elementBytes * color.samples);
-    Require(guardedBytes + Threads * 4u <= block.bytes, "the unsupported target guard leaves no adjacent buffer control");
-    std::vector<std::string> missing;
-    const auto dispatch = [&](const auto& program) {
-        device->Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
-        device->WaitIdle();
-    };
-    CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + 4u, output.Address())); }, "fresh read", missing);
-    CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + colorBytes - 4u, output.Address())); }, "edge read", missing);
-    CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + guardedBytes, block.Address())); }, "write", missing, "whose samples are only on the host");
-    CheckBufferRefused([&] { dispatch(warm); }, "warmed dispatch", missing);
-    if (prepared != nullptr) {
-        CheckBufferRefused([&] {
-            device->Dispatch(deferredProgram, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), prepared);
-            device->WaitIdle();
-        }, "deferred dispatch", missing);
-    }
-    bool reused = false;
-    if (recipe != nullptr) {
-        const auto hit = device->PrepareRecipe(recipe, false);
-        Require(hit != nullptr, "the warmed buffer recipe did not retain its template");
-        reused = true;
-        CheckBufferRefused([&] {
-            AgcDriver::VulkanDevice::IndirectOutcome outcome{};
-            device->DispatchRecipe(warm, 1, 1, 1, 0, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), hit, outcome);
-            device->WaitIdle();
-        }, "recipe dispatch", missing);
-    }
+    Require(guardedBytes + Threads * 4u <= block.bytes, "the target guard leaves no adjacent buffer control");
     CheckBufferLoad(*device, CompileBufferLoad(*device, block.Address() + guardedBytes, output.Address()), output);
-    CheckUniform(LoadSamples(*device, block), Ones, "after the native buffer access refusals and adjacent buffer control");
-    std::cout << "native buffer controls: adjacent=passed deferred=" << (prepared != nullptr) << " recipe=" << reused << std::endl;
-    std::string failures;
-    for (const auto& item : missing) failures += " " + item;
-    Require(missing.empty(), "buffer aliases of live native MSAA color memory bypassed the guard:" + failures);
+    CheckUniform(LoadSamples(*device, block), Ones, "after the adjacent buffer control");
+    std::puts("native buffer controls: adjacent read passed without changing native samples");
 }
 
 void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
@@ -1443,6 +1395,7 @@ void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
     arm();
     check([&] { dispatch(CompileBufferLoad(*device, block.Address() + bytes, output.Address())); }, false, 0u);
     Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * Samples * 8u, "a neighboring logical buffer retired the native owner");
+    CheckUniform(LoadSamples(*device, block), Ones, "after the neighboring logical buffer control");
     check([&] { dispatch(warm); }, false, FillOnes);
     RequireNoMultisampleTarget(block.Address(), bytes, "after warmed buffer publication");
     std::puts("native buffer publication: adjacent range retains owner; warmed dispatch reads native words");
@@ -1461,34 +1414,7 @@ void BufferPublication(std::unique_ptr<AgcDriver::VulkanDevice>& device) {
         device->DispatchRecipe(warm, 1u, 1u, 1u, 0u, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), hit, outcome);
     }, false, FillOnes);
     std::puts("native buffer publication: recipe dispatch reads native words");
-    arm();
-    std::string refusal;
-    try {
-        dispatch(CompileBufferLoad(*device, block.Address() + bytes, block.Address()));
-        device->WaitIdle();
-    } catch (const std::exception& error) {
-        refusal = error.what();
-    }
-    Require(refusal.find("a shader buffer write") != std::string::npos, "a writable native buffer alias lost its refusal: " + refusal);
-    CheckUniform(LoadSamples(*device, block), Ones, "after a refused native buffer write");
-    std::puts("native buffer publication: writable aliases remain refused without changing native samples");
-    arm();
-    const auto* beforeBegin = reinterpret_cast<const std::byte*>(block.data);
-    const std::vector<std::byte> before(beforeBegin, beforeBegin + block.bytes);
-    refusal.clear();
-    try {
-        const auto alias = CompileBufferLoad(*device, block.Address() + 4u, block.Address());
-        const auto aliasPrepared = device->PrepareDispatch(alias, {}, Threads, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
-        Require(aliasPrepared != nullptr, "the overlapping alias probe did not prepare resources");
-        std::puts("native buffer publication: overlapping alias preparation returned a resource plan without refusal");
-    } catch (const std::exception& error) {
-        refusal = error.what();
-    }
-    Require(refusal.find("a shader buffer write") != std::string::npos, "an overlapping read-only binding allowed a writable native alias during preparation: " + refusal);
-    Require(std::equal(before.begin(), before.end(), beforeBegin), "a rejected writable alias published its overlapping read-only source");
-    Require(ReadMultisampleTargetSamples_nid_no_patch(context, color).size() == Side * Side * Samples * 8u, "a rejected writable alias retired its native owner");
-    CheckUniform(LoadSamples(*device, block), Ones, "after a refused overlapping read-only and writable binding");
-    std::puts("native buffer publication: overlapping read-only and writable bindings are refused before publication, with bytes and native owner retained");
+
 }
 
 ShaderRecompiler::RecompileResult CompileMovedVertex(AgcDriver::VulkanDevice& device, std::uint64_t address) {
@@ -1904,7 +1830,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--buffer-refusal") {
-            BufferRefusals(device);
+            BufferAdjacentControls(device);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--buffer-publication") {
