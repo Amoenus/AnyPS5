@@ -3,8 +3,6 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "Recompiler.hpp"
-#include "Optimization/ResourceProgram.hpp"
-#include "IntermediateRepresentation/IrProgram.hpp"
 #include "VulkanTestDevice.hpp"
 #include <algorithm>
 #include <array>
@@ -44,6 +42,13 @@ alignas(256) std::array<std::uint32_t, 4> Data{Payload, 0u, 0u, 0u};
 alignas(256) std::array<std::uint64_t, 1> Indirect{};
 alignas(256) std::array<std::uint32_t, 8> Table{};
 alignas(256) std::array<std::uint32_t, 1> ConditionInput{};
+
+alignas(256) constexpr std::array<std::uint32_t, 27> DynamicDescriptorCode{
+    0xf4080100u, 0xfa000000u, 0xbe8803ffu, 0x00000001u, 0xf4080401u, 0xfa000000u, 0xf4000240u, 0xfa000010u,
+    0x7e0202ffu, 0x11111111u, 0x34040082u, 0xbf8cc07fu, 0xe0300000u, 0x80040000u, 0xbf8c3f70u, 0x7da80008u,
+    0xbf880006u, 0xf4080501u, 0x12000000u, 0xbf8cc07fu, 0xe0300000u, 0x80050100u, 0xbf8c3f70u, 0xbefe04c1u,
+    0xe0701000u, 0x80010102u, 0xbf810000u,
+};
 
 alignas(256) constexpr std::array<std::uint32_t, 19> BranchCode{
     0xf4080100u, 0xfa000000u, 0xf4000200u, 0xfa000010u, 0xf4040280u, 0xfa000018u, 0xbe8c03ffu, 0x11111111u,
@@ -85,13 +90,6 @@ alignas(256) constexpr std::array<std::uint32_t, 21> DescriptorCode{
     0xf4080100u, 0xfa000000u, 0xf4000200u, 0xfa000010u, 0xf4040280u, 0xfa000018u, 0x7e0202ffu, 0x11111111u,
     0xbf8cc07fu, 0xbf068008u, 0xbf850006u, 0xf4080405u, 0xfa000010u, 0xbf8cc07fu, 0xe0300000u, 0x80040100u,
     0xbf8c3f70u, 0x34040082u, 0xe0701000u, 0x80010102u, 0xbf810000u,
-};
-
-alignas(256) constexpr std::array<std::uint32_t, 27> DynamicDescriptorCode{
-    0xf4080100u, 0xfa000000u, 0xf4000200u, 0xfa000010u, 0xf4080400u, 0xfa000030u, 0xf4000240u, 0xfa000020u,
-    0x7e0202ffu, 0x11111111u, 0x34040082u, 0xbf8cc07fu, 0xe0300000u, 0x80040000u, 0xbf8c3f70u, 0x7da80008u,
-    0xbf880006u, 0xf4080501u, 0x12000000u, 0xbf8cc07fu, 0xe0300000u, 0x80050100u, 0xbf8c3f70u, 0xbefe04c1u,
-    0xe0701000u, 0x80010102u, 0xbf810000u,
 };
 
 class StderrCapture {
@@ -153,13 +151,6 @@ Outcome Run(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, Cod
     Root[7] = static_cast<std::uint32_t>(pointer >> 32u);
     Root[8] = static_cast<std::uint32_t>(second);
     Root[9] = static_cast<std::uint32_t>(second >> 32u);
-    if (code.data() == DynamicDescriptorCode.data()) {
-        const auto condition = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(ConditionInput.data()));
-        Root[12] = static_cast<std::uint32_t>(condition);
-        Root[13] = static_cast<std::uint32_t>((condition >> 32u) & 0xffffu);
-        Root[14] = sizeof(ConditionInput);
-        Root[15] = 0x30027facu;
-    }
     std::fill(Output.begin(), Output.end(), 0xdeadbeefu);
     const auto root = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Root.data()));
     const std::array<std::uint32_t, 4> words{static_cast<std::uint32_t>(root), static_cast<std::uint32_t>(root >> 32u), static_cast<std::uint32_t>(pointer), static_cast<std::uint32_t>(pointer >> 32u)};
@@ -174,10 +165,6 @@ Outcome Run(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, Cod
     };
     AgcDriver::ShaderMemory memory({});
     const auto capture = memory.Capture(request);
-    if (code.data() == DynamicDescriptorCode.data()) {
-        const bool flat = std::any_of(capture->plan->srtReads.begin(), capture->plan->srtReads.end(), [](const auto& read) { return read.value->template Flags<ShaderRecompiler::MemoryFlags>().pc == 0x44u; });
-        std::printf("dynamic descriptor plan: pc0x44_flat_slot=%d guards=%zu\n", flat, capture->plan->guardedSrtSlots.size());
-    }
     const auto regions = memory.Regions();
     request.context.memory = regions;
     const auto result = ShaderRecompiler::Recompile(request, *capture);
@@ -276,35 +263,40 @@ void RunDynamicDescriptorTests(AgcDriver::VulkanDevice& device) {
     GuestAllocations::Mutation().Add(reserved, pageBytes, true, true, true);
     auto* descriptor = static_cast<std::uint32_t*>(reserved);
     const auto input = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Data.data()));
-    descriptor[0] = static_cast<std::uint32_t>(input);
-    descriptor[1] = static_cast<std::uint32_t>((input >> 32u) & 0xffffu);
-    descriptor[2] = sizeof(Data);
+    const auto condition = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(ConditionInput.data()));
+    descriptor[0] = static_cast<std::uint32_t>(condition);
+    descriptor[1] = static_cast<std::uint32_t>((condition >> 32u) & 0xffffu);
+    descriptor[2] = sizeof(ConditionInput);
     descriptor[3] = 0x30027facu;
+    descriptor[16] = static_cast<std::uint32_t>(input);
+    descriptor[17] = static_cast<std::uint32_t>((input >> 32u) & 0xffffu);
+    descriptor[18] = sizeof(Data);
+    descriptor[19] = 0x30027facu;
     const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(reserved));
     ConditionInput[0] = 0u;
-    const auto taken = Run(device, DynamicDescriptorCode, base, 1u, 1u, 0u, true);
+    const auto taken = Run(device, DynamicDescriptorCode, base, 64u, 1u, 0u, true);
     Require(!Faulted(taken) && taken.poisoned == 0u, "dynamic descriptor: mapped taken arm faulted:\n" + taken.log);
     RequireWords(taken, Lanes, Payload, "dynamic descriptor: mapped taken arm");
     std::puts("dynamic descriptor: GPU condition0 took the mapped arm and wrote the payload");
-    descriptor[16] = static_cast<std::uint32_t>(input + sizeof(std::uint32_t));
-    descriptor[17] = static_cast<std::uint32_t>(((input + sizeof(std::uint32_t)) >> 32u) & 0xffffu);
-    descriptor[18] = sizeof(Data) - sizeof(std::uint32_t);
-    descriptor[19] = 0x30027facu;
-    const auto second = Run(device, DynamicDescriptorCode, base, 1u, 1u, 64u, true);
+    descriptor[32] = static_cast<std::uint32_t>(input + sizeof(std::uint32_t));
+    descriptor[33] = static_cast<std::uint32_t>(((input + sizeof(std::uint32_t)) >> 32u) & 0xffffu);
+    descriptor[34] = sizeof(Data) - sizeof(std::uint32_t);
+    descriptor[35] = 0x30027facu;
+    const auto second = Run(device, DynamicDescriptorCode, base, 128u, 1u, 0u, true);
     Require(!Faulted(second) && second.poisoned == 0u && second.pipelineVariantId == taken.pipelineVariantId, "dynamic descriptor: a changed mapped offset faulted or changed the pipeline variant:\n" + second.log);
     RequireWords(second, Lanes, 0u, "dynamic descriptor: second mapped descriptor");
     std::puts("dynamic descriptor: a changed runtime offset selected the second mapped descriptor");
     ConditionInput[0] = 1u;
-    const auto skippedMapped = Run(device, DynamicDescriptorCode, base, 1u, 1u, 0u, true);
+    const auto skippedMapped = Run(device, DynamicDescriptorCode, base, 64u, 1u, 0u, true);
     Require(!Faulted(skippedMapped) && skippedMapped.poisoned == 0u, "dynamic descriptor: mapped skipped arm faulted:\n" + skippedMapped.log);
     RequireWords(skippedMapped, 0u, 0u, "dynamic descriptor: mapped skipped arm");
     std::puts("dynamic descriptor: GPU condition1 skipped the mapped arm and wrote the default");
-    const auto skipped = Run(device, DynamicDescriptorCode, base, 1u, 1u, pageBytes, true);
+    const auto skipped = Run(device, DynamicDescriptorCode, base, static_cast<std::uint32_t>(pageBytes), 1u, 0u, true);
     Require(!Faulted(skipped), "dynamic descriptor: an inaccessible descriptor in the skipped arm faulted:\n" + skipped.log);
     RequireWords(skipped, 0u, 0u, "dynamic descriptor: inaccessible skipped arm");
     std::puts("dynamic descriptor: GPU condition1 skipped the inaccessible arm and wrote the default");
     ConditionInput[0] = 0u;
-    const auto inaccessible = Run(device, DynamicDescriptorCode, base, 1u, 1u, pageBytes, true);
+    const auto inaccessible = Run(device, DynamicDescriptorCode, base, static_cast<std::uint32_t>(pageBytes), 1u, 0u, true);
     Require(Faulted(inaccessible) && inaccessible.log.find(Fault(base + pageBytes, 0x44u)) != std::string::npos, "dynamic descriptor: an executed inaccessible descriptor did not fault at its address and pc:\n" + inaccessible.log);
     std::puts("dynamic descriptor: GPU condition0 faulted on the inaccessible descriptor at its address and pc");
     GuestAllocations::Mutation().Remove(reserved);
