@@ -940,6 +940,7 @@ void APS5_VABI bcopy_nid_postfix(const void* source, void* destination, size_t c
 void* APS5_VABI memcpy_nid_postfix(void* dest, const void* src, size_t n);
 void* APS5_VABI memmove_nid_postfix(void* dest, const void* src, size_t n);
 int APS5_VABI memcmp_nid_postfix(const void* s1, const void* s2, size_t n);
+int APS5_VABI timingsafe_memcmp_nid_postfix(const void* b1, const void* b2, size_t len);
 const void* APS5_VABI memchr_nid_postfix(const void* s, int c, size_t n);
 void* APS5_VABI memrchr_nid_postfix(const void* s, int c, size_t n);
 void* APS5_VABI memccpy_nid_postfix(void* dest, const void* src, int c, size_t n);
@@ -1019,6 +1020,8 @@ long long APS5_VABI wcstol_nid_postfix(const char16_t* str, char16_t** endptr, i
 long long APS5_VABI wcstoimax_nid_postfix(const char16_t* str, char16_t** endptr, int base);
 unsigned long long APS5_VABI wcstoumax_nid_postfix(const char16_t* str, char16_t** endptr, int base);
 std::uint64_t APS5_VABI _WStoul_nid_postfix(const char16_t* str, char16_t** endptr, int base);
+int APS5_VABI _Stopfx_nid_postfix(const char** cursor, char** end);
+int APS5_VABI _WStopfx_nid_postfix(const char16_t** cursor, char16_t** end);
 int APS5_VABI wcscoll_nid_postfix(const char16_t* first, const char16_t* second);
 size_t APS5_VABI wcsxfrm_nid_postfix(char16_t* destination, const char16_t* source, size_t count);
 size_t APS5_VABI strxfrm_nid_postfix(char* destination, const char* source, size_t count);
@@ -1130,6 +1133,7 @@ const void* APS5_VABI __std_min_element_1_nid_postfix(const void* first, const v
 const void* APS5_VABI __std_min_element_2_nid_postfix(const void* first, const void* last, bool isSigned);
 const void* APS5_VABI __std_min_element_4_nid_postfix(const void* first, const void* last, bool isSigned);
 const void* APS5_VABI __std_min_element_8_nid_postfix(const void* first, const void* last, bool isSigned);
+std::int32_t APS5_VABI __std_min_4i_nid_postfix(const void* first, const void* last);
 const void* APS5_VABI __std_max_element_1_nid_postfix(const void* first, const void* last, bool isSigned);
 const void* APS5_VABI __std_max_element_2_nid_postfix(const void* first, const void* last, bool isSigned);
 const void* APS5_VABI __std_max_element_4_nid_postfix(const void* first, const void* last, bool isSigned);
@@ -1144,6 +1148,7 @@ void APS5_VABI __std_reverse_trivially_swappable_1_nid_postfix(void* first, void
 void APS5_VABI __std_reverse_trivially_swappable_2_nid_postfix(void* first, void* last);
 void APS5_VABI __std_reverse_trivially_swappable_4_nid_postfix(void* first, void* last);
 void APS5_VABI __std_reverse_trivially_swappable_8_nid_postfix(void* first, void* last);
+std::uint32_t APS5_VABI __std_max_4u_nid_postfix(const void* first, const void* last);
 void APS5_VABI __std_reverse_copy_trivially_copyable_1_nid_postfix(const void* first, const void* last, void* destination);
 void APS5_VABI __std_reverse_copy_trivially_copyable_2_nid_postfix(const void* first, const void* last, void* destination);
 void APS5_VABI __std_reverse_copy_trivially_copyable_4_nid_postfix(const void* first, const void* last, void* destination);

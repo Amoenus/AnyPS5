@@ -3561,6 +3561,23 @@ static void CheckMunmapOverUnmappedPages() {
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(memory), 0) == SCE_KERNEL_ERROR_EINVAL);
 }
 
+static void CheckMemoryPoolBlockStats() {
+    KernelMemoryPoolBlockStats stats{-1, -1, -1, -1};
+    Require(sceKernelMemoryPoolGetBlockStats(nullptr, sizeof(stats)) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelMemoryPoolGetBlockStats(&stats, sizeof(stats) - 1) == SCE_KERNEL_ERROR_EINVAL);
+    Require(stats.available_flushed_blocks == -1 && stats.allocated_flushed_blocks == -1);
+    Require(sceKernelMemoryPoolGetBlockStats(&stats, sizeof(stats)) == 0);
+    Require(stats.available_cached_blocks == 0 && stats.allocated_cached_blocks == 0);
+    Require(stats.available_flushed_blocks == 0 && stats.allocated_flushed_blocks == 0);
+    constexpr std::size_t block = std::size_t{2} << 20;
+    std::int64_t phys = -1;
+    Require(sceKernelMemoryPoolExpand(0, static_cast<std::int64_t>(sceKernelGetDirectMemorySize()), block, block, &phys) == 0);
+    Require(phys >= 0 && phys % static_cast<std::int64_t>(block) == 0);
+    Require(sceKernelMemoryPoolGetBlockStats(&stats, sizeof(stats)) == 0);
+    Require(stats.available_flushed_blocks == 1 && stats.allocated_flushed_blocks == 0);
+    Require(sceKernelReleaseDirectMemory(phys, block) == 0);
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     _putenv_s("APS5_PIN_WAIT_MS", "1000");
@@ -3579,6 +3596,7 @@ int main(int argc, char** argv) {
     CheckMappedLeasesPreserveReadableRuns();
     CheckVirtualQuerySplitFlexibleRanges();
     CheckVirtualQueryForNonReadableGuestRange();
+    CheckMemoryPoolBlockStats();
     CheckReleaseFlexibleMemory();
     CheckFlexibleMappingIgnoresFlag8000();
     CheckSceKernelMmap();
