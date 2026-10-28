@@ -80,9 +80,10 @@ void ShiftNanWords(std::uint32_t* words, int from, int to, int digits) {
     } while (++index < to);
 }
 
+template<int Words>
 std::uint64_t HexNanPayload(const char* open, const char*& end) {
-    std::uint32_t words[2] = {};
-    constexpr int high = 1;
+    std::uint32_t words[Words] = {};
+    constexpr int high = Words - 1;
     int top = high;
     int group = high;
     int digits = 0;
@@ -143,10 +144,15 @@ std::uint64_t HexNanPayload(const char* open, const char*& end) {
         do words[to++] = 0;
         while (to <= high);
     } else {
-        words[high] &= 0xffffffffu >> 12;
+        words[high] &= 0xffffffffu >> (Words == 2 ? 12 : 8);
     }
-    if (words[0] == 0 && words[1] == 0) words[0] = 1;
-    return (static_cast<std::uint64_t>(words[1]) << 32) | words[0];
+    if constexpr (Words == 2) {
+        if (words[0] == 0 && words[1] == 0) words[0] = 1;
+        return (static_cast<std::uint64_t>(words[1]) << 32) | words[0];
+    } else {
+        if (words[0] == 0) words[0] = 1;
+        return words[0];
+    }
 }
 
 const char* NanSequenceEnd(const char* tail) {
@@ -160,11 +166,12 @@ template<typename TFloat>
 TFloat NanValue(const NanSubject& subject, const char*& end) {
     if constexpr (std::is_same_v<TFloat, double>) {
         end = subject.tail;
-        const std::uint64_t payload = *subject.tail == '(' ? HexNanPayload(subject.tail, end) : 0;
+        const std::uint64_t payload = *subject.tail == '(' ? HexNanPayload<2>(subject.tail, end) : 0;
         return std::bit_cast<double>((subject.negative ? 0x8000000000000000ull : 0) | 0x7ff8000000000000ull | payload);
     } else if constexpr (std::is_same_v<TFloat, float>) {
-        end = NanSequenceEnd(subject.tail);
-        return std::bit_cast<float>((subject.negative ? 0x80000000u : 0) | 0x7fc00000u);
+        end = subject.tail;
+        const auto payload = static_cast<std::uint32_t>(*subject.tail == '(' ? HexNanPayload<1>(subject.tail, end) : 0);
+        return std::bit_cast<float>((subject.negative ? 0x80000000u : 0) | 0x7fc00000u | payload);
     } else {
         end = NanSequenceEnd(subject.tail);
         TFloat value{};

@@ -1214,6 +1214,17 @@ if(BUILD_TESTING)
         set_tests_properties(guest_exception_handler PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(guest_amm_pool_tests ${LIBS_INCLUDE_DIR}/tests/GuestAmmPool.cpp)
+    target_include_directories(guest_amm_pool_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_amm_pool_tests PRIVATE libc)
+    configure_windows_unwind(guest_amm_pool_tests)
+    add_test(NAME guest_amm_pool COMMAND guest_amm_pool_tests)
+    set_tests_properties(guest_amm_pool PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_amm_pool PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
     add_test_executable(guest_raise_exception_tests ${LIBS_INCLUDE_DIR}/tests/GuestRaiseException.cpp)
     target_include_directories(guest_raise_exception_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_raise_exception_tests PRIVATE libkernel libc)

@@ -184,10 +184,8 @@ static void CheckAudioCoprocessorProtection() {
     Require(sceKernelMprotect(writable, length, 0x3f2) == 0);
     static_cast<volatile unsigned char*>(writable)[0] = 9;
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(writable), length) == 0);
-    bool rejected = false;
     void* undefined = nullptr;
-    try { sceKernelMapFlexibleMemory(&undefined, length, 0x400, 0); } catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected && undefined == nullptr);
+    Require(sceKernelMapFlexibleMemory(&undefined, length, 0x400, 0) == SCE_KERNEL_ERROR_EINVAL && undefined == nullptr);
 }
 
 static void CheckMprotectIgnoresUndefinedBits() {
@@ -268,14 +266,15 @@ static void CheckStrictMemoryProtectionBits() {
     };
     std::size_t available = 0;
     Require(sceKernelAvailableFlexibleMemorySize(&available) == 0);
-    for (const int protection : {-256, -129, -128, -14, -1, 8, 0x400, std::numeric_limits<int>::min()}) {
+    for (const int protection : {-256, -129, -128, -14, -1, 8, 0x400, 0x800, 0x3ff, std::numeric_limits<int>::min()}) {
         void* invalid = nullptr;
-        rejected([&] { sceKernelMapFlexibleMemory(&invalid, length, protection, 0); });
-        Require(invalid == nullptr);
+        Require(sceKernelMapFlexibleMemory(&invalid, length, protection, 0) == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
+        Require(sceKernelMapNamedFlexibleMemory(&invalid, length, protection, 0, "undefined") == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
         std::size_t after = 0;
         Require(sceKernelAvailableFlexibleMemorySize(&after) == 0 && after == available);
-        rejected([&] { sceKernelMapDirectMemory(&invalid, length, protection, 0, physical, 0); });
-        Require(invalid == nullptr);
+        Require(sceKernelMapDirectMemory(&invalid, length, protection, 0, physical, 0) == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
+        Require(sceKernelMapDirectMemory2(&invalid, length, 0, protection, 0, physical, 0) == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
+        Require(sceKernelMapNamedDirectMemory(&invalid, length, protection, 0, physical, 0, "undefined") == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
         rejected([&] { sceKernelMtypeprotect(mapping, length, 2, protection); });
         VirtualQueryInfo info{};
         Require(sceKernelVirtualQuery(mapping, 0, &info, sizeof(info)) == 0);
