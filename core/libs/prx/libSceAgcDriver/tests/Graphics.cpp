@@ -1898,7 +1898,8 @@ void DisabledColorTests() {
     const auto thirdSlice = AgcDriver::Graphics::DecodeState(queue);
     Require(thirdSlice.depth && thirdSlice.depth->firstSlice == 3 && thirdSlice.depth->address == depthOnly.depth->address + 3u * AgcDriver::Graphics::DepthSliceBytes(depthOnly.depth->extent, 4u), "a depth view of slice 3 lost its slice or its Z offset");
     queue.context[0x002] = 1u << 26u;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "on a surface without mips");
+    const auto singleLevelMip = AgcDriver::Graphics::DecodeState(queue);
+    Require(singleLevelMip.depth && singleLevelMip.depth->address == depthOnly.depth->address && singleLevelMip.depth->extent.width == depthOnly.depth->extent.width && singleLevelMip.depth->extent.height == depthOnly.depth->extent.height, "a depth view mip on a single-level surface did not select its first level");
     queue.context[0x002] = 0;
     {
         using AgcDriver::Graphics::ComputeElementMipLayout;
