@@ -1568,6 +1568,29 @@ add_custom_command(
         VERBATIM
 )
 
+add_test_executable(agc_pipeline_cache_allocation_tests EXCLUDE_FROM_ALL tests/PipelineCacheFailures.cpp
+    Graphics/src/PipelineCache.cpp tests/AllocationFailure.cpp)
+target_include_directories(agc_pipeline_cache_allocation_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/core/shader/recompiler ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
+target_link_libraries(agc_pipeline_cache_allocation_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_pipeline_cache_allocation_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_pipeline_cache_allocation_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_pipeline_cache_allocation_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    foreach(mode startup now busy destructor worker)
+        add_test(NAME agc_pipeline_cache_allocation_${mode} COMMAND agc_pipeline_cache_allocation_tests ${mode})
+        set_tests_properties(agc_pipeline_cache_allocation_${mode} PROPERTIES TIMEOUT 25)
+        if(WIN32)
+            set_tests_properties(agc_pipeline_cache_allocation_${mode} PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
+    if(WIN32)
+        add_test(NAME agc_pipeline_cache_read_retry COMMAND agc_pipeline_cache_allocation_tests read-retry)
+        set_tests_properties(agc_pipeline_cache_read_retry PROPERTIES TIMEOUT 25 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 add_test_executable(agc_driver_recorder_tests EXCLUDE_FROM_ALL
         tests/Recorder.cpp
         tests/HostImportLifetime.cpp
@@ -2250,6 +2273,9 @@ file(GLOB agcExecutionTestSources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/
 set(agcExecutionTests)
 foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
     get_filename_component(agcExecutionTestName ${agcExecutionTestSource} NAME_WE)
+    if(NOT WIN32 AND agcExecutionTestName STREQUAL "CommittedReadMapping")
+        continue()
+    endif()
     if(ANYPS5_AGC_EXECUTION_TESTS AND NOT agcExecutionTestName IN_LIST ANYPS5_AGC_EXECUTION_TESTS)
         set(agcExecutionTestSource ${CMAKE_CURRENT_SOURCE_DIR}/tests/ExecutionTestNotBuilt.cpp)
     endif()
@@ -2803,6 +2829,11 @@ if(BUILD_TESTING)
     set_tests_properties(agc_driver_partially_resident_pending_stores PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)
     if(WIN32)
         set_tests_properties(agc_driver_partially_resident_pending_stores PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test(NAME agc_shader_disk_cache_pack_ownership COMMAND agc_shader_disk_cache_tests --prebuilt-pack-ownership)
+    set_tests_properties(agc_shader_disk_cache_pack_ownership PROPERTIES TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_tests_properties(agc_shader_disk_cache_pack_ownership PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_shader_disk_cache_large_file COMMAND agc_shader_disk_cache_tests --large-file)
     if(Python3_Interpreter_FOUND)
@@ -3754,6 +3785,12 @@ if(BUILD_TESTING AND ANYPS5_ENABLE_SPIRV_TOOLS)
     add_test(NAME agc_compute_pipeline_replay COMMAND agc_compute_pipeline_replay_tests)
     set_tests_properties(agc_compute_pipeline_replay PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
     add_dependencies(agc_compute_pipeline_replay_tests agc_compute_pipeline_replay agc_driver_branch_past_endpgm_tests)
+    add_test(NAME agc_compute_pipeline_inspection COMMAND ${CMAKE_COMMAND}
+            -DREPLAY=$<TARGET_FILE:agc_compute_pipeline_replay>
+            -DVULKAN_PROBE=$<TARGET_FILE:agc_compute_pipeline_replay_tests>
+            -DOUTPUT_ROOT=${CMAKE_CURRENT_BINARY_DIR}/capture-tests
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ComputePipelineInspectRun.cmake)
+    set_tests_properties(agc_compute_pipeline_inspection PROPERTIES TIMEOUT 60 SKIP_REGULAR_EXPRESSION "compute pipeline inspection: skipped")
     add_test(NAME agc_compute_pipeline_capture_run COMMAND ${CMAKE_COMMAND}
             -DFIXTURE=$<TARGET_FILE:agc_driver_branch_past_endpgm_tests>
             -DREPLAY=$<TARGET_FILE:agc_compute_pipeline_replay>
@@ -3761,7 +3798,7 @@ if(BUILD_TESTING AND ANYPS5_ENABLE_SPIRV_TOOLS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ComputePipelineCaptureRun.cmake)
     set_tests_properties(agc_compute_pipeline_capture_run PROPERTIES TIMEOUT 30 SKIP_REGULAR_EXPRESSION "compute pipeline capture run: skipped, no usable Vulkan device")
     if(WIN32)
-        set_tests_properties(agc_compute_pipeline_replay agc_compute_pipeline_capture_run PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        set_tests_properties(agc_compute_pipeline_replay agc_compute_pipeline_capture_run agc_compute_pipeline_inspection PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
 
