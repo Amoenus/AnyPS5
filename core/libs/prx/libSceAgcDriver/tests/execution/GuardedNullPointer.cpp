@@ -286,6 +286,14 @@ void RunDynamicDescriptorTests(AgcDriver::VulkanDevice& device) {
     Require(!Faulted(taken) && taken.poisoned == 0u, "dynamic descriptor: mapped taken arm faulted:\n" + taken.log);
     RequireWords(taken, Lanes, Payload, "dynamic descriptor: mapped taken arm");
     std::puts("dynamic descriptor: GPU condition0 took the mapped arm and wrote the payload");
+    descriptor[16] = static_cast<std::uint32_t>(input + sizeof(std::uint32_t));
+    descriptor[17] = static_cast<std::uint32_t>(((input + sizeof(std::uint32_t)) >> 32u) & 0xffffu);
+    descriptor[18] = sizeof(Data) - sizeof(std::uint32_t);
+    descriptor[19] = 0x30027facu;
+    const auto second = Run(device, DynamicDescriptorCode, base, 1u, 1u, 64u, true);
+    Require(!Faulted(second) && second.poisoned == 0u && second.pipelineVariantId == taken.pipelineVariantId, "dynamic descriptor: a changed mapped offset faulted or changed the pipeline variant:\n" + second.log);
+    RequireWords(second, Lanes, 0u, "dynamic descriptor: second mapped descriptor");
+    std::puts("dynamic descriptor: a changed runtime offset selected the second mapped descriptor");
     ConditionInput[0] = 1u;
     const auto skippedMapped = Run(device, DynamicDescriptorCode, base, 1u, 1u, 0u, true);
     Require(!Faulted(skippedMapped) && skippedMapped.poisoned == 0u, "dynamic descriptor: mapped skipped arm faulted:\n" + skippedMapped.log);
@@ -295,6 +303,10 @@ void RunDynamicDescriptorTests(AgcDriver::VulkanDevice& device) {
     Require(!Faulted(skipped), "dynamic descriptor: an inaccessible descriptor in the skipped arm faulted:\n" + skipped.log);
     RequireWords(skipped, 0u, 0u, "dynamic descriptor: inaccessible skipped arm");
     std::puts("dynamic descriptor: GPU condition1 skipped the inaccessible arm and wrote the default");
+    ConditionInput[0] = 0u;
+    const auto inaccessible = Run(device, DynamicDescriptorCode, base, 1u, 1u, pageBytes, true);
+    Require(Faulted(inaccessible) && inaccessible.log.find(Fault(base + pageBytes, 0x44u)) != std::string::npos, "dynamic descriptor: an executed inaccessible descriptor did not fault at its address and pc:\n" + inaccessible.log);
+    std::puts("dynamic descriptor: GPU condition0 faulted on the inaccessible descriptor at its address and pc");
     GuestAllocations::Mutation().Remove(reserved);
 #ifdef _WIN32
     VirtualFree(reserved, 0, MEM_RELEASE);
