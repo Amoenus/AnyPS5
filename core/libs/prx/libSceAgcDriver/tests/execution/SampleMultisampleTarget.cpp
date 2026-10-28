@@ -1583,7 +1583,7 @@ int main(int argc, char** argv) {
         Draw(*device, TargetState(DecodePackedFloatTarget(packedFloat)));
         const auto packedSamples = LoadSamples(*device, packedFloat, Samples, 0u, Format11_11_10Float);
         CheckPackedFloatSamples(packedSamples);
-        CheckFirstSampleReads(*device, TargetDescriptor(packedFloat, SampleShift, Format11_11_10Float), packedSamples, true, "from a 4x 10_11_11 float target read through a format 36 descriptor");
+        CheckFirstSampleReads(*device, TargetDescriptor(packedFloat, SampleShift, 0u, Format11_11_10Float), packedSamples, true, "from a 4x 10_11_11 float target read through a format 36 descriptor");
         std::puts("a 4x 10_11_11 float color target loaded through a format 36 (11_11_10 float) texture descriptor reads its drawn color");
         Block integer(4u * BlockBytes);
         Block signedFill(BlockBytes);
