@@ -237,6 +237,13 @@ if(BUILD_TESTING)
         set_tests_properties(guest_process_time guest_process_time_counter PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test(NAME guest_process_time_tsc COMMAND guest_process_time_tests tsc)
+    add_test(NAME guest_process_time_tsc_scaled COMMAND guest_process_time_tests tsc)
+    set_tests_properties(guest_process_time_tsc_scaled PROPERTIES ENVIRONMENT "APS5_TIME_SCALE=0.5")
+    if(WIN32)
+        set_tests_properties(guest_process_time_tsc guest_process_time_tsc_scaled PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_process_arguments_tests ${LIBS_INCLUDE_DIR}/tests/GuestProcessArguments.cpp)
     target_include_directories(guest_process_arguments_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_process_arguments_tests PRIVATE libkernel libc)
