@@ -3,6 +3,8 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "Recompiler.hpp"
+#include "Optimization/ResourceProgram.hpp"
+#include "IntermediateRepresentation/IrProgram.hpp"
 #include "VulkanTestDevice.hpp"
 #include <algorithm>
 #include <array>
@@ -172,6 +174,10 @@ Outcome Run(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, Cod
     };
     AgcDriver::ShaderMemory memory({});
     const auto capture = memory.Capture(request);
+    if (code.data() == DynamicDescriptorCode.data()) {
+        const bool flat = std::any_of(capture->plan->srtReads.begin(), capture->plan->srtReads.end(), [](const auto& read) { return read.value->template Flags<ShaderRecompiler::MemoryFlags>().pc == 0x44u; });
+        std::printf("dynamic descriptor plan: pc0x44_flat_slot=%d guards=%zu\n", flat, capture->plan->guardedSrtSlots.size());
+    }
     const auto regions = memory.Regions();
     request.context.memory = regions;
     const auto result = ShaderRecompiler::Recompile(request, *capture);
