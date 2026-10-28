@@ -184,10 +184,8 @@ static void CheckAudioCoprocessorProtection() {
     Require(sceKernelMprotect(writable, length, 0x3f2) == 0);
     static_cast<volatile unsigned char*>(writable)[0] = 9;
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(writable), length) == 0);
-    bool rejected = false;
     void* undefined = nullptr;
-    try { sceKernelMapFlexibleMemory(&undefined, length, 0x400, 0); } catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected && undefined == nullptr);
+    Require(sceKernelMapFlexibleMemory(&undefined, length, 0x400, 0) == SCE_KERNEL_ERROR_EINVAL && undefined == nullptr);
 }
 
 static void CheckMprotectIgnoresUndefinedBits() {
@@ -268,14 +266,15 @@ static void CheckStrictMemoryProtectionBits() {
     };
     std::size_t available = 0;
     Require(sceKernelAvailableFlexibleMemorySize(&available) == 0);
-    for (const int protection : {-256, -129, -128, -14, -1, 8, 0x400, std::numeric_limits<int>::min()}) {
+    for (const int protection : {-256, -129, -128, -14, -1, 8, 0x400, 0x800, 0x3ff, std::numeric_limits<int>::min()}) {
         void* invalid = nullptr;
-        rejected([&] { sceKernelMapFlexibleMemory(&invalid, length, protection, 0); });
-        Require(invalid == nullptr);
+        Require(sceKernelMapFlexibleMemory(&invalid, length, protection, 0) == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
+        Require(sceKernelMapNamedFlexibleMemory(&invalid, length, protection, 0, "undefined") == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
         std::size_t after = 0;
         Require(sceKernelAvailableFlexibleMemorySize(&after) == 0 && after == available);
-        rejected([&] { sceKernelMapDirectMemory(&invalid, length, protection, 0, physical, 0); });
-        Require(invalid == nullptr);
+        Require(sceKernelMapDirectMemory(&invalid, length, protection, 0, physical, 0) == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
+        Require(sceKernelMapDirectMemory2(&invalid, length, 0, protection, 0, physical, 0) == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
+        Require(sceKernelMapNamedDirectMemory(&invalid, length, protection, 0, physical, 0, "undefined") == SCE_KERNEL_ERROR_EINVAL && invalid == nullptr);
         rejected([&] { sceKernelMtypeprotect(mapping, length, 2, protection); });
         VirtualQueryInfo info{};
         Require(sceKernelVirtualQuery(mapping, 0, &info, sizeof(info)) == 0);
@@ -3561,6 +3560,23 @@ static void CheckMunmapOverUnmappedPages() {
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(memory), 0) == SCE_KERNEL_ERROR_EINVAL);
 }
 
+static void CheckMemoryPoolBlockStats() {
+    KernelMemoryPoolBlockStats stats{-1, -1, -1, -1};
+    Require(sceKernelMemoryPoolGetBlockStats(nullptr, sizeof(stats)) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelMemoryPoolGetBlockStats(&stats, sizeof(stats) - 1) == SCE_KERNEL_ERROR_EINVAL);
+    Require(stats.available_flushed_blocks == -1 && stats.allocated_flushed_blocks == -1);
+    Require(sceKernelMemoryPoolGetBlockStats(&stats, sizeof(stats)) == 0);
+    Require(stats.available_cached_blocks == 0 && stats.allocated_cached_blocks == 0);
+    Require(stats.available_flushed_blocks == 0 && stats.allocated_flushed_blocks == 0);
+    constexpr std::size_t block = std::size_t{2} << 20;
+    std::int64_t phys = -1;
+    Require(sceKernelMemoryPoolExpand(0, static_cast<std::int64_t>(sceKernelGetDirectMemorySize()), block, block, &phys) == 0);
+    Require(phys >= 0 && phys % static_cast<std::int64_t>(block) == 0);
+    Require(sceKernelMemoryPoolGetBlockStats(&stats, sizeof(stats)) == 0);
+    Require(stats.available_flushed_blocks == 1 && stats.allocated_flushed_blocks == 0);
+    Require(sceKernelReleaseDirectMemory(phys, block) == 0);
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     _putenv_s("APS5_PIN_WAIT_MS", "1000");
@@ -3579,6 +3595,7 @@ int main(int argc, char** argv) {
     CheckMappedLeasesPreserveReadableRuns();
     CheckVirtualQuerySplitFlexibleRanges();
     CheckVirtualQueryForNonReadableGuestRange();
+    CheckMemoryPoolBlockStats();
     CheckReleaseFlexibleMemory();
     CheckFlexibleMappingIgnoresFlag8000();
     CheckSceKernelMmap();
