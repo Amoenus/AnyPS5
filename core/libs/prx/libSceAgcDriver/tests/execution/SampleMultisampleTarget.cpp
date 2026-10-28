@@ -1069,6 +1069,28 @@ void CheckColorSnapshot(AgcDriver::VulkanDevice& device, const AgcDriver::Graphi
     Require(LoadSamples(device, block, color.samples, color.pipeBankXor) == loaded, "attachment reuse after the native snapshot changed untouched samples");
 }
 
+int InitialReuse(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    if (!InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, 2u) || !InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, Samples)) return VulkanTestSkipped;
+    Block reused(2u * BlockBytes);
+    const auto expected = StoreInitial(reused, Samples, 0u, false);
+    const std::vector<std::uint8_t> before(reused.data, reused.data + reused.bytes);
+    const auto wide = TargetState(DecodeTarget(reused.Address(), 1u, {8u * Side, 4u * Side}));
+    const auto narrow = TargetState(DecodeTarget(reused));
+    Require(MultisampledColorBytes(wide.color) == 2u * BlockBytes && MultisampledColorBytes(narrow.color) == BlockBytes, "the reused initial color footprints differ from two blocks and one block");
+    Draw(device, wide);
+    device.WaitIdle();
+    Require(Refused(reused.Address(), 0x1000u, "a read before initial color memory reuse"), "the live wide target is not guarded before reuse");
+    Draw(device, narrow);
+    CheckSamples(narrow, LoadSamples(device, reused), {}, expected);
+    Require(std::equal(before.begin(), before.end(), reused.data), "initialization of a reused target changed guest color bytes or padding");
+    RequireNoMultisampleTarget(reused.Address() + BlockBytes, 0x1000u, "a read of the retired target outside its replacement");
+    Require(Refused(reused.Address(), 0x1000u, "a read of the replacement target after initial reuse"), "the replacement target is not guarded after reuse");
+    std::puts("native color initial reuse: the replacement preserves guest samples and bytes, retires the old owner and keeps its own guard");
+    return 0;
+}
+
 void InitialContents(AgcDriver::VulkanDevice& device, bool snapshots = false) {
     using namespace AgcDriver::Graphics;
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
@@ -1345,6 +1367,39 @@ void RequirePublicationRefused(const AgcDriver::Graphics::Context& context, cons
         refusal = error.what();
     }
     Require(refusal.find(expected) != std::string::npos, "native color publication was not refused: " + refusal);
+}
+
+int ReusedPublication(AgcDriver::VulkanDevice& device, std::string_view cause) {
+    using namespace AgcDriver::Graphics;
+    Require(cause == "live" || cause == "claimed" || cause == "written", "unknown publication reuse case");
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    if (!InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, Samples)) return VulkanTestSkipped;
+    Block block(2u * BlockBytes, true);
+    if (cause == "written" && !AgcDriver::GuestMemory::Watched(block.Address(), block.bytes)) return VulkanTestSkipped;
+    const auto color = DecodeTarget(block);
+    StoreInitial(block, Samples, 0u, false);
+    Draw(device, TargetState(color));
+    const auto loaded = LoadSamples(device, block);
+    device.WaitIdle();
+    const auto colorBytes = static_cast<std::size_t>(MultisampledColorBytes(color));
+    Require(colorBytes >= 256u && colorBytes <= block.bytes, "the publication reuse footprint does not fit its block");
+    if (cause == "written") Require(AgcDriver::GuestMemory::Watched(block.Address(), colorBytes), "the publication reuse target lost write watching");
+    if (cause == "claimed") ClaimMultisampleTargetMemory(color.address, colorBytes);
+    if (cause == "written") std::memset(block.data + colorBytes - 256u, 0x5a, 256u);
+    const auto* begin = reinterpret_cast<const std::byte*>(block.data);
+    const std::vector<std::byte> before(begin, begin + block.bytes);
+    auto expected = before;
+    if (cause == "live") {
+        const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, color.elementBytes, Samples, Side, Side, 1u, 0u);
+        layout.Tile(HalfSamples(loaded), std::span(expected).first(colorBytes));
+        Require(expected != before, "the live publication control has no changed native samples");
+    }
+    PublishMultisampleTargetColor_nid_no_patch(context, color);
+    Require(std::equal(expected.begin(), expected.end(), begin), "publication overwrote reused guest data or lost live native samples");
+    RequireReadbackRefused(context, color, "requires an existing resident target");
+    RequireNoMultisampleTarget(block.Address(), colorBytes, "after publication of a reused or live owner");
+    std::printf("native color publication reuse: %.*s, explicit, complete bytes and retirement passed\n", static_cast<int>(cause.size()), cause.data());
+    return 0;
 }
 
 void Publication(AgcDriver::VulkanDevice& device, bool automatic = false) {
@@ -2000,6 +2055,8 @@ int main(int argc, char** argv) {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--initial-reuse") return InitialReuse(*device);
+        if (argc == 3 && std::string_view(argv[1]) == "--reused-publication") return ReusedPublication(*device, argv[2]);
         if (argc == 2 && std::string_view(argv[1]) == "--draw-recipe") {
             DrawRecipePublication(device);
             return 0;
