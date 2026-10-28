@@ -66,7 +66,7 @@ All switches are disabled by default. `unused-filter` defaults to `0`; `--rpath`
 | `--help`                      | Print usage to stdout and exit with code `0`; input and output paths are not required.                                                                                                                                                                                                                                                                                                                                                                                      |
 | `--version`                  | Print the relinker build revision reported by `git describe` to stdout and exit with code `0`; input and output paths are not required. |
 | `--windows`                   | Produce a Windows PE executable.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `--macos`                     | Produce an x86-64 Mach-O executable, with bundled modules as Mach-O libraries in `app0/sce_module`. Conflicts with `--windows`.                                                                                                                                                                                                                                                                                                                                             |
+| `--macos`                     | Produce an x86-64 Mach-O executable, with bundled modules as Mach-O libraries under `app0/`, each in the directory it was found in (`sce_module`, `sce_modules`, `prx` or a `--module-dir`). Conflicts with `--windows`.                                                                                                                                                                                                                                                                                                                                             |
 | `--windows-diagnostics`       | Include startup dependency diagnostics. Requires `--windows`.                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `--windows-gui`               | Select the Windows GUI subsystem instead of the console subsystem. Requires `--windows`.                                                                                                                                                                                                                                                                                                                                                                                    |
 | `--windows-fixed-base <address>` | Map the lowest ELF load page at this fixed Windows address instead of the preferred `0x400000`, given in decimal or hexadecimal (`0x`). Requires `--windows`, a 64 KiB-aligned address from `0x20000` through `0x7fffffff0000`, and a complete image fitting in the user address space. The main executable has no ASLR or base relocations; an occupied address fails to load. Bundled modules keep their normal placement. |
@@ -124,6 +124,38 @@ The advisor reads `titleId` and `contentVersion` from the specified `param.json`
   }]
 }
 ```
+
+Catalog entries may also contain these optional fields. Catalogs without them keep the same behavior and `format: 1`. Older advisor versions reject matching entries containing these fields; use an advisor version that supports them.
+
+| Field | Value |
+|-------|-------|
+| `id` | Stable patch identifier matching `[a-z0-9][a-z0-9_-]*`. It may be reused for another content version. Verified entries with the same ID for one title and version are rejected. |
+| `name` | User-facing name for the whole patch file. |
+| `category` | One of `compatibility`, `fps`, `graphics`, `memory` or `other`. |
+| `description` | What the patch file changes. |
+| `tested` | Nonempty array of test records, described below. |
+| `notes` | Limits or instructions for the user. |
+| `contributors` | Nonempty array of distinct contributor names. |
+| `source` | HTTPS link to the patch's provenance. The advisor only displays it; it does not fetch it. |
+| `revision` | Positive integer revision of the patch definition, separate from the game's `contentVersion`. |
+
+`category` describes the patch's area, not whether its effect is a fix or an enhancement; use `description` to explain the effect. `revision` does not select the newest entry automatically. To replace a patch definition with the same `id` for one title and content version, remove the old entry from the catalog. If both revisions verify, the advisor rejects both as duplicate IDs.
+
+`name`, `description` and `notes` are nonempty single-line text when present. They describe the catalog entry as a whole; `name` and `description` inside a patch TOML's `[[patch]]` describe individual byte changes. Each `tested` record requires `stage` (`verification`, `conversion`, `launch` or `gameplay`), `result` (`passed`, `failed` or `partial`) and nonempty single-line `evidence`. Optional `environment` is single-line text, and optional `date` is a calendar date in `YYYY-MM-DD` form. For example:
+
+```json
+{
+  "tested": [{
+    "stage": "verification",
+    "result": "passed",
+    "environment": "CachyOS Linux",
+    "date": "2026-10-26",
+    "evidence": "Relinker reported 1 ok, 0 not-checked, 0 mismatch"
+  }]
+}
+```
+
+The advisor validates these fields for matching catalog entries and reports a malformed entry without stopping the remaining entries. It prints metadata only for entries that pass the hash and relinker checks. Test records are contributor-provided claims; the advisor does not independently confirm launch or gameplay evidence.
 
 The advisor validates patch files only for entries matching the requested title and version. It reports and skips a malformed matching entry or a relinker verification error, so another valid entry can still be recommended. Verification times out after 120 seconds per entry by default; use `--timeout-seconds <positive integer>` to change the limit. For synthetic inputs without system modules, use `--skip-sce-module` if conversion also uses it; this option conflicts with `--sce-module-path`. No matching entry or no verified patch exits `1`; invalid input or no verified patch after a relinker error exits `2`. If multiple entries verify, the advisor recommends none because it cannot choose or combine them, and points to `--list-verified` to inspect the matches. The tool does not fetch or apply patches. A recommendation prints `--patches` and the module and executable options to use when converting. Keep catalog patch files outside the input executable's directory to avoid automatic `relinker-patches.toml` discovery.
 
@@ -422,7 +454,7 @@ Set `APS5_CRASH_INDIRECT_MEMORY=1` before launching the executable to include up
 
 Set `APS5_CRASH_STACK_BYTES=<n>` to print, after the stack return address candidates, the faulting thread's stack words from `rsp` for `n` bytes (at most 1048576, decimal or `0x` hexadecimal), four words per line with their offset from `rsp`. Below them the report prints eight words at every distinct stack word that points at readable, non-executable memory outside the thread's stack, labelled with the word's offset and the address it holds, up to 256 addresses. This shows the objects the caller frames kept, such as the `this` of a destructor or the buffer of a container. The dump stops at the first unreadable stack page, and nothing is printed when the variable is unset, empty or 0.
 
-The report lists every other thread of the process with its `rip`, `rsp`, `rbp` and the return addresses of its `rbp` frame chain. A thread whose chain yields fewer than two frames, such as one waiting inside `ntdll.dll` or in code built without frame pointers, also gets up to 24 stack return address candidates: the words in the 32 KiB above its `rsp` that point at executable memory, read while the thread is suspended. Like the candidates of the faulting thread they are a scan, not an unwind, so stale return addresses of finished calls can appear among them.
+The report lists the other threads of the process, up to 128 of them (a line says how many were left out), with their `rip`, `rsp`, `rbp` and the return addresses of its `rbp` frame chain. A thread whose chain yields fewer than two frames, such as one waiting inside `ntdll.dll` or in code built without frame pointers, also gets up to 24 stack return address candidates: the words in the 32 KiB above its `rsp` that point at executable memory, read while the thread is suspended. Like the candidates of the faulting thread they are a scan, not an unwind, so stale return addresses of finished calls can appear among them.
 
 ### GPU submission rings and stall dumps
 
@@ -457,7 +489,7 @@ An import that names a library requires the literal export name. If its implemen
 
 Module registries mark ELF weak imports with `"weak": true`, allowing the audit's current-stop selection to skip them. Strong imports omit the field. Older module registries do not preserve weak bindings; regenerate them to distinguish optional imports.
 
-ELF modules in `--modules` are audited regardless of filename: their undefined symbols are classified against the built libraries and the other modules' exports, with the module file named in the report, and the libraries they need must have a file in `--libs` or `--modules`. Ordinary non-module sidecars are ignored; malformed ELF, PE/SELF containers and non-ELF files with module extensions remain errors. The audit reads dynamic tables from ELF section headers or, for sectionless files, from `PT_DYNAMIC` and a SysV or GNU hash table.
+ELF modules in `--modules` are audited regardless of filename: their undefined symbols are classified against the built libraries and the other modules' exports, with the module file named in the report, and the libraries they need must have a file in `--libs` or `--modules`. Ordinary non-module sidecars are ignored; malformed ELF, SELF containers and non-ELF files with module extensions remain errors; the converted `*.guest.prx` PE modules of a Windows build are accepted, and any other PE file is an error. The audit reads dynamic tables from ELF section headers or, for sectionless files, from `PT_DYNAMIC` and a SysV or GNU hash table.
 
 Each registry has a companion with the same prefix and the suffix `.needed.json`, listing its host library dependencies, including declared `DT_NEEDED` entries with no imports. Dependencies supplied by converted bundled modules, including their aliases, are omitted. The executable's companion includes host dependencies of its bundled modules. The audit reads these companions automatically; keep them beside the registries. Older registries without companions still work, but cannot report dependencies that have no imports; regenerate them with `--registry` to include those dependencies.
 
