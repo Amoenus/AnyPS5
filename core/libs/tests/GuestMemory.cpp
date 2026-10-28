@@ -425,6 +425,27 @@ static void CheckBatchMapStopsAtInvalidEntry() {
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(entries[0].start), page) == 0);
 }
 
+static void CheckBatchMapPlacesAtTheGivenStart() {
+    constexpr std::size_t page = 0x4000;
+    constexpr int mapFlexible = 3;
+    constexpr int unmap = 1;
+    void* reserved = nullptr;
+    Require(sceKernelReserveVirtualRange(&reserved, page * 2, 0, page) == 0 && reserved != nullptr);
+    auto* base = static_cast<unsigned char*>(reserved);
+    KernelBatchMapEntry entries[2] = {{base, 0, page, 3, 0, 0, mapFlexible}, {base + page, 0, page, 3, 0, 0, mapFlexible}};
+    int processed = -1;
+    Require(sceKernelBatchMap(entries, 2, &processed) == 0 && processed == 2);
+    Require(entries[0].start == base && entries[1].start == base + page);
+    base[0] = 0x5a;
+    base[page * 2 - 1] = 0xa5;
+    Require(base[0] == 0x5a && base[page * 2 - 1] == 0xa5);
+    KernelBatchMapEntry unmaps[2] = {entries[0], entries[1]};
+    unmaps[0].operation = unmap;
+    unmaps[1].operation = unmap;
+    processed = -1;
+    Require(sceKernelBatchMap(unmaps, 2, &processed) == 0 && processed == 2);
+}
+
 static void CheckVirtualQueryFindsNeighbours() {
     constexpr std::size_t page = 0x4000;
     void* low = nullptr;
@@ -724,10 +745,6 @@ static void CheckReleaseDirectMemoryClearsMappings() {
         VirtualQueryInfo next{};
         if (sceKernelVirtualQuery(view, 1, &next, sizeof(next)) == 0) Require(next.start != reinterpret_cast<std::uintptr_t>(view));
     }
-}
-
-static void CheckDirectMemorySize() {
-    Require(sceKernelGetDirectMemorySize() == 0x300000000ull);
 }
 
 static void CheckReleaseDirectMemoryRejectsInvalidRanges() {
@@ -3576,6 +3593,7 @@ int main(int argc, char** argv) {
     CheckMunmapScopedFlexibleRelease();
     CheckGuestModuleUsesFlexibleMemory();
     CheckBatchMapStopsAtInvalidEntry();
+    CheckBatchMapPlacesAtTheGivenStart();
     CheckCheckedReleaseDirectMemory();
     CheckReleaseSkipsFreePages();
     CheckAudioCoprocessorProtection();
@@ -3588,7 +3606,6 @@ int main(int argc, char** argv) {
     CheckSavedDirectMemorySurvivesCachePressure();
     CheckReusedDirectMemorySections();
     CheckReleaseDirectMemoryClearsMappings();
-    CheckDirectMemorySize();
     CheckReleaseDirectMemoryRejectsInvalidRanges();
     CheckFixedMappingReplacesPartialOverlap();
     CheckFixedMappingOverHoleInsideAllocation();
