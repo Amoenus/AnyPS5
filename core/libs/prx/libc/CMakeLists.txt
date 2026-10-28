@@ -69,6 +69,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Bessel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Random.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FloatBuiltins.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/FloatingPrefix.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/HostEntropy.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Backtrace.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/DinkumwareAtomics.cpp
@@ -489,6 +490,18 @@ if(BUILD_TESTING)
         set_tests_properties(guest_integer_builtins PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test_executable(guest_count_zeros_tests ${LIBS_INCLUDE_DIR}/tests/GuestCountZeros.cpp)
+    target_include_directories(guest_count_zeros_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_count_zeros_tests PRIVATE libc)
+    configure_windows_unwind(guest_count_zeros_tests)
+    foreach(width uc us ui ul ull)
+        add_test(NAME guest_count_zeros_${width} COMMAND guest_count_zeros_tests ${width})
+        set_tests_properties(guest_count_zeros_${width} PROPERTIES TIMEOUT 20)
+        if(WIN32)
+            set_tests_properties(guest_count_zeros_${width} PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
     add_test_executable(guest_wide_stream_scan_tests ${LIBS_INCLUDE_DIR}/tests/GuestWideStreamScan.cpp)
     target_include_directories(guest_wide_stream_scan_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_wide_stream_scan_tests PRIVATE libc)
