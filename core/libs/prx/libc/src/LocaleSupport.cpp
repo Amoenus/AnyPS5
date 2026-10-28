@@ -586,6 +586,14 @@ int APS5_VABI ispunct_nid_postfix(int c) { return ClassifyCharacter(c, 0x08); }
 int APS5_VABI isxdigit_nid_postfix(int c) { return ClassifyCharacter(c, 0x01); }
 int APS5_VABI isascii_nid_postfix(int c) { return (c & ~0x7F) == 0; }
 int APS5_VABI toascii_nid_postfix(int c) { return c & 0x7F; }
+int APS5_VABI digittoint_nid_postfix(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+int APS5_VABI isnumber_nid_postfix(int c) { return isdigit_nid_postfix(c); }
+int APS5_VABI ishexnumber_nid_postfix(int c) { return isxdigit_nid_postfix(c); }
 int APS5_VABI toupper_nid_postfix(int c) { return ConvertCharacter(c, true); }
 int APS5_VABI tolower_nid_postfix(int c) { return ConvertCharacter(c, false); }
 
