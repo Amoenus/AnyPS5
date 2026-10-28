@@ -1371,7 +1371,13 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
             if (!image.optionalDescriptor || !undefinedImageWords(descriptor)) {
                 char detail[256];
                 std::snprintf(detail, sizeof(detail), ": image %u first used at pc 0x%x (%s, read %d, written %d, r128 %d), T# %08x %08x %08x %08x %08x %08x %08x %08x", i, image.firstUsePc, image.optionalDescriptor ? "optional" : "required", image.read ? 1 : 0, image.written ? 1 : 0, image.r128 ? 1 : 0, descriptor.dwords[0], descriptor.dwords[1], descriptor.dwords[2], descriptor.dwords[3], descriptor.dwords[4], descriptor.dwords[5], descriptor.dwords[6], descriptor.dwords[7]);
-                throw std::runtime_error(std::string("runtime image descriptor is invalid") + detail);
+                auto message = std::string("runtime image descriptor is invalid") + detail;
+                if (image.source < plan.descriptorSources.size()) {
+                    const auto& source = plan.descriptorSources[image.source];
+                    message += " [sourceWord3 " + Detail::RuntimeValueDescription(plan, source.dwords[3]) +
+                        ", sourceWord5 " + Detail::RuntimeValueDescription(plan, source.dwords[5]) + "]";
+                }
+                throw std::runtime_error(message);
             }
             descriptor = DescriptorValue{};
             descriptor.dwordCount = 8u;
