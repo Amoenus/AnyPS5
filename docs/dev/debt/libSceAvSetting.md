@@ -48,3 +48,38 @@
 - [sceAvControlSetCheckoutputMode](../../../core/libs/prx/libSceAvSetting/Export.cpp) (libSceAvSetting) - unknown signature
 - [sceAvControlSetSystemVideoMode](../../../core/libs/prx/libSceAvSetting/Export.cpp) (libSceAvSetting) - unknown signature
 - [sceAvControlDebugAddCallbacks](../../../core/libs/prx/libSceAvSetting/Export.cpp) (libSceAvSetting) - unknown signature
+
+### Additional callable exports
+
+- [Additional callable exports](../../../core/libs/prx/libSceAvSetting/Export.cpp) - 28 entries observed in the 3.20 export inventory and present in the later 13.60-labelled inventory are import-resolution declarations only. The later inventory label does not authenticate a retail firmware version. Parameter lists, return types and behavior are unverified; parameterless `int` declarations are placeholders, not verified ABI contracts. Every entry throws through `NotImplemented_nid_no_patch`. Unidentified names use literal NID aliases. No runtime functionality is implemented. Data exports require separate layout and ownership analysis. Identified candidate names match their NIDs in the [public symbol database](https://github.com/zecoxao/sce_symbols/blob/2883963a0a514ba6e77407a08ef4730a65e88254/aerolib.csv) or [supplemental catalog](https://github.com/claimore22/ps5rs/blob/2304be5131221bae0dac24b9767cabffda33f747/data/nids.csv).
+
+| Name | NID |
+| --- | --- |
+| `Unknown` | `+QkxEV+rZws` |
+| `Unknown` | `0BKuKlQG8zE` |
+| `Unknown` | `0mMgouCMXQ4` |
+| `Unknown` | `0vwiTglFTz4` |
+| `Unknown` | `7kywfNahIbw` |
+| `Unknown` | `A143jTEYkNw` |
+| `Unknown` | `DtJ45BO7LtY` |
+| `Unknown` | `Dxe4ybR-NaM` |
+| `Unknown` | `GYAho0we28c` |
+| `Unknown` | `Iv3zoMND6xU` |
+| `Unknown` | `JUxonNYB9xk` |
+| `Unknown` | `JlZQqZOsTMQ` |
+| `Unknown` | `MNZaRdvvdU4` |
+| `Unknown` | `V-IcK9eokeE` |
+| `Unknown` | `bM9VthphLmg` |
+| `Unknown` | `bXmd6MGBaNI` |
+| `Unknown` | `cANt7oF1VsA` |
+| `Unknown` | `cK+dKi9GYYA` |
+| `Unknown` | `ftQASJeHi6M` |
+| `Unknown` | `kvYuLJa0CyU` |
+| `Unknown` | `m1Wi0Yp38v0` |
+| `Unknown` | `mp2s52Yr4pc` |
+| `Unknown` | `nWFSNYt07Cw` |
+| `Unknown` | `nhvN5B5bvyc` |
+| `Unknown` | `osJaW+pc9kw` |
+| `Unknown` | `s-Egk+i6sAY` |
+| `Unknown` | `tIR02KtiDXw` |
+| `Unknown` | `xVRs9kzSP7I` |
