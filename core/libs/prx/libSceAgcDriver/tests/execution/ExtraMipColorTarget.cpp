@@ -287,7 +287,9 @@ void CheckDraw(AgcDriver::VulkanDevice& device, bool recorded, std::uint32_t lay
     device.WaitIdle();
     const std::uint32_t value = std::bit_cast<std::uint32_t>(1.0f);
     std::memcpy(expected.data() + 65536u + offset, &value, sizeof(value));
-    Require(std::equal(expected.begin(), expected.end(), block.registered), "extra-mip draw changed a sibling, another array slice, padding or guest bounds");
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        Require(expected[index] == block.registered[index], "extra-mip draw mismatch: layers=" + std::to_string(layers) + " offset=" + std::to_string(offset) + " byte=" + std::to_string(index) + " actual=" + std::to_string(std::to_integer<unsigned>(block.registered[index])) + " expected=" + std::to_string(std::to_integer<unsigned>(expected[index])));
+    }
     ClearCachedTextures(context.device);
     std::printf("extra-mip actual draw passed: recorded=%u first-array-slice=%u mip=%u physical=%u\n", recorded ? 1u : 0u, layer, mip, geometry.imageLevels);
 }
