@@ -284,6 +284,7 @@ void CheckDraw(AgcDriver::VulkanDevice& device, bool recorded, std::uint32_t lay
         recorder->Sync();
     }
     StorageTexture::FlushAllPending("idle");
+    if (recorded) recorder->Sync();
     device.WaitIdle();
     const std::uint32_t value = std::bit_cast<std::uint32_t>(1.0f);
     std::memcpy(expected.data() + 65536u + offset, &value, sizeof(value));
