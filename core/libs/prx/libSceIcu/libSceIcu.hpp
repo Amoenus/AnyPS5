@@ -5,6 +5,7 @@
 #include "Version.hpp"
 #include "ConverterCallbacks.hpp"
 #include "CString.hpp"
+#include "prx/libSceIcu/include/InventoryDispatch.hpp"
 #include "Space.hpp"
 #include "Unescape.hpp"
 #include "Identified.hpp"
