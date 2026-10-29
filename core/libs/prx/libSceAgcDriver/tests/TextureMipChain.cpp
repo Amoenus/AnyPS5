@@ -26,14 +26,6 @@
 #include <utility>
 #include <vector>
 
-// A guest texture descriptor may name more mip levels than its extent halves into: Demon's Souls
-// (PPSA01342) samples a 28x1 BC3 array through a T# of 10 levels. A Vulkan image holds at most
-// floor(log2(max extent)) + 1 = 5 of them (VUID-VkImageCreateInfo-mipLevels-00947); NVIDIA sizes a
-// 28x1 BC3 image of 10 levels exactly like one of 5, so copying the guest's levels 5-9 into it
-// wrote past its memory and lost the device (write fault at the end of the image). These tests run
-// the sampled texture upload and a storage image's upload, write-back, views and fills against a
-// recording mock device and check that the image and every command on it stay inside the levels
-// the image can have, and that an access that would write a level past them throws.
 namespace {
 
 using namespace AgcDriver::Graphics;
@@ -66,7 +58,6 @@ struct MockDevice {
 
 MockDevice mock;
 
-// floor(log2(max extent)) + 1: the most levels a Vulkan image of that extent may have.
 std::uint32_t fullChain(const VkExtent3D& extent) {
     return static_cast<std::uint32_t>(std::bit_width(std::max({extent.width, extent.height, extent.depth, 1u})));
 }
@@ -353,8 +344,6 @@ void clearRecords() {
     mock.clears.clear();
 }
 
-// Checks that every copy into or out of `image`, and every barrier, clear and view of it, stays
-// inside the levels and layers it was created with, and that it has no more levels than its extent.
 void checkInsideImage(VkImage image, const VkImageCreateInfo& info, const std::string& what) {
     const auto levels = std::to_string(info.mipLevels);
     Require(info.mipLevels <= fullChain(info.extent), what + ": the image was created with " + levels + " mip levels, more than its " + std::to_string(info.extent.width) + "x" + std::to_string(info.extent.height) + " extent can hold (" + std::to_string(fullChain(info.extent)) + ")");
@@ -387,8 +376,6 @@ void checkInsideImage(VkImage image, const VkImageCreateInfo& info, const std::s
     }
 }
 
-// Uploads `descriptor` through the sampled texture constructor and returns its image's create info,
-// after checking that every copy, barrier and view of that image stays inside its levels and layers.
 VkImageCreateInfo upload(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, const std::string& what) {
     clearRecords();
     const auto geometry = DescribeSurface(descriptor);
@@ -414,20 +401,17 @@ std::size_t copiesOfLevel(std::uint32_t level) {
 }
 
 void TestLevelsPastTheFullChain(const Context& context, TextureDetiler& detiler) {
-    // The descriptor of the fault: 28x1 BC3 sRGB, 10 levels (4 layers here, 256 in the title).
     constexpr std::uint32_t layers = 4;
     const auto descriptor = arrayTexture(0x1003000000, FormatBc3Srgb, 28, 1, layers, 10);
     const auto info = upload(context, detiler, descriptor, "28x1 BC3 with 10 levels");
     Require(info.mipLevels == 5, "a 28x1 BC3 texture of 10 guest levels must keep the 5 levels its extent has");
     for (std::uint32_t level = 0; level < 5; ++level) Require(copiesOfLevel(level) == layers, "level " + std::to_string(level) + " of every layer must be uploaded");
 
-    // A view of guest levels past the image's (base 7..9) reads the image's last level.
     auto pastChain = descriptor;
     pastChain.baseLevel = 7;
     upload(context, detiler, pastChain, "a view of levels 7-9 of a 28x1 surface");
     Require(mock.views.front().second.baseMipLevel == 4 && mock.views.front().second.levelCount == 1, "a view of levels past the image's last one must read its last level");
 
-    // 4x1 BC3 with 11 levels (ds-c0078/0080/0081): 3 levels.
     const auto narrow = upload(context, detiler, arrayTexture(0x1021400000, FormatBc3Srgb, 4, 1, 2, 11), "4x1 BC3 with 11 levels");
     Require(narrow.mipLevels == 3, "a 4x1 texture of 11 guest levels must keep 3 levels");
 }
@@ -440,8 +424,6 @@ void TestFullChainsAreUnchanged(const Context& context, TextureDetiler& detiler)
     Require(partial.mipLevels == 3, "a partial chain must keep its own level count");
 }
 
-// Committed, registered host memory standing for a guest surface (storage images read and store
-// guest memory, and drop results over memory no allocation registers).
 class GuestSurface {
 public:
     explicit GuestSurface(std::size_t bytes) : bytes((bytes + Alignment - 1) / Alignment * Alignment), data(::operator new(this->bytes, std::align_val_t{Alignment})) {
@@ -492,7 +474,6 @@ void requireThrows(const std::function<void()>& action, const std::string& expec
     Require(false, what + ": did not throw");
 }
 
-// The single image the storage texture made: its handle and create info.
 std::pair<VkImage, VkImageCreateInfo> storageImage(const std::string& what) {
     Require(mock.images.size() == 1, what + ": the storage texture did not create exactly one image");
     return *mock.images.begin();

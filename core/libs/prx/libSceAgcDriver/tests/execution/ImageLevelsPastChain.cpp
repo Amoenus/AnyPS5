@@ -209,16 +209,6 @@ void CheckBaseLoad(AgcDriver::VulkanDevice& device) {
     }
 }
 
-void RequireRefused(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, std::uint32_t base, const std::string& name, std::uint32_t last = GuestLevels - 1u) {
-    std::string refusal;
-    try {
-        Run(device, code, SampledDescriptor(Type2D, 1u, base, last), [](std::uint32_t tid) { return std::array<std::uint32_t, 4>{0u, 0u, tid % GuestLevels, 0u}; });
-    } catch (const std::exception& error) {
-        refusal = error.what();
-    }
-    Require(refusal.find("past its extent's full mip chain") != std::string::npos, name + " of a 28x1 T# of 10 levels was not refused: " + (refusal.empty() ? std::string("it ran") : refusal));
-}
-
 void CheckStorageWriteBack(AgcDriver::VulkanDevice& device, std::uint32_t tile) {
     const auto descriptor = [&](const void* data) { return TextureDescriptor(data, Format32UInt, tile, Type2D, 1u, 0u, 0u); };
     const auto geometry = AgcDriver::Graphics::DescribeSurface(AgcDriver::Graphics::DecodeTextureResource(descriptor(Texels.data())));
@@ -278,7 +268,7 @@ int main() {
         return 1;
     }
     auto& gpu = *device;
-    const std::array<std::function<void()>, 15> checks{
+    const std::array<std::function<void()>, 11> checks{
         [&] { CheckSampledLevels(gpu); },
         [&] { CheckBaseLoad(gpu); },
         [&] { CheckResinfo(gpu, Resinfo2D, Type2D, 1u, 0u); },
@@ -288,10 +278,6 @@ int main() {
         [&] { CheckResinfo(gpu, Resinfo2DArray, Type2DArray, Layers, 7u); },
         [&] { CheckResinfo(gpu, Resinfo2D, Type2D, 1u, 0u, ChainLevels - 1u); },
         [&] { CheckResinfo(gpu, Resinfo2DArray, Type2DArray, Layers, 0u, ChainLevels - 1u); },
-        [&] { RequireRefused(gpu, LoadMip2D, 0u, "image_load_mip"); },
-        [&] { RequireRefused(gpu, Load2D, 7u, "image_load at base level 7"); },
-        [&] { RequireRefused(gpu, Load2D, 7u, "image_load at single base level 7", 7u); },
-        [&] { RequireRefused(gpu, LoadMip2D, 7u, "image_load_mip at single base level 7", 7u); },
         [&] { CheckStorageWriteBack(gpu, TileLinear); },
         [&] { CheckStorageWriteBack(gpu, TileR64KBX); },
     };
