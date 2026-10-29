@@ -283,7 +283,7 @@ void CheckDraw(AgcDriver::VulkanDevice& device, bool recorded, std::uint32_t lay
         Require(recorder->Recording(), "extra-mip draw did not leave recorded GPU work");
         recorder->Sync();
     }
-    StorageTexture::FlushAllPending("extra-mip draw fixture");
+    StorageTexture::FlushAllPending("idle");
     device.WaitIdle();
     const std::uint32_t value = std::bit_cast<std::uint32_t>(1.0f);
     std::memcpy(expected.data() + 65536u + offset, &value, sizeof(value));
@@ -326,7 +326,14 @@ void CheckReadback(AgcDriver::VulkanDevice& device) {
     std::vector<std::byte> pixels(static_cast<std::size_t>(geometry.mips[0].linearSize * geometry.layers));
     file.read(reinterpret_cast<char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
     Require(file.good() && file.peek() == std::char_traits<char>::eof(), "extra-mip readback file size mismatch");
-    Require(std::all_of(pixels.begin(), pixels.end(), [](std::byte value) { return value == std::byte{0xa5}; }), "extra-mip diagnostic readback changed base-level pixels");
+    for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
+        for (std::uint32_t y = 0; y < descriptor.height; ++y) {
+            for (std::uint32_t x = 0; x < descriptor.width * 4u; ++x) {
+                const auto offset = layer * geometry.mips[0].linearSize + y * geometry.mips[0].pitchBytes + x;
+                Require(pixels[offset] == std::byte{0xa5}, "extra-mip diagnostic readback changed a base-level pixel");
+            }
+        }
+    }
     file.close();
     std::filesystem::remove(name);
     texture.reset();
