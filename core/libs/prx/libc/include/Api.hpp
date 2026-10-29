@@ -1391,6 +1391,8 @@ int APS5_VABI dl_iterate_phdr_nid_postfix(int (*callback)(dl_phdr_info*, std::si
 [[noreturn]] char* APS5_VABI fgetln_nid_postfix(FileStream*, std::size_t*);
 [[noreturn]] void APS5_VABI _Assert_nid_postfix(const char* message, const char* location);
 [[noreturn]] void APS5_VABI _ZSt16_Throw_Cpp_errori_nid_postfix(int code);
+[[noreturn]] void APS5_VABI _ZNSt10filesystem18_Xfilesystem_errorEPKcSt10error_code_nid_postfix(const char* message, LibcException::ErrorCode code);
+[[noreturn]] void APS5_VABI _ZNSt10filesystem18_Xfilesystem_errorEPKcRKNS_4pathESt10error_code_nid_postfix(const char* message, const GuestLocale::String* path, LibcException::ErrorCode code);
 [[noreturn]] void APS5_VABI _Thrd_exit_nid_postfix(int code);
 [[noreturn]] void APS5_VABI _ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE_nid_postfix(GuestExceptionPointerArgument exception);
 [[noreturn]] void APS5_VABI _ZSt19_Throw_future_errorRKSt10error_code_nid_postfix(const LibcException::ErrorCode* code);

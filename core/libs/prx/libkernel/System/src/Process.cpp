@@ -294,6 +294,8 @@ std::mutex openFileLimitMutex;
 std::optional<GuestResourceLimit> guestOpenFileLimit;
 std::mutex processLimitMutex;
 GuestResourceLimit guestProcessResourceLimit{guestProcessLimit, guestProcessLimit};
+std::mutex coreLimitMutex;
+GuestResourceLimit guestCoreLimit{guestRlimitInfinity, guestRlimitInfinity};
 }
 
 namespace {
@@ -808,6 +810,13 @@ int APS5_VABI setrlimit_nid_postfix(int resource, const GuestResourceLimit* limi
         guestProcessResourceLimit = requested;
         return 0;
     }
+    if (resource == guestRlimitCore && requested.rlim_max == current.rlim_max) {
+        std::lock_guard lock(coreLimitMutex);
+        guestCoreLimit.rlim_cur = requested.rlim_cur;
+        return 0;
+    }
+    if ((resource == guestRlimitData || resource == guestRlimitStack) && requested.rlim_cur == current.rlim_cur && requested.rlim_max > current.rlim_max)
+        return 0;
     if (requested.rlim_cur != current.rlim_cur || requested.rlim_max != current.rlim_max)
         throw std::runtime_error("setrlimit: changing the limit of resource " + std::to_string(resource) + " is not supported");
     return 0;
@@ -1147,9 +1156,13 @@ int APS5_VABI getrlimit_nid_postfix(int resource, GuestResourceLimit* limit) {
         result = guestProcessResourceLimit;
         break;
     }
+    case guestRlimitCore: {
+        std::lock_guard lock(coreLimitMutex);
+        result = guestCoreLimit;
+        break;
+    }
     case guestRlimitCpu:
     case guestRlimitFsize:
-    case guestRlimitCore:
     case guestRlimitRss:
     case guestRlimitMemlock:
     case guestRlimitSbsize:
