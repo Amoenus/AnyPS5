@@ -19,6 +19,7 @@ namespace {
     constexpr std::uint32_t kInterceptedButton = 0x80000000;
     std::uint64_t injectedTimestamp = 0;
     std::uint32_t injectedHeldThroughCapture = 0;
+    std::uint64_t injectedHeldAt = 0;
 
     struct QueuedInput {
         PadInputState input;
@@ -244,7 +245,7 @@ PadData BuildData(PadSlot& slot, const PadInputState& state, std::uint64_t chang
     return data;
 }
 
-Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
+Pad::InputCommandFile& InjectedCommands() {
     static Pad::InputCommandFile commands([] {
 #ifdef _WIN32
         const auto* path = _wgetenv(L"APS5_PAD_INPUT_FILE");
@@ -253,8 +254,12 @@ Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
 #endif
         return path ? std::filesystem::path(path) : std::filesystem::path{};
     }());
+    return commands;
+}
+
+Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
     static Pad::InputCommandFile::Input lastInjected;
-    const auto injected = commands.Poll(now);
+    const auto injected = InjectedCommands().Poll(now);
     if (injected != lastInjected) {
         lastInjected = injected;
         slots[0].timestamp = now;
@@ -266,7 +271,8 @@ Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
 Pad::InputCommandFile::Input InjectedTitleInput(std::uint64_t now) {
     auto injected = InjectedInput(now);
     if (slots[0].state.intercepted) injectedHeldThroughCapture |= injected.buttons;
-    else injectedHeldThroughCapture &= injected.buttons;
+    else injectedHeldThroughCapture &= InjectedCommands().HeldThrough(injectedHeldAt, now);
+    injectedHeldAt = now;
     injected.buttons &= ~injectedHeldThroughCapture;
     return injected;
 }
@@ -519,6 +525,7 @@ extern "C" void PadApplyInjectedInput_nid_postfix(PadInputState* state) {
     std::lock_guard lock(stateMutex);
     const auto injected = InjectedInput(sceKernelGetProcessTime());
     injectedHeldThroughCapture |= injected.buttons;
+    injectedHeldAt = sceKernelGetProcessTime();
     state->buttons |= injected.buttons;
     if (injected.hasSticks) state->sticks = injected.sticks;
 }
