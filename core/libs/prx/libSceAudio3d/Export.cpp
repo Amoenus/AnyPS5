@@ -46,6 +46,10 @@ constexpr std::uint32_t AUDIO3D_BUFFER_ADVANCE_NO_PUSH = 1;
 constexpr std::uint32_t AUDIO3D_BUFFER_ADVANCE_AND_PUSH = 2;
 constexpr int AUDIO3D_AUDIO_OUT_PORT_TYPE = 126;
 constexpr int AUDIO_OUT_PORT_TYPE_COUNT = 5;
+constexpr int AUDIO_OUT_PORT_TYPE_PERSONAL = 3;
+constexpr std::uint32_t AUDIO_OUT_PARAM_BIT_17 = 1u << 17;
+constexpr std::uint32_t AUDIO_OUT_FORMAT_S16_8CH_STD = 6;
+constexpr std::uint32_t AUDIO_OUT_FORMAT_FLOAT_8CH_STD = 7;
 constexpr int AUDIO_OUT_PORT_TYPE_AUX = 127;
 constexpr std::uint32_t AUDIO_OUT_FORMAT_LAST = 7;
 constexpr std::uint32_t AUDIO3D_AUDIO_OUT_FORMAT_STEREO = 1;
@@ -100,6 +104,7 @@ struct Audio3dPort {
     std::uint32_t granularity = 0;
     std::uint32_t buffer_mode = 0;
     std::uint32_t max_objects = 0;
+    std::uint32_t num_beds = 0;
     std::uint32_t next_object_id = 0;
     std::set<std::uint32_t> objects;
     std::deque<Audio3dBed> beds;
@@ -110,6 +115,7 @@ struct Audio3dPort {
 
 std::mutex g_mutex;
 bool g_initialized = false;
+std::atomic<bool> g_ps4_process{false};
 Audio3dPort g_port;
 std::set<int> g_closed_port_audio_outs;
 std::mutex g_report_mutex;
@@ -125,7 +131,7 @@ bool PortIsOpen(std::uint32_t port_id) {
 }
 
 bool Ps4Process() {
-    return sceKernelIsPs4Process() != 0;
+    return g_ps4_process.load();
 }
 
 bool CallReportsRegistered() {
@@ -136,13 +142,14 @@ std::uint32_t ReportedPortId(const std::uint32_t* id) {
     return id != nullptr ? *id : AUDIO3D_PORT_INVALID;
 }
 
-void StorePort(std::uint32_t queue_depth, std::uint32_t granularity, std::uint32_t buffer_mode, std::uint32_t max_objects, std::uint32_t* id) {
+void StorePort(std::uint32_t queue_depth, std::uint32_t granularity, std::uint32_t buffer_mode, std::uint32_t max_objects, std::uint32_t num_beds, std::uint32_t* id) {
     g_port = Audio3dPort{};
     g_port.open = true;
     g_port.queue_depth = queue_depth;
     g_port.granularity = granularity;
     g_port.buffer_mode = buffer_mode;
     g_port.max_objects = max_objects;
+    g_port.num_beds = num_beds;
     *id = AUDIO3D_PORT_ID;
 }
 
@@ -156,7 +163,8 @@ int OpenPs5Port(int user_id, const Audio3dOpenParameters* parameters, std::uint3
     if (parameters->max_objects == 0 || parameters->queue_depth == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
     if (parameters->buffer_mode != AUDIO3D_BUFFER_ADVANCE_AND_PUSH) return AUDIO3D_ERROR_INVALID_PARAMETER;
     if (g_port.open) return AUDIO3D_ERROR_OUT_OF_RESOURCES;
-    StorePort(parameters->queue_depth, parameters->granularity, parameters->buffer_mode, parameters->max_objects, id);
+    const std::uint32_t num_beds = parameters->size_this == 0x28 ? parameters->num_beds : 2;
+    StorePort(parameters->queue_depth, parameters->granularity, parameters->buffer_mode, parameters->max_objects, num_beds, id);
     return 0;
 }
 
@@ -195,7 +203,7 @@ int OpenPs4Port(const char* function, int user_id, const Audio3dOpenParameters* 
     if (buffer_mode != AUDIO3D_BUFFER_ADVANCE_AND_PUSH) Unsupported(function, "buffer mode " + std::to_string(buffer_mode));
     if (num_beds != 2) Unsupported(function, "3 beds");
     if (g_port.open) return AUDIO3D_ERROR_OUT_OF_RESOURCES;
-    StorePort(queue_depth, parameters->granularity, buffer_mode, max_objects, id);
+    StorePort(queue_depth, parameters->granularity, buffer_mode, max_objects, num_beds, id);
     return 0;
 }
 
@@ -297,8 +305,10 @@ void APS5_VABI sceAudio3dGetDefaultOpenParameters(Audio3dOpenParameters* p) {
 
 int APS5_VABI sceAudio3dInitialize(int64_t reserved) {
     const int result = [&] {
-        if (reserved != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
+        g_ps4_process = sceKernelIsPs4Process() != 0;
         std::lock_guard lock(g_mutex);
+        if (g_ps4_process && g_initialized) return AUDIO3D_ERROR_NOT_READY;
+        if (reserved != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
         if (g_initialized) Unsupported("sceAudio3dInitialize", "repeated initialization");
         g_initialized = true;
         return 0;
@@ -540,8 +550,9 @@ int APS5_VABI sceAudio3dBedWrite2(uint32_t port_id, uint32_t num_channels, uint3
         if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
         if (num_channels != 2 && num_channels != 6 && num_channels != 8) return AUDIO3D_ERROR_INVALID_PARAMETER;
         if (format > AUDIO3D_FORMAT_FLOAT) return AUDIO3D_ERROR_INVALID_PARAMETER;
-        const bool route_supported = output_route == AUDIO3D_OUTPUT_ROUTE_BOTH ||
-            (Ps4Process() && (output_route == AUDIO3D_OUTPUT_ROUTE_HMU_ONLY || output_route == AUDIO3D_OUTPUT_ROUTE_TV_ONLY));
+        const bool route_supported = Ps4Process()
+            ? output_route <= AUDIO3D_OUTPUT_ROUTE_TV_ONLY && !(output_route == AUDIO3D_OUTPUT_ROUTE_HMU_ONLY && g_port.num_beds == 2)
+            : output_route == AUDIO3D_OUTPUT_ROUTE_BOTH;
         if (!route_supported) return AUDIO3D_ERROR_INVALID_PARAMETER;
         if (buffer == nullptr || num_samples == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
         const std::size_t sample_size = format == AUDIO3D_FORMAT_S16 ? 2u : 4u;
@@ -579,7 +590,13 @@ int APS5_VABI sceAudio3dAudioOutOpen(uint32_t port_id, int user_id, std::int32_t
         const int initialized = sceAudioOutInit();
         if (initialized != 0 && initialized != AUDIO_OUT_ERROR_ALREADY_INIT) return initialized;
         if (type >= AUDIO_OUT_PORT_TYPE_COUNT && type != AUDIO_OUT_PORT_TYPE_AUX) return AUDIO_OUT_ERROR_INVALID_PORT_TYPE;
-        if ((param & 0xFF) > AUDIO_OUT_FORMAT_LAST) return AUDIO_OUT_ERROR_INVALID_FORMAT;
+        const bool ps4 = Ps4Process();
+        if (ps4 && type == AUDIO_OUT_PORT_TYPE_PERSONAL && (param & AUDIO_OUT_PARAM_BIT_17) != 0) return AUDIO_OUT_ERROR_INVALID_FORMAT;
+        const std::uint32_t format = param & 0xFF;
+        if (format > AUDIO_OUT_FORMAT_LAST) return AUDIO_OUT_ERROR_INVALID_FORMAT;
+        if (ps4 && (format == AUDIO_OUT_FORMAT_S16_8CH_STD || format == AUDIO_OUT_FORMAT_FLOAT_8CH_STD)) {
+            Unsupported("sceAudio3dAudioOutOpen", "PS4 format " + std::to_string(format) + " depends on the PS4 SDK version");
+        }
         const int handle = sceAudioOutOpen(user_id, type, index, len, freq, param);
         if (handle < 0) return handle;
         bool registered = false;

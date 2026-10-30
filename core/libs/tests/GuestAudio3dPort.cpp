@@ -360,6 +360,11 @@ void CheckAudioOutPorts() {
     Require(sceAudio3dPortFlush(0) == 0, "flush drains the associated ports");
     Require(sceAudio3dAudioOutOutput(handle, block.data()) == 0, "flush resets the pending queue");
     Require(sceAudio3dAudioOutOutputs(nullptr, 0) == INVALID_PARAMETER, "outputs rejects an empty batch");
+    Require(sceAudio3dPortFlush(0) == 0, "flush before outputs");
+    AudioOutOutputParam batch[2] = {{handle, block.data()}, {0x1234, block.data()}};
+    Require(sceAudio3dAudioOutOutputs(batch, 1) == 0, "outputs one block");
+    Require(sceAudio3dAudioOutOutputs(batch, 2) == INVALID_PORT, "outputs stops at an unknown handle");
+    Require(sceAudio3dAudioOutOutput(handle, block.data()) == NOT_READY, "outputs queued both blocks for the known handle");
     Require(sceAudio3dAudioOutClose(handle) == 0, "audio out close");
     Require(sceAudio3dAudioOutClose(handle) == INVALID_PORT, "audio out double close");
     Require(sceAudio3dAudioOutOutput(handle, block.data()) == INVALID_PORT, "output on a closed handle");
@@ -554,6 +559,17 @@ void CheckReportHandlers() {
     g_reports.clear();
     Require(sceAudio3dAudioOutOutputs(nullptr, 0) == INVALID_PARAMETER, "outputs without parameters");
     RequireReport(g_reports.at(0), "sceAudio3dAudioOutOutputs", "PU", 0xFFFFFFFF, OBJECT_INVALID, INVALID_PARAMETER, {0, 0}, "outputs without parameters reports a null pointer");
+    const int out_handle = sceAudio3dAudioOutOpen(0, SYSTEM_USER, 0, 0, parameters.granularity, 48000, 1);
+    Require(out_handle > 0, "audio out open with a call handler");
+    g_reports.clear();
+    const std::vector<std::int16_t> block(static_cast<std::size_t>(parameters.granularity) * 2, 0);
+    AudioOutOutputParam batch[2] = {{out_handle, block.data()}, {0x1234, block.data()}};
+    Require(sceAudio3dAudioOutOutputs(batch, 2) == INVALID_PORT, "outputs with an unknown second handle");
+    Require(g_reports.size() == 3, "outputs reports each output and itself");
+    RequireReport(g_reports[0], "sceAudio3dAudioOutOutput", "IP", 0xFFFFFFFF, OBJECT_INVALID, 0, {static_cast<std::uint64_t>(out_handle), Address(block.data())}, "first output report");
+    RequireReport(g_reports[1], "sceAudio3dAudioOutOutput", "IP", 0xFFFFFFFF, OBJECT_INVALID, INVALID_PORT, {0x1234, Address(block.data())}, "failed output report");
+    RequireReport(g_reports[2], "sceAudio3dAudioOutOutputs", "PU", 0xFFFFFFFF, OBJECT_INVALID, INVALID_PORT, {Address(batch + 1), 2}, "outputs reports the element where it stopped");
+    Require(sceAudio3dAudioOutClose(out_handle) == 0, "close the audio out handle");
     g_reports.clear();
     Require(sceAudio3dAudioOutClose(0x1234) == INVALID_PORT && g_reports.empty(), "closing an unknown audio out port is not reported");
     Require(sceAudio3dPortDestroy(0) == 0, "destroy");
@@ -585,6 +601,8 @@ void CheckTerminate() {
 
 void CheckPs4Process() {
     Require(sceAudio3dInitialize(0) == 0, "initialize in a PS4 process");
+    Require(sceAudio3dInitialize(1) == NOT_READY, "a repeated initialize in a PS4 process is NOT_READY before the reserved check");
+    Require(sceAudio3dInitialize(0) == NOT_READY, "a repeated initialize in a PS4 process is NOT_READY");
     const Audio3dOpenParameters defaults = Defaults();
     std::uint32_t id = 7;
     auto open = [&](auto change) {
@@ -605,9 +623,17 @@ void CheckPs4Process() {
     RequireThrows([&] { sceAudio3dPortCreate(0x100, 0, 0, &id); }, "create in a PS4 process selects the unsupported buffer mode 0");
     Require(open([](auto& p) { p.size_this = 0x28; p.num_beds = 2; }) == 0 && id == 0, "a PS4 process opens with 2 beds");
     const std::int16_t samples[8] = {};
-    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 1, false) == 0, "a PS4 process accepts the hmu only route");
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 1, false) == INVALID_PARAMETER, "a PS4 process rejects the hmu only route on a 2-bed port");
     Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 2, false) == 0, "a PS4 process accepts the tv only route");
     Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 3, false) == INVALID_PARAMETER, "a PS4 process rejects an unknown route");
+    const std::uint32_t granularity = defaults.granularity;
+    Require(sceAudio3dAudioOutOpen(0, SYSTEM_USER, 3, 0, granularity, 48000, 1 | (1u << 17)) == AUDIO_OUT_INVALID_FORMAT, "a PS4 process rejects param bit 17 on port type 3");
+    Require(sceAudio3dAudioOutOpen(0, SYSTEM_USER, 5, 0, granularity, 48000, 1) == AUDIO_OUT_INVALID_PORT_TYPE, "a PS4 process checks the port type");
+    Require(sceAudio3dAudioOutOpen(0, SYSTEM_USER, 0, 0, granularity, 48000, 8) == AUDIO_OUT_INVALID_FORMAT, "a PS4 process rejects an unknown format");
+    RequireThrows([&] { sceAudio3dAudioOutOpen(0, SYSTEM_USER, 0, 0, granularity, 48000, 6); }, "a PS4 process with format 6 depends on the SDK version");
+    RequireThrows([&] { sceAudio3dAudioOutOpen(0, SYSTEM_USER, 0, 0, granularity, 48000, 7); }, "a PS4 process with format 7 depends on the SDK version");
+    const int handle = sceAudio3dAudioOutOpen(0, SYSTEM_USER, 3, 0, granularity, 48000, 1);
+    Require(handle > 0 && sceAudio3dAudioOutClose(handle) == 0, "a PS4 process opens port type 3 without bit 17");
     Require(sceAudio3dPortClose(0) == 0, "close in a PS4 process");
     Require(sceAudio3dTerminate() == 0, "terminate in a PS4 process");
 }
