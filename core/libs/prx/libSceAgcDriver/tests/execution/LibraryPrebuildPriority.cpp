@@ -140,13 +140,13 @@ void CheckLargeBacklog() {
     gate->changed.notify_all();
     Require(gate->changed.wait_for(lock, std::chrono::seconds(10), [&] { return !gate->order.empty(); }), "no queued prebuild ran after one prebuild thread was released");
     Require(gate->order.front() == target, "the bound prebuild did not run first from a large backlog");
-    gate->released = ~0u;
-    gate->changed.notify_all();
     Require(gate->changed.wait_for(lock, std::chrono::seconds(60), [&] { return gate->order.size() == backlog; }), "queued prebuilds were lost");
     auto sorted = gate->order;
     std::ranges::sort(sorted);
     for (std::uint64_t index = 0; index < backlog; ++index) Require(sorted[index] == queued + index * 0x100u, "a queued prebuild ran twice or not at all");
-    for (std::size_t index = 1; index + threads + 1 < gate->order.size(); ++index) Require(gate->order[index] < gate->order[index + threads + 1], "the nonmatching prebuilds lost their order");
+    Require(std::ranges::is_sorted(gate->order.begin() + 1, gate->order.end()), "the nonmatching prebuilds lost their order");
+    gate->released = ~0u;
+    gate->changed.notify_all();
     lock.unlock();
     AgcDriver::DriverDetail::AwaitLibraryPrebuilds();
     Require(!AgcDriver::DriverDetail::LibraryPrebuildsWaiting(), "a drained pool still reported waiting prebuilds");
