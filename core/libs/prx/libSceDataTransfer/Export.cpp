@@ -1,3 +1,5 @@
+#include "prx/libSceDataTransfer/include/LegacyExports.hpp"
+#include "prx/libc/include/general/ExportMacros.hpp"
 #include "prx/libSceDataTransfer/include/Api.hpp"
 #include <cstdint>
 #include <cstddef>
@@ -417,5 +419,19 @@ int APS5_VABI sceDataTransferRequestStartFgTransferPS5() {
 int APS5_VABI sceDataTransferRequestTransferTimePS5() {
     NotImplemented_nid_no_patch(__func__);
 }
+
+}
+
+extern "C" {
+
+int APS5_VABI dataTransferLegacyUnknown_YxCpG1l_minus_iMA_nid_no_patch() {
+    NotImplemented_nid_no_patch(__func__);
+}
+APS5_EXPORT("YxCpG1l-iMA", dataTransferLegacyUnknown_YxCpG1l_minus_iMA_nid_no_patch);
+
+int APS5_VABI dataTransferLegacyUnknown_p_plus_EwF_minus_lg9Lc_nid_no_patch() {
+    NotImplemented_nid_no_patch(__func__);
+}
+APS5_EXPORT("p+EwF-lg9Lc", dataTransferLegacyUnknown_p_plus_EwF_minus_lg9Lc_nid_no_patch);
 
 }
