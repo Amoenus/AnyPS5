@@ -1,4 +1,5 @@
 add_library(libSceInvitationDialog SHARED EXCLUDE_FROM_ALL Export.cpp)
+target_link_libraries(libSceInvitationDialog PRIVATE libSceIme)
 target_include_directories(libSceInvitationDialog PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(libSceInvitationDialog PRIVATE libSceCommonDialog libc)
 configure_windows_unwind(libSceInvitationDialog)
