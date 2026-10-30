@@ -2796,7 +2796,6 @@
 | `_ZN3WTF33indexOfBestMatchingLanguageInListERKNS_6StringERKNS_6VectorIS0_Lm0ENS_15CrashOnOverflowELm16ENS_10FastMallocEEERb` | `RoOulmakF2U` |
 | `_ZN3WTF37canCurrentThreadAccessThreadLocalDataERNS_6ThreadE` | `UY123Q3mRZI` |
 | `_ZN3WTF37parseDateFromNullTerminatedCharactersEPKc` | `Eisgz+sqX1g` |
-| `_ZN3WTF37parseDateFromNullTerminatedCharactersEPKcRb` | `Go8rq2aaDlc` |
 | `_ZN3WTF3ICU12majorVersionEv` | `VZkUzpN-EW8` |
 | `_ZN3WTF3ICU12minorVersionEv` | `GMRugn+lVTw` |
 | `_ZN3WTF3URL10invalidateEv` | `8Ydwx621DeA` |
@@ -8715,3 +8714,8 @@
 | `Unknown` | `zdn8pgeNnEY` |
 | `Unknown` | `ziXF7YQDRhY` |
 | `Unknown` | `zpeJoENXwDY` |
+
+### Functional
+
+- [parseDateFromNullTerminatedCharacters(const char*)](../../../core/libs/prx/libSceNKWebKit/Export.cpp) (libSceNKWebKit) - still throws: it subtracts [calculateLocalTimeOffset](https://github.com/WebKit/WebKit/blob/c55364d53f97/Source/WTF/wtf/DateMath.cpp#L318-L361), whose code path follows `HAVE_LOCALTIME_R`, `HAVE_TIMEGM` and `HAVE_TM_GMTOFF` from [configure checks](https://github.com/WebKit/WebKit/blob/c55364d53f97/Source/cmake/OptionsCommon.cmake#L131-L148) against the port's sysroot, and the device time zone.
+- [parseDateFromNullTerminatedCharacters(const char*, bool&)](../../../core/libs/prx/libSceNKWebKit/DateParsing.cpp) (libSceNKWebKit) - is not measured on a device, and throws where pinned [DateMath.cpp](https://github.com/WebKit/WebKit/blob/c55364d53f97/Source/WTF/wtf/DateMath.cpp#L684-L988) overflows a signed integer, which is undefined there (the `YYYY/MM/DD` day count, the `GMT+hh:mm` minute total and comment nesting), and for a null argument, where WebKit faults.
