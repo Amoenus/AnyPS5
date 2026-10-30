@@ -67,6 +67,7 @@ private:
     AgcDriver::PadStatusProvider statusProvider;
     Port0Presence::Mode port0Mode;
     Port0Presence::Presence port0;
+    bool padCaptured = false;
 };
 
 #endif
