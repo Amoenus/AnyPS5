@@ -1434,14 +1434,14 @@ void CheckBufferLoad(AgcDriver::VulkanDevice& device, const ShaderRecompiler::Re
 }
 
 template<class TAction>
-void CheckBufferRefused(TAction&& action, const char* name, std::vector<std::string>& missing) {
+void CheckBufferRefused(TAction&& action, const char* name, std::vector<std::string>& missing, std::string_view expected = "whose samples are only on the host") {
     std::string refusal;
     try {
         action();
     } catch (const std::runtime_error& error) {
         refusal = error.what();
     }
-    const bool refused = refusal.find("whose samples are only on the host") != std::string::npos;
+    const bool refused = refusal.find(expected) != std::string::npos;
     std::cout << "native buffer " << name << ": " << (refused ? "refused" : "missing refusal") << '\n';
     if (!refused) missing.emplace_back(std::string(name) + ": " + refusal);
 }
@@ -2317,20 +2317,22 @@ int main(int argc, char** argv) {
         Require(colorBytes != 0 && colorBytes <= block.bytes, "the 4x target's color memory does not fit its block");
         AgcDriver::Graphics::NoteColorMetadataFill(block.Address(), static_cast<std::size_t>(colorBytes), FillOnes);
         CheckUniform(LoadSamples(*device, block), Ones, "after a fill of the target's color memory with half-float ones");
+        const std::vector<std::uint8_t> guardedBytes(block.data, block.data + block.bytes);
+        constexpr std::string_view mismatch = "guest color no longer matches its initial contents or a known full fill";
         std::vector<std::string> missing;
         const auto dispatch = [&](const auto& program) {
             device->Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()));
             device->WaitIdle();
         };
-        CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + 4u, output.Address())); }, "fresh read", missing);
-        CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + colorBytes - 4u, output.Address())); }, "edge read", missing);
+        CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + 4u, output.Address())); }, "fresh read", missing, mismatch);
+        CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + colorBytes - 4u, output.Address())); }, "edge read", missing, mismatch);
         CheckBufferRefused([&] { dispatch(CompileBufferLoad(*device, block.Address() + colorBytes, block.Address())); }, "write", missing);
-        CheckBufferRefused([&] { dispatch(warm); }, "warmed dispatch", missing);
+        CheckBufferRefused([&] { dispatch(warm); }, "warmed dispatch", missing, mismatch);
         if (prepared != nullptr) {
             CheckBufferRefused([&] {
                 device->Dispatch(deferredProgram, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), prepared);
                 device->WaitIdle();
-            }, "deferred dispatch", missing);
+            }, "deferred dispatch", missing, mismatch);
         }
         bool recipeReused = false;
         if (recipe != nullptr) {
@@ -2341,7 +2343,7 @@ int main(int argc, char** argv) {
                 AgcDriver::VulkanDevice::IndirectOutcome outcome{};
                 device->DispatchRecipe(warm, 1, 1, 1, 0, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), hit, outcome);
                 device->WaitIdle();
-            }, "recipe dispatch", missing);
+            }, "recipe dispatch", missing, mismatch);
         }
         std::memset(block.data + colorBytes, 0, BlockBytes);
         CheckBufferLoad(*device, CompileBufferLoad(*device, block.Address() + colorBytes, output.Address()), output);
@@ -2350,6 +2352,8 @@ int main(int argc, char** argv) {
         std::string failures;
         for (const auto& item : missing) failures += " " + item;
         Require(missing.empty(), "buffer aliases of live native MSAA color memory bypassed the guard:" + failures);
+        Require(std::equal(guardedBytes.begin(), guardedBytes.end(), block.data), "a refused buffer publication changed guest color bytes");
+        Require(Refused(block.Address(), static_cast<std::size_t>(colorBytes), "after refused buffer publication"), "refused buffer publication removed the live color guard");
         recipe.reset();
         prepared.reset();
         RequireRefused(*device, TargetDescriptor(block, 3u), "texture of 8 samples", "loading a 4x target as an 8x texture");
