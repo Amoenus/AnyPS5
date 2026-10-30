@@ -162,6 +162,13 @@ int main() {
         }
         AgcDriver::DriverDetail::Driver::Get();
         Require(!AgcDriver::DriverDetail::LibraryPrebuildsWaiting(), "an unused pool reported waiting prebuilds");
+        {
+            auto words = Bind(0x008, second);
+            Packet dcb{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+            Require(sceAgcDriverSubmitDcb(&dcb) == 0, "the submission with no prebuild waiting failed");
+            AgcDriverWaitIdle_nid_postfix();
+        }
+        Require(FirstPrebuildAfter(Pm4(0x76, {0x008, static_cast<std::uint32_t>(second >> 8u)})) == first, "a submission scanned its program registers with no prebuild waiting");
         Require(FirstPrebuildAfter(Bind(0x008, second)) == second, "the prebuild of the pixel program a submission binds did not run before an earlier queued prebuild");
         Require(FirstPrebuildAfter(Pm4(0x76, {0x008, static_cast<std::uint32_t>(second >> 8u)})) == second, "a pixel program bound with a retained high address register was not prioritized");
         Require(FirstPrebuildAfter(Bind(0x048, second)) == second, "the prebuild of the legacy vertex program a submission binds did not run before an earlier queued prebuild");
