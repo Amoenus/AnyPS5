@@ -629,10 +629,20 @@ int APS5_VABI sceSaveDataLoadIcon(const SaveDataMountPoint* mount_point, SaveDat
     return SAVE_DATA_OK;
 }
 
+enum class FreeSpaceMode : std::uint8_t { Fixed, Host };
+
+static FreeSpaceMode free_space_mode() {
+    const char* configured = std::getenv("ANYPS5_FREE_SPACE");
+    if (configured == nullptr || std::strcmp(configured, "fixed") == 0) return FreeSpaceMode::Fixed;
+    if (std::strcmp(configured, "host") == 0) return FreeSpaceMode::Host;
+    throw std::runtime_error("ANYPS5_FREE_SPACE must be fixed or host, not \"" + std::string(configured) + "\"");
+}
+
 static int mount3(const SaveDataMount3* mount, SaveDataMountResult* mount_result) {
     if (mount == nullptr || mount_result == nullptr || mount->dir_name == nullptr) {
         return SAVE_DATA_ERROR_PARAMETER;
     }
+    free_space_mode();
     const bool create = (mount->mount_mode & SAVE_DATA_MOUNT_MODE_CREATE) != 0;
     const bool create2 = (mount->mount_mode & SAVE_DATA_MOUNT_MODE_CREATE2) != 0;
     const bool rdonly = (mount->mount_mode & SAVE_DATA_MOUNT_MODE_RDONLY) != 0;
