@@ -42,6 +42,7 @@ extern "C" Uint32 SDLCALL SDL_GetQueuedAudioSize(SDL_AudioDeviceID id) { Require
 extern "C" int SDLCALL SDL_QueueAudio(SDL_AudioDeviceID id, const void*, Uint32) { Require(id == device, "wrong queue written"); return 0; }
 extern "C" void SDLCALL SDL_ClearQueuedAudio(SDL_AudioDeviceID id) { Require(id == device, "wrong queue cleared"); }
 extern "C" void SDLCALL SDL_CloseAudioDevice(SDL_AudioDeviceID id) { Require(id == device, "wrong device closed"); ++closed; }
+extern "C" SDL_AudioStatus SDLCALL SDL_GetAudioDeviceStatus(SDL_AudioDeviceID) { return SDL_AUDIO_PLAYING; }
 
 int main(int argc, char** argv) {
     try {

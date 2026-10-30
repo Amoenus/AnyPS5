@@ -221,6 +221,7 @@ extern "C" int SDLCALL SDL_QueueAudio(SDL_AudioDeviceID device, const void* data
 }
 extern "C" void SDLCALL SDL_ClearQueuedAudio(SDL_AudioDeviceID device) { Require(device == 42, "wrong native queue cleared"); }
 extern "C" void SDLCALL SDL_CloseAudioDevice(SDL_AudioDeviceID device) { Require(device == 42, "wrong native device closed"); ++closed; }
+extern "C" SDL_AudioStatus SDLCALL SDL_GetAudioDeviceStatus(SDL_AudioDeviceID) { return SDL_AUDIO_PLAYING; }
 
 int main(int argc, char** argv) {
     try {
