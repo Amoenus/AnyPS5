@@ -7,9 +7,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <limits>
+#include <random>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -81,6 +85,9 @@ void CheckBeforeInitialize() {
     Require(sceAudio3dPortCreate(0x100, 0, 0, &id) == NOT_READY && id == 7, "create before initialize must be NOT_READY");
     Require(sceAudio3dPortCreate(0x100, 0, 1, &id) == INVALID_PARAMETER && id == 7, "create checks the reserved argument first");
     Require(sceAudio3dPortCreate(0x100, 0, 0, nullptr) == NOT_READY, "create checks the initialization before the port id");
+    auto* const inaccessible = reinterpret_cast<std::uint32_t*>(std::uintptr_t{0x10});
+    Require(Open(parameters, inaccessible) == NOT_READY, "a failed open without report handlers does not read the port id");
+    Require(sceAudio3dPortCreate(0x100, 0, 1, inaccessible) == INVALID_PARAMETER, "a failed create without report handlers does not read the port id");
     Require(sceAudio3dPortAdvance(0) == INVALID_PORT, "advance needs an open port");
     Require(sceAudio3dPortPush(0, 0) == INVALID_PORT, "push needs an open port");
     float value = 0.0f;
@@ -545,6 +552,9 @@ void CheckReportHandlers() {
     Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 1, false) == INVALID_PARAMETER, "bed write2 with a PS4 route");
     RequireReport(g_reports.at(0), "sceAudio3dBedWrite2", "HUUPU", 0, OBJECT_INVALID, INVALID_PARAMETER, {0, 2, 0, Address(samples), 4}, "a rejected bed keeps its format");
     g_reports.clear();
+    Require(sceAudio3dAudioOutOutputs(nullptr, 0) == INVALID_PARAMETER, "outputs without parameters");
+    RequireReport(g_reports.at(0), "sceAudio3dAudioOutOutputs", "PU", 0xFFFFFFFF, OBJECT_INVALID, INVALID_PARAMETER, {0, 0}, "outputs without parameters reports a null pointer");
+    g_reports.clear();
     Require(sceAudio3dAudioOutClose(0x1234) == INVALID_PORT && g_reports.empty(), "closing an unknown audio out port is not reported");
     Require(sceAudio3dPortDestroy(0) == 0, "destroy");
     Require(g_reports.size() == 2, "destroy reports itself and the close");
@@ -573,9 +583,64 @@ void CheckTerminate() {
     Require(sceAudio3dTerminate() == 0, "terminate after reinitialize");
 }
 
+void CheckPs4Process() {
+    Require(sceAudio3dInitialize(0) == 0, "initialize in a PS4 process");
+    const Audio3dOpenParameters defaults = Defaults();
+    std::uint32_t id = 7;
+    auto open = [&](auto change) {
+        Audio3dOpenParameters parameters = defaults;
+        change(parameters);
+        return Open(parameters, &id);
+    };
+    RequireThrows([&] { open([](auto& p) { p.size_this = 0x10; }); }, "a PS4 process with 0x10 parameters selects the unsupported buffer mode 0");
+    RequireThrows([&] { open([](auto& p) { p.size_this = 0x18; }); }, "a PS4 process with 0x18 parameters selects the unsupported buffer mode 1");
+    RequireThrows([&] { open([](auto& p) { p.buffer_mode = 0; }); }, "a PS4 process with buffer mode 0 is unsupported");
+    RequireThrows([&] { open([](auto& p) { p.buffer_mode = 1; }); }, "a PS4 process with buffer mode 1 is unsupported");
+    RequireThrows([&] { open([](auto& p) { p.size_this = 0x28; p.num_beds = 3; }); }, "a PS4 process with 3 beds is unsupported");
+    for (const std::uint32_t beds : {0u, 1u, 4u}) {
+        Require(open([&](auto& p) { p.size_this = 0x28; p.num_beds = beds; }) == INVALID_PARAMETER && id == 7, "a PS4 process needs 2 or 3 beds");
+    }
+    RequireThrows([&] { sceAudio3dPortOpenEx(SYSTEM_USER, &defaults, &id); }, "open ex in a PS4 process is unsupported");
+    Require(sceAudio3dPortCreate(0x100, 0, 1, &id) == INVALID_PARAMETER && id == 7, "create in a PS4 process needs a zero reserved argument");
+    RequireThrows([&] { sceAudio3dPortCreate(0x100, 0, 0, &id); }, "create in a PS4 process selects the unsupported buffer mode 0");
+    Require(open([](auto& p) { p.size_this = 0x28; p.num_beds = 2; }) == 0 && id == 0, "a PS4 process opens with 2 beds");
+    const std::int16_t samples[8] = {};
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 1, false) == 0, "a PS4 process accepts the hmu only route");
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 2, false) == 0, "a PS4 process accepts the tv only route");
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 3, false) == INVALID_PARAMETER, "a PS4 process rejects an unknown route");
+    Require(sceAudio3dPortClose(0) == 0, "close in a PS4 process");
+    Require(sceAudio3dTerminate() == 0, "terminate in a PS4 process");
 }
 
-int main() {
+int RunAsPs4Process(const char* program) {
+    const auto directory = std::filesystem::temp_directory_path() / ("audio3d-ps4-test-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(directory / "app0" / "sce_sys");
+    struct Entry { std::uint16_t key, format; std::uint32_t length, maximum, offset; };
+    const std::uint32_t header[5] = {0x46535000, 0x0101, 52, 72, 2};
+    const Entry entries[2] = {{0, 0x0204, 8, 8, 0}, {6, 0x0204, 10, 12, 8}};
+    {
+        std::ofstream file(directory / "app0/sce_sys/param.sfo", std::ios::binary);
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(reinterpret_cast<const char*>(entries), sizeof(entries));
+        file << std::string("TITLE\0TITLE_ID\0\0\0\0\0\0", 20) << std::string("Example\0", 8) << "CUSA00000" << std::string("\0\0\0", 3);
+    }
+#ifdef _WIN32
+    const std::string command = "\"cd /d \"" + directory.string() + "\" && \"" + program + "\" ps4-process\"";
+#else
+    const std::string command = "cd \"" + directory.string() + "\" && \"" + program + "\" ps4-process";
+#endif
+    const int status = std::system(command.c_str());
+    std::filesystem::remove_all(directory);
+    return status;
+}
+
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "ps4-process") {
+        CheckPs4Process();
+        return 0;
+    }
     CheckBeforeInitialize();
     CheckOpenParameters();
     CheckOpenClose();
@@ -591,4 +656,5 @@ int main() {
     CheckBedQueue();
     CheckReportHandlers();
     CheckTerminate();
+    Require(RunAsPs4Process(argv[0]) == 0, "the PS4 process checks must pass");
 }

@@ -20,6 +20,7 @@
 #include "Mixer.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel_sys/include/Api.hpp"
 
 namespace {
 
@@ -38,6 +39,10 @@ constexpr std::uint32_t AUDIO3D_PORT_ID = 0;
 constexpr std::uint32_t AUDIO3D_OBJECT_INVALID = 0xFFFFFFFF;
 constexpr std::uint32_t AUDIO3D_RATE_48000 = 0;
 constexpr std::uint32_t AUDIO3D_SAMPLE_RATE = 48000;
+constexpr std::uint32_t AUDIO3D_DEFAULT_MAX_OBJECTS = 512;
+constexpr std::uint32_t AUDIO3D_DEFAULT_QUEUE_DEPTH = 2;
+constexpr std::uint32_t AUDIO3D_BUFFER_NO_ADVANCE = 0;
+constexpr std::uint32_t AUDIO3D_BUFFER_ADVANCE_NO_PUSH = 1;
 constexpr std::uint32_t AUDIO3D_BUFFER_ADVANCE_AND_PUSH = 2;
 constexpr int AUDIO3D_AUDIO_OUT_PORT_TYPE = 126;
 constexpr int AUDIO_OUT_PORT_TYPE_COUNT = 5;
@@ -56,6 +61,8 @@ constexpr std::uint32_t AUDIO3D_ATTRIBUTE_DOWNMIX_SPREAD_HEIGHT_AWARE = 0x10003;
 constexpr std::uint32_t AUDIO3D_FORMAT_S16 = 0;
 constexpr std::uint32_t AUDIO3D_FORMAT_FLOAT = 1;
 constexpr std::uint32_t AUDIO3D_OUTPUT_ROUTE_BOTH = 0;
+constexpr std::uint32_t AUDIO3D_OUTPUT_ROUTE_HMU_ONLY = 1;
+constexpr std::uint32_t AUDIO3D_OUTPUT_ROUTE_TV_ONLY = 2;
 constexpr std::uint32_t AUDIO3D_STATUS_DOWNMIX = 1;
 constexpr std::uint32_t AUDIO3D_PORT_INVALID = 0xFFFFFFFF;
 constexpr std::uint32_t AUDIO3D_REPORT_TYPES = 4;
@@ -115,6 +122,81 @@ std::atomic<std::uint32_t> g_call_report_handlers{0};
 
 bool PortIsOpen(std::uint32_t port_id) {
     return port_id == AUDIO3D_PORT_ID && g_port.open;
+}
+
+bool Ps4Process() {
+    return sceKernelIsPs4Process() != 0;
+}
+
+bool CallReportsRegistered() {
+    return g_call_report_handlers.load() != 0;
+}
+
+std::uint32_t ReportedPortId(const std::uint32_t* id) {
+    return id != nullptr ? *id : AUDIO3D_PORT_INVALID;
+}
+
+void StorePort(std::uint32_t queue_depth, std::uint32_t granularity, std::uint32_t buffer_mode, std::uint32_t max_objects, std::uint32_t* id) {
+    g_port = Audio3dPort{};
+    g_port.open = true;
+    g_port.queue_depth = queue_depth;
+    g_port.granularity = granularity;
+    g_port.buffer_mode = buffer_mode;
+    g_port.max_objects = max_objects;
+    *id = AUDIO3D_PORT_ID;
+}
+
+int OpenPs5Port(int user_id, const Audio3dOpenParameters* parameters, std::uint32_t* id) {
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return AUDIO3D_ERROR_NOT_READY;
+    if (user_id != AUDIO3D_USER_ID_SYSTEM || parameters == nullptr || id == nullptr) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (parameters->size_this != 0x20 && parameters->size_this != 0x28) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (parameters->rate != AUDIO3D_RATE_48000) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (parameters->granularity < 0x100 || (parameters->granularity & 0xFF) != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (parameters->max_objects == 0 || parameters->queue_depth == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (parameters->buffer_mode != AUDIO3D_BUFFER_ADVANCE_AND_PUSH) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (g_port.open) return AUDIO3D_ERROR_OUT_OF_RESOURCES;
+    StorePort(parameters->queue_depth, parameters->granularity, parameters->buffer_mode, parameters->max_objects, id);
+    return 0;
+}
+
+int OpenPs4Port(const char* function, int user_id, const Audio3dOpenParameters* parameters, std::uint32_t* id) {
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return AUDIO3D_ERROR_NOT_READY;
+    if (user_id != AUDIO3D_USER_ID_SYSTEM || parameters == nullptr || id == nullptr) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    std::uint32_t max_objects = AUDIO3D_DEFAULT_MAX_OBJECTS;
+    std::uint32_t queue_depth = AUDIO3D_DEFAULT_QUEUE_DEPTH;
+    std::uint32_t buffer_mode = AUDIO3D_BUFFER_NO_ADVANCE;
+    std::uint32_t num_beds = 2;
+    switch (parameters->size_this) {
+    case 0x10:
+        break;
+    case 0x18:
+        max_objects = parameters->max_objects;
+        queue_depth = parameters->queue_depth;
+        buffer_mode = AUDIO3D_BUFFER_ADVANCE_NO_PUSH;
+        break;
+    case 0x28:
+        num_beds = parameters->num_beds;
+        [[fallthrough]];
+    case 0x20:
+        max_objects = parameters->max_objects;
+        queue_depth = parameters->queue_depth;
+        buffer_mode = parameters->buffer_mode;
+        break;
+    default:
+        return AUDIO3D_ERROR_INVALID_PARAMETER;
+    }
+    if (parameters->rate != AUDIO3D_RATE_48000) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (parameters->granularity < 0x100 || (parameters->granularity & 0xFF) != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (max_objects == 0 || queue_depth == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (buffer_mode > AUDIO3D_BUFFER_ADVANCE_AND_PUSH) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (num_beds != 2 && num_beds != 3) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (buffer_mode != AUDIO3D_BUFFER_ADVANCE_AND_PUSH) Unsupported(function, "buffer mode " + std::to_string(buffer_mode));
+    if (num_beds != 2) Unsupported(function, "3 beds");
+    if (g_port.open) return AUDIO3D_ERROR_OUT_OF_RESOURCES;
+    StorePort(queue_depth, parameters->granularity, buffer_mode, max_objects, id);
+    return 0;
 }
 
 std::uint32_t QueueLevel() {
@@ -307,26 +389,8 @@ int APS5_VABI sceAudio3dPortGetAttributesSupported(uint32_t portId, uint32_t* at
 }
 
 int APS5_VABI sceAudio3dPortOpen(int user_id, const Audio3dOpenParameters* parameters, uint32_t* id) {
-    const int result = [&] {
-        std::lock_guard lock(g_mutex);
-        if (!g_initialized) return AUDIO3D_ERROR_NOT_READY;
-        if (user_id != AUDIO3D_USER_ID_SYSTEM || parameters == nullptr || id == nullptr) return AUDIO3D_ERROR_INVALID_PARAMETER;
-        if (parameters->size_this != 0x20 && parameters->size_this != 0x28) return AUDIO3D_ERROR_INVALID_PARAMETER;
-        if (parameters->rate != AUDIO3D_RATE_48000) return AUDIO3D_ERROR_INVALID_PARAMETER;
-        if (parameters->granularity < 0x100 || (parameters->granularity & 0xFF) != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
-        if (parameters->max_objects == 0 || parameters->queue_depth == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
-        if (parameters->buffer_mode != AUDIO3D_BUFFER_ADVANCE_AND_PUSH) return AUDIO3D_ERROR_INVALID_PARAMETER;
-        if (g_port.open) return AUDIO3D_ERROR_OUT_OF_RESOURCES;
-        g_port = Audio3dPort{};
-        g_port.open = true;
-        g_port.queue_depth = parameters->queue_depth;
-        g_port.granularity = parameters->granularity;
-        g_port.buffer_mode = parameters->buffer_mode;
-        g_port.max_objects = parameters->max_objects;
-        *id = AUDIO3D_PORT_ID;
-        return 0;
-    }();
-    Report(id != nullptr ? *id : AUDIO3D_PORT_INVALID, AUDIO3D_OBJECT_INVALID, result, __func__, "I&HD", user_id, id, parameters);
+    const int result = Ps4Process() ? OpenPs4Port(__func__, user_id, parameters, id) : OpenPs5Port(user_id, parameters, id);
+    if (CallReportsRegistered()) Report(ReportedPortId(id), AUDIO3D_OBJECT_INVALID, result, __func__, "I&HD", user_id, id, parameters);
     return result;
 }
 
@@ -476,7 +540,9 @@ int APS5_VABI sceAudio3dBedWrite2(uint32_t port_id, uint32_t num_channels, uint3
         if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
         if (num_channels != 2 && num_channels != 6 && num_channels != 8) return AUDIO3D_ERROR_INVALID_PARAMETER;
         if (format > AUDIO3D_FORMAT_FLOAT) return AUDIO3D_ERROR_INVALID_PARAMETER;
-        if (output_route != AUDIO3D_OUTPUT_ROUTE_BOTH) return AUDIO3D_ERROR_INVALID_PARAMETER;
+        const bool route_supported = output_route == AUDIO3D_OUTPUT_ROUTE_BOTH ||
+            (Ps4Process() && (output_route == AUDIO3D_OUTPUT_ROUTE_HMU_ONLY || output_route == AUDIO3D_OUTPUT_ROUTE_TV_ONLY));
+        if (!route_supported) return AUDIO3D_ERROR_INVALID_PARAMETER;
         if (buffer == nullptr || num_samples == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
         const std::size_t sample_size = format == AUDIO3D_FORMAT_S16 ? 2u : 4u;
         if (reinterpret_cast<std::uintptr_t>(buffer) % sample_size != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
@@ -570,7 +636,7 @@ int APS5_VABI sceAudio3dAudioOutOutputs(AudioOutOutputParam* param, uint32_t num
         }
         return 0;
     }();
-    Report(AUDIO3D_PORT_INVALID, AUDIO3D_OBJECT_INVALID, result, __func__, "PU", param + i, num);
+    Report(AUDIO3D_PORT_INVALID, AUDIO3D_OBJECT_INVALID, result, __func__, "PU", param != nullptr ? param + i : nullptr, num);
     return result;
 }
 
@@ -584,6 +650,7 @@ const char* APS5_VABI sceAudio3dStrError(std::int32_t error) {
 }
 
 int APS5_VABI sceAudio3dPortOpenEx(int user_id, const Audio3dOpenParameters* parameters, uint32_t* id) {
+    if (Ps4Process()) Unsupported(__func__, "PS4 process");
     return sceAudio3dPortOpen(user_id, parameters, id);
 }
 
@@ -596,8 +663,10 @@ int APS5_VABI sceAudio3dPortCreate(uint32_t granularity, uint32_t rate, int64_t 
         parameters.rate = rate;
         return sceAudio3dPortOpen(AUDIO3D_USER_ID_SYSTEM, &parameters, id);
     }();
-    const std::uint32_t port_id = id != nullptr ? *id : AUDIO3D_PORT_INVALID;
-    Report(port_id, AUDIO3D_OBJECT_INVALID, result, __func__, "H", port_id);
+    if (CallReportsRegistered()) {
+        const std::uint32_t port_id = ReportedPortId(id);
+        Report(port_id, AUDIO3D_OBJECT_INVALID, result, __func__, "H", port_id);
+    }
     return result;
 }
 
