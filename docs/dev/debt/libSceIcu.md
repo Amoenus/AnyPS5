@@ -2,7 +2,7 @@
 
 ### Older dispatch exports
 
-- [Older dispatch exports](../../../core/libs/prx/libSceIcu/Export.cpp) - Four 3.20 callable NIDs are declared as throwing placeholders. Their signatures and behavior are unverified. Static comparison of the 3.20 and later version-labelled module and consumer images suggests corresponding selector wrappers, but their NIDs and internal layouts differ; no forwarding or binary compatibility is claimed. Later image version metadata does not authenticate a retail firmware release.
+- [Older dispatch exports](../../../core/libs/prx/libSceIcu/Export.cpp) - Four 3.20 callable NIDs are declared as throwing placeholders. Their signatures and behavior are unverified. The four selector wrappers have identical instruction bytes in the 3.20 and later version-labelled modules, and corresponding consumer switch cases call them. Their NIDs and internal layouts differ; no forwarding or binary compatibility is claimed. Later image version metadata does not authenticate a retail firmware release.
 
 | 3.20 NID | Later candidate NID | Selector |
 | --- | --- | --- |
