@@ -41,7 +41,6 @@ int APS5_VABI sceIcuDispatchUnknown_lME28PLmu54_nid_no_patch() {
 }
 APS5_EXPORT("lME28PLmu54", sceIcuDispatchUnknown_lME28PLmu54_nid_no_patch);
 
-
 int APS5_VABI UCNV_TO_U_CALLBACK_SUBSTITUTE_nid_postfix() {
     NotImplemented_nid_no_patch(__func__);
 }
@@ -425,9 +424,5 @@ int APS5_VABI sceIcuUnknown_wezXBwKdjAY_nid_no_patch() {
     NotImplemented_nid_no_patch(__func__);
 }
 APS5_EXPORT("wezXBwKdjAY", sceIcuUnknown_wezXBwKdjAY_nid_no_patch);
-
-}
-
-extern "C" {
 
 }
