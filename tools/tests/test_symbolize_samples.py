@@ -401,6 +401,29 @@ class SymbolizeSamplesTests(unittest.TestCase):
         self.assertIn("libSceAgcDriver.prx!short", lines[2])
         self.assertEqual(errors, "")
 
+    def test_multiple_sampled_modules_with_the_same_name_are_not_symbolized(self):
+        samples = self.root / "worker.txt"
+        for second_timestamp in (TIMESTAMP, TIMESTAMP + 1):
+            for unverified in (False, True):
+                with self.subTest(second_timestamp=second_timestamp, unverified=unverified):
+                    samples.write_text(
+                        f"# module libSceAgcDriver.prx {SIZE_OF_IMAGE:#x} {TIMESTAMP:#x}\n"
+                        f"# module LIBSCEAGCDRIVER.PRX {SIZE_OF_IMAGE:#x} {second_timestamp:#x}\n"
+                        "libSceAgcDriver.prx+0x1011 4\n", encoding="utf-8")
+                    options = ("--unverified",) if unverified else ()
+                    lines, errors = self.run_main(samples, "--libs", self.libs, *options)
+                    self.assertIn("libSceAgcDriver.prx+0x1011", "\n".join(lines))
+                    self.assertNotIn("libSceAgcDriver.prx!short", "\n".join(lines))
+                    self.assertIn("multiple sampled modules", errors)
+
+    def test_module_record_lookup_is_case_insensitive(self):
+        samples = self.root / "worker.txt"
+        samples.write_text(f"# module LIBSCEAGCDRIVER.PRX {SIZE_OF_IMAGE:#x} {TIMESTAMP:#x}\n"
+                           "libSceAgcDriver.prx+0x1011 4\n", encoding="utf-8")
+        lines, errors = self.run_main(samples, "--libs", self.libs)
+        self.assertIn("libSceAgcDriver.prx!short", "\n".join(lines))
+        self.assertEqual(errors, "")
+
     def test_thread_files_keep_each_heading_and_can_select_one_thread(self):
         samples = self.root / "threads.txt"
         record = f"# module libSceAgcDriver.prx {SIZE_OF_IMAGE:#x} {TIMESTAMP:#x}\n"
