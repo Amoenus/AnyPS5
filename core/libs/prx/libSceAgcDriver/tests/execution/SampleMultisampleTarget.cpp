@@ -2345,14 +2345,17 @@ int main(int argc, char** argv) {
                 device->WaitIdle();
             }, "recipe dispatch", missing, mismatch);
         }
+        Require(std::equal(guardedBytes.begin(), guardedBytes.end(), block.data), "a refused buffer publication changed guest color bytes");
+        Require(Refused(block.Address(), static_cast<std::size_t>(colorBytes), "before the adjacent buffer control"), "refused buffer publication removed the live color guard");
         std::memset(block.data + colorBytes, 0, BlockBytes);
+        const std::vector<std::uint8_t> controlBytes(block.data, block.data + block.bytes);
         CheckBufferLoad(*device, CompileBufferLoad(*device, block.Address() + colorBytes, output.Address()), output);
         CheckUniform(LoadSamples(*device, block), Ones, "after the native buffer access refusals and adjacent buffer control");
         std::cout << "native buffer controls: adjacent=passed deferred=" << (prepared != nullptr) << " recipe=" << recipeReused << std::endl;
         std::string failures;
         for (const auto& item : missing) failures += " " + item;
         Require(missing.empty(), "buffer aliases of live native MSAA color memory bypassed the guard:" + failures);
-        Require(std::equal(guardedBytes.begin(), guardedBytes.end(), block.data), "a refused buffer publication changed guest color bytes");
+        Require(std::equal(controlBytes.begin(), controlBytes.end(), block.data), "the adjacent buffer control changed guest bytes");
         Require(Refused(block.Address(), static_cast<std::size_t>(colorBytes), "after refused buffer publication"), "refused buffer publication removed the live color guard");
         recipe.reset();
         prepared.reset();
