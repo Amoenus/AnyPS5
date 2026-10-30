@@ -108,6 +108,8 @@ static void CheckPrtApertures() {
     Require(address == reinterpret_cast<void*>(0x5a5a) && length == 0x5a5a);
     Require(sceKernelGetPrtAperture(0, nullptr, &length) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelGetPrtAperture(0, &address, nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelGetPrtAperture(0, reinterpret_cast<void**>(0x10), &length) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sceKernelGetPrtAperture(0, &address, reinterpret_cast<std::size_t*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
     for (int index = 0; index < 3; ++index) {
         void* const base = reinterpret_cast<void*>(0x1000000000 + 0x100000000 * index);
         const std::size_t size = 0x10000 << index;
@@ -139,6 +141,12 @@ static void CheckFlexibleMappingIgnoresFlag8000() {
     try { sceKernelMapFlexibleMemory(&unknown, length, 3, 0x20000); } catch (const std::exception&) { rejected = true; }
     Require(rejected && unknown == nullptr);
     Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before);
+    Require(sceKernelAvailableFlexibleMemorySize(nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelAvailableFlexibleMemorySize(reinterpret_cast<std::size_t*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
+    std::size_t configured = 0;
+    Require(sceKernelConfiguredFlexibleMemorySize(&configured) == 0 && configured > 0);
+    Require(sceKernelConfiguredFlexibleMemorySize(nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelConfiguredFlexibleMemorySize(reinterpret_cast<std::size_t*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
 }
 
 static void CheckPageTableStats() {
