@@ -1,4 +1,5 @@
 add_library(libSceNpFriendListDialog SHARED EXCLUDE_FROM_ALL Export.cpp)
+target_link_libraries(libSceNpFriendListDialog PRIVATE libSceIme)
 target_include_directories(libSceNpFriendListDialog PRIVATE ${LIBS_INCLUDE_DIR})
 configure_windows_unwind(libSceNpFriendListDialog)
 
