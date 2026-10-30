@@ -15,6 +15,8 @@ EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inl", 
 SKIP = {"build", "build-linux", "build-relinker", "3rdparty", ".git"}
 
 INTEGER_READERS = {"kibSetting", "MaskFromEnvironment", "EnvInt", "configured", "environmentCount", "EnvironmentNumber"}
+IDENTIFIER_READERS = ("getenv", "IsEnvironmentSet", "MaskFromEnvironment", "kibSetting", "EnvInt", "configured",
+                      "PipelineSwitch", "environmentCount", "EnvironmentNumber")
 STRING_READERS = {"GetEnvironmentVariableA", "GetEnvironmentVariableW", "addWideString"}
 NULL_TEST = re.compile(r"[!=]=\s*(nullptr|NULL|0)\b|!\s*(?:std::)?_?w?getenv\s*\(")
 INTEGER_TEST = re.compile(r"\b(atoi|strtol|strtoul|strtoll|strtoull|stoi|stol|stoul|from_chars|atoi64|_wtoi|_wtol|_wtoi64)\s*\(")
@@ -120,27 +122,75 @@ def source_files(root):
         yield path
 
 
+class _NamedRead:
+    """A read whose name was reached through a string constant, positioned like the literal read."""
+
+    def __init__(self, match, name):
+        self.match = match
+        self.name = name
+
+    def start(self):
+        return self.match.start()
+
+    def end(self):
+        return self.match.end()
+
+    def group(self, key):
+        return self.name if key == "name" else self.match.group(key)
+
+    def groupdict(self):
+        return {}
+
+
+@functools.lru_cache(maxsize=None)
+def constant_forms(prefixes=PREFIXES):
+    name = _name(prefixes)
+    return (
+        re.compile(r'\b([A-Za-z_]\w*)\s*=\s*(?:u8|u|U|L)?"(?P<name>' + name + r')"\s*;'),
+        re.compile(r'(?<![\w:])(?:std::)?(' + "|".join(IDENTIFIER_READERS) + r')\s*\(\s*(?P<ident>[A-Za-z_]\w*)\s*(?=[,)])'),
+    )
+
+
+def identifier_reads(code, constants, prefixes=PREFIXES):
+    _, reader_form = constant_forms(tuple(prefixes))
+    out = []
+    for match in reader_form.finditer(code):
+        names = constants.get(match.group("ident"), set())
+        if len(names) == 1:
+            out.append((match.group(1), _NamedRead(match, next(iter(names)))))
+    return out
+
+
 def reads(roots, prefixes=PREFIXES):
     found = {}
+    sources = []
     for root in roots:
         for path in source_files(root):
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as error:
                 raise ValueError(f"cannot read {path.as_posix()}: {error}") from error
-            matches = line_reads(text, prefixes)
-            if not matches:
-                continue
-            code = CPP_TOKEN.sub(lambda token: token.group() if token.group("code") else " " * len(token.group()), text)
-            starts = [0] + [match.end() for match in re.finditer("\n", text)]
-            for reader, match in matches:
-                number = bisect.bisect_right(starts, match.start())
-                start = max(code.rfind(token, 0, match.start()) for token in ";{}") + 1
-                end = code.find(";", match.end())
-                end = end + 1 if end >= 0 else len(text)
-                window = expression_window(text, code, matches, match, start, end)
-                found.setdefault(match.group("name"), []).append(
-                    (path.as_posix(), number, kind_of(reader, window), default_of(match, window)))
+            sources.append((path, text))
+    constant_form, _ = constant_forms(tuple(prefixes))
+    constants = {}
+    for _, text in sources:
+        for match in constant_form.finditer(text):
+            constants.setdefault(match.group(1), set()).add(match.group("name"))
+    for path, text in sources:
+        matches = line_reads(text, prefixes)
+        code = CPP_TOKEN.sub(lambda token: token.group() if token.group("code") else " " * len(token.group()), text)
+        matches += identifier_reads(code, constants, prefixes)
+        if not matches:
+            continue
+        starts = [0] + [match.end() for match in re.finditer("\n", text)]
+        for reader, match in matches:
+            number = bisect.bisect_right(starts, match.start())
+            start = max(code.rfind(token, 0, match.start()) for token in ";{}") + 1
+            end = code.find(";", match.end())
+            end = end + 1 if end >= 0 else len(text)
+            window = expression_window(text, code, matches, match, start, end)
+            found.setdefault(match.group("name"), []).append(
+                (path.as_posix(), number, kind_of(reader, window), default_of(match, window)))
     for sites in found.values():
         sites.sort()
     return found
