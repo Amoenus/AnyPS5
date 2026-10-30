@@ -1,4 +1,5 @@
 #include "prx/libSceSaveData/include/Api.hpp"
+#include "prx/libSceSaveData.native/include/SaveDataHostSpace.hpp"
 #include "prx/libSceSaveData.native/include/Api.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
@@ -20,8 +21,20 @@ namespace {
 constexpr std::uint32_t MountReadWrite = 2;
 constexpr std::uint32_t MountCreate2 = 32;
 constexpr int SaveDataErrorParameter = -2137063424;
+constexpr int SaveDataErrorNoSpaceFs = -2137063414;
+constexpr std::uint64_t BlockBytes = 65536;
 
 int failures = 0;
+
+std::uint64_t fakeAvailable = 0;
+int fakeCalls = 0;
+bool fakeFails = false;
+
+std::uint64_t FakeFreeSpace(const std::string&) {
+    ++fakeCalls;
+    if (fakeFails) throw std::runtime_error("fake volume query failed");
+    return fakeAvailable;
+}
 
 void Check(bool condition, const std::string& what) {
     if (condition) return;
@@ -104,6 +117,67 @@ void CheckEmptyValueStopsMount() {
 }
 #endif
 
+void CheckHostRoom() {
+    SetFreeSpaceVariable("host");
+    SetSaveDataFreeSpaceSourceForTest_nid_no_patch(FakeFreeSpace);
+    SaveDataMountResult result{};
+
+    fakeAvailable = 0;
+    fakeCalls = 0;
+    result = SaveDataMountResult{};
+    int code = Mount("HS_FULL", MountReadWrite | MountCreate2, 96, &result);
+    Check(code == SaveDataErrorNoSpaceFs, "a save the full volume cannot hold is NO_SPACE_FS");
+    Check(result.required_blocks == 96, "a full volume reports every requested block as required");
+    Check(!std::filesystem::exists("_sd/HS_FULL"), "a refused save creates no directory");
+    Check(fakeCalls == 1, "the volume is queried once per create");
+
+    fakeAvailable = 96 * BlockBytes - 1;
+    result = SaveDataMountResult{};
+    code = Mount("HS_TINY", MountReadWrite | MountCreate2, 96, &result);
+    Check(code == SaveDataErrorNoSpaceFs && result.required_blocks == 1, "one byte short reports one block required");
+    Check(!std::filesystem::exists("_sd/HS_TINY"), "a one-byte-short save creates no directory");
+
+    fakeAvailable = 96 * BlockBytes;
+    code = Mount("HS_EXACT", MountReadWrite | MountCreate2, 96, &result);
+    Check(code == 0, "a volume with exactly the requested room creates the save");
+    if (code == 0) Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the exact-room save unmounts");
+
+    fakeAvailable = UINT64_MAX;
+    code = Mount("HS_HUGE", MountReadWrite | MountCreate2, 0, &result);
+    Check(code == 0, "a volume with unbounded room creates a default-size save");
+    if (code == 0) Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the huge-room save unmounts");
+
+    fakeAvailable = 16384 * BlockBytes - 1;
+    result = SaveDataMountResult{};
+    code = Mount("HS_DEFAULT", MountReadWrite | MountCreate2, 0, &result);
+    Check(code == SaveDataErrorNoSpaceFs && result.required_blocks == 1, "a default-size save needs the full 16384 blocks");
+
+    fakeFails = true;
+    code = Mount("HS_ERROR", MountReadWrite | MountCreate2, 96, &result);
+    Check(code == 0, "a failed volume query keeps today's behaviour and creates the save");
+    if (code == 0) Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the save created after a failed query unmounts");
+    fakeFails = false;
+
+    fakeAvailable = UINT64_MAX;
+    code = Mount("HS_OPEN", MountReadWrite | MountCreate2, 96, &result);
+    Check(code == 0, "the save to reopen is created while the volume has room");
+    if (code == 0) Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the save to reopen unmounts");
+    fakeAvailable = 0;
+    code = Mount("HS_OPEN", MountReadWrite, 0, &result);
+    Check(code == 0, "a full volume still opens an existing save");
+    if (code == 0) Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the opened save unmounts");
+
+    SetFreeSpaceVariable(nullptr);
+    fakeAvailable = 0;
+    fakeCalls = 0;
+    code = Mount("HS_FIXED", MountReadWrite | MountCreate2, 96, &result);
+    Check(code == 0, "the default fixed mode creates a save on a full volume");
+    Check(fakeCalls == 0, "the default fixed mode never queries the volume");
+    if (code == 0) Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the fixed-mode save unmounts");
+
+    SetSaveDataFreeSpaceSourceForTest_nid_no_patch(nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -116,6 +190,7 @@ int main() {
 
     CheckValidValuesMount();
     CheckInvalidValueStopsMount();
+    CheckHostRoom();
 #ifndef _WIN32
     CheckEmptyValueStopsMount();
 #endif
