@@ -4,6 +4,7 @@
 #include "SDL_gamecontroller.h"
 #include "prx/libSceVideoOut/include/PadInput.hpp"
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
+#include "prx/libScePad/include/PadInputTypes.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libSceUserService/UserService.hpp"
 #include <chrono>
@@ -40,6 +41,17 @@ void Send(PadInput& pad, DisplayWindow& window, Uint32 type, int which) {
     event.type = type;
     event.cdevice.which = which;
     pad.HandleEvent(event, window);
+}
+
+void SendKey(PadInput& pad, DisplayWindow& window, Uint32 type, SDL_Scancode key) {
+    SDL_Event event{};
+    event.type = type;
+    event.key.keysym.scancode = key;
+    pad.HandleEvent(event, window);
+}
+
+bool CrossPressed() {
+    return (Pad::ReadState(0).buttons & static_cast<std::uint32_t>(Pad::PadButton::Cross)) != 0;
 }
 
 void Pump(PadInput& pad, DisplayWindow& window, std::chrono::milliseconds duration) {
@@ -107,6 +119,25 @@ void CheckControllerModeFollowsTheController(DisplayWindow& window, int index, S
     Require(User0LoggedIn(), "user 0 stays logged in across a brief removal");
 }
 
+void CheckKeyboardStaysOutOfWithdrawnPort0(DisplayWindow& window, int index, SDL_JoystickID id) {
+    SetPort0State("controller");
+    PadInput pad;
+    Require(Pad::IsConnected(0), "controller mode starts with the controller present");
+    SendKey(pad, window, SDL_KEYDOWN, SDL_SCANCODE_SPACE);
+    Require(CrossPressed(), "a bound key reaches port 0 while the controller is present");
+    SendKey(pad, window, SDL_KEYUP, SDL_SCANCODE_SPACE);
+    Require(!CrossPressed(), "releasing the key clears it on port 0");
+
+    Send(pad, window, SDL_CONTROLLERDEVICEREMOVED, id);
+    PumpUntil(pad, window, std::chrono::seconds{5}, [] { return !Pad::IsConnected(0); });
+    Send(pad, window, SDL_CONTROLLERDEVICEADDED, index);
+    Pump(pad, window, std::chrono::milliseconds{460});
+    SendKey(pad, window, SDL_KEYDOWN, SDL_SCANCODE_SPACE);
+    SendKey(pad, window, SDL_KEYUP, SDL_SCANCODE_SPACE);
+    PumpUntil(pad, window, std::chrono::seconds{5}, [] { return Pad::IsConnected(0); });
+    Require(!CrossPressed(), "a key pressed while port 0 was withdrawn is not given to it when the controller returns");
+}
+
 }
 
 int main() {
@@ -138,6 +169,7 @@ int main() {
     DisplayWindow window;
     CheckDefaultKeepsPort0(window, device, id);
     CheckControllerModeFollowsTheController(window, device, id);
+    CheckKeyboardStaysOutOfWithdrawnPort0(window, device, id);
 
     SetPort0State(nullptr);
     Require(SDL_JoystickDetachVirtual(device) == 0, "virtual controller detach failed");
