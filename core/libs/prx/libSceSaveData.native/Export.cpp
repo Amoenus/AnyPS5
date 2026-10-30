@@ -455,7 +455,12 @@ static std::uint64_t used_blocks(const std::string& real_path) {
 
 static SaveDataSearchInfo search_info(const std::string& real_path) {
     const auto blocks = save_blocks(real_path);
-    return SaveDataSearchInfo{blocks, blocks - std::min(blocks, used_blocks(real_path)), {}};
+    auto freeBlocks = blocks - std::min(blocks, used_blocks(real_path));
+    if (free_space_mode() == FreeSpaceMode::Host) {
+        std::uint64_t available = 0;
+        if (host_free_bytes(real_path, available)) freeBlocks = std::min(freeBlocks, available / SAVE_DATA_BLOCK_BYTES);
+    }
+    return SaveDataSearchInfo{blocks, freeBlocks, {}};
 }
 
 static int dirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameSearchResult* result) {

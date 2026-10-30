@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -178,6 +179,76 @@ void CheckHostRoom() {
     SetSaveDataFreeSpaceSourceForTest_nid_no_patch(nullptr);
 }
 
+std::uint64_t MountInfoFreeBlocks(const char* name, std::uint64_t* blocks) {
+    SceSaveDataDirName dirName{};
+    std::snprintf(dirName.data, sizeof(dirName.data), "%s", name);
+    SaveDataMount3 mount{};
+    mount.user_id = 1;
+    mount.dir_name = &dirName;
+    mount.mount_mode = MountReadWrite;
+    SaveDataMountResult result{};
+    Check(sceSaveDataMount3(&mount, &result) == 0, std::string("open for mount info: ") + name);
+    SaveDataMountInfo info{};
+    Check(sceSaveDataGetMountInfo(&result.mount_point, &info) == 0, std::string("mount info of ") + name);
+    Check(sceSaveDataUmount2(0, &result.mount_point) == 0, std::string("unmount after mount info: ") + name);
+    *blocks = info.blocks;
+    return info.free_blocks;
+}
+
+std::uint64_t SearchFreeBlocks(const char* pattern, std::uint64_t* blocks) {
+    SceSaveDataDirName patternName{};
+    std::snprintf(patternName.data, sizeof(patternName.data), "%s", pattern);
+    SaveDataDirNameSearchCond cond{};
+    cond.user_id = 1;
+    cond.dir_name = &patternName;
+    cond.key = 5;
+    cond.order = 0;
+    SceSaveDataDirName names[1]{};
+    SaveDataSearchInfo infos[1]{};
+    SaveDataDirNameSearchResult result{};
+    result.dir_names = names;
+    result.dir_names_num = 1;
+    result.infos = infos;
+    Check(sceSaveDataDirNameSearch(&cond, &result) == 0, "free-blocks search succeeds");
+    Check(result.set_num == 1, "free-blocks search finds the save");
+    *blocks = infos[0].blocks;
+    return infos[0].free_blocks;
+}
+
+void CheckHostFreeBlocks() {
+    SetFreeSpaceVariable("host");
+    SetSaveDataFreeSpaceSourceForTest_nid_no_patch(FakeFreeSpace);
+    SaveDataMountResult result{};
+    fakeAvailable = UINT64_MAX;
+    const int created = Mount("HS_INFO", MountReadWrite | MountCreate2, 200, &result);
+    Check(created == 0, "a save with 200 blocks is created");
+    if (created == 0) Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the new save unmounts");
+    {
+        std::ofstream data("_sd/HS_INFO/data.bin", std::ios::binary);
+        const std::string bytes(40000, 'x');
+        data.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+
+    std::uint64_t blocks = 0;
+    fakeAvailable = UINT64_MAX;
+    Check(MountInfoFreeBlocks("HS_INFO", &blocks) == 199 && blocks == 200, "an unbounded volume reports the save's own free blocks");
+    fakeAvailable = 10 * BlockBytes + 5;
+    Check(MountInfoFreeBlocks("HS_INFO", &blocks) == 10 && blocks == 200, "mount info is bounded by the blocks the volume has");
+    Check(SearchFreeBlocks("HS_INF%", &blocks) == 10 && blocks == 200, "the search reports the same bound");
+    fakeAvailable = 0;
+    Check(MountInfoFreeBlocks("HS_INFO", &blocks) == 0, "a full volume reports no free blocks");
+    fakeFails = true;
+    Check(MountInfoFreeBlocks("HS_INFO", &blocks) == 199, "a failed volume query reports the save's own free blocks");
+    fakeFails = false;
+
+    SetFreeSpaceVariable(nullptr);
+    fakeAvailable = 0;
+    fakeCalls = 0;
+    Check(MountInfoFreeBlocks("HS_INFO", &blocks) == 199, "the default fixed mode reports the save's own free blocks");
+    Check(fakeCalls == 0, "the default fixed mode never bounds free blocks by the volume");
+    SetSaveDataFreeSpaceSourceForTest_nid_no_patch(nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -191,6 +262,7 @@ int main() {
     CheckValidValuesMount();
     CheckInvalidValueStopsMount();
     CheckHostRoom();
+    CheckHostFreeBlocks();
 #ifndef _WIN32
     CheckEmptyValueStopsMount();
 #endif
