@@ -1,20 +1,29 @@
 #include "VulkanTestDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "Recompiler.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 namespace AgcDriver {
@@ -188,12 +197,164 @@ void CheckCase(AgcDriver::VulkanDevice& device, std::uint32_t width, std::uint32
     std::puts("extra-mip color attachment writes and full guest bytes passed");
 }
 
+void DrawTarget(const Context& context, AgcDriver::VulkanDevice& device, const ColorTarget& color) {
+    using ShaderRecompiler::ShaderStage;
+    alignas(256) static constexpr std::array<std::uint32_t, 6> vertexCode{0xe0382000u, 0x80000005u, 0xbf8c3f70u, 0xf80008cfu, 0x03020100u, 0xbf810000u};
+    alignas(256) static constexpr std::array<std::uint32_t, 4> pixelCode{0x7e0e02f2u, 0xf800180fu, 0x07070707u, 0xbf810000u};
+    alignas(256) static constexpr std::array<std::array<float, 4>, 3> triangle{{{-1.0f, -1.0f, 0.5f, 1.0f}, {3.0f, -1.0f, 0.5f, 1.0f}, {-1.0f, 3.0f, 0.5f, 1.0f}}};
+    const auto address = reinterpret_cast<std::uintptr_t>(triangle.data());
+    const std::vector<std::uint32_t> vertexData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (16u << 16u), 3u, 0x01016facu};
+    const std::array<ShaderRecompiler::MemoryRegion, 1> vertexMemory{{{reinterpret_cast<std::uintptr_t>(vertexCode.data()), std::as_bytes(std::span(vertexCode))}}};
+    ShaderRecompiler::RecompileRequest vertex{
+        {ShaderStage::Vertex, reinterpret_cast<std::uintptr_t>(vertexCode.data()), vertexCode, 0, {}},
+        {64u, 0, vertexData, std::nullopt, std::nullopt, ShaderRecompiler::ShaderVertexStageInfo{}, vertexMemory},
+        device.Target(), {0, 0, 0, 64u}
+    };
+    vertex.useCache = false;
+    const auto compiledVertex = ShaderRecompiler::Recompile(vertex);
+    const auto push = static_cast<std::uint32_t>(compiledVertex.pushConstants.size());
+    State state{};
+    state.stages = {ShaderPath::Vertex, 0u, 64u, 64u, std::nullopt, std::nullopt};
+    state.color = color;
+    state.colors = {color};
+    state.hasColorTarget = true;
+    state.renderExtent = color.extent;
+    state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    state.viewport = {0, static_cast<float>(color.extent.height), static_cast<float>(color.extent.width), -static_cast<float>(color.extent.height), 0, 1};
+    state.scissor = {{0, 0}, color.extent};
+    state.cullMode = VK_CULL_MODE_NONE;
+    state.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    state.blend.colorWriteMask = 15;
+    state.blends = {state.blend};
+    ShaderRecompiler::ShaderPixelStageInfo pixel{};
+    pixel.targetOutputMode[0] = 9;
+    pixel.targetExportMapping = ExportMappings(state);
+    const std::array<ShaderRecompiler::MemoryRegion, 1> pixelMemory{{{reinterpret_cast<std::uintptr_t>(pixelCode.data()), std::as_bytes(std::span(pixelCode))}}};
+    ShaderRecompiler::RecompileRequest fragment{
+        {ShaderStage::Fragment, reinterpret_cast<std::uintptr_t>(pixelCode.data()), pixelCode, 0, {}},
+        {64u, 0, {}, std::nullopt, pixel, std::nullopt, pixelMemory},
+        device.Target(), PixelPushLayout(push, device.Target())
+    };
+    fragment.useCache = false;
+    const auto compiledPixel = ShaderRecompiler::Recompile(fragment);
+    const std::array<CompiledShader, 2> shaders{{{ShaderStage::Vertex, &compiledVertex, 0}, {ShaderStage::Fragment, &compiledPixel, PixelPushOffset(push, device.Target())}}};
+    const AgcDriver::Pm4::DrawParameters draw{0, 3, 0, 1, 0, false};
+    Draw(context, state, draw, shaders);
 }
 
-int main() {
+void CheckDraw(AgcDriver::VulkanDevice& device, bool recorded, std::uint32_t layers) {
+    auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    GuestTextureResource descriptor{};
+    descriptor.width = 32;
+    descriptor.height = 16;
+    descriptor.mipCount = 8;
+    descriptor.lastLevel = 7;
+    descriptor.format = 22;
+    descriptor.tileMode = TextureTileMode::kR64KBX;
+    descriptor.dimension = layers == 1 ? TextureDimension::k2D : TextureDimension::k2DArray;
+    descriptor.depthOrLastArray = layers - 1u;
+    const auto geometry = DescribeSurface(descriptor);
+    GuestBlock block(static_cast<std::size_t>(geometry.guestBytes));
+    descriptor.baseAddress = reinterpret_cast<std::uintptr_t>(block.Surface());
+    auto expected = std::vector<std::byte>(block.registered, block.registered + block.bytes);
+    const auto layer = layers - 1u;
+    const auto mip = descriptor.lastLevel;
+    const auto offset = TexelOffset(descriptor, geometry, ColorTileMode::RenderTarget, mip, layer);
+    ColorTarget color{descriptor.baseAddress + offset, {1, 1}, VK_FORMAT_R32_SFLOAT, 65536, 0xe4u};
+    color.tileMode = ColorTileMode::RenderTarget;
+    color.surfaceAddress = descriptor.baseAddress + geometry.GuestLayerOffset(layer);
+    color.surfaceExtent = {descriptor.width, descriptor.height};
+    color.mipCount = descriptor.mipCount;
+    color.mip = mip;
+    color.mipTail = geometry.mips[mip].tail;
+    if (layers > 1) {
+        color.arrayAddress = descriptor.baseAddress;
+        color.arrayLastSlice = layers - 1u;
+        color.arraySlice = layer;
+    }
+    std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+    std::optional<Recorder> recorder;
+    if (recorded) {
+        recorder.emplace(context);
+        recorder->Activate();
+    }
+    DrawTarget(context, device, color);
+    if (recorded) {
+        Require(recorder->Recording(), "extra-mip draw did not leave recorded GPU work");
+        recorder->Sync();
+    }
+    StorageTexture::FlushAllPending("idle");
+    if (recorded) recorder->Sync();
+    device.WaitIdle();
+    const std::uint32_t value = std::bit_cast<std::uint32_t>(1.0f);
+    std::memcpy(expected.data() + 65536u + offset, &value, sizeof(value));
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        Require(expected[index] == block.registered[index], "extra-mip draw mismatch: layers=" + std::to_string(layers) + " offset=" + std::to_string(offset) + " byte=" + std::to_string(index) + " actual=" + std::to_string(std::to_integer<unsigned>(block.registered[index])) + " expected=" + std::to_string(std::to_integer<unsigned>(expected[index])));
+    }
+    ClearCachedTextures(context.device);
+    std::printf("extra-mip actual draw passed: recorded=%u first-array-slice=%u mip=%u physical=%u\n", recorded ? 1u : 0u, layer, mip, geometry.imageLevels);
+}
+
+void CheckReadback(AgcDriver::VulkanDevice& device) {
+    auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    GuestTextureResource descriptor{};
+    descriptor.width = 4;
+    descriptor.height = 2;
+    descriptor.mipCount = 5;
+    descriptor.lastLevel = 4;
+    descriptor.format = 20;
+    descriptor.tileMode = TextureTileMode::kLinear;
+    descriptor.dimension = TextureDimension::k2DArray;
+    descriptor.depthOrLastArray = 1;
+    const auto geometry = DescribeSurface(descriptor);
+    GuestBlock block(static_cast<std::size_t>(geometry.guestBytes));
+    descriptor.baseAddress = reinterpret_cast<std::uintptr_t>(block.Surface());
+    std::lock_guard lock(AgcDriver::GuestMemory::GpuMutex());
+    auto texture = StorageTexture::Create(context, *context.detiler, descriptor, 0);
+    if (auto* recorder = Recorder::Active()) recorder->Sync();
+    char name[80];
+    std::snprintf(name, sizeof(name), "storage_direct_%llx_0.raw", static_cast<unsigned long long>(descriptor.baseAddress));
+    Require(!std::filesystem::exists(name), "extra-mip readback file already exists");
+    StorageTexture::FlushDumpSelected("closed extra-mip fixture gate");
+    Require(!std::filesystem::exists(name), "extra-mip readback ignored its closed gate");
+    { std::ofstream gate("extra-mip-readback.ready"); Require(gate.good(), "cannot create extra-mip readback fixture gate"); }
+    StorageTexture::FlushDumpSelected("extra-mip fixture readback");
+    std::filesystem::remove("extra-mip-readback.ready");
+    std::ifstream file(name, std::ios::binary);
+    std::array<std::uint32_t, 3> header{};
+    file.read(reinterpret_cast<char*>(header.data()), sizeof(header));
+    Require(file.good() && header[0] == geometry.mips[0].pitchBytes / 4u && header[1] == descriptor.height && header[2] == VK_FORMAT_R32_UINT, "extra-mip readback header mismatch");
+    std::vector<std::byte> pixels(static_cast<std::size_t>(geometry.mips[0].linearSize * geometry.layers));
+    file.read(reinterpret_cast<char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+    Require(file.good() && file.peek() == std::char_traits<char>::eof(), "extra-mip readback file size mismatch");
+    for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
+        for (std::uint32_t y = 0; y < descriptor.height; ++y) {
+            for (std::uint32_t x = 0; x < descriptor.width * 4u; ++x) {
+                const auto offset = layer * geometry.mips[0].linearSize + y * geometry.mips[0].pitchBytes + x;
+                Require(pixels[offset] == std::byte{0xa5}, "extra-mip diagnostic readback changed a base-level pixel");
+            }
+        }
+    }
+    file.close();
+    std::filesystem::remove(name);
+    texture.reset();
+    std::puts("extra-mip physical/extra-image diagnostic readback passed");
+}
+
+}
+
+int main(int argc, char** argv) {
     try {
+        const std::string mode = argc == 2 ? argv[1] : "";
+        Require(argc == 1 || mode == "--recorded" || mode == "--immediate" || mode == "--readback", "unknown extra-mip fixture mode");
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (mode == "--readback") { CheckReadback(*device); return 0; }
+        if (mode == "--recorded" || mode == "--immediate") {
+            CheckDraw(*device, mode == "--recorded", 1u);
+            CheckDraw(*device, mode == "--recorded", 3u);
+            return 0;
+        }
         for (const auto singlePass : {true, false}) {
             CheckCase(*device, 512u, 256u, 12u, 75u, TextureTileMode::kD64KBX, ColorTileMode::D64KBX, 1u, singlePass);
             CheckCase(*device, 32u, 16u, 8u, 20u, TextureTileMode::kR64KBX, ColorTileMode::RenderTarget, 2u, singlePass);
