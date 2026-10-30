@@ -1,10 +1,10 @@
 #include "prx/libc/include/general/ExportMacros.hpp"
-#include "prx/libSceIcu/include/InventoryDispatch.hpp"
 #include <cstddef>
 #include <cstdint>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceIcu/Identified.hpp"
+#include "prx/libSceIcu/include/InventoryDispatch.hpp"
 
 extern "C" {
 
@@ -20,6 +20,27 @@ int APS5_VABI UCNV_FROM_U_CALLBACK_SUBSTITUTE_nid_postfix() {
 int APS5_VABI UCNV_TO_U_CALLBACK_ESCAPE_nid_postfix() {
     NotImplemented_nid_no_patch(__func__);
 }
+
+int APS5_VABI sceIcuDispatchUnknown_BufsAiaX0_plus_s_nid_no_patch() {
+    NotImplemented_nid_no_patch(__func__);
+}
+APS5_EXPORT("BufsAiaX0+s", sceIcuDispatchUnknown_BufsAiaX0_plus_s_nid_no_patch);
+
+int APS5_VABI sceIcuDispatchUnknown_xdF5zg0V5Oc_nid_no_patch() {
+    NotImplemented_nid_no_patch(__func__);
+}
+APS5_EXPORT("xdF5zg0V5Oc", sceIcuDispatchUnknown_xdF5zg0V5Oc_nid_no_patch);
+
+int APS5_VABI sceIcuDispatchUnknown_Con4H1SB3nw_nid_no_patch() {
+    NotImplemented_nid_no_patch(__func__);
+}
+APS5_EXPORT("Con4H1SB3nw", sceIcuDispatchUnknown_Con4H1SB3nw_nid_no_patch);
+
+int APS5_VABI sceIcuDispatchUnknown_lME28PLmu54_nid_no_patch() {
+    NotImplemented_nid_no_patch(__func__);
+}
+APS5_EXPORT("lME28PLmu54", sceIcuDispatchUnknown_lME28PLmu54_nid_no_patch);
+
 
 int APS5_VABI UCNV_TO_U_CALLBACK_SUBSTITUTE_nid_postfix() {
     NotImplemented_nid_no_patch(__func__);
@@ -408,25 +429,5 @@ APS5_EXPORT("wezXBwKdjAY", sceIcuUnknown_wezXBwKdjAY_nid_no_patch);
 }
 
 extern "C" {
-
-int APS5_VABI sceIcuDispatchUnknown_BufsAiaX0_plus_s_nid_no_patch() {
-    NotImplemented_nid_no_patch(__func__);
-}
-APS5_EXPORT("BufsAiaX0+s", sceIcuDispatchUnknown_BufsAiaX0_plus_s_nid_no_patch);
-
-int APS5_VABI sceIcuDispatchUnknown_xdF5zg0V5Oc_nid_no_patch() {
-    NotImplemented_nid_no_patch(__func__);
-}
-APS5_EXPORT("xdF5zg0V5Oc", sceIcuDispatchUnknown_xdF5zg0V5Oc_nid_no_patch);
-
-int APS5_VABI sceIcuDispatchUnknown_Con4H1SB3nw_nid_no_patch() {
-    NotImplemented_nid_no_patch(__func__);
-}
-APS5_EXPORT("Con4H1SB3nw", sceIcuDispatchUnknown_Con4H1SB3nw_nid_no_patch);
-
-int APS5_VABI sceIcuDispatchUnknown_lME28PLmu54_nid_no_patch() {
-    NotImplemented_nid_no_patch(__func__);
-}
-APS5_EXPORT("lME28PLmu54", sceIcuDispatchUnknown_lME28PLmu54_nid_no_patch);
 
 }

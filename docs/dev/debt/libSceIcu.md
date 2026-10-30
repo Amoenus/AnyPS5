@@ -1,18 +1,5 @@
 # libSceIcu technical debt
 
-### Older dispatch exports
-
-- [Older dispatch exports](../../../core/libs/prx/libSceIcu/Export.cpp) - Four 3.20 callable NIDs are declared as throwing placeholders. Their signatures and behavior are unverified. The four selector wrappers have identical instruction bytes in the 3.20 and later version-labelled modules, and corresponding consumer switch cases call them. Their NIDs and internal layouts differ; no forwarding or binary compatibility is claimed. Later image version metadata does not authenticate a retail firmware release.
-
-| 3.20 NID | Later candidate NID | Selector |
-| --- | --- | --- |
-| `BufsAiaX0+s` | `3lVihhFbXus` | 0 |
-| `xdF5zg0V5Oc` | `HFkUTLyJkZ0` | 1 |
-| `Con4H1SB3nw` | `jXOj7dZh7RQ` | 2 |
-| `lME28PLmu54` | `bxjI++g9NkE` | 3 |
-
-
-
 ### Unknown function info
 
 - [ICU export availability](../../../core/libs/prx/libSceIcu/Unescape.cpp) across firmware versions remains unproven. The [PS5 3.20 inventory](https://github.com/DNNDHH/PS5-3.20_Libs/blob/b2a77c09cd71c01f34c790cfbe98c751a13262ad/libSceIcu.c) includes the implemented escape, invariant-character and version helpers. [BunnyFl’s firmware 13.42 report](https://github.com/boykopovar/AnyPS5/pull/10961#issuecomment-6400071863) records `u_getVersion` returning `78.1.0.0` under an emulator, but neither escape function is in the checked native `system_ex/common_ex/lib/libSceIcu.sprx` export table. Only 104 of the 661 inventory NIDs appear among that module’s 299 exports. The exports for compatibility with older firmware are retained; availability and routing across firmware versions remain unproven.
@@ -39,3 +26,14 @@
 
 - The 96 `sceIcuUnknown_*_nid_no_patch` and named `*_nid_postfix` stubs in [Export.cpp](../../../core/libs/prx/libSceIcu/Export.cpp) are present in the PS5 3.20 export inventory from [PS5-3.20_Libs](https://github.com/DNNDHH/PS5-3.20_Libs). Their prototypes and behavior are unverified. Each uses the no-parameter import-resolution convention and throws through `NotImplemented_nid_no_patch`; these declarations make no ABI or behavior claim.
 - The 74 named stubs declared in [Identified.hpp](../../../core/libs/prx/libSceIcu/Identified.hpp) carry the ICU C API names whose `tools/nid_names.py` hash equals the inventory NID; the names were taken from the identifiers of the ICU 78.1 `common`, `i18n` and `io` sources. A name match does not show that the console function has ICU's prototype or behavior. Most of them read Unicode property, case-folding or resource data that no host library provides.
+
+### Older dispatch exports
+
+- [Older dispatch exports](../../../core/libs/prx/libSceIcu/Export.cpp) - Four 3.20 callable NIDs are declared as throwing placeholders. Their signatures and behavior are unverified. The four selector wrappers have identical instruction bytes in the 3.20 and later version-labelled modules, and corresponding consumer switch cases call them. Their NIDs and internal layouts differ; no forwarding or binary compatibility is claimed. Later image version metadata does not authenticate a retail firmware release.
+
+| 3.20 NID | Later candidate NID | Selector |
+| --- | --- | --- |
+| `BufsAiaX0+s` | `3lVihhFbXus` | 0 |
+| `xdF5zg0V5Oc` | `HFkUTLyJkZ0` | 1 |
+| `Con4H1SB3nw` | `jXOj7dZh7RQ` | 2 |
+| `lME28PLmu54` | `bxjI++g9NkE` | 3 |
