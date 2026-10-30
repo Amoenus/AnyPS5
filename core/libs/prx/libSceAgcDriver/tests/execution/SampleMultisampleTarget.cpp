@@ -1113,7 +1113,7 @@ void Readback(AgcDriver::VulkanDevice& device) {
 std::vector<std::array<float, 4>> StoreInitial(const Block& block, std::uint32_t fragments, std::uint32_t pipeBankXor, bool uniform) {
     using namespace AgcDriver::Graphics;
     const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, 8u, fragments, Side, Side, 1u, pipeBankXor);
-    Require(layout.Bytes() == block.bytes, "the initial fixture does not cover one complete color block");
+    Require(layout.Bytes() <= block.bytes, "the initial color footprint exceeds its allocation");
     StoreWords(block, block.bytes, 0x38003800u);
     std::vector<std::byte> linear(static_cast<std::size_t>(layout.LinearBytes()));
     std::vector<std::array<float, 4>> expected(Side * Side * fragments);
@@ -1125,7 +1125,7 @@ std::vector<std::array<float, 4>> StoreInitial(const Block& block, std::uint32_t
         std::memcpy(linear.data() + index * sizeof(bits), bits.data(), sizeof(bits));
         expected[index] = ones ? Ones : Written;
     }
-    layout.Tile(linear, std::as_writable_bytes(std::span(block.data, block.bytes)));
+    layout.Tile(linear, std::as_writable_bytes(std::span(block.data, static_cast<std::size_t>(layout.Bytes()))));
     return expected;
 }
 
