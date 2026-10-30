@@ -4,10 +4,6 @@
 
 extern "C" {
 
-int APS5_VABI sceAppInstUtilGetAddons2();
-int APS5_VABI sceAppInstUtilGetPatchInstallStatus2();
-int APS5_VABI sceAppInstUtilInstallPatch2();
-int APS5_VABI libSceAppInstUtilUnknown__plus_78trVvdQVs_nid_no_patch();
 int APS5_VABI libSceAppInstUtilUnknown_2WQuFX8yYXg_nid_no_patch();
 int APS5_VABI libSceAppInstUtilUnknown_4vqRxwpIE1M_nid_no_patch();
 int APS5_VABI libSceAppInstUtilUnknown_9QIC1kZpSG4_nid_no_patch();

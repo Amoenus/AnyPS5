@@ -579,22 +579,9 @@ int APS5_VABI sceAppInstUtilInstallAddons(void) {
 
 extern "C" {
 
-int APS5_VABI sceAppInstUtilGetAddons2() {
-    NotImplemented_nid_no_patch(__func__);
-}
 
-int APS5_VABI sceAppInstUtilGetPatchInstallStatus2() {
-    NotImplemented_nid_no_patch(__func__);
-}
 
-int APS5_VABI sceAppInstUtilInstallPatch2() {
-    NotImplemented_nid_no_patch(__func__);
-}
 
-int APS5_VABI libSceAppInstUtilUnknown__plus_78trVvdQVs_nid_no_patch() {
-    NotImplemented_nid_no_patch(__func__);
-}
-APS5_EXPORT("+78trVvdQVs", libSceAppInstUtilUnknown__plus_78trVvdQVs_nid_no_patch);
 
 int APS5_VABI libSceAppInstUtilUnknown_2WQuFX8yYXg_nid_no_patch() {
     NotImplemented_nid_no_patch(__func__);
