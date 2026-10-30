@@ -1,4 +1,5 @@
 add_library(libSceNpCommerce SHARED EXCLUDE_FROM_ALL Export.cpp)
+target_link_libraries(libSceNpCommerce PRIVATE libSceIme)
 target_include_directories(libSceNpCommerce PRIVATE ${LIBS_INCLUDE_DIR})
 configure_windows_unwind(libSceNpCommerce)
 target_link_libraries(libSceNpCommerce PRIVATE libc libSceUserService)
