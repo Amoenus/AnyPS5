@@ -11,8 +11,4 @@
 
 ### Additional callable exports
 
-- [Additional callable exports](../../../core/libs/prx/libSceSystemGesture/Export.cpp) - One entry observed in the 3.20 export inventory and present in the later 13.60-labelled inventory are import-resolution declarations only. The later inventory label does not authenticate a retail firmware version. Parameter lists, return types and behavior are unverified; parameterless `int` declarations are placeholders, not verified ABI contracts. Every entry throws through `NotImplemented_nid_no_patch`. No runtime functionality is implemented. Identified candidate names match their NIDs in the [public symbol database](https://github.com/zecoxao/sce_symbols/blob/2883963a0a514ba6e77407a08ef4730a65e88254/aerolib.csv) or [supplemental catalog](https://github.com/claimore22/ps5rs/blob/2304be5131221bae0dac24b9767cabffda33f747/data/nids.csv).
-
-| Name | NID |
-| --- | --- |
-| `sceSystemGestureSetTouchAreaInformation` | `dWKhDgKLsHY` |
+- [sceSystemGestureSetTouchAreaInformation](../../../core/libs/prx/libSceSystemGesture/Export.cpp) hashes to `dWKhDgKLsHY`; the public 3.20 catalogue does not list it. Two version-labelled images contain `dWKhDgKLsHY#D#A` as a function record and map library ID 3 and module ID 0 to `libSceSystemGesture`. Older module words: `0x08540001`, `0x03200004`; later: `0x13590001`, `0x13600007`. Both contain 24 unique function NIDs; sorted-LF SHA-256: `acad8b5f908d6431db3c2d2a5dcffbd79eca1e1f8a02127e8671d82da0fca38d`, using the [static ELF membership procedure](https://github.com/boykopovar/AnyPS5/pull/12367#issuecomment-6470603298). Labels do not authenticate retail provenance; the digest identifies the NID set only. Independent verification requires a matching image. The signature and behavior are unverified; this declaration throws.
