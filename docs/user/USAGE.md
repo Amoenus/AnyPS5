@@ -282,6 +282,8 @@ The game chooses its video-output resolution; AnyPS5 uses that mode for renderin
 
 `APS5_OUTPUT_RESOLUTION=<width>x<height>`, for example `APS5_OUTPUT_RESOLUTION=1920x1080`, makes the game's video output status report the 1080p class when the width is below 3840 and the height below 2160, and the 2160p class otherwise, instead of the class of the display's current mode. The two numbers must be positive integers separated by `x` or `X`. An empty value is the same as an unset one; any other value stops the game with an error that names the variable.
 
+`ANYPS5_DISPLAY_INDEX=<n>` opens the window centred on display `n`, counted from 0 in the order SDL lists the displays. Unset, the first display is used. A value that is not the index of a connected display, including an empty value, stops the game at start with an error that names the variable.
+
 ### VR compatibility
 
 AnyPS5 does not currently support PS VR2 headsets or PC VR headsets connected through an OpenXR runtime. It does not provide headset tracking, stereoscopic output or reprojection. A VR title may skip its headset setup when no device is detected, but that does not mean its VR gameplay is supported.
