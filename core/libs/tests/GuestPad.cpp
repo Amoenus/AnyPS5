@@ -777,6 +777,19 @@ static void CheckPortZeroWithdrawn() {
     Require(!data[0].connected && data[0].buttons == 0 && data[0].analog_buttons_l2 == 0 && data[0].analog_buttons_r2 == 0);
     Require(data[0].left_stick_x == 0 && data[0].left_stick_y == 0 && data[0].right_stick_x == 0 && data[0].right_stick_y == 0);
     Require(data[0].orientation_w == 1.0f && data[0].touch_data_touch_num == 0);
+    PadControllerInformation controllerInfo;
+    std::memset(&controllerInfo, 0xff, sizeof(controllerInfo));
+    Require(scePadGetControllerInformation(handle, &controllerInfo) == PAD_OK);
+    Require(!controllerInfo.connected && controllerInfo.connectedCount == 0);
+    PadInfo info;
+    std::memset(&info, 0xff, sizeof(info));
+    Require(scePadGetInfo_nid_postfix(&info) == PAD_OK);
+    std::uint8_t expected = 0;
+    for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+        if (Pad::IsConnected(port)) ++expected;
+    }
+    Require(info.connectedCount[0] == expected);
+    if (expected == 0) Require(info.padTypeInfo[0].status == 0);
     PadPublishInput_nid_postfix(pressed);
     std::memset(data, 0xff, sizeof(data));
     Require(scePadRead_nid_postfix(handle, data, 2) == 1);
