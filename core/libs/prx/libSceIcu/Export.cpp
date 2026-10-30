@@ -1,9 +1,9 @@
-#include "prx/libc/include/general/ExportMacros.hpp"
 #include <cstddef>
 #include <cstdint>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceIcu/Identified.hpp"
+#include "prx/libc/include/general/ExportMacros.hpp"
 #include "prx/libSceIcu/include/InventoryDispatch.hpp"
 
 extern "C" {
