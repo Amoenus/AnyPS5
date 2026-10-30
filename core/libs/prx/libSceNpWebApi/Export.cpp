@@ -391,11 +391,15 @@ int APS5_VABI sceNpWebApiIntCreateCtxIndExtdPushEventFilter() {
     NotImplemented_nid_no_patch(__func__);
 }
 
-int APS5_VABI sceNpWebApiIntCreateRequest(int titleUserCtxId, const char* apiGroup, const char* path, int method, const NpWebApiContentParameter* contentParameter, const void* internalArgs, std::int64_t* requestId) {
-    (void)internalArgs;
+int APS5_VABI sceNpWebApiIntCreateRequest(int titleUserCtxId, const char* apiGroup, const char* path, int method, const NpWebApiContentParameter* contentParameter, const NpWebApiIntCreateRequestExtraArgs* internalArgs, std::int64_t* requestId) {
     if (!apiGroup || !path || method > SCE_NP_WEBAPI_HTTP_METHOD_PATCH) return SCE_NP_WEBAPI_ERROR_INVALID_ARGUMENT;
     if (contentParameter && contentParameter->contentLength != 0 && !contentParameter->contentType) return SCE_NP_WEBAPI_ERROR_INVALID_CONTENT_PARAMETER;
     std::lock_guard lock(contextsMutex);
+    if (internalArgs && (internalArgs->unknown0 || internalArgs->unknown1 || internalArgs->unknown2)) {
+        const auto lookup = findUserContext(titleUserCtxId);
+        if (lookup.error != 0) return lookup.error;
+        NotImplemented_nid_no_patch("sceNpWebApiIntCreateRequest with internal arguments set");
+    }
     return createRequest(titleUserCtxId, false, requestId);
 }
 

@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
+#include <stdexcept>
+#include <string>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -62,6 +64,15 @@ void Require(bool condition, const char* message) {
 
 void APS5_VABI Notification() {}
 
+bool InternalArgumentsThrow(IntCreateRequestFn intCreateRequest, int user, const void* internalArgs, std::int64_t* request) {
+    try {
+        intCreateRequest(user, "group", "/v1", 0, nullptr, internalArgs, request);
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()).find("not implemented") != std::string::npos;
+    }
+    return false;
+}
+
 }
 
 int main() {
@@ -111,6 +122,13 @@ int main() {
     Require(intCreateRequest(user + 1, "group", "/v1", 4, nullptr, nullptr, &request) == UserContextNotFound && request == 77, "an internal request for an unknown user context was taken");
     Require(intCreateRequest(user, "group", "/v1", 4, nullptr, nullptr, &request) == 0 && (request >> 32) == user, "a PATCH internal request was not created in the user context");
     Require(sceNpWebApiDeleteRequest(request) == 0, "the internal request could not be deleted");
+    const void* nullFields[3] = {};
+    Require(intCreateRequest(user, "group", "/v1", 0, nullptr, nullFields, &request) == 0 && (request >> 32) == user, "internal arguments with only null fields were refused");
+    Require(sceNpWebApiDeleteRequest(request) == 0, "the internal request with null fields could not be deleted");
+    const void* setFields[3] = {nullptr, onlineId, nullptr};
+    request = 77;
+    Require(intCreateRequest(user + 1, "group", "/v1", 0, nullptr, setFields, &request) == UserContextNotFound && request == 77, "the user context was not checked before the internal arguments");
+    Require(InternalArgumentsThrow(intCreateRequest, user, setFields, &request) && request == 77, "internal arguments with a field set did not stay unsupported");
     Require(sceNpWebApiDeleteContext(user) == 0, "the user context could not be deleted");
     Require(registerNotification(user, callback, nullptr) == UserContextNotFound, "a deleted user context was taken");
     Require(sceNpWebApiTerminate(context) == 0, "the library context could not be terminated");
