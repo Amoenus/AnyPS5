@@ -273,17 +273,17 @@ constexpr std::size_t NP_STREAM_CHUNK = 0x100;
 
 int StreamRead(NpStreamReader* self, void* handle, void* out, std::size_t size, std::size_t* read) {
     using Read = int(APS5_VABI*)(NpStreamReader*, void*, void*, std::size_t, std::size_t*);
-    return reinterpret_cast<Read>(self->vtable[2])(self, handle, out, size, read);
+    return reinterpret_cast<Read>(const_cast<void*>(self->vtable[2]))(self, handle, out, size, read);
 }
 
 int StreamWrite(NpStreamWriter* self, void* handle, const void* data, std::size_t size, std::size_t* written) {
     using Write = int(APS5_VABI*)(NpStreamWriter*, void*, const void*, std::size_t, std::size_t*);
-    return reinterpret_cast<Write>(self->vtable[2])(self, handle, data, size, written);
+    return reinterpret_cast<Write>(const_cast<void*>(self->vtable[2]))(self, handle, data, size, written);
 }
 
 int StreamNotify(NpStreamCtx* ctx, const void* data, std::size_t size) {
     using Notify = int(APS5_VABI*)(NpStreamCtx*, const void*, std::size_t);
-    return ctx == nullptr ? 0 : reinterpret_cast<Notify>(ctx->vtable[2])(ctx, data, size);
+    return ctx == nullptr ? 0 : reinterpret_cast<Notify>(const_cast<void*>(ctx->vtable[2]))(ctx, data, size);
 }
 
 int ReadAll(NpStreamReader* self, void* handle, NpStreamCtx* ctx, void* out, std::size_t size, std::size_t* read) {
