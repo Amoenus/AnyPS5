@@ -60,9 +60,16 @@ void TestKeyLength() {
     Require(EVP_CIPHER_key_length_nid_postfix(&cipher) == 32);
 }
 
+void TestIvLength() {
+    CheckField(EVP_CIPHER_iv_length_nid_postfix, &LibreSsl3EvpCipher::ivLength);
+    const LibreSsl3EvpCipher cipher = Aes256Cbc();
+    Require(EVP_CIPHER_iv_length_nid_postfix(&cipher) == 16);
+}
+
 }
 
 int main() {
     TestKeyLength();
+    TestIvLength();
     std::puts("LibreSSL3 EVP_CIPHER tests passed");
 }
