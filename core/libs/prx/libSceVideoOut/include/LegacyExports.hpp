@@ -12,4 +12,6 @@ int APS5_VABI videoOutLegacyUnknown_fZgBeiGqE_plus_c_nid_no_patch();
 int APS5_VABI videoOutLegacyUnknown_spvjek0G4es_nid_no_patch();
 int APS5_VABI videoOutLegacyUnknown_xwhyGPZkW6w_nid_no_patch();
 
+int APS5_VABI sceVideoOutSetConfigurationMode();
+
 }

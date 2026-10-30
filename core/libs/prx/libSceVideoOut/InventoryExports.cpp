@@ -822,4 +822,8 @@ int APS5_VABI videoOutLegacyUnknown_xwhyGPZkW6w_nid_no_patch() {
 }
 APS5_EXPORT("xwhyGPZkW6w", videoOutLegacyUnknown_xwhyGPZkW6w_nid_no_patch);
 
+int APS5_VABI sceVideoOutSetConfigurationMode() {
+    NotImplemented_nid_no_patch(__func__);
+}
+
 }
