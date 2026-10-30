@@ -249,6 +249,19 @@ void CheckHostFreeBlocks() {
     SetSaveDataFreeSpaceSourceForTest_nid_no_patch(nullptr);
 }
 
+void CheckDefaultVolumeQuery() {
+    SetFreeSpaceVariable("host");
+    SetSaveDataFreeSpaceSourceForTest_nid_no_patch(nullptr);
+    SaveDataMountResult result{};
+    const int created = Mount("HS_REAL", MountReadWrite | MountCreate2, 1, &result);
+    Check(created == 0, "a 1-block save is created with the default volume query");
+    if (created == 0) Check(sceSaveDataUmount2(0, &result.mount_point) == 0, "the default-query save unmounts");
+
+    std::uint64_t blocks = 0;
+    Check(MountInfoFreeBlocks("HS_REAL", &blocks) > 0, "the default volume query reports room for a 1-block save");
+    SetFreeSpaceVariable(nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -263,6 +276,7 @@ int main() {
     CheckInvalidValueStopsMount();
     CheckHostRoom();
     CheckHostFreeBlocks();
+    CheckDefaultVolumeQuery();
 #ifndef _WIN32
     CheckEmptyValueStopsMount();
 #endif
