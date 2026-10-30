@@ -237,3 +237,5 @@
 | `Unknown` | `yGMBA0AKcgQ` |
 | `Unknown` | `yoK0AjkkBkI` |
 | `Unknown` | `ys239q8VgXY` |
+
+- [Older callable NIDs](../../../core/libs/prx/libSceVideoOut/InventoryExports.cpp): 7 unidentified exports have unverified names, signatures and behavior. These are throwing import-resolution placeholders; no functionality is implemented. No matching NIDs were found in the later module inventory. Six use the primary library qualifier and one uses the nosubmission qualifier; qualified guest import resolution is unverified.
