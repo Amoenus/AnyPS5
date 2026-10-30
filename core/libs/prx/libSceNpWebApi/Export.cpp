@@ -382,8 +382,8 @@ int APS5_VABI sceNpWebApiGetErrorCode() {
     NotImplemented_nid_no_patch(__func__);
 }
 
-int APS5_VABI sceNpWebApiInitializeForPresence() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNpWebApiInitializeForPresence(int libHttpCtxId, std::size_t poolSize) {
+    return sceNpWebApiInitialize(libHttpCtxId, poolSize);
 }
 
 int APS5_VABI sceNpWebApiIntCreateCtxIndExtdPushEventFilter() {
@@ -398,8 +398,9 @@ int APS5_VABI sceNpWebApiIntCreateServicePushEventFilter() {
     NotImplemented_nid_no_patch(__func__);
 }
 
-int APS5_VABI sceNpWebApiIntInitialize() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNpWebApiIntInitialize(const NpWebApiIntInitializeArgs* args) {
+    if (!args || args->structSize != sizeof(NpWebApiIntInitializeArgs)) return SCE_NP_WEBAPI_ERROR_INVALID_ARGUMENT;
+    return sceNpWebApiInitialize(static_cast<int>(args->libHttpCtxId), args->poolSize);
 }
 
 int APS5_VABI sceNpWebApiIntRegisterServicePushEventCallback() {
@@ -414,8 +415,11 @@ int APS5_VABI sceNpWebApiRegisterExtdPushEventCallback() {
     NotImplemented_nid_no_patch(__func__);
 }
 
-int APS5_VABI sceNpWebApiRegisterNotificationCallback() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNpWebApiRegisterNotificationCallback(int titleUserCtxId, void* callback, void* userArg) {
+    (void)userArg;
+    if (!callback) return SCE_NP_WEBAPI_ERROR_INVALID_ARGUMENT;
+    std::lock_guard lock(contextsMutex);
+    return findUserContext(titleUserCtxId).error;
 }
 
 int APS5_VABI sceNpWebApiSendMultipartRequest() {
@@ -460,12 +464,13 @@ int APS5_VABI sceNpWebApiSetRequestTimeout(std::int64_t requestId, std::uint32_t
     return 0;
 }
 
-int APS5_VABI sceNpWebApiUnregisterNotificationCallback() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNpWebApiUnregisterNotificationCallback(int titleUserCtxId) {
+    std::lock_guard lock(contextsMutex);
+    return findUserContext(titleUserCtxId).error;
 }
 
-int APS5_VABI sceNpWebApiVshInitialize() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNpWebApiVshInitialize(int libHttpCtxId, std::size_t poolSize) {
+    return sceNpWebApiInitialize(libHttpCtxId, poolSize);
 }
 
 }

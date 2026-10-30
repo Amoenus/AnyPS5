@@ -1,0 +1,103 @@
+#include "prx/libSceNpWebApi/include/Api.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <initializer_list>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+namespace {
+
+constexpr int InvalidArgument = static_cast<int>(0x80552902u);
+constexpr int LibContextNotFound = static_cast<int>(0x80552904u);
+constexpr int UserContextNotFound = static_cast<int>(0x80552905u);
+const char onlineId[20] = "player";
+
+struct IntInitializeArgs {
+    std::uint32_t libHttpCtxId;
+    std::uint8_t reserved[4];
+    std::uint64_t poolSize;
+    const char* name;
+    std::uint64_t structSize;
+};
+static_assert(sizeof(IntInitializeArgs) == 0x20);
+
+using InitializeFn = int (APS5_VABI*)(int, std::size_t);
+using IntInitializeFn = int (APS5_VABI*)(const IntInitializeArgs*);
+using RegisterFn = int (APS5_VABI*)(int, void*, void*);
+using UnregisterFn = int (APS5_VABI*)(int);
+
+template <typename Function>
+Function Resolve(const char* name) {
+#ifdef _WIN32
+    void* symbol = reinterpret_cast<void*>(GetProcAddress(LoadLibraryA("libSceNpWebApi.prx"), name));
+#else
+    void* symbol = dlsym(RTLD_DEFAULT, name);
+#endif
+    if (!symbol) {
+        std::fprintf(stderr, "%s is not exported by libSceNpWebApi\n", name);
+        std::abort();
+    }
+    return reinterpret_cast<Function>(symbol);
+}
+
+void Require(bool condition, const char* message) {
+    if (condition) return;
+    std::fprintf(stderr, "NpWebApi initialize: %s\n", message);
+    std::abort();
+}
+
+void APS5_VABI Notification() {}
+
+}
+
+int main() {
+    const auto initializeForPresence = Resolve<InitializeFn>("sceNpWebApiInitializeForPresence");
+    const auto vshInitialize = Resolve<InitializeFn>("sceNpWebApiVshInitialize");
+    const auto intInitialize = Resolve<IntInitializeFn>("sceNpWebApiIntInitialize");
+    const auto registerNotification = Resolve<RegisterFn>("sceNpWebApiRegisterNotificationCallback");
+    const auto unregisterNotification = Resolve<UnregisterFn>("sceNpWebApiUnregisterNotificationCallback");
+
+    const int presence = initializeForPresence(1, 0x10000);
+    Require(presence > 0, "the presence library context was not created");
+    const int vsh = vshInitialize(1, 0x10000);
+    Require(vsh > 0 && vsh != presence, "the VSH library context was not a new context");
+    IntInitializeArgs args{1, {}, 0x10000, "internal", sizeof(IntInitializeArgs)};
+    Require(intInitialize(nullptr) == InvalidArgument, "null internal arguments were taken");
+    args.structSize = 0x18;
+    Require(intInitialize(&args) == InvalidArgument, "internal arguments of the wrong size were taken");
+    args.structSize = sizeof(IntInitializeArgs);
+    const int internal = intInitialize(&args);
+    Require(internal > 0 && internal != presence && internal != vsh, "the internal library context was not a new context");
+    for (const int context : {presence, vsh, internal}) {
+        const int user = sceNpWebApiCreateContext(context, onlineId);
+        Require(user > 0, "a user context could not be created in the new library context");
+        Require(sceNpWebApiDeleteContext(user) == 0, "the user context could not be deleted");
+        Require(sceNpWebApiTerminate(context) == 0, "the library context could not be terminated");
+    }
+
+    const int context = sceNpWebApiInitialize(1, 0x10000);
+    const int user = sceNpWebApiCreateContext(context, onlineId);
+    Require(context > 0 && user > 0, "the contexts for the notification checks were not created");
+    Require(registerNotification(user, nullptr, nullptr) == InvalidArgument, "a null notification callback was taken");
+    Require(registerNotification(user + 1, nullptr, nullptr) == InvalidArgument, "the callback was not checked before the user context");
+    auto* callback = reinterpret_cast<void*>(&Notification);
+    Require(registerNotification(user + 1, callback, nullptr) == UserContextNotFound, "an unknown user context was taken");
+    Require(registerNotification((0x7fff << 16) | 1, callback, nullptr) == LibContextNotFound, "an unknown library context was taken");
+    Require(registerNotification(user, callback, nullptr) == 0, "registering the notification callback failed");
+    Require(registerNotification(user, callback, nullptr) == 0, "registering the notification callback again failed");
+    Require(unregisterNotification(user + 1) == UserContextNotFound, "unregistering for an unknown user context was taken");
+    Require(unregisterNotification(user) == 0 && unregisterNotification(user) == 0, "unregistering the notification callback failed");
+    Require(sceNpWebApiDeleteContext(user) == 0, "the user context could not be deleted");
+    Require(registerNotification(user, callback, nullptr) == UserContextNotFound, "a deleted user context was taken");
+    Require(sceNpWebApiTerminate(context) == 0, "the library context could not be terminated");
+    Require(unregisterNotification(user) == LibContextNotFound, "a terminated library context was taken");
+
+    std::puts("NpWebApi initialize and notification tests passed");
+    return 0;
+}
