@@ -309,6 +309,8 @@ Run the helper in a second terminal. Commands are polled at most every 100 ms du
 
 Set `APS5_NO_PAD_INPUT` to any value, an empty one included, to make the window ignore its keyboard and mouse events. The keyboard and mouse bindings, the mouse stick and the window keys (F10, F11 and F12 among them) then do nothing. Controllers and the `APS5_PAD_INPUT_FILE` commands are not affected.
 
+On Windows, set `APS5_NO_WGI` to any value to turn off SDL's Windows Gaming Input controller backend. AnyPS5 turns off DirectInput there in every case, and this variable is read once when the video output driver is created.
+
 ### Controller vibration strength
 
 Set `ANYPS5_RUMBLE` to a whole number from `0` to `100` to scale how strongly the game's vibration reaches your controller. `100`, which is also the value when the variable is unset, passes the vibration exactly as the game asks. `0` turns vibration off: the motors never receive a nonzero request, and a rumble that was running is stopped. Values in between scale the motor strength by that percentage and apply to every connected controller.
