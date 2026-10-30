@@ -1,4 +1,5 @@
 add_library(libSceWebBrowserDialog SHARED EXCLUDE_FROM_ALL Export.cpp)
+target_link_libraries(libSceWebBrowserDialog PRIVATE libSceIme)
 target_include_directories(libSceWebBrowserDialog PRIVATE ${LIBS_INCLUDE_DIR})
 configure_windows_unwind(libSceWebBrowserDialog)
 

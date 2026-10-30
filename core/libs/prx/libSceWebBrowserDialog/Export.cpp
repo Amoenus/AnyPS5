@@ -6,6 +6,7 @@
 #include "SceTypes.hpp"
 #include "prx/libSceCommonDialog/CommonDialog.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libSceIme/include/PsnDialogNotice.hpp"
 
 static_assert(sizeof(WebBrowserDialogCookieParam) == 280);
 static_assert(offsetof(WebBrowserDialogCookieParam, address) == 8);
@@ -100,6 +101,7 @@ int APS5_VABI sceWebBrowserDialogOpen(const void* param) {
  if (param == nullptr) return COMMON_DIALOG_ERROR_ARG_NULL;
  g_status = COMMON_DIALOG_STATUS_FINISHED;
  g_open = true;
+ PsnDialogNoticeOffer_nid_postfix(PsnDialogNoticeKind::GenericFeature);
  return 0;
 }
 
@@ -137,6 +139,7 @@ int APS5_VABI sceWebBrowserDialogOpenForPredeterminedContent(const void* param, 
     if (status == COMMON_DIALOG_STATUS_RUNNING) return COMMON_DIALOG_ERROR_BUSY;
     g_status = COMMON_DIALOG_STATUS_FINISHED;
     g_open = true;
+    PsnDialogNoticeOffer_nid_postfix(PsnDialogNoticeKind::GenericFeature);
     return 0;
 }
 
