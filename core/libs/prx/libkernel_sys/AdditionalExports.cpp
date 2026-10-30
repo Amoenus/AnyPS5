@@ -1662,10 +1662,6 @@ int APS5_VABI sceKernelUseCronosStreaming() {
     NotImplemented_nid_no_patch(__func__);
 }
 
-int APS5_VABI sceKernelWriteUnmapToPrtCommand() {
-    NotImplemented_nid_no_patch(__func__);
-}
-
 int APS5_VABI scePthreadRegisterThreadDeathHook() {
     NotImplemented_nid_no_patch(__func__);
 }
