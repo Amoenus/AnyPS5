@@ -9907,6 +9907,8 @@ void repeatStorageGuardTests(const Device& device, Recorder& recorder) {
         target.format = VK_FORMAT_R8G8B8A8_UNORM;
         target.bytes = targetBytes;
         target.samples = 4;
+        target.tileMode = ColorTileMode::RenderTarget;
+        Require(MultisampledColorBytes(target) == targetBytes, "the guarding multisampled target has an unexpected footprint");
         std::lock_guard gpu(GpuMutex());
         Require(MultisampleTargetView(context, target) != VK_NULL_HANDLE, "the guarding multisampled target has no view");
         recorder.Submit();
