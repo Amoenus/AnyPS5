@@ -2493,12 +2493,12 @@ bool OpportunisticReap() {
 
 }
 
-void VulkanDevice::StoreIdleResults(bool reapFirst) {
+void VulkanDevice::StoreIdleResults(bool reapFirst, const std::function<bool()>& stop) {
     if (!Graphics::StorageTexture::AnyPending()) return;
     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
     std::lock_guard gpuLock(GuestMemory::GpuMutex());
     const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
-    Graphics::StorageTexture::FlushAllPending("idle");
+    static_cast<void>(Graphics::StorageTexture::FlushAllPendingUntil("idle", stop));
     SubmitRecorded(reapFirst);
 }
 
