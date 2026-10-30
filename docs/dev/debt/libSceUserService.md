@@ -3,8 +3,6 @@
 ### Unknown function info
 
 - [sceUserServiceGetNpAccountId](../../../core/libs/prx/libSceUserService/Export.cpp) (libSceUserService) - the account id for a logged-in user with no linked PSN account is assumed to be 0 with success; libSceNpManager's `sceNpGetAccountIdA` answers the same question with `SCE_NP_ERROR_SIGNED_OUT`. Console measurement on PS4 Pro firmware 10.71 confirms a user that is not logged in returns `0x80960105` (`USER_SERVICE_ERROR_UNKNOWN_USER`) and leaves the output untouched, differing from `sceUserServiceGetUserName`.
-### Older settings exports
-
 - [Older settings exports](../../../core/libs/prx/libSceUserService/LegacyExports.cpp) - Forty callable NIDs are declared as throwing placeholders for older software. Their signatures and behavior are unverified; parameterless `int` declarations are placeholders, not verified ABI contracts. The corresponding NIDs are absent from the later version-labelled inventory. Representative later settings functions use a related dispatch pattern, which does not establish compatibility for these settings. No functionality is implemented.
 
 - [sceUserServiceInitialize and sceUserServiceInitialize2](../../../core/libs/prx/libSceUserService/Export.cpp) (libSceUserService) - event delivery has no background service thread, so the confirmed priority and Initialize2 CPU affinity mask do not affect host scheduling. Of 23 `sceUserServiceInitialize` calls in ten titles checked, 17 pass no param, four pass priority 700 (Borderlands 4 PPSA01494, Crimson Desert PPSA25286, MXGP 26 PPSA30839, Super Meat Boy 3D PPSA31162), one passes 767 (Ghost of Tsushima PPSA02225) and one in Metal Gear Solid 4's `mgs4.elf` passes a param from a register. None calls `sceUserServiceInitialize2`.
