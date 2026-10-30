@@ -196,9 +196,18 @@ static void closeDevice(Port& port) {
 }
 
 static void reopenStoppedDevice(Port& port) {
-    if (port.device == 0 || port.type == PORT_TYPE_VIBRATION || SDL_GetAudioDeviceStatus(port.device) != SDL_AUDIO_STOPPED) return;
+    if (port.device == 0 || SDL_GetAudioDeviceStatus(port.device) != SDL_AUDIO_STOPPED) return;
     closeDevice(port);
-    openDevice(port);
+    if (port.type == PORT_TYPE_VIBRATION) {
+        try {
+            openVibrationDevice(port);
+        } catch (const std::runtime_error&) {
+            port.device = 0;
+            port.spec = {};
+        }
+    } else {
+        openDevice(port);
+    }
 }
 
 static constexpr std::uint32_t STD_8CH_MAP[8] = {0, 1, 2, 3, 6, 7, 4, 5};
