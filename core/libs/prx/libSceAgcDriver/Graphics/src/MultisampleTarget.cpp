@@ -1654,7 +1654,25 @@ MultisampleColorSnapshot ReadMultisampleTargetColorSnapshot_nid_no_patch(const C
 void PublishMultisampleTargetColor_nid_no_patch(const Context& context, const ColorTarget& target) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
     const auto owner = snapshotTarget(context, target);
+    const auto retireReusedOwner = [&] {
+        const auto colorBytes = guardedColorBytes(owner->target);
+        Require(colorBytes <= std::numeric_limits<std::size_t>::max() && colorBytes <= std::numeric_limits<std::uint64_t>::max() - target.address, "reused color publication range overflows");
+        const auto bytes = static_cast<std::size_t>(colorBytes);
+        const auto used = owner->use->writes.load(std::memory_order_acquire);
+        if (!owner->use->claimed.load(std::memory_order_acquire) && (used == 0 || !GuestMemory::Watched(target.address, bytes) || GuestMemory::UnchangedSinceCollected(target.address, bytes, used))) return false;
+        {
+            std::unique_lock lock(guardedMutex());
+            owner->active->store(false, std::memory_order_release);
+            std::erase_if(guarded(), [&](const auto& range) { return range.active == owner->active; });
+            guardedGeneration().fetch_add(1, std::memory_order_release);
+            anyGuarded().store(!guarded().empty(), std::memory_order_release);
+        }
+        UpdateResidentImageUnmapObserver_nid_no_patch();
+        return true;
+    };
+    if (retireReusedOwner()) return;
     const auto snapshot = owner->ColorSnapshot();
+    if (retireReusedOwner()) return;
     const auto bytes = snapshot.current.size();
     Require(bytes <= std::numeric_limits<std::uint64_t>::max() - target.address, "guest color publication range overflows");
     RequireNoResidentDepthRead_nid_no_patch(target.address, bytes);
@@ -1673,6 +1691,7 @@ void PublishMultisampleTargetColor_nid_no_patch(const Context& context, const Co
     {
         std::unique_lock lock(guardedMutex());
         std::erase_if(guarded(), [&](const auto& range) { return range.active == owner->active; });
+        guardedGeneration().fetch_add(1, std::memory_order_release);
         anyGuarded().store(!guarded().empty(), std::memory_order_release);
     }
     UpdateResidentImageUnmapObserver_nid_no_patch();

@@ -1522,6 +1522,43 @@ void RequirePublicationRefused(const AgcDriver::Graphics::Context& context, cons
     Require(refusal.find(expected) != std::string::npos, "native color publication was not refused: " + refusal);
 }
 
+int ReusedPublication(AgcDriver::VulkanDevice& device, std::string_view cause, bool automatic) {
+    using namespace AgcDriver::Graphics;
+    Require(cause == "live" || cause == "claimed" || cause == "written", "unknown publication reuse case");
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    if (!InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, Samples)) return VulkanTestSkipped;
+    Block block(2u * BlockBytes, true);
+    if (cause == "written" && !AgcDriver::GuestMemory::Watched(block.Address(), block.bytes)) return VulkanTestSkipped;
+    const auto color = DecodeTarget(block);
+    StoreInitial(block, Samples, 0u, false);
+    Draw(device, TargetState(color));
+    const auto loaded = LoadSamples(device, block);
+    device.WaitIdle();
+    const auto colorBytes = static_cast<std::size_t>(MultisampledColorBytes(color));
+    Require(colorBytes >= 256u && colorBytes <= block.bytes, "the publication reuse footprint does not fit its block");
+    if (cause == "written") Require(AgcDriver::GuestMemory::Watched(block.Address(), colorBytes), "the publication reuse target lost write watching");
+    if (cause == "claimed") ClaimMultisampleTargetMemory(color.address, colorBytes);
+    if (cause == "written") std::memset(block.data + colorBytes - 256u, 0x5a, 256u);
+    const auto* begin = reinterpret_cast<const std::byte*>(block.data);
+    const std::vector<std::byte> before(begin, begin + block.bytes);
+    auto expected = before;
+    if (cause == "live") {
+        const MultisampleTextureLayout layout(TextureTileMode::kR64KBX, color.elementBytes, Samples, Side, Side, 1u, 0u);
+        layout.Tile(HalfSamples(loaded), std::span(expected).first(colorBytes));
+        Require(expected != before, "the live publication control has no changed native samples");
+    }
+    if (automatic) {
+        std::array<std::byte, 16> read{};
+        AgcDriver::GuestMemory::Read(block.Address(), read);
+        Require(std::equal(read.begin(), read.end(), expected.begin()), "the synchronized read changed the reused or live owner's bytes");
+    } else PublishMultisampleTargetColor_nid_no_patch(context, color);
+    Require(std::equal(expected.begin(), expected.end(), begin), "publication overwrote reused guest data or lost live native samples");
+    RequireReadbackRefused(context, color, "requires an existing resident target");
+    RequireNoMultisampleTarget(block.Address(), colorBytes, "after publication of a reused or live owner");
+    std::printf("native color publication reuse: %.*s, %s, complete bytes and retirement passed\n", static_cast<int>(cause.size()), cause.data(), automatic ? "CPU read" : "explicit");
+    return 0;
+}
+
 void Publication(AgcDriver::VulkanDevice& device) {
     using namespace AgcDriver::Graphics;
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
@@ -1836,6 +1873,10 @@ int main(int argc, char** argv) {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 4 && std::string_view(argv[1]) == "--reused-publication") {
+            Require(std::string_view(argv[3]) == "explicit" || std::string_view(argv[3]) == "cpu", "unknown publication reuse path");
+            return ReusedPublication(*device, argv[2], std::string_view(argv[3]) == "cpu");
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--publication") {
             Publication(*device);
             return 0;
