@@ -144,7 +144,7 @@ void CheckRelocatedTransfers() {
 }
 
 void CheckSegmentRelativeTransfers() {
-    for (const auto segment : {0x00, 0x2e, 0x64, 0x65}) {
+    for (const auto segment : {0x00, 0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65}) {
         for (const bool address32 : {false, true}) {
             for (const bool call : {false, true}) {
                 Bytes text;
@@ -168,6 +168,10 @@ void CheckSegmentRelativeTransfers() {
                     text[32] = 0x0f;
                     const auto unmapped = BuildControlFlowGraph(text, TextAddress, TextAddress, {}, pointers);
                     Require(unmapped->ReachableVaddrs() == expected, "Segment-relative transfer decoded unrelated bytes");
+                    const auto explicitRoot = BuildControlFlowGraph(Bytes(text.begin(), text.begin() + 32), TextAddress,
+                        TextAddress, {TextAddress + 31}, pointers);
+                    expected.insert(TextAddress + 31);
+                    Require(explicitRoot->ReachableVaddrs() == expected, "Segment-relative transfer discarded an explicit root");
                 }
             }
         }
@@ -206,6 +210,12 @@ void CheckCodeAddresses() {
     RequireOffsets(*ordinary, {0, 7});
     const auto addresses = BuildControlFlowGraph(text, TextAddress, TextAddress, {}, pointers, true);
     RequireOffsets(*addresses, {0, 7, 16});
+    for (const std::uint8_t segment : {0x64, 0x65}) {
+        auto prefixed = text;
+        prefixed.insert(prefixed.begin(), segment);
+        const auto graph = BuildControlFlowGraph(prefixed, TextAddress, TextAddress, {}, pointers, true);
+        RequireOffsets(*graph, {0, 8, 17});
+    }
 }
 
 void CheckSpeculativeRoots() {
