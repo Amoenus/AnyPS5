@@ -49,6 +49,7 @@ extern "C" SDL_AudioDeviceID SDLCALL SDL_OpenAudioDevice(const char* name, int c
 extern "C" void SDLCALL SDL_PauseAudioDevice(SDL_AudioDeviceID id, int) { Require(id == device, "wrong device paused"); }
 extern "C" Uint32 SDLCALL SDL_GetQueuedAudioSize(SDL_AudioDeviceID id) { Require(id == device, "wrong queue queried"); return 0; }
 extern "C" int SDLCALL SDL_QueueAudio(SDL_AudioDeviceID id, const void*, Uint32) {
+    if (!unplugged) Require(id == device, "wrong queue written");
     if (live(id)) ++queuedLive;
     else ++queuedDead;
     return 0;
