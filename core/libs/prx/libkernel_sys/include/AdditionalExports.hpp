@@ -330,7 +330,6 @@ int APS5_VABI sceKernelTraceAutoCaptureStore();
 int APS5_VABI sceKernelTraceAutoCaptureUnmap();
 int APS5_VABI sceKernelUseCronosKura();
 int APS5_VABI sceKernelUseCronosStreaming();
-int APS5_VABI sceKernelWriteUnmapToPrtCommand();
 int APS5_VABI scePthreadRegisterThreadDeathHook();
 
 }

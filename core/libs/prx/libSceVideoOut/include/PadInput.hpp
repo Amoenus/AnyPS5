@@ -68,6 +68,7 @@ private:
     Port0Presence::Mode port0Mode;
     Port0Presence::Presence port0;
     bool padCaptured = false;
+    bool hostFocusSynced = false;
 };
 
 #endif
