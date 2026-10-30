@@ -200,9 +200,9 @@ int OpenPs4Port(const char* function, int user_id, const Audio3dOpenParameters* 
     if (max_objects == 0 || queue_depth == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
     if (buffer_mode > AUDIO3D_BUFFER_ADVANCE_AND_PUSH) return AUDIO3D_ERROR_INVALID_PARAMETER;
     if (num_beds != 2 && num_beds != 3) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (g_port.open) return AUDIO3D_ERROR_OUT_OF_RESOURCES;
     if (buffer_mode != AUDIO3D_BUFFER_ADVANCE_AND_PUSH) Unsupported(function, "buffer mode " + std::to_string(buffer_mode));
     if (num_beds != 2) Unsupported(function, "3 beds");
-    if (g_port.open) return AUDIO3D_ERROR_OUT_OF_RESOURCES;
     StorePort(queue_depth, parameters->granularity, buffer_mode, max_objects, num_beds, id);
     return 0;
 }
@@ -667,7 +667,6 @@ const char* APS5_VABI sceAudio3dStrError(std::int32_t error) {
 }
 
 int APS5_VABI sceAudio3dPortOpenEx(int user_id, const Audio3dOpenParameters* parameters, uint32_t* id) {
-    if (Ps4Process()) Unsupported(__func__, "PS4 process");
     return sceAudio3dPortOpen(user_id, parameters, id);
 }
 

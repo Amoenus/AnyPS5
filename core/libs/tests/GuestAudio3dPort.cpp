@@ -618,7 +618,11 @@ void CheckPs4Process() {
     for (const std::uint32_t beds : {0u, 1u, 4u}) {
         Require(open([&](auto& p) { p.size_this = 0x28; p.num_beds = beds; }) == INVALID_PARAMETER && id == 7, "a PS4 process needs 2 or 3 beds");
     }
-    RequireThrows([&] { sceAudio3dPortOpenEx(SYSTEM_USER, &defaults, &id); }, "open ex in a PS4 process is unsupported");
+    Require(sceAudio3dPortOpenEx(1, &defaults, &id) == INVALID_PARAMETER && id == 7, "open ex in a PS4 process checks like open");
+    Require(sceAudio3dPortOpenEx(SYSTEM_USER, &defaults, &id) == 0 && id == 0, "open ex in a PS4 process opens the port");
+    id = 7;
+    Require(open([](auto& p) { p.buffer_mode = 0; }) == OUT_OF_RESOURCES && id == 7, "a PS4 process reports the open port before an unsupported buffer mode");
+    Require(sceAudio3dPortClose(0) == 0, "close after open ex in a PS4 process");
     Require(sceAudio3dPortCreate(0x100, 0, 1, &id) == INVALID_PARAMETER && id == 7, "create in a PS4 process needs a zero reserved argument");
     RequireThrows([&] { sceAudio3dPortCreate(0x100, 0, 0, &id); }, "create in a PS4 process selects the unsupported buffer mode 0");
     Require(open([](auto& p) { p.size_this = 0x28; p.num_beds = 2; }) == 0 && id == 0, "a PS4 process opens with 2 beds");
