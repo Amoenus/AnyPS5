@@ -987,6 +987,28 @@ VKAPI_ATTR VkResult VKAPI_CALL NoInitialStorageImage(VkPhysicalDevice physical, 
     return imageFormatProperties(physical, format, type, tiling, usage, flags, properties);
 }
 
+int InitialReuse(AgcDriver::VulkanDevice& device) {
+    using namespace AgcDriver::Graphics;
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    if (!InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, 2u) || !InitialCountSupported(context, VK_FORMAT_R16G16B16A16_SFLOAT, Samples)) return VulkanTestSkipped;
+    Block reused(2u * BlockBytes);
+    const auto expected = StoreInitial(reused, Samples, 0u, false);
+    const std::vector<std::uint8_t> before(reused.data, reused.data + reused.bytes);
+    const auto wide = TargetState(DecodeTarget(reused.Address(), 1u, {8u * Side, 4u * Side}));
+    const auto narrow = TargetState(DecodeTarget(reused));
+    Require(MultisampledColorBytes(wide.color) == 2u * BlockBytes && MultisampledColorBytes(narrow.color) == BlockBytes, "the reused initial color footprints differ from two blocks and one block");
+    Draw(device, wide);
+    device.WaitIdle();
+    Require(Refused(reused.Address(), 0x1000u, "a read before initial color memory reuse"), "the live wide target is not guarded before reuse");
+    Draw(device, narrow);
+    CheckSamples(narrow, LoadSamples(device, reused), {}, expected);
+    Require(std::equal(before.begin(), before.end(), reused.data), "initialization of a reused target changed guest color bytes or padding");
+    RequireNoMultisampleTarget(reused.Address() + BlockBytes, 0x1000u, "a read of the retired target outside its replacement");
+    Require(Refused(reused.Address(), 0x1000u, "a read of the replacement target after initial reuse"), "the replacement target is not guarded after reuse");
+    std::puts("native color initial reuse: the replacement preserves guest samples and bytes, retires the old owner and keeps its own guard");
+    return 0;
+}
+
 void InitialContents(AgcDriver::VulkanDevice& device) {
     using namespace AgcDriver::Graphics;
     const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
@@ -1411,6 +1433,7 @@ int main(int argc, char** argv) {
     try {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--initial-reuse") return InitialReuse(*device);
         if (argc == 2 && std::string_view(argv[1]) == "--initial") {
             InitialContents(*device);
             return 0;
