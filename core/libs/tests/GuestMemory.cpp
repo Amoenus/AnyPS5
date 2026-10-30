@@ -939,6 +939,9 @@ static void CheckGetDirectMemoryType() {
     Require(sceKernelGetDirectMemoryType(first, nullptr, &start, &end) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelGetDirectMemoryType(first, &type, nullptr, &end) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelGetDirectMemoryType(first, &type, &start, nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelGetDirectMemoryType(first, reinterpret_cast<int*>(0x10), &start, &end) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sceKernelGetDirectMemoryType(first, &type, reinterpret_cast<std::int64_t*>(0x10), &end) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sceKernelGetDirectMemoryType(first, &type, &start, reinterpret_cast<std::int64_t*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
     Require(sceKernelReleaseDirectMemory(first, page) == 0);
     type = -1;
     start = -1;
@@ -980,6 +983,7 @@ static void CheckDirectMemoryQuery() {
     Require(info.start == second && info.end == second + page && info.memoryType == 1);
     info = {-1, -1, -1};
     Require(sceKernelDirectMemoryQuery(first, 0, nullptr, sizeof(info)) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelDirectMemoryQuery(first, 0, reinterpret_cast<void*>(0x10), sizeof(info)) == SCE_KERNEL_ERROR_EFAULT);
     Require(sceKernelDirectMemoryQuery(-1, 1, &info, sizeof(info)) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelDirectMemoryQuery(first, 0, &info, sizeof(info) - 1) == SCE_KERNEL_ERROR_EINVAL);
     Require(info.start == -1 && info.end == -1 && info.memoryType == -1);
@@ -3800,6 +3804,8 @@ static void CheckAvailableDirectMemoryIsLargestFreeBlock() {
     Require(sceKernelAvailableDirectMemorySize(top, top + window, 0, &start, nullptr) == 0 && start == run);
     Require(sceKernelAvailableDirectMemorySize(top, top + window, 0, nullptr, nullptr) == 0);
     Require(sceKernelAvailableDirectMemorySize(top, top + window, 3, nullptr, nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelAvailableDirectMemorySize(top, top + window, 0, reinterpret_cast<std::int64_t*>(0x10), &size) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sceKernelAvailableDirectMemorySize(top, top + window, 0, &start, reinterpret_cast<std::size_t*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
     Require(sceKernelAvailableDirectMemorySize(-1, top + window, 0, &start, &size) == 0 && start >= 0 && static_cast<std::int64_t>(size) <= top + window - start);
     Require(sceKernelAvailableDirectMemorySize(std::numeric_limits<std::int64_t>::min(), top + window, 0, &start, &size) == 0 && start >= 0);
     Require(sceKernelAvailableDirectMemorySize(run, run + 0xfffff, 0, &start, &size) == 0 && start == run && size == 0xfffff);
