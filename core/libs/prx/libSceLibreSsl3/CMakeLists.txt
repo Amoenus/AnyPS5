@@ -5,6 +5,7 @@ configure_windows_unwind(libSceLibreSsl3)
 
 target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/AdditionalExports.cpp)
 target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/Stack.cpp)
+target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/DigestContext.cpp)
 if(WIN32)
     target_sources(libSceLibreSsl3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ParentExports.cpp)
 endif()
