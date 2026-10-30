@@ -223,7 +223,8 @@ void PublishRegisteredShader(std::shared_ptr<ShaderRegistry>& registry, const st
 void SubmitRegistrationPreparation(std::function<void()> task, const PreparedShaders* prepared = nullptr);
 void PrioritizeRegistrationPreparation(PreparedShaders& prepared);
 void AwaitRegistrationPreparation();
-void SubmitLibraryPrebuild(std::function<void()> task);
+void SubmitLibraryPrebuild(std::function<void()> task, std::uint64_t program = 0);
+void PrioritizeLibraryPrebuilds(std::span<const std::uint64_t> programs);
 void SubmitComputePrebuild(std::function<void()> task);
 void AwaitLibraryPrebuilds();
 void CloseRegistrationPreparation();
