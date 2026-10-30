@@ -65,6 +65,7 @@ std::shared_ptr<StorageTexture> CachedStorageLayers(const Context& context, cons
 // would return); a true answer counts as a use for the cache's eviction order, as a lookup would.
 bool StorageImageCached(const Context& context, const StorageTexture* image);
 bool StorageImageServesKeys(const StorageTexture& image, std::uint64_t dccAddress);
+std::shared_ptr<StorageTexture> RepeatStorageSurface(const Context& context, const GuestTextureResource& resource, const std::shared_ptr<StorageTexture>& stored);
 
 // Defined in Texture.cpp beside the pending-results registry, for the fast Revalidate below: whether
 // a storage image other than `except` has results pending in [address, address + bytes).
@@ -321,6 +322,17 @@ public:
     // Why the fast proof of a Revalidate left the object to the full walk (the [rescache]
     // revalidate line's reasons); Count: it did not.
     enum class FastFail : std::size_t { NoRecord, Collect, Pending, Evicted, Changed, Keys, ClearedView, StorageKeys, Depth, Replaced, Audit, Count };
+    struct CollectRefusals {
+        std::uint64_t sampled = 0;
+        std::uint64_t storage = 0;
+        std::uint64_t uncommitted = 0;
+        std::uint64_t unwatched = 0;
+        std::uint64_t other = 0;
+        std::uint64_t surfaces = 0;
+        std::uint64_t bytes = 0;
+    };
+    static CollectRefusals CollectRefusalCounts();
+    static std::array<std::uint64_t, static_cast<std::size_t>(FastFail::Count)> FullWalkNanoseconds();
     // Why a Pending failure was left to the full walk instead of the own-object refresh (T1, see
     // refreshOwnObjects); Count: it was not.
     enum class OwnRefreshFallback : std::size_t { Disabled, Snapshot, Keys, ForeignView, SurfaceKey, NotImported, Uncached, Rerun, Count };
@@ -536,6 +548,8 @@ private:
         bool storage;
         bool viewUncompressed;
         bool sourceEligible = false;
+        bool depthCompare = false;
+        bool sourceRefreshed = false;
     };
     // `serialBefore` is StorageTexture::PendingSerial() loaded before any check of this Revalidate;
     // `refreshed` the surfaces refreshOwnObjects resolved earlier in the same Revalidate (empty on

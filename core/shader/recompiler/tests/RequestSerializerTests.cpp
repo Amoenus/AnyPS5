@@ -176,8 +176,26 @@ std::string EncodeBase64(const std::vector<std::uint8_t>& bytes) {
 
 }
 
+namespace {
+
+void VerifyTessellationInstancePatches() {
+    ShaderRecompiler::RecompileRequest request;
+    request.graphics.emplace();
+    request.graphics->draw.indexCount = 12u;
+    request.graphics->draw.instanceCount = 2u;
+    ShaderRecompiler::TessellationConfiguration configuration{};
+    configuration.inputControlPoints = 0u;
+    request.graphics->tessellation = configuration;
+    Require(ShaderRecompiler::TessellationInstancePatches(request) == 0u);
+    request.graphics->tessellation->inputControlPoints = 3u;
+    Require(ShaderRecompiler::TessellationInstancePatches(request) == 4u);
+}
+
+}
+
 int main() {
     VerifyMemoryView();
+    VerifyTessellationInstancePatches();
     const ShaderRecompiler::RequestSerializer serializer;
 
     const auto historical = serializer.Deserialize(kHistoricalVersion21);
@@ -672,7 +690,7 @@ int main() {
     version42.pop_back();
     version42[4] = 42u;
     const auto replay42 = serializer.Deserialize(EncodeBase64(version42));
-    Require(replay42.request.context.pixel.has_value() && replay42.request.context.pixel->sampleOrder == pixel.sampleOrder && replay42.request.context.pixel->targetMerge == ShaderRecompiler::TargetMerge{});
+    Require(replay42.request.context.pixel.has_value() && replay42.request.context.pixel->sampleOrder == pixel.sampleOrder && replay42.request.context.pixel->targetMerges.empty());
     auto upgraded42 = replay42.request;
     upgraded42.target = request.target;
     Require(serializer.Serialize(upgraded42) == orderEncoded);
