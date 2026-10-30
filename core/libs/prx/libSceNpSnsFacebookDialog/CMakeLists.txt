@@ -1,4 +1,5 @@
 add_library(libSceNpSnsFacebookDialog SHARED EXCLUDE_FROM_ALL Export.cpp)
+target_link_libraries(libSceNpSnsFacebookDialog PRIVATE libSceIme)
 target_include_directories(libSceNpSnsFacebookDialog PRIVATE ${LIBS_INCLUDE_DIR})
 configure_windows_unwind(libSceNpSnsFacebookDialog)
 
