@@ -143,6 +143,37 @@ void CheckRelocatedTransfers() {
     RequireOffsets(*unresolved, {0, 6, 7, 8});
 }
 
+void CheckSegmentRelativeTransfers() {
+    for (const auto segment : {0x00, 0x2e, 0x64, 0x65}) {
+        for (const bool address32 : {false, true}) {
+            for (const bool call : {false, true}) {
+                Bytes text;
+                if (segment != 0) text.push_back(static_cast<std::uint8_t>(segment));
+                if (address32) text.push_back(0x67);
+                text.insert(text.end(), {0xff, static_cast<std::uint8_t>(call ? 0x15 : 0x25), 0, 0, 0, 0});
+                const auto next = text.size();
+                text.push_back(0xc3);
+                text.resize(32, 0x90);
+                text.push_back(0xc3);
+                const auto slot = TextAddress + 0x1000;
+                SetDisplacement(text, next - 4, next, slot);
+                Pointers pointers;
+                pointers.Slots = {{address32 ? static_cast<std::uint32_t>(slot) : slot, TextAddress + 32}};
+                const auto graph = BuildControlFlowGraph(text, TextAddress, TextAddress, {}, pointers);
+                std::unordered_set<VirtualAddress> expected{TextAddress};
+                if (call) expected.insert(TextAddress + next);
+                if (segment != 0x64 && segment != 0x65) expected.insert(TextAddress + 32);
+                Require(graph->ReachableVaddrs() == expected, "Segment-relative transfer followed a flat relocation slot");
+                if (segment == 0x64 || segment == 0x65) {
+                    text[32] = 0x0f;
+                    const auto unmapped = BuildControlFlowGraph(text, TextAddress, TextAddress, {}, pointers);
+                    Require(unmapped->ReachableVaddrs() == expected, "Segment-relative transfer decoded unrelated bytes");
+                }
+            }
+        }
+    }
+}
+
 void CheckAddressSizeOverride() {
     constexpr auto slot = TextAddress + 0x1000;
     Bytes text{0x67, 0xff, 0x15, 0, 0, 0, 0, 0x90, 0xc3, 0x67, 0xff, 0x25, 0, 0, 0, 0, 0x90, 0x90, 0xc3};
@@ -647,6 +678,7 @@ int main() {
         CheckCallsBeforeZeroPadding();
         CheckCallsThatStillFallThrough();
         CheckRelocatedTransfers();
+        CheckSegmentRelativeTransfers();
         CheckAddressSizeOverride();
         CheckCodeAddresses();
         CheckSpeculativeRoots();
