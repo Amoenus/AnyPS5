@@ -60,6 +60,8 @@ void RemovalHoldsForTheHoldTime() {
     Presence presence(Mode::Controller, true);
     Require(!presence.Observe(false, At(std::chrono::seconds{1})).has_value(), "a removal starts the hold");
     Require(presence.Connected(), "still connected during the hold");
+    Require(!presence.Observe(false, At(std::chrono::seconds{1}) + Port0Presence::kHold / 2).has_value(), "half way through the hold");
+    Require(presence.Connected(), "still connected half way through the hold");
     Require(!presence.Observe(false, At(std::chrono::seconds{1}) + Port0Presence::kHold - std::chrono::milliseconds{1}).has_value(), "one millisecond short of the hold");
     Require(presence.Connected(), "still connected one millisecond short of the hold");
     const auto change = presence.Observe(false, At(std::chrono::seconds{1}) + Port0Presence::kHold);
@@ -83,6 +85,8 @@ void ReconnectHoldsForTheHoldTime() {
     Presence presence(Mode::Controller, false);
     Require(!presence.Observe(true, At(std::chrono::seconds{2})).has_value(), "an attach starts the hold");
     Require(!presence.Connected(), "still disconnected during the hold");
+    Require(!presence.Observe(true, At(std::chrono::seconds{2}) + Port0Presence::kHold / 2).has_value(), "half way through the reconnect hold");
+    Require(!presence.Connected(), "still disconnected half way through the reconnect hold");
     Require(!presence.Observe(true, At(std::chrono::seconds{2}) + Port0Presence::kHold - std::chrono::milliseconds{1}).has_value(), "one millisecond short of the reconnect hold");
     const auto change = presence.Observe(true, At(std::chrono::seconds{2}) + Port0Presence::kHold);
     Require(change.has_value() && *change, "the attach is reported once the hold has passed");
