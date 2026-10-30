@@ -18,6 +18,7 @@ namespace {
     constexpr std::uint64_t kLatchExpiryLimit = 500000;
     constexpr std::uint32_t kInterceptedButton = 0x80000000;
     std::uint64_t injectedTimestamp = 0;
+    std::uint32_t injectedHeldThroughCapture = 0;
 
     struct QueuedInput {
         PadInputState input;
@@ -262,6 +263,14 @@ Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
     return injected;
 }
 
+Pad::InputCommandFile::Input InjectedTitleInput(std::uint64_t now) {
+    auto injected = InjectedInput(now);
+    if (slots[0].state.intercepted) injectedHeldThroughCapture |= injected.buttons;
+    else injectedHeldThroughCapture &= injected.buttons;
+    injected.buttons &= ~injectedHeldThroughCapture;
+    return injected;
+}
+
 std::uint64_t LatchExpiry(const PadSlot& slot) {
     return std::clamp(slot.readInterval + slot.readInterval / 2, kLatchExpiry, kLatchExpiryLimit);
 }
@@ -273,7 +282,7 @@ PadData Pad::ReadState(int port) {
     if (failure) std::rethrow_exception(failure);
     if (!initialized) throw std::runtime_error("Pad: read before initialization");
     const std::uint64_t now = sceKernelGetProcessTime();
-    const auto injected = port == 0 ? InjectedInput(now) : Pad::InputCommandFile::Input{};
+    const auto injected = port == 0 ? InjectedTitleInput(now) : Pad::InputCommandFile::Input{};
     auto& slot = slots[port];
     PadData data = BuildData(slot, slot.state, slot.timestamp, now, injected, port);
     if (slot.pressedSinceRead != 0 && now - slot.pressedAt <= LatchExpiry(slot)) {
@@ -296,7 +305,7 @@ int Pad::Read(PadData* data, int num, int port) {
     auto& slot = slots[port];
     slot.pressedSinceRead = 0;
     const std::uint64_t now = sceKernelGetProcessTime();
-    const auto injected = port == 0 ? InjectedInput(now) : Pad::InputCommandFile::Input{};
+    const auto injected = port == 0 ? InjectedTitleInput(now) : Pad::InputCommandFile::Input{};
     if (slot.queue.empty()) {
         data[0] = BuildData(slot, slot.state, slot.timestamp, now, injected, port);
         return 1;
@@ -509,6 +518,7 @@ extern "C" void PadApplyInjectedInput_nid_postfix(PadInputState* state) {
     if (state == nullptr) return;
     std::lock_guard lock(stateMutex);
     const auto injected = InjectedInput(sceKernelGetProcessTime());
+    injectedHeldThroughCapture |= injected.buttons;
     state->buttons |= injected.buttons;
     if (injected.hasSticks) state->sticks = injected.sticks;
 }

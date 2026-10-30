@@ -139,7 +139,12 @@ void InjectedAnswer(PadInput& padInput, const DisplayWindow& window, const std::
     }
     Require(state == ModalDialogState::Answered && chosen == 0);
     padInput.Update(window);
-    Require((Pad::ReadState(0).buttons & Intercepted) == 0);
+    Require(Pad::ReadState(0).buttons == 0);
+    for (int frame = 0; frame < 50; ++frame) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        padInput.Update(window);
+        Require(Pad::ReadState(0).buttons == 0);
+    }
     std::ofstream(commandPath) << "2 16384 400\n";
     bool reached = false;
     for (int frame = 0; frame < 200 && !reached; ++frame) {
