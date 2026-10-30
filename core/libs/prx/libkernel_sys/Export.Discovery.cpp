@@ -6,6 +6,7 @@
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/Pthread/Posix/Common.hpp"
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
@@ -32,6 +33,24 @@ int WriteAmmCommand(std::initializer_list<std::uint64_t> protections, const std:
     if (!command) return SCE_KERNEL_ERROR_EINVAL;
     if (dst) std::memcpy(dst, &*command, sizeof(TCommand));
     if (outSize) *outSize = sizeof(TCommand);
+    return 0;
+}
+
+constexpr std::uint64_t GuestAddressMask = 0xFFFFFFFFFFFFull;
+constexpr std::uint64_t AmmPageMask = 0x3FFFu;
+constexpr std::uint64_t AmmSizeMask = 0x1FFFFFFC000ull;
+constexpr std::uint64_t EqueueLimit = 1ull << 48u;
+
+bool InsideAmmMapRange(std::uint64_t address, std::uint64_t size) {
+    std::uint64_t start = 0, end = 0, multimapStart = 0, multimapEnd = 0;
+    AmmVirtualAddressRanges_nid_no_patch(&start, &end, &multimapStart, &multimapEnd);
+    return size != 0u && ((address | size) & AmmPageMask) == 0u && address >= start && address + size <= end;
+}
+
+template<class TCommand>
+int WriteCommand(void* dst, const TCommand& command, std::uint64_t* outSize) {
+    if (dst) std::memcpy(dst, &command, sizeof(command));
+    if (outSize) *outSize = sizeof(command);
     return 0;
 }
 
@@ -95,8 +114,7 @@ int APS5_VABI get_self_auth_info_nid_postfix(void) {
 }
 
 int APS5_VABI get_vm_map_timestamp_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return static_cast<int>(static_cast<std::uint32_t>(GuestAllocations::GuestAllocationsGeneration_nid_postfix()));
 }
 
 int APS5_VABI getfsstat_nid_postfix(void) {
@@ -1325,11 +1343,6 @@ int APS5_VABI sceKernelIsMainOnStandbyMode(void) {
     return 0;
 }
 
-int APS5_VABI sceKernelIsModuleLoaded(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceKernelIsNeoMode(void) {
     std::uint32_t attribute = 0;
     if (!GetAppParamSfoAttribute_nid_no_patch(&attribute)) NotImplemented_nid_no_patch(__func__);
@@ -1806,11 +1819,6 @@ int APS5_VABI sceKernelTerminateSysCore(void) {
     return 0;
 }
 
-int APS5_VABI sceKernelTitleWorkdaroundIsEnabled(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceKernelTraceMemoryTypeProtect(void) {
     return static_cast<int>(0x8002004e);
 }
@@ -1828,18 +1836,20 @@ int APS5_VABI sceKernelWaitCommandBufferCompletion(std::uint32_t id) {
     return AmmSubmitted_nid_no_patch(id) ? 0 : SCE_KERNEL_ERROR_ESRCH;
 }
 
-int APS5_VABI sceKernelWriteEventQueueOnCompletionCommand(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceKernelWriteEventQueueOnCompletionCommand(void* dst, std::uint64_t equeue, std::int32_t ident, std::uint64_t data, std::uint64_t* outSize) {
+    if (equeue > EqueueLimit) return SCE_KERNEL_ERROR_EINVAL;
+    return WriteCommand(dst, Apr::WriteKernelEventQueueCommand{{Apr::Opcode::WriteKernelEventQueue, sizeof(Apr::WriteKernelEventQueueCommand)}, equeue & GuestAddressMask, static_cast<std::uint64_t>(ident), data, 0}, outSize);
 }
 
 int APS5_VABI sceKernelWriteMapCommand(void* dst, std::uint64_t address, std::uint64_t size, std::uint64_t type, std::uint64_t protection, std::uint64_t* outSize) {
     return WriteAmmCommand({protection}, Apr::EncodeAmmMap(Apr::Opcode::AmmMap, address, 0, size, static_cast<std::int32_t>(type), static_cast<std::int32_t>(protection)), dst, outSize);
 }
 
-int APS5_VABI sceKernelWriteMapCommand2(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceKernelWriteMapCommand2(void* dst, std::uint64_t address, std::uint64_t size, std::int32_t type, std::int32_t protection, std::int32_t prt, std::uint64_t* outSize) {
+    if (prt == 0) return sceKernelWriteMapCommand(dst, address, size, static_cast<std::uint32_t>(type), static_cast<std::uint32_t>(protection), outSize);
+    if (!InsideAmmMapRange(address, size)) return SCE_KERNEL_ERROR_EINVAL;
+    if (type != 0 || protection != 0) NotImplemented_nid_no_patch("sceKernelWriteMapCommand2: a PRT map with a type or protection");
+    return WriteCommand(dst, Apr::AmmUnmapCommand{{Apr::Opcode::AmmMapAsPrt, sizeof(Apr::AmmUnmapCommand)}, address & GuestAddressMask, size & AmmSizeMask}, outSize);
 }
 
 int APS5_VABI sceKernelWriteMapDirectCommand(void* dst, std::uint64_t address, std::uint64_t directOffset, std::uint64_t size, std::uint64_t type, std::uint64_t protection, std::uint64_t* outSize) {
@@ -1902,24 +1912,30 @@ int APS5_VABI sceKernelWriteUnmapCommand(void* dst, std::uint64_t address, std::
     return WriteAmmCommand({}, Apr::EncodeAmmUnmap(address, size), dst, outSize);
 }
 
-int APS5_VABI sceKernelWriteWaitOnAddressCommand(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceKernelWriteUnmapToPrtCommand(void* dst, std::uint64_t address, std::uint64_t size, std::uint64_t* outSize) {
+    if (!InsideAmmMapRange(address, size)) return SCE_KERNEL_ERROR_EINVAL;
+    return WriteCommand(dst, Apr::AmmUnmapCommand{{Apr::Opcode::AmmUnmapToPrt, sizeof(Apr::AmmUnmapCommand)}, address & GuestAddressMask, size & AmmSizeMask}, outSize);
 }
 
-int APS5_VABI sceKernelWriteWaitOnCounterCommand(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceKernelWriteWaitOnAddressCommand(void* dst, std::uint64_t address, std::uint64_t reference, std::int32_t compare, std::int32_t flush, std::uint64_t* outSize) {
+    (void)flush;
+    if (compare > 3) return SCE_KERNEL_ERROR_EINVAL;
+    if (dst && (address & 7u) != 0u) NotImplemented_nid_no_patch("sceKernelWriteWaitOnAddressCommand: a wait on an unaligned address");
+    return WriteCommand(dst, Apr::WaitCommand{{Apr::Opcode::WaitOnAddress, sizeof(Apr::WaitCommand)}, address & GuestAddressMask, reference, ~0ull, 0, static_cast<std::uint8_t>(compare & 7), Apr::CounterAccess::Size8, 0}, outSize);
 }
 
-int APS5_VABI sceKernelWriteWriteAddressCommand(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceKernelWriteWaitOnCounterCommand(void* dst, std::uint8_t counter, std::uint32_t reference, std::int32_t compare, std::int32_t flush, std::uint64_t* outSize) {
+    (void)flush;
+    if (compare > 3) return SCE_KERNEL_ERROR_EINVAL;
+    return WriteCommand(dst, Apr::WaitCommand{{Apr::Opcode::WaitOnCounter, sizeof(Apr::WaitCommand)}, 0, reference, ~0ull, counter, static_cast<std::uint8_t>(compare & 7), Apr::CounterAccess::Size4, 0}, outSize);
 }
 
-int APS5_VABI sceKernelWriteWriteCounterCommand(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceKernelWriteWriteAddressCommand(void* dst, std::uint64_t address, std::uint64_t value, std::uint64_t* outSize) {
+    return WriteCommand(dst, Apr::WriteAddressCommand{{Apr::Opcode::WriteAddress, sizeof(Apr::WriteAddressCommand)}, address & GuestAddressMask & ~std::uint64_t{7}, value, 0, 0}, outSize);
+}
+
+int APS5_VABI sceKernelWriteWriteCounterCommand(void* dst, std::uint8_t counter, std::uint32_t value, std::uint64_t* outSize) {
+    return WriteCommand(dst, Apr::WriteCounterCommand{{Apr::Opcode::WriteCounter, sizeof(Apr::WriteCounterCommand)}, counter, Apr::CounterAccess::Size4, Apr::CounterOperation::Store, 0, value}, outSize);
 }
 
 int APS5_VABI sceKernelYieldCpumode(void) {
