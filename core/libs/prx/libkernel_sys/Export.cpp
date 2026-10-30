@@ -1224,9 +1224,13 @@ void APS5_VABI scePthreadSetName(Pthread thread, const char* name) {
 
 int APS5_VABI sceKernelTitleWorkaroundIsEnabled(const KernelTitleWorkaround* workaround, std::int32_t bit, std::int32_t* enabled) {
     if (!workaround || !enabled) return static_cast<int>(0x8002000E);
-    if (static_cast<std::uint32_t>(bit) >= 0x3A) return static_cast<int>(0x80020016);
+    if (static_cast<std::uint32_t>(bit) > 0x7F) return static_cast<int>(0x80020016);
     *enabled = static_cast<std::int32_t>((workaround->ids[bit >> 6] >> (bit & 0x3F)) & 1);
     return 0;
+}
+
+int APS5_VABI sceKernelTitleWorkdaroundIsEnabled(const KernelTitleWorkaround* workaround, std::int32_t bit, std::int32_t* enabled) {
+    return sceKernelTitleWorkaroundIsEnabled(workaround, bit, enabled);
 }
 
 int APS5_VABI sceKernelGetProcessType(int pid) {

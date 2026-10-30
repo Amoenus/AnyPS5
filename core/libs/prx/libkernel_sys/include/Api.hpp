@@ -471,7 +471,7 @@ int APS5_VABI sceKernelSwitchToNativeMode(void);
 int APS5_VABI sceKernelSwitchToNeoMode(void);
 int APS5_VABI sceKernelTerminateProcess(void);
 int APS5_VABI sceKernelTerminateSysCore(void);
-int APS5_VABI sceKernelTitleWorkdaroundIsEnabled(void);
+int APS5_VABI sceKernelTitleWorkdaroundIsEnabled(const KernelTitleWorkaround* workaround, std::int32_t bit, std::int32_t* enabled);
 int APS5_VABI sceKernelTraceMemoryTypeProtect(void);
 int APS5_VABI sceKernelTriggerEport(void);
 int APS5_VABI sceKernelVirtualQueryAll(void);
