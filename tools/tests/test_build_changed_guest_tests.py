@@ -60,6 +60,21 @@ class GuestTestTargets(unittest.TestCase):
         product = self.target("libScePad", target_type="SHARED_LIBRARY", source="core/libs/prx/libScePad/Export.cpp")
         self.assertEqual(self.selections(self.fixture([guest, host, product]), None), ["guest_pad_tests"])
 
+    def test_selects_changed_guest_test_with_mingw_libc_import_library(self):
+        for fragment in (
+            "core/libs/libs/implib/liblibc.dll.a",
+            r'"C:\build with spaces\core\libs\libs\implib\liblibc.dll.a"',
+        ):
+            with self.subTest(fragment=fragment):
+                guest = self.target("guest_mktime_tests", source="core/libs/tests/GuestMktime.cpp", fragment=fragment)
+                targets = {guest["id"]: guest}
+                source_root = Path(self.temporary.name).resolve()
+                for changed in (["core/libs/tests/GuestMktime.cpp"], ["core/libs/prx/libc/include/SonyCrt.hpp"]):
+                    self.assertEqual(
+                        build_changed_guest_tests.guest_test_targets(source_root, targets, changed),
+                        ["guest_mktime_tests"],
+                    )
+
     def test_changed_source_selects_only_the_changed_target(self):
         guest_a = self.target("guest_a_tests", source="core/libs/tests/GuestA.cpp", fragment="libc.prx")
         guest_b = self.target("guest_b_tests", source="core/libs/tests/GuestB.cpp", fragment="libc.prx")
