@@ -224,6 +224,7 @@ void SubmitRegistrationPreparation(std::function<void()> task, const PreparedSha
 void PrioritizeRegistrationPreparation(PreparedShaders& prepared);
 void AwaitRegistrationPreparation();
 void SubmitLibraryPrebuild(std::function<void()> task, std::uint64_t program = 0);
+bool LibraryPrebuildsWaiting();
 void PrioritizeLibraryPrebuilds(std::span<const std::uint64_t> programs);
 void SubmitComputePrebuild(std::function<void()> task);
 void AwaitLibraryPrebuilds();

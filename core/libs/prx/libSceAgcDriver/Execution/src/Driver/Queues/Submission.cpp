@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "ThreadOwned.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -342,8 +343,7 @@ std::vector<std::uint64_t> BoundGraphicsPrograms(const Submission& submission) {
         for (std::size_t program = 0; program < programRegisters.size(); ++program) {
             if (!written[program] || !low[program]) continue;
             written[program] = false;
-            const auto address = (static_cast<std::uint64_t>(*low[program]) << 8u) | (static_cast<std::uint64_t>(lastHigh[program].load(std::memory_order_relaxed)) << 40u);
-            if (std::ranges::find(programs, address) == programs.end()) programs.push_back(address);
+            programs.push_back((static_cast<std::uint64_t>(*low[program]) << 8u) | (static_cast<std::uint64_t>(lastHigh[program].load(std::memory_order_relaxed)) << 40u));
         }
     };
     const auto& commands = submission.commands;
@@ -363,6 +363,8 @@ std::vector<std::uint64_t> BoundGraphicsPrograms(const Submission& submission) {
         flush();
         cursor += count;
     }
+    std::ranges::sort(programs);
+    programs.erase(std::ranges::unique(programs).begin(), programs.end());
     return programs;
 }
 
@@ -405,7 +407,7 @@ void Driver::executeRewindTail(const Submission& stalled) {
     if (APS5_ENABLE_TIMING_LOG) tail.copiedAt = std::chrono::steady_clock::now();
     validate(tail, stalled.rewindTail);
     readRegisterLists(tail);
-    PrioritizeLibraryPrebuilds(BoundGraphicsPrograms(tail));
+    if (LibraryPrebuildsWaiting()) PrioritizeLibraryPrebuilds(BoundGraphicsPrograms(tail));
     if (APS5_ENABLE_TIMING_LOG) tail.validatedAt = std::chrono::steady_clock::now();
     waitForFlipRoom(tail);
     if (APS5_ENABLE_TIMING_LOG) tail.roomReadyAt = std::chrono::steady_clock::now();
@@ -470,7 +472,7 @@ void Driver::Submit(const Packet* packet, std::uint32_t queue, bool cpuFlip) {
     waitForFlipRoom(submission);
     holdFlipBehindWorker(submission);
     AwaitRegistrationPreparation();
-    PrioritizeLibraryPrebuilds(BoundGraphicsPrograms(submission));
+    if (LibraryPrebuildsWaiting()) PrioritizeLibraryPrebuilds(BoundGraphicsPrograms(submission));
     if (APS5_ENABLE_TIMING_LOG) submission.roomReadyAt = std::chrono::steady_clock::now();
     static const bool trace = std::getenv("APS5_TRACE_GPU") != nullptr;
     if (trace) std::fprintf(stderr, "[gpu] %.1f submit queue=0x%x dwords=%zu at %p\n", TraceMs(), queue, submission.commands.size(), static_cast<const void*>(descriptor.addr));

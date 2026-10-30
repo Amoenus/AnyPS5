@@ -1575,6 +1575,7 @@ public:
                 const auto sequence = ++submitted;
                 if (prepared != nullptr && prepared->demanded.load()) tasks.push_front({std::move(task), prepared, sequence, budgeted, program});
                 else tasks.push_back({std::move(task), prepared, sequence, budgeted, program});
+                if (program != 0) waitingPrograms.fetch_add(1, std::memory_order_relaxed);
                 unfinished.insert(sequence);
                 lock.unlock();
                 ready.notify_one();
@@ -1593,9 +1594,13 @@ public:
     }
 
     void Prioritize(std::span<const std::uint64_t> programs) {
-        const auto bound = [&](const Task& task) { return task.program != 0 && std::ranges::find(programs, task.program) != programs.end(); };
+        const auto bound = [&](const Task& task) { return task.program != 0 && std::ranges::binary_search(programs, task.program); };
         std::lock_guard lock(mutex);
         if (std::ranges::any_of(tasks, bound)) std::stable_partition(tasks.begin(), tasks.end(), bound);
+    }
+
+    bool ProgramsWaiting() const {
+        return waitingPrograms.load(std::memory_order_relaxed) != 0;
     }
 
     void AwaitSubmitted() {
@@ -1612,6 +1617,7 @@ public:
             closed = true;
             if (dropQueued) {
                 dropped.swap(tasks);
+                waitingPrograms.store(0, std::memory_order_relaxed);
                 for (const auto& task : dropped) unfinished.erase(task.sequence);
                 idle.notify_all();
             }
@@ -1696,6 +1702,7 @@ private:
                 }
                 task = std::move(*next);
                 pool.tasks.erase(next);
+                if (task.program != 0) pool.waitingPrograms.fetch_sub(1, std::memory_order_relaxed);
                 ++pool.running;
                 if (task.budgeted) ++pool.budgetedRunning;
             }
@@ -1732,6 +1739,7 @@ private:
     std::condition_variable ready;
     std::condition_variable idle;
     std::deque<Task> tasks;
+    std::atomic<std::size_t> waitingPrograms{0};
     std::vector<Worker> workers;
     unsigned threads = 0;
     inline static std::atomic<unsigned> liveWorkers{0};
@@ -1818,6 +1826,11 @@ void AwaitRegistrationPreparation() {
 
 void SubmitLibraryPrebuild(std::function<void()> task, std::uint64_t program) {
     RegistrationPreparePool::Prebuild().Submit(std::move(task), nullptr, false, program);
+}
+
+bool LibraryPrebuildsWaiting() {
+    auto* pool = RegistrationPreparePool::ExistingPrebuild();
+    return pool != nullptr && pool->ProgramsWaiting();
 }
 
 void PrioritizeLibraryPrebuilds(std::span<const std::uint64_t> programs) {
