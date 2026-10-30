@@ -51,7 +51,7 @@ int main() {
         auto empty = Fixture();
         Io::WriteU64(empty, 112, 0);
         Require(Relinker::UnusedNidFilter::ReadExceptionFunctions(empty, {load, eh}, {}, {}).empty());
-        for (int kind = 0; kind < 12; ++kind) {
+        for (int kind = 0; kind < 13; ++kind) {
             auto bytes = Fixture(); auto segment = load;
             switch (kind) {
                 case 0: Io::WriteU32(bytes, 64, 0x1000); break;
@@ -84,6 +84,14 @@ int main() {
                     bytes[3] = 0x3B;
                     Io::WriteU32(bytes, 96, 0x80000000);
                     Io::WriteU32(bytes, 100, 0x80000000);
+                    break;
+                }
+                case 12: {
+                    bytes[3] = 0x49;
+                    bytes[96] = 0;
+                    bytes[97] = 0x80;
+                    bytes[98] = 0;
+                    bytes[99] = 0x80;
                     break;
                 }
             }
