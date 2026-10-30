@@ -1,4 +1,5 @@
 add_library(libSceNpProfileDialog SHARED EXCLUDE_FROM_ALL Export.cpp)
+target_link_libraries(libSceNpProfileDialog PRIVATE libSceIme)
 target_include_directories(libSceNpProfileDialog PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(libSceNpProfileDialog PRIVATE libc)
 configure_windows_unwind(libSceNpProfileDialog)
@@ -11,6 +12,6 @@ if(BUILD_TESTING)
     add_test(NAME guest_np_profile_dialog COMMAND guest_np_profile_dialog_tests)
     if(WIN32)
         set_tests_properties(guest_np_profile_dialog PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNpProfileDialog>")
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNpProfileDialog>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceIme>")
     endif()
 endif()
