@@ -241,8 +241,8 @@ int APS5_VABI sceKernelAvailableDirectMemorySize(int64_t search_start, int64_t s
  size_t size = 0;
  const int result = DirectMemoryLargestFree(search_start, search_end, alignment, &start, &size);
  if (result != 0) return result;
- if (phys_addr_out) *phys_addr_out = start;
- if (size_out) *size_out = size;
+ if (phys_addr_out && !GuestCopyOut_nid_no_patch(phys_addr_out, &start, sizeof(start))) return SCE_KERNEL_ERROR_EFAULT;
+ if (size_out && !GuestCopyOut_nid_no_patch(size_out, &size, sizeof(size))) return SCE_KERNEL_ERROR_EFAULT;
  return 0;
 }
 
@@ -251,8 +251,9 @@ int APS5_VABI sceKernelDirectMemoryQuery(int64_t offset, int flags, void* info, 
  if (!info || offset < 0) return SCE_KERNEL_ERROR_EINVAL;
  struct DirectMemoryQueryInfo { int64_t start; int64_t end; int memory_type; };
  if (info_size < sizeof(DirectMemoryQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
- auto* q = static_cast<DirectMemoryQueryInfo*>(info);
- if (!DirectMemoryFind(offset, (flags & SCE_KERNEL_DMQ_FIND_NEXT) != 0, &q->start, &q->end, &q->memory_type)) return SCE_KERNEL_ERROR_EACCES;
+ DirectMemoryQueryInfo q{};
+ if (!DirectMemoryFind(offset, (flags & SCE_KERNEL_DMQ_FIND_NEXT) != 0, &q.start, &q.end, &q.memory_type)) return SCE_KERNEL_ERROR_EACCES;
+ if (!GuestCopyOut_nid_no_patch(info, &q, sizeof(q))) return SCE_KERNEL_ERROR_EFAULT;
  return 0;
 }
 
@@ -262,9 +263,9 @@ int APS5_VABI sceKernelGetDirectMemoryType(int64_t offset, int* memory_type, int
  int64_t blockEnd = 0;
  int blockType = 0;
  if (!DirectMemoryFind(offset, false, &blockStart, &blockEnd, &blockType)) return SCE_KERNEL_ERROR_ENOENT;
- *memory_type = blockType;
- *start = blockStart;
- *end = blockEnd;
+ if (!GuestCopyOut_nid_no_patch(memory_type, &blockType, sizeof(blockType))) return SCE_KERNEL_ERROR_EFAULT;
+ if (!GuestCopyOut_nid_no_patch(start, &blockStart, sizeof(blockStart))) return SCE_KERNEL_ERROR_EFAULT;
+ if (!GuestCopyOut_nid_no_patch(end, &blockEnd, sizeof(blockEnd))) return SCE_KERNEL_ERROR_EFAULT;
  return 0;
 }
 
