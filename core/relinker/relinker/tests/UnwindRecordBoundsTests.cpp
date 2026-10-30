@@ -176,6 +176,16 @@ int main() {
             lsdaOverflowRejected = std::string(error.what()).find("unwind pointer address overflowed") != std::string::npos;
         }
         Require(lsdaOverflowRejected);
-        std::cout << "22 unwind record cases passed\n";
+        lsdaBytes[0x21B] = 0x4C;
+        Io::WriteU32(lsdaBytes, 0x220, 33);
+        lsdaBytes[0x238] = 8;
+        Io::WriteU64(lsdaBytes, 0x239, 0xFFFFFFFFFFFFEFFFULL);
+        bool lsda8OverflowRejected = false;
+        try { Relinker::UnusedNidFilter::ReadExceptionFunctions(lsdaBytes, {lsdaLoad, lsdaEh}, {}, {}); }
+        catch (const Domain::RelinkerException& error) {
+            lsda8OverflowRejected = std::string(error.what()).find("unwind pointer address overflowed") != std::string::npos;
+        }
+        Require(lsda8OverflowRejected);
+        std::cout << "23 unwind record cases passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
