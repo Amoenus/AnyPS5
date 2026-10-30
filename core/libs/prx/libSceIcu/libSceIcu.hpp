@@ -1,4 +1,5 @@
 #pragma once
+#include "prx/libSceIcu/include/LegacyExports.hpp"
 #include "Invariant.hpp"
 #include "Utf8.hpp"
 #include "Version.hpp"

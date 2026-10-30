@@ -2,6 +2,8 @@
 
 ### Unknown function info
 
+- [Older callable exports](../../../core/libs/prx/libSceIcu/Export.cpp) - 2347 3.20 callable NIDs have unidentified names and are declared as throwing placeholders. Their signatures and behavior are unverified; no ICU functionality is implemented. These NIDs do not appear in the later version-labelled module inventory; no cross-version identity or compatibility is claimed.
+
 - [ICU export availability](../../../core/libs/prx/libSceIcu/Unescape.cpp) across firmware versions remains unproven. The [PS5 3.20 inventory](https://github.com/DNNDHH/PS5-3.20_Libs/blob/b2a77c09cd71c01f34c790cfbe98c751a13262ad/libSceIcu.c) includes the implemented escape, invariant-character and version helpers. [BunnyFl’s firmware 13.42 report](https://github.com/boykopovar/AnyPS5/pull/10961#issuecomment-6400071863) records `u_getVersion` returning `78.1.0.0` under an emulator, but neither escape function is in the checked native `system_ex/common_ex/lib/libSceIcu.sprx` export table. Only 104 of the 661 inventory NIDs appear among that module’s 299 exports. The exports for compatibility with older firmware are retained; availability and routing across firmware versions remain unproven.
 
 ### Functional
