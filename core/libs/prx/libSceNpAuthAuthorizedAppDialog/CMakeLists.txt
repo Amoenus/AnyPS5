@@ -1,4 +1,5 @@
 add_library(libSceNpAuthAuthorizedAppDialog SHARED EXCLUDE_FROM_ALL Export.cpp)
+target_link_libraries(libSceNpAuthAuthorizedAppDialog PRIVATE libSceIme)
 target_include_directories(libSceNpAuthAuthorizedAppDialog PRIVATE ${LIBS_INCLUDE_DIR})
 configure_windows_unwind(libSceNpAuthAuthorizedAppDialog)
 
