@@ -667,6 +667,11 @@ static void CheckVersionLimits() {
     } update{0xaaaaaaaau, 0xaaaaaaaau};
     Require(sysKernelGetLowerLimitUpdVersion_nid_postfix(&update.version) == 0 && update.version == 0 && update.after == 0xaaaaaaaau);
     Require(sysKernelGetLowerLimitUpdVersion_nid_postfix(nullptr) == SCE_KERNEL_ERROR_EINVAL && *__error_nid_postfix() == 13);
+    Require(sceKernelGetSystemExVersion(reinterpret_cast<char*>(0x10), reinterpret_cast<char*>(first)) == 14);
+    Require(sceKernelGetSystemExVersion(reinterpret_cast<char*>(first), reinterpret_cast<char*>(0x10)) == 14);
+    Require(sysKernelGetLowerLimitSysexVersion_nid_postfix(reinterpret_cast<char*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sysKernelGetLowerLimitUpdVersion_nid_postfix(reinterpret_cast<std::uint32_t*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sceKernelGetSystemSwVersion_nid_postfix(reinterpret_cast<SceKernelSystemSwVersion*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
 
     update = {0xaaaaaaaau, 0xaaaaaaaau};
     Require(sysKernelGetUpdVersion_nid_postfix(&update.version) == 0 && update.version == 0 && update.after == 0xaaaaaaaau);
