@@ -53,6 +53,11 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceIme>")
     endif()
 
+    add_test_executable(psn_dialog_notice_mode_tests ${LIBS_INCLUDE_DIR}/tests/PsnDialogNoticeMode.cpp)
+    target_include_directories(psn_dialog_notice_mode_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    configure_host_test_executable(psn_dialog_notice_mode_tests)
+    add_test(NAME psn_dialog_notice_mode COMMAND psn_dialog_notice_mode_tests)
+
     add_test_executable(guest_ime_open_tests ${LIBS_INCLUDE_DIR}/tests/GuestImeOpen.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../libSceVideoOut/src/ImeTextInput.cpp)
     target_include_directories(guest_ime_open_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_SDL2_INCLUDE_DIR})
