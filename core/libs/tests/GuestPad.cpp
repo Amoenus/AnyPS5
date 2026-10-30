@@ -757,6 +757,37 @@ static void CheckInjectedQueueTimes(const std::filesystem::path& path) {
     PadPublishInput_nid_postfix(PadInputState{});
 }
 
+static void CheckPortZeroWithdrawn() {
+    constexpr int user = 0x10000000;
+    constexpr int noHandle = static_cast<int>(0x80920008);
+    const bool wasOpen = scePadGetHandle(user, 0, 0) != noHandle;
+    const int handle = wasOpen ? scePadGetHandle(user, 0, 0) : scePadOpen_nid_postfix(user, PAD_PORT_TYPE_STANDARD, 0, nullptr);
+    Require(handle > 0);
+    PadInputState pressed;
+    pressed.buttons = 0x4000;
+    PadSetPortConnected_nid_postfix(0, true);
+    PadPublishInput_nid_postfix(pressed);
+    PadData data[2];
+    std::memset(data, 0xff, sizeof(data));
+    Require(scePadReadState(handle, data) == PAD_OK);
+    Require(data[0].connected && (data[0].buttons & 0x4000) != 0);
+    PadSetPortConnected_nid_postfix(0, false);
+    std::memset(data, 0xff, sizeof(data));
+    Require(scePadReadState(handle, data) == PAD_OK);
+    Require(!data[0].connected && data[0].buttons == 0 && data[0].analog_buttons_l2 == 0 && data[0].analog_buttons_r2 == 0);
+    Require(data[0].left_stick_x == 0 && data[0].left_stick_y == 0 && data[0].right_stick_x == 0 && data[0].right_stick_y == 0);
+    Require(data[0].orientation_w == 1.0f && data[0].touch_data_touch_num == 0);
+    PadPublishInput_nid_postfix(pressed);
+    std::memset(data, 0xff, sizeof(data));
+    Require(scePadRead_nid_postfix(handle, data, 2) == 1);
+    Require(!data[0].connected && data[0].buttons == 0);
+    PadSetPortConnected_nid_postfix(0, true);
+    std::memset(data, 0xff, sizeof(data));
+    Require(scePadReadState(handle, data) == PAD_OK);
+    Require(data[0].connected && (data[0].buttons & 0x4000) != 0);
+    if (!wasOpen) Require(scePadClose_nid_postfix(handle) == PAD_OK);
+}
+
 int main() {
     CheckInputCommands();
     std::uint32_t accessibilityState = 7;
@@ -975,4 +1006,5 @@ int main() {
     Require(!scePadIsValidHandle(handle2, PAD_PORT_TYPE_STANDARD));
     Require(scePadSetAngularVelocityDeadbandState(handle2, false) == PAD_OK);
     Require(scePadSetAngularVelocityDeadbandState(handle2 + 1, false) == PAD_ERROR_INVALID_HANDLE);
+    CheckPortZeroWithdrawn();
 }
