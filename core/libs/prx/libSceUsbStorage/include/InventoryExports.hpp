@@ -4,8 +4,6 @@
 
 extern "C" {
 
-int APS5_VABI sceUsbStorageCheckSystemDefaultMountPoint();
-int APS5_VABI sceUsbStorageClearFakeMapLockForDebug();
 int APS5_VABI libSceUsbStorageUnknown_267oD_minus_IF_plus_8k_nid_no_patch();
 int APS5_VABI libSceUsbStorageUnknown_96s31EeG0LM_nid_no_patch();
 int APS5_VABI libSceUsbStorageUnknown_AIyv_minus_u_minus_8w0s_nid_no_patch();

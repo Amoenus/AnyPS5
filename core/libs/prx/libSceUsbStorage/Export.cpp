@@ -561,14 +561,6 @@ int APS5_VABI sceUsbStorageSetFakeWriteProtection() {
 
 extern "C" {
 
-int APS5_VABI sceUsbStorageCheckSystemDefaultMountPoint() {
-    NotImplemented_nid_no_patch(__func__);
-}
-
-int APS5_VABI sceUsbStorageClearFakeMapLockForDebug() {
-    NotImplemented_nid_no_patch(__func__);
-}
-
 int APS5_VABI libSceUsbStorageUnknown_267oD_minus_IF_plus_8k_nid_no_patch() {
     NotImplemented_nid_no_patch(__func__);
 }
