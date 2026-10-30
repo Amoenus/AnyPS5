@@ -1062,6 +1062,7 @@ MultisampleTarget& acquire(const Context& context, const ColorTarget& requested)
         return *target;
     }
     const auto& use = requested;
+    ClaimMultisampleTargetMemory(use.address, MultisampledColorBytes(use));
     auto target = std::make_shared<MultisampleTarget>(context, use);
     target->Keep();
     targets().push_back(std::move(target));
