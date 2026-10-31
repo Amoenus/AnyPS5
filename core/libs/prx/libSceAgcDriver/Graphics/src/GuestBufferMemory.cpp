@@ -42,6 +42,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <thread>
 #include <stop_token>
 #include <cerrno>
@@ -3341,10 +3342,14 @@ void sweepMirrors(std::uint64_t neededBytes, std::uint64_t protectAddress) {
         ++state.version;
     }
     if (neededBytes != 0 && state.heapBytes + neededBytes > heapMirrorBudget()) {
+        std::unordered_set<const ImageMirror*> queued;
+        if (buildingBlocks != nullptr) {
+            for (const auto& block : *buildingBlocks) queued.insert(block.mirror);
+        }
         while (state.heapBytes + neededBytes > heapMirrorBudget()) {
             auto victim = state.entries.end();
             for (auto it = state.entries.begin(); it != state.entries.end(); ++it) {
-                if (!it->second->heap || it->first == protectAddress) continue;
+                if (!it->second->heap || it->first == protectAddress || queued.count(it->second.get()) != 0) continue;
                 const bool buildingHolds = buildingBufferMemory != nullptr && buildingBufferMemory->HoldsMirror(it->second);
                 const auto allowedCount = (buildingHolds && !it->second->writable) ? 2 : 1;
                 if (it->second.use_count() == allowedCount) {
@@ -3360,7 +3365,6 @@ void sweepMirrors(std::uint64_t neededBytes, std::uint64_t protectAddress) {
                 }
             }
             if (victim == state.entries.end()) break;
-            if (buildingBlocks != nullptr) std::erase_if(*buildingBlocks, [&](const RefreshBlock& block) { return block.mirror == victim->second.get(); });
             if (buildingBufferMemory != nullptr) {
                 buildingBufferMemory->RecordEvicted(victim->first);
                 if (buildingBufferMemory->HoldsMirror(victim->second)) {
