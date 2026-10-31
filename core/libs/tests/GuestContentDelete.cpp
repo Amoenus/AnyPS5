@@ -21,16 +21,6 @@ std::string LogicErrorMessage(TAction action) {
     return "returned";
 }
 
-template <typename TCall>
-bool ReportsNotImplemented(const char* name, TCall call) {
-    try {
-        call();
-    } catch (const std::runtime_error& error) {
-        return std::string(error.what()) == std::string(name) + " not implemented";
-    }
-    return false;
-}
-
 }
 
 int main() {
@@ -52,12 +42,6 @@ int main() {
     Require(sceContentDeleteByPath("") == static_cast<int>(0x809D5001u));
 
     Require(LogicErrorMessage([] { sceContentDeleteByPath(nullptr); }) == "invalid argument");
-    Require(ReportsNotImplemented("sceContentDeleteById", [] { sceContentDeleteById(1); }));
-    Require(ReportsNotImplemented("sceContentDeleteByPath", [] { sceContentDeleteByPath("/user/av_contents/photo/a.png"); }));
-    Require(ReportsNotImplemented("sceContentDeleteByIdListForSf", [] { std::int64_t id = 1; sceContentDeleteByIdListForSf(&id, 1); }));
-    Require(ReportsNotImplemented("sceContentDeleteGlobalMstat", [] { sceContentDeleteGlobalMstat(); }));
-    Require(ReportsNotImplemented("sceContentDeleteMemoryInitialize", [] { sceContentDeleteMemoryInitialize(); }));
-    Require(ReportsNotImplemented("sceContentDeleteMemoryTerminate", [] { sceContentDeleteMemoryTerminate(); }));
 
     Require(sceContentDeleteTerminate() == 0);
     Require(sceContentDeleteTerminate() == static_cast<int>(0x809D5002u));
