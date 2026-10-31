@@ -290,5 +290,26 @@ int main(int argc, char** argv) {
     Require(Fails(Unix, Stream, 6, 43));
     *__error_nid_postfix() = 0;
     Require(socketpair_nid_postfix(Unix, Stream, 0, nullptr) == -1 && *__error_nid_postfix() == 14);
+    for (int type : {Stream, Datagram}) {
+        *__error_nid_postfix() = 0;
+        Require(socketpair_nid_postfix(Unix, type, 0, reinterpret_cast<int*>(0x10)) == -1 && *__error_nid_postfix() == 14);
+    }
+    constexpr std::size_t page = 0x4000;
+    void* memory = nullptr;
+    Require(sceKernelMapFlexibleMemory(&memory, page * 2, 3, 0) == 0 && memory != nullptr);
+    auto* base = static_cast<char*>(memory);
+    Require(sceKernelMprotect(base + page, page, 0) == 0);
+    for (auto* target : {base + page, base + page - 4}) {
+        *__error_nid_postfix() = 0;
+        Require(socketpair_nid_postfix(Unix, Stream, 0, reinterpret_cast<int*>(target)) == -1 && *__error_nid_postfix() == 14);
+    }
+    Require(sceKernelMprotect(memory, page * 2, 3) == 0 && sceKernelMunmap(reinterpret_cast<std::uint64_t>(memory), page * 2) == 0);
+    int first[2] = {-1, -1};
+    Require(socketpair_nid_postfix(Unix, Stream, 0, first) == 0);
+    Require(close_nid_postfix(first[0]) == 0 && close_nid_postfix(first[1]) == 0);
+    Require(socketpair_nid_postfix(Unix, Stream | CloseOnExec, 0, reinterpret_cast<int*>(0x10)) == -1);
+    int second[2] = {-1, -1};
+    Require(socketpair_nid_postfix(Unix, Stream, 0, second) == 0 && second[0] == first[0] && second[1] == first[1]);
+    Require(close_nid_postfix(second[0]) == 0 && close_nid_postfix(second[1]) == 0);
     return 0;
 }
