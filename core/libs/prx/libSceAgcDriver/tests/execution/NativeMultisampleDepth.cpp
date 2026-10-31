@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
@@ -1587,12 +1588,15 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--initial-owner") {
+            auto initialContext = context;
+            TextureDetiler detiler(initialContext);
+            initialContext.detiler = &detiler;
             std::uint32_t checked = 0u, unavailable = 0u;
             for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
                 for (const auto samples : {2u, 4u, 8u}) {
                     if (!DepthSupported(context, format, samples)) { unavailable += 4u; continue; }
                     for (const bool depthOnly : {false, true}) {
-                        for (const bool one : {false, true}) { CheckDepthTarget(context, format, samples, one, false, depthOnly, ClearFault::None, lock, true, true); ++checked; }
+                        for (const bool one : {false, true}) { CheckDepthTarget(initialContext, format, samples, one, false, depthOnly, ClearFault::None, lock, true, true); ++checked; }
                     }
                 }
             }
