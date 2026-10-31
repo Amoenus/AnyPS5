@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SceTypes.hpp"
+#include "prx/libwebrtc/include/ExpFilter.hpp"
 
 extern "C" {
 
@@ -215,8 +216,8 @@ int APS5_VABI _ZN3rtc6Thread30IsProcessingMessagesForTestingEv_nid_postfix(void)
 int APS5_VABI _ZN3rtc6ThreadC1EPNS_12SocketServerE_nid_postfix(void);
 int APS5_VABI _ZNK3rtc24RecursiveCriticalSection5EnterEv_nid_postfix(void);
 int APS5_VABI _ZNK3rtc24RecursiveCriticalSection5LeaveEv_nid_postfix(void);
-int APS5_VABI _ZN3rtc9ExpFilter5ResetEf_nid_postfix(void);
-int APS5_VABI _ZN3rtc9ExpFilter5ApplyEff_nid_postfix(void);
+void APS5_VABI _ZN3rtc9ExpFilter5ResetEf_nid_postfix(WebRtcExpFilter* filter, float alpha);
+float APS5_VABI _ZN3rtc9ExpFilter5ApplyEff_nid_postfix(WebRtcExpFilter* filter, float exponent, float sample);
 int APS5_VABI _ZNK6webrtc4rtcp10RtcpPacket5BuildEv_nid_postfix(void);
 int APS5_VABI _ZN6webrtc4rtcp3App5ParseERKNS0_12CommonHeaderE_nid_postfix(void);
 int APS5_VABI _ZN6webrtc4rtcp3AppC1Ev_nid_postfix(void);

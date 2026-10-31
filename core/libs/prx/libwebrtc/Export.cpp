@@ -1108,16 +1108,6 @@ int APS5_VABI _ZNK3rtc24RecursiveCriticalSection5LeaveEv_nid_postfix(void) {
     return 0;
 }
 
-int APS5_VABI _ZN3rtc9ExpFilter5ResetEf_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI _ZN3rtc9ExpFilter5ApplyEff_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI _ZNK6webrtc4rtcp10RtcpPacket5BuildEv_nid_postfix(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
