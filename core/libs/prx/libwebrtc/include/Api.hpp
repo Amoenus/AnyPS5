@@ -3,6 +3,7 @@
 #include "SceTypes.hpp"
 #include "prx/libwebrtc/include/ExpFilter.hpp"
 #include "prx/libwebrtc/include/RtcpCommonHeader.hpp"
+#include "prx/libwebrtc/include/Opus.hpp"
 
 extern "C" {
 
@@ -392,22 +393,22 @@ int APS5_VABI _ZN6webrtc29BuiltinAudioProcessingBuilder5BuildERKNS_11Environment
 int APS5_VABI _ZN6webrtc32CreateBuiltinAudioDecoderFactoryEv_nid_postfix(void);
 int APS5_VABI libwebrtcUnknown55(void);
 int APS5_VABI libwebrtcUnknown56(void);
-int APS5_VABI WebRtcOpus_EncoderFree_nid_postfix(void);
-int APS5_VABI WebRtcOpus_SetBitRate_nid_postfix(void);
-int APS5_VABI WebRtcOpus_EnableFec_nid_postfix(void);
-int APS5_VABI WebRtcOpus_DisableFec_nid_postfix(void);
-int APS5_VABI WebRtcOpus_SetMaxPlaybackRate_nid_postfix(void);
-int APS5_VABI WebRtcOpus_SetComplexity_nid_postfix(void);
-int APS5_VABI WebRtcOpus_EnableDtx_nid_postfix(void);
-int APS5_VABI WebRtcOpus_DisableDtx_nid_postfix(void);
-int APS5_VABI WebRtcOpus_EnableCbr_nid_postfix(void);
-int APS5_VABI WebRtcOpus_DisableCbr_nid_postfix(void);
-int APS5_VABI WebRtcOpus_Encode_nid_postfix(void);
-int APS5_VABI WebRtcOpus_EncoderCreate_nid_postfix(void);
-int APS5_VABI WebRtcOpus_SetPacketLossRate_nid_postfix(void);
-int APS5_VABI WebRtcOpus_GetBandwidth_nid_postfix(void);
-int APS5_VABI WebRtcOpus_SetBandwidth_nid_postfix(void);
-int APS5_VABI WebRtcOpus_SetForceChannels_nid_postfix(void);
+std::int16_t APS5_VABI WebRtcOpus_EncoderFree_nid_postfix(WebRtcOpusEncInst* inst);
+std::int16_t APS5_VABI WebRtcOpus_SetBitRate_nid_postfix(WebRtcOpusEncInst* inst, std::int32_t rate);
+std::int16_t APS5_VABI WebRtcOpus_EnableFec_nid_postfix(WebRtcOpusEncInst* inst);
+std::int16_t APS5_VABI WebRtcOpus_DisableFec_nid_postfix(WebRtcOpusEncInst* inst);
+std::int16_t APS5_VABI WebRtcOpus_SetMaxPlaybackRate_nid_postfix(WebRtcOpusEncInst* inst, std::int32_t frequencyHz);
+std::int16_t APS5_VABI WebRtcOpus_SetComplexity_nid_postfix(WebRtcOpusEncInst* inst, std::int32_t complexity);
+std::int16_t APS5_VABI WebRtcOpus_EnableDtx_nid_postfix(WebRtcOpusEncInst* inst);
+std::int16_t APS5_VABI WebRtcOpus_DisableDtx_nid_postfix(WebRtcOpusEncInst* inst);
+std::int16_t APS5_VABI WebRtcOpus_EnableCbr_nid_postfix(WebRtcOpusEncInst* inst);
+std::int16_t APS5_VABI WebRtcOpus_DisableCbr_nid_postfix(WebRtcOpusEncInst* inst);
+int APS5_VABI WebRtcOpus_Encode_nid_postfix(WebRtcOpusEncInst* inst, const std::int16_t* audioIn, std::size_t samples, std::size_t lengthEncodedBuffer, std::uint8_t* encoded);
+std::int16_t APS5_VABI WebRtcOpus_EncoderCreate_nid_postfix(WebRtcOpusEncInst** inst, std::size_t channels, std::int32_t application, int sampleRateHz);
+std::int16_t APS5_VABI WebRtcOpus_SetPacketLossRate_nid_postfix(WebRtcOpusEncInst* inst, std::int32_t lossRate);
+std::int32_t APS5_VABI WebRtcOpus_GetBandwidth_nid_postfix(WebRtcOpusEncInst* inst);
+std::int16_t APS5_VABI WebRtcOpus_SetBandwidth_nid_postfix(WebRtcOpusEncInst* inst, std::int32_t bandwidth);
+std::int16_t APS5_VABI WebRtcOpus_SetForceChannels_nid_postfix(WebRtcOpusEncInst* inst, std::size_t numChannels);
 int APS5_VABI _ZN6webrtc20AudioDecoderOpusImplC1ERKNS_15FieldTrialsViewEmi_nid_postfix(void);
 int APS5_VABI _ZN6webrtc20AudioDecoderOpusImplD1Ev_nid_postfix(void);
 int APS5_VABI _ZN6webrtc23AudioNetworkAdaptorImpl6ConfigC1Ev_nid_postfix(void);
