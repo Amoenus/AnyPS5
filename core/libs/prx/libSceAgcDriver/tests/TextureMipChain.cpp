@@ -11,6 +11,7 @@
 #include "RuntimeAbi.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -399,6 +400,23 @@ void TestLevelsPastTheFullChain(const Context& context, TextureDetiler& detiler)
     Require(narrow.mipLevels == 3, "a 4x1 texture of 11 guest levels must keep 3 levels");
 }
 
+void TestClearedMipRanges(const Context& context, TextureDetiler& detiler) {
+    for (const auto [width, height, levels, expected] : {std::array{28u, 1u, 10u, 5u}, std::array{64u, 32u, 7u, 7u}, std::array{64u, 32u, 3u, 3u}}) {
+        const auto descriptor = arrayTexture(0x1068600000, FormatR8G8B8A8Unorm, width, height, 4u, levels);
+        clearRecords();
+        VkClearColorValue clear{};
+        clear.float32[0] = 0.5f;
+        const auto texture = std::make_shared<Texture>(context, detiler, descriptor, VkComponentMapping{}, std::span<const std::byte>{}, false, &clear);
+        Require(mock.images.size() == 1u, "a sampled GPU clear did not create exactly one image");
+        const auto [image, info] = *mock.images.begin();
+        Require(info.mipLevels == expected, "a sampled GPU clear allocated the wrong mip count");
+        Require(mock.clears.size() == 1u && mock.clears.front().first == image, "a sampled GPU clear did not clear its image exactly once");
+        Require(mock.uploads.empty(), "a sampled GPU clear uploaded guest texels");
+        checkInsideImage(image, info, "a GPU-cleared sampled texture");
+        Require(mock.clears.front().second.baseMipLevel == 0u && mock.clears.front().second.levelCount == expected && mock.clears.front().second.baseArrayLayer == 0u && mock.clears.front().second.layerCount == 4u, "a sampled GPU clear did not cover every allocated mip and layer");
+    }
+}
+
 void TestFullChainsAreUnchanged(const Context& context, TextureDetiler& detiler) {
     const auto full = upload(context, detiler, arrayTexture(0x1068400000, FormatBc3Srgb, 64, 64, 2, 7), "64x64 BC3 with 7 levels");
     Require(full.mipLevels == 7, "a full 64x64 chain of 7 levels must keep all of them");
@@ -670,6 +688,7 @@ void RunTextureMipChainTests() {
         TextureDetiler detiler(context);
         TestLevelsPastTheFullChain(context, detiler);
         TestFullChainsAreUnchanged(context, detiler);
+        TestClearedMipRanges(context, detiler);
         TestSrgbExpansionLevels(context, detiler);
         TestRepackCopyLevels(context, detiler);
         TestStorageLevelsPastTheFullChain(context, detiler);
