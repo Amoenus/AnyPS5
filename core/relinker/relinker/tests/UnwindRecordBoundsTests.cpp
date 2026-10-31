@@ -51,7 +51,7 @@ int main() {
         auto empty = Fixture();
         Io::WriteU64(empty, 112, 0);
         Require(Relinker::UnusedNidFilter::ReadExceptionFunctions(empty, {load, eh}, {}, {}).empty());
-        for (int kind = 0; kind < 12; ++kind) {
+        for (int kind = 0; kind < 13; ++kind) {
             auto bytes = Fixture(); auto segment = load;
             switch (kind) {
                 case 0: Io::WriteU32(bytes, 64, 0x1000); break;
@@ -84,6 +84,14 @@ int main() {
                     bytes[3] = 0x3B;
                     Io::WriteU32(bytes, 96, 0x80000000);
                     Io::WriteU32(bytes, 100, 0x80000000);
+                    break;
+                }
+                case 12: {
+                    bytes[3] = 0x49;
+                    bytes[96] = 0;
+                    bytes[97] = 0x80;
+                    bytes[98] = 0;
+                    bytes[99] = 0x80;
                     break;
                 }
             }
@@ -147,6 +155,16 @@ int main() {
             sdata8Rejected = std::string(error.what()).find("unwind pointer address overflowed") != std::string::npos;
         }
         Require(sdata8Rejected);
+        auto sdata2Overflow = Fixture();
+        sdata2Overflow[3] = 0x3A;
+        Io::WriteU16(sdata2Overflow, 16, 0x1000);
+        Io::WriteU16(sdata2Overflow, 18, 0x1000);
+        bool sdata2Rejected = false;
+        try { Relinker::UnusedNidFilter::ReadExceptionFunctions(sdata2Overflow, {highLoad, highEh}, {}, {}); }
+        catch (const Domain::RelinkerException& error) {
+            sdata2Rejected = std::string(error.what()).find("unwind pointer address overflowed") != std::string::npos;
+        }
+        Require(sdata2Rejected);
         std::vector<std::uint8_t> lsdaBytes(0x400, 0);
         Io::WriteU32(lsdaBytes, 0x200, 25);
         lsdaBytes[0x208] = 1;
@@ -176,6 +194,15 @@ int main() {
             lsdaOverflowRejected = std::string(error.what()).find("unwind pointer address overflowed") != std::string::npos;
         }
         Require(lsdaOverflowRejected);
+        lsdaBytes[0x21B] = 0x49;
+        lsdaBytes[0x238] = 2;
+        Io::WriteU32(lsdaBytes, 0x239, 0x5FFF);
+        bool lsdaSlebRejected = false;
+        try { Relinker::UnusedNidFilter::ReadExceptionFunctions(lsdaBytes, {lsdaLoad, lsdaEh}, {}, {}); }
+        catch (const Domain::RelinkerException& error) {
+            lsdaSlebRejected = std::string(error.what()).find("unwind pointer address overflowed") != std::string::npos;
+        }
+        Require(lsdaSlebRejected);
         lsdaBytes[0x21B] = 0x4C;
         Io::WriteU32(lsdaBytes, 0x220, 33);
         lsdaBytes[0x238] = 8;
@@ -186,6 +213,6 @@ int main() {
             lsda8OverflowRejected = std::string(error.what()).find("unwind pointer address overflowed") != std::string::npos;
         }
         Require(lsda8OverflowRejected);
-        std::cout << "23 unwind record cases passed\n";
+        std::cout << "24 unwind record cases passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
