@@ -88,7 +88,7 @@ int main() {
         Require(*__error_nid_postfix() == 12345 && output == untouched);
     }
     Require(getlogin_r_nid_postfix(nullptr, 1) == 14);
-    Require(getlogin_r_nid_postfix(reinterpret_cast<char*>(0x10), 1) == 14);
+    Require(getlogin_r_nid_postfix(reinterpret_cast<char*>(0x10), 1) == 34);
     Require(getlogin_r_nid_postfix(reinterpret_cast<char*>(0x10), static_cast<int>(output.size())) == 14);
     Require(*__error_nid_postfix() == 12345);
     const std::string expected = HostLogin();
