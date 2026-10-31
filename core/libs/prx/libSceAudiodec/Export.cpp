@@ -177,8 +177,13 @@ int APS5_VABI sceAudiodecUnregisterCodec() {
     NotImplemented_nid_no_patch(__func__);
 }
 
-int APS5_VABI sceAudiodecGetAjmContext() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceAudiodecGetAjmContext(const void* context, std::uint32_t* ajmiContext, std::uint32_t* ajmContext) {
+    if (context == nullptr) return ERROR_ARG;
+    std::uint32_t ids[2];
+    std::memcpy(ids, context, sizeof(ids));
+    if (ajmiContext != nullptr) *ajmiContext = ids[0];
+    if (ajmContext != nullptr) *ajmContext = ids[1];
+    return 0;
 }
 
 int32_t APS5_VABI sceAudiodecInitLibrary(uint32_t codec_type) {
