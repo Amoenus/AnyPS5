@@ -1426,6 +1426,7 @@ void verifyTypeZeroImageMaterialization() {
 
     static bool settledRecord0 = false;
     static bool knownRecord0 = false;
+    static std::array<std::uint32_t, 4> pendingV0{};
 
     AgcDriver::GuestMemory::SetFlushHook([](std::uint64_t address, std::size_t bytes) {
         if (phase == 1u && !flushed && address < syncEnd && syncBegin < address + bytes) {
@@ -1446,6 +1447,10 @@ void verifyTypeZeroImageMaterialization() {
             }
         } else if (phase == 5u) {
             ++waits;
+        } else if (phase == 8u && !flushed && address < record0Addr + 16u && record0Addr < address + bytes) {
+            flushed = true;
+            ++waits;
+            std::memcpy(reinterpret_cast<void*>(record0Addr), pendingV0.data(), sizeof(pendingV0));
         }
     });
 
@@ -1460,7 +1465,19 @@ void verifyTypeZeroImageMaterialization() {
                 ++srtRootReads;
             }
         }
-        if (phase == 0u || phase == 5u) return Pending::Raw;
+        if (phase == 0u || phase == 5u || phase == 9u) return Pending::Raw;
+        if (phase == 7u) {
+            if (settledRecord0) return Pending::None;
+            if (address == record0Addr + 28u && bytes == sizeof(std::uint32_t) && !known.empty()) {
+                settledRecord0 = true;
+                std::memcpy(reinterpret_cast<void*>(record0Addr), pendingT0.data(), sizeof(pendingT0));
+            }
+            return Pending::Raw;
+        }
+        if (phase == 8u) {
+            if (flushed) return Pending::None;
+            return address < record0Addr + 16u && record0Addr < address + bytes ? Pending::Raw : Pending::None;
+        }
         if (phase == 4u) {
             if (address >= record0Addr && address + bytes <= record0Addr + 32u) {
                 if (known.size() == bytes) {
@@ -1796,6 +1813,121 @@ void verifyTypeZeroImageMaterialization() {
         const auto exited = AgcDriver::ShaderMemory::descriptorScope(&settledScopeMemory, SrtDescriptorEndForceSync);
         require(!settledCapture->snapshot.buffers.empty() && entered == before && exited == before,
                 "settled SrtDescriptorForceSync: a 0->1 transition over cached words read with no pending write incremented rawInvalidations");
+    }
+
+    {
+        auto tornT = oldT;
+        tornT[1] &= ~(0x1ffu << 20u);
+        srt.fill(0u);
+        std::copy(tornT.begin(), tornT.end(), srt.begin());
+        std::copy(outputV.begin(), outputV.end(), srt.begin() + 16u);
+        srt[20] = 1u;
+        phase = 7u;
+        waits = 0u;
+        flushed = false;
+        settledRecord0 = false;
+        record0Addr = srtAddress;
+        pendingT0 = newT;
+        AgcDriver::ShaderMemory retryTMemory({}, multiPending, nullptr, hookWaits);
+        const auto retryTCapture = retryTMemory.Capture(request);
+        require(settledRecord0 && std::ranges::any_of(retryTCapture->snapshot.images, [&](const DescriptorValue& value) {
+            return std::equal(newT.begin(), newT.end(), value.dwords.begin());
+        }), "speculative invalid T# retry: Materialize did not retry under force-sync and invalidate settled Raw T# words");
+    }
+
+    {
+        auto validV = outputV;
+        validV[3] = 0x00014facu;
+        auto tornV = outputV;
+        tornV[3] = 0x50000facu;
+        srt.fill(0u);
+        std::copy(oldT.begin(), oldT.end(), srt.begin());
+        std::copy(tornV.begin(), tornV.end(), srt.begin() + 16u);
+        srt[20] = 1u;
+        phase = 8u;
+        waits = 0u;
+        flushed = false;
+        record0Addr = srtAddress + 64u;
+        pendingV0 = validV;
+        AgcDriver::ShaderMemory retryVMemory({}, multiPending, nullptr, hookWaits);
+        const auto retryVCapture = retryVMemory.Capture(request);
+        require(flushed && waits == 1u && !retryVCapture->snapshot.buffers.empty() &&
+                    std::equal(validV.begin(), validV.end(), retryVCapture->snapshot.buffers[0].dwords.begin()),
+                "speculative invalid V# retry: materializeTables validation failure on attempt 0 did not retry under force-sync");
+    }
+
+    {
+        auto tornT = oldT;
+        tornT[1] &= ~(0x1ffu << 20u);
+        srt.fill(0u);
+        std::copy(tornT.begin(), tornT.end(), srt.begin());
+        std::copy(outputV.begin(), outputV.end(), srt.begin() + 16u);
+        srt[20] = 1u;
+        phase = 9u;
+        waits = 0u;
+        flushed = false;
+        AgcDriver::ShaderMemory badTMemory({}, multiPending, nullptr, hookWaits);
+        expectFailure([&] { static_cast<void>(badTMemory.Capture(request)); }, "runtime image descriptor is invalid",
+                      "genuinely invalid T# did not throw after force-sync retry");
+
+        auto tornV = outputV;
+        tornV[3] = 0x50000facu;
+        srt.fill(0u);
+        std::copy(oldT.begin(), oldT.end(), srt.begin());
+        std::copy(tornV.begin(), tornV.end(), srt.begin() + 16u);
+        srt[20] = 1u;
+        AgcDriver::ShaderMemory badVMemory({}, multiPending, nullptr, hookWaits);
+        expectFailure([&] { static_cast<void>(badVMemory.Capture(request)); }, "buffer descriptor uses an unsupported type",
+                      "genuinely invalid V# did not throw after force-sync retry");
+    }
+
+    {
+        IrResourcePlan convPlan;
+        convPlan.srtPlanComplete = true;
+        convPlan.resourceTrackingComplete = true;
+        convPlan.userDataCount = 0u;
+        convPlan.materializationSources = {0u};
+        const std::array<std::uint32_t, 8> convWords{
+            0x12345678u,
+            (static_cast<std::uint32_t>(IrBufferFormat::Format11_11_10UNorm) << 20u) | 0x100u,
+            0x0000c000u,
+            0x90000facu,
+            0u, 0u, 0u, 0u,
+        };
+        std::vector<std::unique_ptr<IrValue>> convValues;
+        DescriptorSource convSource;
+        convSource.dwordCount = 8u;
+        for (std::uint32_t i = 0u; i < 8u; ++i) {
+            auto val = std::make_unique<IrValue>(IrOpcode::Void, IrType::U32, i);
+            val->SetImmediateU32(convWords[i]);
+            convSource.dwords[i] = val.get();
+            convValues.push_back(std::move(val));
+        }
+        convPlan.descriptorSources.push_back(convSource);
+        ImageResource convImg;
+        convImg.source = 0u;
+        convImg.resourceClass = ImageResourceClass::Sampled;
+        convImg.dimension = RdnaImageDimension::Dim2D;
+        convImg.read = true;
+        convImg.srgbDecodeCompatible = false;
+        convImg.depthBitsCompatible = true;
+        convPlan.info.images.push_back(convImg);
+        convPlan.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(convImg));
+        std::uint32_t forceSyncCalls = 0u;
+        SrtRuntime convRuntime{};
+        convRuntime.userContext = &forceSyncCalls;
+        convRuntime.descriptorScope = +[](void* ctx, std::size_t bytes) -> std::uint64_t {
+            if (bytes == SrtDescriptorForceSync) ++*static_cast<std::uint32_t*>(ctx);
+            return 0u;
+        };
+        ResourceSnapshot convSnapshot;
+        bool caughtConverted = false;
+        try {
+            ResourceMaterializer{}.Materialize(convPlan, convRuntime, convSnapshot);
+        } catch (const ConvertedSampleRequired&) {
+            caughtConverted = true;
+        }
+        require(caughtConverted && forceSyncCalls == 0u, "ConvertedSampleRequired was swallowed or retried under SrtDescriptorForceSync");
     }
 
     {
