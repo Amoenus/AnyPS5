@@ -503,13 +503,15 @@ int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size) {
  const size_t configured = _configuredFlexibleSize();
  const size_t images = GuestImageSegmentBytes_nid_no_patch();
  std::lock_guard lock(g_flexibleLock);
- *size = configured - std::min(configured, images + _flexibleUsedLocked());
+ const size_t available = configured - std::min(configured, images + _flexibleUsedLocked());
+ if (!GuestCopyOut_nid_no_patch(size, &available, sizeof(available))) return SCE_KERNEL_ERROR_EFAULT;
  return 0;
 }
 
 int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
  if (!size) return SCE_KERNEL_ERROR_EINVAL;
- *size = _configuredFlexibleSize();
+ const size_t configured = _configuredFlexibleSize();
+ if (!GuestCopyOut_nid_no_patch(size, &configured, sizeof(configured))) return SCE_KERNEL_ERROR_EFAULT;
  return 0;
 }
 
@@ -564,8 +566,9 @@ int APS5_VABI sceKernelGetTraceMemoryStats(std::uint64_t* first, std::uint64_t* 
 int APS5_VABI sceKernelGetPrtAperture(int index, void** addr, size_t* len) {
  if (index < 0 || index >= PRT_APERTURE_COUNT || !addr || !len) return SCE_KERNEL_ERROR_EINVAL;
  std::lock_guard lock(g_prtLock);
- *addr = g_prtApertures[index].address;
- *len = g_prtApertures[index].length;
+ if (!GuestCopyOut_nid_no_patch(addr, &g_prtApertures[index].address, sizeof(void*)) ||
+     !GuestCopyOut_nid_no_patch(len, &g_prtApertures[index].length, sizeof(size_t)))
+  return SCE_KERNEL_ERROR_EFAULT;
  return 0;
 }
 
