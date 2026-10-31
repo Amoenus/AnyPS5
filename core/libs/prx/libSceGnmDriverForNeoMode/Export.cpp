@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstring>
 #include <initializer_list>
-#include <stdexcept>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
@@ -344,8 +343,7 @@ int APS5_VABI sceGnmDrawInitToDefaultContextState400(std::uint32_t* cmdbuf, std:
 }
 
 int APS5_VABI sceGnmDrawInitToDefaultContextStateInternalCommand(std::uint32_t* cmdbuf, std::uint32_t size) {
-    if (CompiledSdkVersion() < ContextState400SdkVersion)
-        throw std::runtime_error("sceGnmDrawInitToDefaultContextStateInternalCommand: compiled SDK below 0x04000000");
+    if (CompiledSdkVersion() < ContextState400SdkVersion) return sceGnmDrawInitToDefaultContextState(cmdbuf, size);
     return sceGnmDrawInitToDefaultContextState400(cmdbuf, size);
 }
 

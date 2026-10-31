@@ -12,6 +12,11 @@
 namespace {
 
 constexpr std::uint32_t Untouched = 0xa5a5a5a5u;
+constexpr std::array<std::uint32_t, 19> ContextStateBefore400{
+    0xc0012800u, 0x80000000u, 0x80000000u, 0xc0001200u, 0x00000000u, 0xc0002f00u, 0x00000001u, 0xc0016900u,
+    0x00000102u, 0x00000000u, 0xc0016900u, 0x00000202u, 0x00cc0010u, 0xc0026900u, 0x000000ebu, 0xff00ff00u,
+    0x0000ff00u, 0xc00d1000u, 0x00000000u,
+};
 constexpr std::size_t BufferWords = 0x110;
 
 using Buffer = std::array<std::uint32_t, BufferWords>;
@@ -44,6 +49,18 @@ void CheckSize(std::uint32_t sdkVersion, int (APS5_VABI* expected)(std::uint32_t
 int main() {
     static std::array<std::byte, 64> process{};
     Require(ProcessParametersFixture::Install(process.data(), process.size()), "the process parameters could not be installed");
+
+    for (const std::uint32_t sdkVersion : {0x03500000u, 0x03ffffffu}) {
+        std::memcpy(process.data() + 0x10, &sdkVersion, sizeof(sdkVersion));
+        Buffer words = Fresh();
+        Require(sceGnmDrawInitToDefaultContextStateInternalCommand(words.data(), 0x20) == 0x20, "size 0x20 was not taken before SDK 0x04000000");
+        for (std::size_t index = 0; index < BufferWords; ++index)
+            Require(words[index] == (index < ContextStateBefore400.size() ? ContextStateBefore400[index] : Untouched), "the words before SDK 0x04000000 differ from firmware 13.42's");
+        for (const std::uint32_t size : {0u, 0x1fu, 0x21u, 0xffu, 0x100u, 0x101u}) {
+            Buffer refused = Fresh();
+            Require(sceGnmDrawInitToDefaultContextStateInternalCommand(refused.data(), size) == 0 && refused == Fresh(), "a size other than 0x20 was taken before SDK 0x04000000");
+        }
+    }
 
     for (const std::uint32_t sdkVersion : {0x04000000u, 0x09000000u}) {
         std::memcpy(process.data() + 0x10, &sdkVersion, sizeof(sdkVersion));
