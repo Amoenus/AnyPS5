@@ -1798,6 +1798,90 @@ void verifyTypeZeroImageMaterialization() {
                 "settled SrtDescriptorForceSync: a 0->1 transition over cached words read with no pending write incremented rawInvalidations");
     }
 
+    {
+        std::vector<std::unique_ptr<IrValue>> retryValues;
+        std::uint32_t retryIds = 0u;
+        const auto make = [&](IrOpcode opcode, IrType type) -> IrValue& {
+            retryValues.push_back(std::make_unique<IrValue>(opcode, type, retryIds++));
+            return *retryValues.back();
+        };
+        const auto userWord = [&](std::uint32_t index) -> IrValue& {
+            auto& reg = make(IrOpcode::Void, IrType::ScalarReg);
+            reg.SetRegister({RegisterBank::Scalar, index});
+            auto& read = make(IrOpcode::GetUserData, IrType::U32);
+            read.AddArgument(&reg);
+            return read;
+        };
+        const auto load = [&](IrValue& address, std::uint32_t offset) -> IrValue& {
+            auto& immediate = make(IrOpcode::Void, IrType::U32);
+            immediate.SetImmediateU32(offset);
+            auto& read = make(IrOpcode::LoadAddressU32, IrType::U32);
+            read.AddArgument(&address);
+            read.AddArgument(&immediate);
+            read.SetFlags(MemoryFlags{0, 0});
+            return read;
+        };
+        auto& base = make(IrOpcode::CompositeConstructU64, IrType::U64);
+        base.AddArgument(&userWord(0u));
+        base.AddArgument(&userWord(1u));
+        DescriptorSource descriptor;
+        descriptor.dwordCount = 4u;
+        for (std::uint32_t dword = 0; dword < 4u; ++dword) descriptor.dwords[dword] = &load(base, dword * 4u);
+        const auto describe = [&](IrProgram& program) {
+            auto& resources = program.Resources();
+            resources.srtPlanComplete = true;
+            resources.resourceTrackingComplete = true;
+            resources.userDataCount = 2u;
+            MemoryInfo memory;
+            memory.kind = ResourceKind::ScalarAddress;
+            resources.memoryInfo.push_back(memory);
+            resources.descriptorSources.push_back(descriptor);
+            resources.info.buffers.push_back(BufferResource{});
+        };
+        constexpr std::uint64_t RetryBase = 0x10000u;
+        const std::array<std::uint32_t, 2> retryUserData{static_cast<std::uint32_t>(RetryBase), 0u};
+        IrProgram fillProgram;
+        describe(fillProgram);
+        auto& uniform = fillProgram.Resources().uniformFill;
+        uniform.fill.kind = UniformFillKind::Buffer;
+        uniform.fill.words = 1u;
+        uniform.values[0] = &load(base, 16u);
+        const auto fillPlan = ResourceMaterializer{}.ExtractPlan(fillProgram);
+        struct FillMemory {
+            std::array<std::uint32_t, 4> words{};
+            std::uint32_t fill = 0u;
+            std::uint32_t settledFill = 0u;
+            std::uint64_t epoch = 0u;
+            std::uint32_t fillReads = 0u;
+        };
+        FillMemory fillState;
+        fillState.words = outputV;
+        fillState.fill = 0x11111111u;
+        fillState.settledFill = 0x3f800000u;
+        SrtRuntime fillRuntime{retryUserData};
+        fillRuntime.userContext = &fillState;
+        fillRuntime.readMemory = +[](void* ctx, std::uint64_t address, std::uint32_t* value) {
+            auto& self = *static_cast<FillMemory*>(ctx);
+            if (address == RetryBase + sizeof(self.words)) {
+                ++self.fillReads;
+                *value = self.fill;
+                if (self.fill != self.settledFill) {
+                    self.fill = self.settledFill;
+                    ++self.epoch;
+                }
+                return true;
+            }
+            if (address < RetryBase || address >= RetryBase + sizeof(self.words)) return false;
+            *value = self.words[(address - RetryBase) / sizeof(std::uint32_t)];
+            return true;
+        };
+        fillRuntime.readSpecializationMemory = fillRuntime.readMemory;
+        fillRuntime.descriptorScope = +[](void* ctx, std::size_t) -> std::uint64_t { return static_cast<FillMemory*>(ctx)->epoch; };
+        ResourceSnapshot fillSnapshot;
+        ResourceMaterializer{}.Materialize(fillPlan, fillRuntime, fillSnapshot);
+        require(fillSnapshot.uniformFill.value == fillState.settledFill && fillState.fillReads == 2u,
+                "uniform fill epoch: a pass whose uniform fill read moved the epoch was accepted with the value read before the move");
+    }
 }
 
 void verifyOutOfRangeConstantReads() {
