@@ -1621,6 +1621,23 @@ int main(int argc, char** argv) {
             std::printf("skipped, no usable Vulkan device: %s\n", error.what());
             return VulkanTestSkipped;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--initial-owner") {
+            auto initialContext = device->GetContext();
+            std::unique_lock lock(AgcDriver::GuestMemory::GpuMutex());
+            TextureDetiler detiler(initialContext);
+            initialContext.detiler = &detiler;
+            std::uint32_t checked = 0u, unavailable = 0u;
+            for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
+                for (const auto samples : {2u, 4u, 8u}) {
+                    if (!DepthSupported(initialContext, format, samples)) { unavailable += 4u; continue; }
+                    for (const bool depthOnly : {false, true}) {
+                        for (const bool one : {false, true}) { CheckInitialOwner(initialContext, format, samples, one, depthOnly); ++checked; }
+                    }
+                }
+            }
+            std::printf("Native depth initial owner cases checked=%u unavailable=%u\n", checked, unavailable);
+            return checked == 0u ? VulkanTestSkipped : 0;
+        }
         CheckDrawFeedback();
         const auto context = device->GetContext();
         if (argc == 1) CheckDepthAttachmentAlias();
@@ -1665,22 +1682,6 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--buffer-clear") {
             CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, ClearFault::DriverBufferDispatch, lock);
             std::puts("Native depth clear by the buffer HTILE mask kernel through PM4 checked");
-            return 0;
-        }
-        if (argc == 2 && std::string_view(argv[1]) == "--initial-owner") {
-            auto initialContext = context;
-            TextureDetiler detiler(initialContext);
-            initialContext.detiler = &detiler;
-            std::uint32_t checked = 0u, unavailable = 0u;
-            for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
-                for (const auto samples : {2u, 4u, 8u}) {
-                    if (!DepthSupported(context, format, samples)) { unavailable += 4u; continue; }
-                    for (const bool depthOnly : {false, true}) {
-                        for (const bool one : {false, true}) { CheckInitialOwner(initialContext, format, samples, one, depthOnly); ++checked; }
-                    }
-                }
-            }
-            std::printf("Native depth initial owner cases checked=%u unavailable=%u\n", checked, unavailable);
             return 0;
         }
         Require(argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--retirement"), "invalid native depth fixture arguments");
