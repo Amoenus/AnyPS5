@@ -701,14 +701,11 @@ int APS5_VABI sceKernelGetSystemSwVersion_nid_postfix(SceKernelSystemSwVersion* 
     if (version == nullptr) {
         return 0;
     }
-    SceKernelSystemSwVersion localVersion{};
-    if (!GuestCopyIn_nid_no_patch(&localVersion, version, sizeof(localVersion))) {
-        return SCE_KERNEL_ERROR_EFAULT;
-    }
-    std::memset(localVersion.versionString, 0, sizeof(localVersion.versionString));
-    std::memcpy(localVersion.versionString, "01.000.000", sizeof("01.000.000"));
-    localVersion.version = 0x01000000;
-    if (!GuestCopyOut_nid_no_patch(version, &localVersion, sizeof(localVersion))) {
+    char versionString[sizeof(version->versionString)] = {};
+    std::memcpy(versionString, "01.000.000", sizeof("01.000.000"));
+    constexpr std::uint32_t packedVersion = 0x01000000;
+    if (!GuestCopyOut_nid_no_patch(version->versionString, versionString, sizeof(versionString)) ||
+        !GuestCopyOut_nid_no_patch(&version->version, &packedVersion, sizeof(packedVersion))) {
         return SCE_KERNEL_ERROR_EFAULT;
     }
     return 0;
