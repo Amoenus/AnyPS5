@@ -2,9 +2,12 @@
 #define CORE_LIBS_PRX_LIBC_INCLUDE_WINDOWSMAPPINGS_HPP
 
 #ifdef _WIN32
+#include "HostThreadSlot.hpp"
+#include "general/LogMacros.hpp"
 #include <windows.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #ifdef APS5_COUNT_MAPPING_QUERIES
 #include <atomic>
 #endif
@@ -479,25 +482,28 @@ public:
 #endif
 
     bool Collect(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear, Collection collection = Collection::All) {
+        CollectionProfile profile(bytes, clear, collection);
         std::lock_guard lock(mutex);
+        profile.Locked();
         const auto capacity = *count;
         *count = 0;
         const auto end = address + bytes;
         if (collection == Collection::Fresh) {
             const auto fresh = freshRanges.upper_bound(address);
-            if ((fresh == freshRanges.begin() || std::prev(fresh)->second <= address) && (fresh == freshRanges.end() || fresh->first >= end)) return true;
+            if ((fresh == freshRanges.begin() || std::prev(fresh)->second <= address) && (fresh == freshRanges.end() || fresh->first >= end)) return profile.Done(true);
             for (auto it = views.lower_bound(address & ~(pageBytes - 1)); it != views.end() && it->first < end; ++it) {
                 if (it->second.resident) {
-                    if (!watchResident) return false;
+                    if (!watchResident) return profile.Done(false);
                     continue;
                 }
-                if (it->second.page->comparedWhenShared) return false;
+                if (it->second.page->comparedWhenShared) return profile.Done(false);
                 if (it->second.protection != PAGE_NOACCESS) continue;
                 for (auto at = std::max(address, it->first); at < std::min(end, it->first + pageBytes); at += 4096) {
-                    if ((it->second.collected & (1u << ((at - it->first) / 4096))) == 0) return false;
+                    if ((it->second.collected & (1u << ((at - it->first) / 4096))) == 0) return profile.Done(false);
                 }
             }
-        } else if (clear && !collectable(address, end)) return false;
+        } else if (clear && !collectable(address, end)) return profile.Done(false);
+        profile.Ready();
         auto position = views.lower_bound(address & ~(pageBytes - 1));
         std::uintptr_t cleanStart = 0;
         std::uintptr_t cleanEnd = 0;
@@ -510,7 +516,9 @@ public:
             if (nextClean != cleanRanges.begin()) {
                 const auto clean = std::prev(nextClean);
                 if (cursor < clean->second) {
-                    cursor = std::min(end, clean->second);
+                    const auto stop = std::min(end, clean->second);
+                    profile.Clean(stop - cursor);
+                    cursor = stop;
                     continue;
                 }
             }
@@ -518,13 +526,14 @@ public:
             const auto found = viewAt(base, position);
             if (found != views.end() && found->second.resident) {
                 flushClean();
-                if (!watchResident) return false;
+                if (!watchResident) return profile.Done(false);
                 const auto available = capacity - *count;
-                if (available == 0) return true;
+                if (available == 0) return profile.Done(true);
                 const auto run = std::prev(residentRuns.upper_bound(cursor));
                 const auto stop = std::min({end, run->second.end, (cursor & ~std::uintptr_t{4095}) + available * 4096, nextClean == cleanRanges.end() ? end : nextClean->first});
-                collectResident(run->first, run->second, cursor, stop, pages, count, clear, collection);
-                if (*count == capacity) return true;
+                profile.Route(CollectionProfile::Resident, stop - cursor);
+                collectResident(run->first, run->second, cursor, stop, pages, count, clear, collection, profile);
+                if (*count == capacity) return profile.Done(true);
                 cursor = stop;
             } else if (found != views.end()) {
                 auto& view = found->second;
@@ -543,9 +552,10 @@ public:
                         }
                     }
                 }
+                profile.Route(CollectionProfile::Shared, stop - cursor);
                 if (view.protection == PAGE_NOACCESS) {
                     flushClean();
-                    return false;
+                    return profile.Done(false);
                 }
                 const bool pinned = view.page->pins != 0;
                 std::uint8_t settled = 0;
@@ -603,7 +613,7 @@ public:
                 }
                 if (full) {
                     flushClean();
-                    return true;
+                    return profile.Done(true);
                 }
                 cursor = stop;
             } else {
@@ -614,9 +624,10 @@ public:
                     continue;
                 }
                 const auto allocationEnd = privateAllocationEnd(cursor);
-                if (allocationEnd == 0) return false;
+                if (allocationEnd == 0) return profile.Done(false);
                 const auto stop = std::min(end, allocationEnd);
-                if (capacity == *count) return true;
+                if (capacity == *count) return profile.Done(true);
+                profile.Route(CollectionProfile::Private, stop - cursor);
                 const auto touched = (((stop + 4095) & ~static_cast<std::uintptr_t>(4095)) - (cursor & ~static_cast<std::uintptr_t>(4095))) / 4096;
                 ULONG_PTR available = std::min<ULONG_PTR>(capacity - *count, touched);
                 DWORD granularity = 0;
@@ -625,22 +636,116 @@ public:
                 collectPieces += (stop + pageBytes - 1) / pageBytes - cursor / pageBytes;
 #endif
                 const bool committed = !verifyDirect() || committedPrivate(cursor, stop);
+                const auto apiStart = profile.BeginApi();
                 if (GetWriteWatch(clear ? WRITE_WATCH_FLAG_RESET : 0, reinterpret_cast<void*>(cursor), stop - cursor, pages + *count, &available, &granularity) != 0) {
                     const auto memory = query(cursor);
-                    if (memory.State != MEM_COMMIT || memory.Type != MEM_PRIVATE) return false;
+                    if (memory.State != MEM_COMMIT || memory.Type != MEM_PRIVATE) return profile.Done(false);
                     fail("collect private guest writes");
                 }
+                profile.EndApi(apiStart, CollectionProfile::Private);
                 if (!committed) staleProof(cursor, stop);
                 *count += available;
-                if (*count == capacity) return true;
+                if (*count == capacity) return profile.Done(true);
                 cursor = stop;
             }
         }
         flushClean();
-        return true;
+        return profile.Done(true);
     }
 
 private:
+    struct CollectionProfile {
+        enum Kind { Resident, Shared, Private, Reset, KindCount };
+        using Clock = std::chrono::steady_clock;
+        struct Sequence {};
+
+        bool sampled = false;
+        bool acquired = false;
+        bool prepared = false;
+        bool pendingApi = false;
+        int result = -1;
+        std::uint64_t sequence = 0;
+        std::size_t bytes;
+        bool clear;
+        Collection collection;
+        Clock::time_point start{};
+        Clock::time_point locked{};
+        Clock::time_point ready{};
+        std::array<std::uint64_t, KindCount> pieces{};
+        std::array<std::uint64_t, KindCount> routeBytes{};
+        std::array<std::uint64_t, KindCount> apiCalls{};
+        std::array<std::uint64_t, KindCount> apiNanos{};
+        std::uint64_t cleanBytes = 0;
+
+        CollectionProfile(std::size_t size, bool reset, Collection mode) : bytes(size), clear(reset), collection(mode) {
+            static const bool enabled = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+            if (!enabled) return;
+            sequence = HostThreadSlot<std::uint64_t, Sequence>::Get() + 1;
+            HostThreadSlot<std::uint64_t, Sequence>::Set(sequence);
+            sampled = ((sequence - 1) & 4095u) == 0;
+            if (sampled) start = Clock::now();
+        }
+
+        static std::uint64_t Nanos(Clock::time_point from, Clock::time_point to) {
+            return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(to - from).count());
+        }
+
+        bool Done(bool value) {
+            if (sampled) result = value ? 1 : 0;
+            return value;
+        }
+
+        void Locked() {
+            if (!sampled) return;
+            locked = Clock::now();
+            acquired = true;
+        }
+
+        void Ready() {
+            if (!sampled) return;
+            ready = Clock::now();
+            prepared = true;
+        }
+
+        void Route(Kind kind, std::size_t size) {
+            if (!sampled) return;
+            ++pieces[kind];
+            routeBytes[kind] += size;
+        }
+
+        void Clean(std::size_t size) {
+            if (sampled) cleanBytes += size;
+        }
+
+        Clock::time_point BeginApi() {
+            if (!sampled) return {};
+            pendingApi = true;
+            return Clock::now();
+        }
+
+        void EndApi(Clock::time_point from, Kind kind) {
+            if (!sampled) return;
+            apiNanos[kind] += Nanos(from, Clock::now());
+            ++apiCalls[kind];
+            pendingApi = false;
+        }
+
+        ~CollectionProfile() {
+            if (!sampled) return;
+            const auto error = GetLastError();
+            const auto stop = Clock::now();
+            const auto wait = Nanos(start, acquired ? locked : stop);
+            const auto preflight = acquired ? Nanos(locked, prepared ? ready : stop) : 0;
+            const auto body = prepared ? Nanos(ready, stop) : 0;
+            WriteLogLine(stderr, "[windows-collect] tid=%lu seq=%llu period=4096 bytes=%zu clear=%u mode=%u ready=%u result=%d pending=%u wait_ns=%llu preflight_ns=%llu body_ns=%llu resident=%llu/%llu shared=%llu/%llu private=%llu/%llu clean_bytes=%llu resident_api=%llu/%llu private_api=%llu/%llu reset_api=%llu/%llu\n",
+                GetCurrentThreadId(), static_cast<unsigned long long>(sequence), bytes, static_cast<unsigned>(clear), static_cast<unsigned>(collection), static_cast<unsigned>(prepared), result, static_cast<unsigned>(pendingApi),
+                static_cast<unsigned long long>(wait), static_cast<unsigned long long>(preflight), static_cast<unsigned long long>(body),
+                static_cast<unsigned long long>(pieces[Resident]), static_cast<unsigned long long>(routeBytes[Resident]), static_cast<unsigned long long>(pieces[Shared]), static_cast<unsigned long long>(routeBytes[Shared]), static_cast<unsigned long long>(pieces[Private]), static_cast<unsigned long long>(routeBytes[Private]), static_cast<unsigned long long>(cleanBytes),
+                static_cast<unsigned long long>(apiCalls[Resident]), static_cast<unsigned long long>(apiNanos[Resident]), static_cast<unsigned long long>(apiCalls[Private]), static_cast<unsigned long long>(apiNanos[Private]), static_cast<unsigned long long>(apiCalls[Reset]), static_cast<unsigned long long>(apiNanos[Reset]));
+            SetLastError(error);
+        }
+    };
+
     bool collectable(std::uintptr_t address, std::uintptr_t end) {
         const auto proven = collectableRanges.upper_bound(address);
         if (proven != collectableRanges.begin() && std::prev(proven)->second >= end) return true;
@@ -775,13 +880,15 @@ private:
         return (run.collected[bit >> 6] >> (bit & 63) & 1) != 0;
     }
 
-    void collectResident(std::uintptr_t start, Run& run, std::uintptr_t from, std::uintptr_t stop, void** pages, std::size_t* count, bool clear, Collection collection) {
+    void collectResident(std::uintptr_t start, Run& run, std::uintptr_t from, std::uintptr_t stop, void** pages, std::size_t* count, bool clear, Collection collection, CollectionProfile& profile) {
         if (clear) run.reset = true;
         const auto first = from & ~std::uintptr_t{4095};
         if (run.fresh == 0 && collection != Collection::Fresh) {
             ULONG_PTR reported = (stop - first + 4095) / 4096;
             DWORD granularity = 0;
+            const auto apiStart = profile.BeginApi();
             if (GetWriteWatch(clear ? WRITE_WATCH_FLAG_RESET : 0, reinterpret_cast<void*>(first), stop - first, pages + *count, &reported, &granularity) != 0) fail("collect resident guest writes");
+            profile.EndApi(apiStart, CollectionProfile::Resident);
             for (ULONG_PTR index = 0; index < reported; ++index) pages[*count + index] = reinterpret_cast<void*>(std::max(from, reinterpret_cast<std::uintptr_t>(pages[*count + index])));
             *count += reported;
             return;
@@ -791,13 +898,19 @@ private:
             std::vector<void*> found((stop - first + 4095) / 4096);
             ULONG_PTR reported = found.size();
             DWORD granularity = 0;
+            const auto apiStart = profile.BeginApi();
             if (GetWriteWatch(clear ? WRITE_WATCH_FLAG_RESET : 0, reinterpret_cast<void*>(first), stop - first, found.data(), &reported, &granularity) != 0) fail("collect resident guest writes");
+            profile.EndApi(apiStart, CollectionProfile::Resident);
             for (ULONG_PTR index = 0; index < reported; ++index) written.push_back(reinterpret_cast<std::uintptr_t>(found[index]));
         }
         auto next = written.begin();
         std::uintptr_t resetFrom = 0;
         const auto flushReset = [&](std::uintptr_t to) {
-            if (resetFrom != 0 && ResetWriteWatch(reinterpret_cast<void*>(resetFrom), to - resetFrom) != 0) fail("reset resident guest writes");
+            if (resetFrom != 0) {
+                const auto apiStart = profile.BeginApi();
+                if (ResetWriteWatch(reinterpret_cast<void*>(resetFrom), to - resetFrom) != 0) fail("reset resident guest writes");
+                profile.EndApi(apiStart, CollectionProfile::Reset);
+            }
             resetFrom = 0;
         };
         for (auto at = first; at < stop; at += 4096) {
