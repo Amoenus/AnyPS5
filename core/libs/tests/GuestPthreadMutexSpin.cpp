@@ -3,13 +3,18 @@
 #include "prx/libkernel/Pthread/include/Mutex.hpp"
 #include "SceTypes.hpp"
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <initializer_list>
+#include <thread>
 
 static constexpr int SCE_OK = 0;
 static constexpr int THREADS = 4;
 static constexpr int ROUNDS = 2000;
 static constexpr int TURNS = 300;
+
+extern "C" std::uint64_t MutexYieldsForTest_nid_no_patch();
 
 static void Require(bool value) { if (!value) std::abort(); }
 
@@ -148,6 +153,53 @@ static void CheckCondRelock(PthreadMutexattr* attr, int type, int spins, int yie
     Require(scePthreadMutexDestroy(&ring.mutex) == SCE_OK);
 }
 
+struct Wake {
+    PthreadMutex mutex = nullptr;
+    PthreadCond cond = nullptr;
+    std::atomic<bool> waiting{false};
+    bool signaled = false;
+    int depth = 1;
+};
+
+static void* APS5_VABI WaitForSignal(void* arg) {
+    auto& wake = *static_cast<Wake*>(arg);
+    for (int level = 0; level < wake.depth; ++level)
+        Require(scePthreadMutexLock(&wake.mutex) == SCE_OK);
+    wake.waiting.store(true);
+    while (!wake.signaled)
+        Require(scePthreadCondWait(&wake.cond, &wake.mutex) == SCE_OK);
+    for (int level = 0; level < wake.depth; ++level)
+        Require(scePthreadMutexUnlock(&wake.mutex) == SCE_OK);
+    return nullptr;
+}
+
+static void CheckCondRelockYields(PthreadMutexattr* attr, int type, int depth) {
+    constexpr std::uint64_t YIELDS = 5;
+    Wake wake;
+    wake.depth = depth;
+    Require(scePthreadMutexattrSettype(attr, type) == SCE_OK);
+    Require(scePthreadMutexInit(&wake.mutex, attr, "wake") == SCE_OK);
+    Require(scePthreadMutexSetspinloops(&wake.mutex, 0) == SCE_OK);
+    Require(scePthreadMutexSetyieldloops(&wake.mutex, static_cast<int>(YIELDS)) == SCE_OK);
+    Require(scePthreadCondInit(&wake.cond, nullptr, "wake") == SCE_OK);
+    Pthread thread = nullptr;
+    Require(scePthreadCreate(&thread, nullptr, WaitForSignal, &wake, nullptr) == SCE_OK);
+    while (!wake.waiting.load())
+        std::this_thread::yield();
+    Require(scePthreadMutexLock(&wake.mutex) == SCE_OK);
+    const auto before = MutexYieldsForTest_nid_no_patch();
+    wake.signaled = true;
+    Require(scePthreadCondSignal(&wake.cond) == SCE_OK);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (MutexYieldsForTest_nid_no_patch() - before < YIELDS && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    Require(scePthreadMutexUnlock(&wake.mutex) == SCE_OK);
+    Require(scePthreadJoin(thread, nullptr) == SCE_OK);
+    Require(MutexYieldsForTest_nid_no_patch() - before == YIELDS);
+    Require(scePthreadCondDestroy(&wake.cond) == SCE_OK);
+    Require(scePthreadMutexDestroy(&wake.mutex) == SCE_OK);
+}
+
 static void CheckRecursiveRelock(PthreadMutexattr* attr) {
     PthreadMutex mutex = nullptr;
     Require(scePthreadMutexattrSettype(attr, 2) == SCE_OK);
@@ -167,6 +219,9 @@ int main() {
     PthreadMutexattr attr = nullptr;
     Require(scePthreadMutexattrInit(&attr) == SCE_OK);
     CheckRecursiveRelock(&attr);
+    for (const int type : {1, 2, 3, 4})
+        CheckCondRelockYields(&attr, type, 1);
+    CheckCondRelockYields(&attr, 2, 2);
     for (const int type : {1, 2, 3, 4}) {
         CheckContention(&attr, type, 2000, 0);
         CheckContention(&attr, type, 0, 4);
