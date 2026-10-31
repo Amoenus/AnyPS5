@@ -108,6 +108,14 @@ int acquireMutex(PthreadMutex mutex, TAcquire acquire, int unavailable, bool try
 
 }
 
+bool MutexOperations::SpinAcquire(PthreadMutex mutex, std::timed_mutex& native) {
+    return spinAcquire(mutex, native);
+}
+
+bool MutexOperations::SpinAcquire(PthreadMutex mutex, std::recursive_timed_mutex& native) {
+    return spinAcquire(mutex, native);
+}
+
 bool MutexOperations::IsOwned(const PthreadMutex* mutex) {
     if (!mutex)
         throw std::invalid_argument("Mutex pointer is null");

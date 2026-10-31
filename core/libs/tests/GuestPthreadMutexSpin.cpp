@@ -1,4 +1,5 @@
 #include "prx/libkernel/include/Api.hpp"
+#include "prx/libkernel/Pthread/include/Cond.hpp"
 #include "prx/libkernel/Pthread/include/Mutex.hpp"
 #include "SceTypes.hpp"
 #include <atomic>
@@ -8,6 +9,7 @@
 static constexpr int SCE_OK = 0;
 static constexpr int THREADS = 4;
 static constexpr int ROUNDS = 2000;
+static constexpr int TURNS = 300;
 
 static void Require(bool value) { if (!value) std::abort(); }
 
@@ -93,6 +95,59 @@ static void CheckContention(PthreadMutexattr* attr, int type, int spins, int yie
     Require(scePthreadMutexDestroy(&shared.mutex) == SCE_OK);
 }
 
+struct Ring {
+    PthreadMutex mutex = nullptr;
+    PthreadCond cond = nullptr;
+    std::atomic<int> inside{0};
+    std::atomic<int> nextId{0};
+    int turn = 0;
+    int total = 0;
+    bool recursive = false;
+    bool timed = false;
+    bool overlapped = false;
+};
+
+static void* APS5_VABI TakeTurns(void* arg) {
+    auto& ring = *static_cast<Ring*>(arg);
+    const int id = ring.nextId.fetch_add(1);
+    for (int round = 0; round < TURNS; ++round) {
+        Require(scePthreadMutexLock(&ring.mutex) == SCE_OK);
+        if (ring.recursive)
+            Require(scePthreadMutexLock(&ring.mutex) == SCE_OK);
+        while (ring.turn % THREADS != id)
+            Require((ring.timed ? scePthreadCondTimedwait(&ring.cond, &ring.mutex, 10000000) : scePthreadCondWait(&ring.cond, &ring.mutex)) == SCE_OK);
+        if (ring.inside.fetch_add(1) != 0)
+            ring.overlapped = true;
+        ++ring.turn;
+        ++ring.total;
+        ring.inside.fetch_sub(1);
+        Require(scePthreadCondBroadcast(&ring.cond) == SCE_OK);
+        if (ring.recursive)
+            Require(scePthreadMutexUnlock(&ring.mutex) == SCE_OK);
+        Require(scePthreadMutexUnlock(&ring.mutex) == SCE_OK);
+    }
+    return nullptr;
+}
+
+static void CheckCondRelock(PthreadMutexattr* attr, int type, int spins, int yields, bool timed) {
+    Ring ring;
+    ring.recursive = type == 2;
+    ring.timed = timed;
+    Require(scePthreadMutexattrSettype(attr, type) == SCE_OK);
+    Require(scePthreadMutexInit(&ring.mutex, attr, "ring") == SCE_OK);
+    Require(scePthreadMutexSetspinloops(&ring.mutex, spins) == SCE_OK);
+    Require(scePthreadMutexSetyieldloops(&ring.mutex, yields) == SCE_OK);
+    Require(scePthreadCondInit(&ring.cond, nullptr, "ring") == SCE_OK);
+    Pthread threads[THREADS] = {};
+    for (auto& thread : threads)
+        Require(scePthreadCreate(&thread, nullptr, TakeTurns, &ring, nullptr) == SCE_OK);
+    for (auto& thread : threads)
+        Require(scePthreadJoin(thread, nullptr) == SCE_OK);
+    Require(!ring.overlapped && ring.total == THREADS * TURNS && ring.turn == THREADS * TURNS);
+    Require(scePthreadCondDestroy(&ring.cond) == SCE_OK);
+    Require(scePthreadMutexDestroy(&ring.mutex) == SCE_OK);
+}
+
 static void CheckRecursiveRelock(PthreadMutexattr* attr) {
     PthreadMutex mutex = nullptr;
     Require(scePthreadMutexattrSettype(attr, 2) == SCE_OK);
@@ -117,6 +172,9 @@ int main() {
         CheckContention(&attr, type, 0, 4);
         CheckContention(&attr, type, 100, 4);
         CheckContention(&attr, type, -1, -1);
+        CheckCondRelock(&attr, type, 2000, 4, false);
+        CheckCondRelock(&attr, type, 0, 0, false);
+        CheckCondRelock(&attr, type, 2000, 4, true);
     }
     Require(scePthreadMutexattrDestroy(&attr) == SCE_OK);
 }
