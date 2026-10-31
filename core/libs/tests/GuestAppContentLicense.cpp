@@ -95,7 +95,7 @@ int main() {
         std::memcpy(process.data() + 16, &version, sizeof(version));
         for (char& padding : label.padding) {
             padding = 1;
-            Require(checkBundleLicense(0, &label) == (version >= 0x01500000 ? Parameter : NotFound), "a padded label was not checked from SDK 0x01500000 by the bundle license check");
+            Require(checkBundleLicense(0, &label) == (version >= 0x03500000 ? Parameter : NotFound), "a padded label was not checked from SDK 0x03500000 by the bundle license check");
             Require(getPlayableStatus(0, &label, &status) == (version >= 0x03500000 ? Parameter : NotFound) && status == Untouched, "a padded label was not checked from SDK 0x03500000 by the playable status");
             padding = 0;
         }
