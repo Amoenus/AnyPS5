@@ -317,6 +317,49 @@ class EnvReferenceTests(unittest.TestCase):
         self.assertEqual(found["APS5_FALLBACK_DB"], [(
             (root / "core" / "Fallback.cpp").as_posix(), 3, "string", "")])
 
+    def test_a_parameter_with_a_constant_name_is_not_a_read_of_that_constant(self):
+        root = self.fixture()
+        (root / "core" / "Names.hpp").write_text('static constexpr const char* MODE = "APS5_REAL_MODE";\n', encoding="utf-8")
+        (root / "core" / "Reader.cpp").write_text(
+            '#include "Names.hpp"\n'
+            "const char* read(const char* MODE) { return std::getenv(MODE); }\n", encoding="utf-8")
+        found = env_reference.reads([root / "core"])
+        self.assertNotIn("APS5_REAL_MODE", found)
+
+    def test_a_local_with_a_non_literal_initializer_is_not_a_read_of_that_constant(self):
+        root = self.fixture()
+        (root / "core" / "Names.hpp").write_text('static constexpr const char* MODE = "APS5_REAL_MODE";\n', encoding="utf-8")
+        (root / "core" / "Other.cpp").write_text(
+            '#include "Names.hpp"\n'
+            "const char* pick() { const char* MODE = dynamic_name(); return std::getenv(MODE); }\n", encoding="utf-8")
+        found = env_reference.reads([root / "core"])
+        self.assertNotIn("APS5_REAL_MODE", found)
+
+    def test_a_commented_out_declaration_is_not_a_constant(self):
+        root = self.fixture()
+        (root / "core" / "Comment.hpp").write_text('// static constexpr const char* NAME = "APS5_COMMENT_ONLY";\n', encoding="utf-8")
+        (root / "core" / "Use.cpp").write_text(
+            '#include "Comment.hpp"\n'
+            "const char* read(const char* NAME) { return std::getenv(NAME); }\n", encoding="utf-8")
+        found = env_reference.reads([root / "core"])
+        self.assertNotIn("APS5_COMMENT_ONLY", found)
+
+    def test_a_constant_from_an_included_header_is_read(self):
+        root = self.fixture()
+        (root / "core" / "Api.hpp").write_text('static constexpr const char* API = "APS5_API_NAME";\n', encoding="utf-8")
+        (root / "core" / "Use.cpp").write_text(
+            '#include "Api.hpp"\n'
+            "const char* value = std::getenv(API);\n", encoding="utf-8")
+        found = env_reference.reads([root / "core"])
+        self.assertEqual(found["APS5_API_NAME"][0][1], 2)
+
+    def test_a_constant_from_a_header_that_is_not_included_is_not_read(self):
+        root = self.fixture()
+        (root / "core" / "Unrelated.hpp").write_text('static constexpr const char* FAR = "APS5_FAR_NAME";\n', encoding="utf-8")
+        (root / "core" / "Use.cpp").write_text("const char* value = std::getenv(FAR);\n", encoding="utf-8")
+        found = env_reference.reads([root / "core"])
+        self.assertNotIn("APS5_FAR_NAME", found)
+
     def test_reads_ignore_a_constant_name_bound_to_two_names(self):
         root = self.fixture()
         (root / "core" / "First.hpp").write_text(
