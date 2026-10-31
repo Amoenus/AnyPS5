@@ -1,14 +1,10 @@
-#include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libSceNKWebKit/libSceNKWebKit.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
-
-extern "C" {
-double APS5_VABI _ZN3WTF37parseDateFromNullTerminatedCharactersEPKcRb(const char* dateString, bool* isLocalTime);
-}
 
 static void Check(bool value, int line) {
     if (!value) {
