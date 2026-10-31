@@ -2351,7 +2351,7 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, 
         if (!tookStorage) surface->SyncFromMemory(mirrorResource(target), true);
     }
     if (cleared && (!created || inherits)) {
-        if (target.samples != 1u) surface->sampling.Refuse(surface->FastClearRefusal("bind-cleared", created, inherits, htileCleared).c_str());
+        if (target.samples != 1u && (!created || !surface->samplingActive)) surface->sampling.Refuse(surface->FastClearRefusal("bind-cleared", created, inherits, htileCleared).c_str());
         if (!created) surface->NoteHtileClear(VK_IMAGE_ASPECT_DEPTH_BIT);
     }
     if (!created) surface->NoteHtileClear(htileCleared);
