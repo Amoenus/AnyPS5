@@ -124,8 +124,8 @@ std::size_t ImagePagesSize();
 // folded at report time; a finished thread's totals move to `retired`. Nothing is counted without
 // the profile switch (the counters are only ever printed under it).
 // Debug aid: APS5_SHARED_MEMORY_COUNTERS=1 accumulates into one shared set with atomic RMWs as before.
-enum MemoryCounterKind { CounterRead, CounterCompare, CounterWrite, CounterChangedWrite, CounterCollect, CounterVerify, CounterQuery, MemoryCounterCount };
-constexpr const char* MemoryCounterNames[MemoryCounterCount] = {"read", "compare", "write", "write-changed", "collect", "verify", "query"};
+enum MemoryCounterKind { CounterRead, CounterCompare, CounterWrite, CounterChangedWrite, CounterCollect, CounterVerify, CounterQuery, CounterCollectWindows, CounterCollectStamp, MemoryCounterCount };
+constexpr const char* MemoryCounterNames[MemoryCounterCount] = {"read", "compare", "write", "write-changed", "collect", "verify", "query", "collect-windows", "collect-stamp"};
 
 struct MemoryCounter {
     std::atomic<std::uint64_t> calls{0};
@@ -1539,10 +1539,17 @@ bool collectWindowsWrites(StampRuns& runs, std::uint64_t first, std::uint64_t st
         auto cursor = first;
         while (cursor < stop) {
             std::size_t count = tracker.pages.size();
-            if (!collect(cursor, static_cast<std::size_t>(stop - cursor), tracker.pages.data(), &count, clear)) return false;
-            for (std::size_t i = 0; i < count; ++i) {
-                const auto page = reinterpret_cast<std::uintptr_t>(tracker.pages[i]);
-                stampWrittenRun(&runs, page, page + WritePageBytes);
+            const auto collected = [&] {
+                const TimedAccess timed(CounterCollectWindows, stop - cursor);
+                return collect(cursor, static_cast<std::size_t>(stop - cursor), tracker.pages.data(), &count, clear);
+            }();
+            if (!collected) return false;
+            {
+                const TimedAccess timed(CounterCollectStamp, count * WritePageBytes);
+                for (std::size_t i = 0; i < count; ++i) {
+                    const auto page = reinterpret_cast<std::uintptr_t>(tracker.pages[i]);
+                    stampWrittenRun(&runs, page, page + WritePageBytes);
+                }
             }
             if (count < tracker.pages.size()) break;
             cursor = reinterpret_cast<std::uintptr_t>(tracker.pages[count - 1]) + WritePageBytes;
