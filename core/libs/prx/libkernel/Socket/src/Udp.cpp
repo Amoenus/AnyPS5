@@ -1337,17 +1337,30 @@ int APS5_VABI socketpair_nid_postfix(int family, int type, int protocol, int* de
             GuestSockets::Close(firstDescriptor);
             return Fail(error);
         }
+        struct InstalledPair {
+            int first;
+            int second;
+            bool release = true;
+            ~InstalledPair() {
+                if (!release) return;
+                const int error = *__error_nid_postfix();
+                for (const int number : {first, second}) {
+                    try {
+                        GuestSockets::Close(number);
+                    } catch (...) {
+                    }
+                }
+                *__error_nid_postfix() = error;
+            }
+        } installedPair{firstDescriptor, secondDescriptor};
         const int installed[2] = {firstDescriptor, secondDescriptor};
-        if (!GuestCopyOut_nid_no_patch(descriptors, installed, sizeof(installed))) {
-            GuestSockets::Close(firstDescriptor);
-            GuestSockets::Close(secondDescriptor);
-            return Fail(14);
-        }
+        if (!GuestCopyOut_nid_no_patch(descriptors, installed, sizeof(installed))) return Fail(14);
         if ((type & GuestCloseOnExec) != 0) {
             std::lock_guard registry(socketsMutex);
             closeOnExecDescriptors.insert(firstDescriptor);
             closeOnExecDescriptors.insert(secondDescriptor);
         }
+        installedPair.release = false;
         return 0;
     } catch (const std::bad_alloc&) {
         return Fail(12);

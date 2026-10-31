@@ -3,6 +3,9 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <array>
+#include <atomic>
+#include <new>
+#include <set>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +13,23 @@
 #include <stdexcept>
 
 static void Require(bool value) { if (!value) std::abort(); }
+
+#ifndef _WIN32
+static std::atomic<std::size_t> lastAllocationSize{0};
+static std::atomic<std::size_t> failAllocationOfSize{0};
+static std::atomic<int> failAllocationAfter{0};
+void* operator new(std::size_t bytes) {
+    lastAllocationSize = bytes;
+    if (bytes != 0 && failAllocationOfSize.load() == bytes && --failAllocationAfter == 0) {
+        failAllocationOfSize = 0;
+        throw std::bad_alloc();
+    }
+    if (void* pointer = std::malloc(bytes != 0 ? bytes : 1)) return pointer;
+    throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
+#endif
 
 template<typename TFunction>
 static bool ThrowsRuntimeError(TFunction function) {
@@ -311,5 +331,34 @@ int main(int argc, char** argv) {
     int second[2] = {-1, -1};
     Require(socketpair_nid_postfix(Unix, Stream, 0, second) == 0 && second[0] == first[0] && second[1] == first[1]);
     Require(close_nid_postfix(second[0]) == 0 && close_nid_postfix(second[1]) == 0);
+#ifndef _WIN32
+    {
+        std::set<int> probe;
+        probe.insert(1);
+    }
+    const std::size_t registryNodeSize = lastAllocationSize;
+    for (const int occurrence : {1, 2}) {
+        int expected[2] = {-1, -1};
+        Require(socketpair_nid_postfix(Unix, Stream | CloseOnExec, 0, expected) == 0);
+        Require(close_nid_postfix(expected[0]) == 0 && close_nid_postfix(expected[1]) == 0);
+        failAllocationAfter = occurrence;
+        failAllocationOfSize = registryNodeSize;
+        int refused[2] = {-1, -1};
+        *__error_nid_postfix() = 0;
+        const int result = socketpair_nid_postfix(Unix, Stream | CloseOnExec, 0, refused);
+        failAllocationOfSize = 0;
+        Require(result == -1 && *__error_nid_postfix() == 12);
+        int plain[2] = {-1, -1};
+        Require(socketpair_nid_postfix(Unix, Stream, 0, plain) == 0 && plain[0] == expected[0] && plain[1] == expected[1]);
+        Require(fcntl_nid_postfix(plain[0], 1, 0) == 0 && fcntl_nid_postfix(plain[1], 1, 0) == 0);
+        Require(close_nid_postfix(plain[0]) == 0 && close_nid_postfix(plain[1]) == 0);
+        int again[2] = {-1, -1};
+        Require(socketpair_nid_postfix(Unix, Stream | CloseOnExec, 0, again) == 0 && again[0] == expected[0] && again[1] == expected[1]);
+        Require(fcntl_nid_postfix(again[0], 1, 0) == 1 && fcntl_nid_postfix(again[1], 1, 0) == 1);
+        Require(close_nid_postfix(again[0]) == 0 && close_nid_postfix(again[1]) == 0);
+        *__error_nid_postfix() = 0;
+        Require(close_nid_postfix(again[0]) == -1 && *__error_nid_postfix() == 9);
+    }
+#endif
     return 0;
 }
