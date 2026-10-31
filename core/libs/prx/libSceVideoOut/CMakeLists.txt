@@ -362,4 +362,8 @@ if(BUILD_TESTING)
     configure_windows_unwind(pad_port0_tests)
     add_test(NAME pad_port0 COMMAND pad_port0_tests)
     set_tests_properties(pad_port0 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    if(WIN32)
+        set_tests_properties(pad_port0 PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceVideoOut>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libScePad>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceIme>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceUserService>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
