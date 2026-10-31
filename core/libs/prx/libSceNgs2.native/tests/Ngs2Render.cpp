@@ -1921,6 +1921,11 @@ static void TestI16RenderConversionLikePs5() {
 }
 
 static constexpr float HalfPower = std::numbers::sqrt2_v<float> / 2.0f;
+#ifdef APS5_NGS2_PS4_LIBRARY
+static constexpr bool Ps4Library = true;
+#else
+static constexpr bool Ps4Library = false;
+#endif
 
 static std::vector<float> MixFrame(std::uint32_t sourceChannels, std::uint32_t sourceChannel, std::uint32_t destChannels) {
     const auto firstBuffer = usedBuffers;
@@ -1961,13 +1966,13 @@ static void TestDefaultChannelMap() {
     Require(MixFrame(5, 3, 1) == std::vector<float>{0.25f});
     Require(MixFrame(5, 3, 2) == (std::vector<float>{0, 0}));
     Require(MixFrame(6, 3, 1) == std::vector<float>{0});
-    Require(MixFrame(6, 4, 2) == (std::vector<float>{0.25f, 0}));
+    Require(MixFrame(6, 4, 2) == (std::vector<float>{Ps4Library ? 0.25f : half, 0}));
     Require(MixFrame(6, 5, 8) == (std::vector<float>{0, 0, 0, 0, 0, 0.5f, 0, 0}));
     Require(MixFrame(7, 6, 1) == std::vector<float>{quarter});
     Require(MixFrame(7, 6, 2) == (std::vector<float>{quarter, quarter}));
     Require(MixFrame(7, 6, 6) == (std::vector<float>{0, 0, 0, 0, half, half}));
     Require(MixFrame(7, 6, 8) == (std::vector<float>{0, 0, 0, 0, 0, 0, half, half}));
-    Require(MixFrame(8, 6, 2) == (std::vector<float>{0.25f, 0}));
+    Require(MixFrame(8, 6, 2) == (std::vector<float>{Ps4Library ? 0.25f : half, 0}));
     Require(MixFrame(8, 7, 6) == (std::vector<float>{0, 0, 0, 0, 0, 0.5f}));
     Require(MixFrame(8, 7, 8) == (std::vector<float>{0, 0, 0, 0, 0, 0, 0, 0.5f}));
 
@@ -2028,6 +2033,67 @@ static void TestUnsetMatrix() {
     Require(sceNgs2SystemRender(stereoSystem, &info, 1) == SCE_NGS2_OK);
     for (std::uint32_t i = 0; i < Grain; i++) Require(out[i * 2] == (i < 3 ? 0.0f : 0.5f) && out[i * 2 + 1] == (i < 3 ? 0.0f : 0.25f));
     Require(sceNgs2SystemDestroy(stereoSystem, nullptr) == SCE_NGS2_OK);
+}
+
+static void TestDefaultMapLikePs5() {
+    const float half = 0.5f * HalfPower;
+    Require(MixFrame(6, 4, 2) == (std::vector<float>{half, 0}) && MixFrame(6, 5, 2) == (std::vector<float>{0, half}));
+    Require(MixFrame(6, 4, 1) == std::vector<float>{0.25f} && MixFrame(6, 5, 1) == std::vector<float>{0.25f});
+    for (std::uint32_t channel = 4; channel < 8; channel++) {
+        Require(MixFrame(8, channel, 2) == (channel % 2 == 0 ? std::vector<float>{half, 0} : std::vector<float>{0, half}));
+        Require(MixFrame(8, channel, 1) == std::vector<float>{half});
+    }
+
+    const auto masterFrame = [](std::uint32_t channels, std::uint32_t channel, std::uint32_t outputChannels, float fbw) {
+        const auto firstBuffer = usedBuffers;
+        const auto system = CreateSystem();
+        const auto master = Mastering(system, channels);
+        Control(master, SCE_NGS2_MASTERING_VOICE_PARAM_GAIN, Ngs2MasteringVoiceGainParam{{}, fbw, 1.0f});
+        const auto voice = Voice(CreateRack(system, SCE_NGS2_RACK_ID_SAMPLER));
+        Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_SETUP, Ngs2SamplerVoiceSetupParam{{}, {SCE_NGS2_WAVEFORM_TYPE_PCM_I16L, channels, 48000, 0, 0, 0}});
+        std::vector<std::int16_t> frames(Grain * channels, 0);
+        for (std::uint32_t i = 0; i < Grain; i++) frames[i * channels + channel] = 16384;
+        const Ngs2WaveformBlock block{0, frames.size() * sizeof(std::int16_t), 0, 0, Grain, 0, 0};
+        Control(voice, SCE_NGS2_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS, Ngs2SamplerVoiceWaveformBlocksParam{{}, frames.data(), 0, 1, &block});
+        std::vector<float> identity(channels * channels, 0.0f);
+        for (std::uint32_t i = 0; i < channels; i++) identity[i * channels + i] = 1.0f;
+        Control(voice, SCE_NGS2_VOICE_PARAM_MATRIX_LEVELS, Ngs2VoiceMatrixLevelsParam{{}, 0, channels * channels, identity.data()});
+        Control(voice, SCE_NGS2_VOICE_PARAM_PORT_MATRIX, Ngs2VoicePortMatrixParam{{}, 0, 0});
+        Patch(voice, master);
+        Event(voice, SCE_NGS2_VOICE_EVENT_PLAY);
+        std::vector<float> out(Grain * outputChannels, -1.0f);
+        const Ngs2RenderBufferInfo info{out.data(), out.size() * sizeof(float), SCE_NGS2_WAVEFORM_TYPE_PCM_F32L, outputChannels};
+        bool threw = false;
+        try {
+            Require(sceNgs2SystemRender(system, &info, 1) == SCE_NGS2_OK);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
+        ResetBuffers(firstBuffer);
+        for (std::uint32_t i = 4; !threw && i < Grain; i++) Require(std::equal(out.begin() + 3 * outputChannels, out.begin() + 4 * outputChannels, out.begin() + i * outputChannels));
+        return threw ? std::vector<float>{} : std::vector<float>(out.begin() + 3 * outputChannels, out.begin() + 4 * outputChannels);
+    };
+    Require(masterFrame(1, 0, 2, 1.0f) == (std::vector<float>{0.5f, 0}));
+    Require(masterFrame(1, 0, 6, 1.0f) == (std::vector<float>{0.5f, 0, 0, 0, 0, 0}));
+    Require(masterFrame(1, 0, 8, 1.0f) == (std::vector<float>{0.5f, 0, 0, 0, 0, 0, 0, 0}));
+    Require(masterFrame(2, 1, 1, 1.0f) == std::vector<float>{half});
+    Require(masterFrame(2, 1, 8, 1.0f) == (std::vector<float>{0, 0.5f, 0, 0, 0, 0, 0, 0}));
+    Require(masterFrame(6, 0, 1, 1.0f) == std::vector<float>{half});
+    Require(masterFrame(6, 2, 1, 1.0f) == std::vector<float>{0.5f});
+    Require(masterFrame(6, 3, 1, 1.0f) == std::vector<float>{0});
+    Require(masterFrame(6, 4, 1, 1.0f) == std::vector<float>{0.25f});
+    Require(masterFrame(6, 2, 2, 1.0f) == (std::vector<float>{half, half}));
+    Require(masterFrame(6, 3, 2, 1.0f) == (std::vector<float>{0, 0}));
+    Require(masterFrame(6, 5, 2, 1.0f) == (std::vector<float>{0, half}));
+    Require(masterFrame(6, 0, 2, 0.5f) == (std::vector<float>{0.25f, 0}));
+    Require(masterFrame(6, 3, 8, 1.0f) == (std::vector<float>{0, 0, 0, 0.5f, 0, 0, 0, 0}));
+    Require(masterFrame(6, 5, 8, 1.0f) == (std::vector<float>{0, 0, 0, 0, 0, 0.5f, 0, 0}));
+    Require(masterFrame(8, 4, 1, 1.0f) == std::vector<float>{half});
+    Require(masterFrame(8, 6, 1, 1.0f) == std::vector<float>{half});
+    Require(masterFrame(8, 7, 2, 1.0f) == (std::vector<float>{0, half}));
+    Require(masterFrame(8, 6, 6, 1.0f) == (std::vector<float>{0, 0, 0, 0, 0.5f, 0}));
+    Require(masterFrame(8, 3, 6, 1.0f) == (std::vector<float>{0, 0, 0, 0.5f, 0, 0}));
 }
 
 template <typename TSample>
@@ -2202,6 +2268,9 @@ int main() {
     TestMasteringGainClampedLikePs5();
 
     TestSystemOptionFlags();
+
+    if (!Ps4Library) TestDefaultMapLikePs5();
+
     TestUserData();
     TestPcmCallbackReset();
     TestPcmCallbackRefill();

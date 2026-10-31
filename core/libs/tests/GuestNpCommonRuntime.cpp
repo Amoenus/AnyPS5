@@ -35,6 +35,7 @@ constexpr int NpEventFlagBusy = static_cast<int>(0x8055800C);
 constexpr int NpSemaBusy = static_cast<int>(0x8055800D);
 constexpr int NpStreamBufferTooSmall = static_cast<int>(0x80559E0D);
 constexpr int NpTitleIdInvalid = static_cast<int>(0x80559E11);
+constexpr int NpUtilParseOutOfRange = static_cast<int>(0x8055060A);
 constexpr int NpTitleIdBufferTooSmall = static_cast<int>(0x80559E0D);
 constexpr int NpStreamShort = static_cast<int>(0x80559E10);
 constexpr int KernelNotPermitted = static_cast<int>(0x80020001);
@@ -1004,6 +1005,60 @@ void TestRefObjects() {
         "releasing the last reference deletes the object through the stored allocator");
 }
 
+void TestCommIdObjects() {
+    NpCommunicationId parts {};
+    std::memset(&parts, 0x77, sizeof(parts));
+    Require(sceNpUtilParseTitleId(&parts, "WXYZ54321_07") == 0 && std::memcmp(parts.data, "WXYZ54321", 9) == 0 && parts.term == '\0'
+            && parts.num == 7 && parts.dummy == '\0',
+        "sceNpUtilParseTitleId splits the id and its number");
+    Require(sceNpUtilParseTitleId(&parts, "WXYZ54321-07") == NpUtilParseOutOfRange && sceNpUtilParseTitleId(&parts, "WXYZ54321_007") == NpUtilParseOutOfRange
+            && sceNpUtilParseTitleId(&parts, "WXYZ") == NpUtilParseOutOfRange && sceNpUtilParseTitleId(&parts, nullptr) == NpUtilInvalid,
+        "sceNpUtilParseTitleId needs an underscore at index 9 and at most 12 characters");
+
+    NpCommIdObject commId {};
+    std::memset(&commId, 0x77, sizeof(commId));
+    _ZN3sce2np8NpCommIdC1Ev(&commId);
+    Require(commId.vtable != nullptr && _ZNK3sce2np8NpCommId7IsEmptyEv(&commId), "a default communication id is empty");
+    Require(_ZN3sce2np8NpCommId5ParseEPS1_PKc(&commId, "WXYZ54321_42") == 0 && commId.commId.num == 42 && !_ZNK3sce2np8NpCommId7IsEmptyEv(&commId),
+        "parsing keeps the number");
+    Require(_ZN3sce2np8NpCommId5ParseEPS1_PKc(&commId, "WXY154321_00") == NpTitleIdInvalid
+            && _ZN3sce2np8NpCommId5ParseEPS1_PKcm(&commId, "WXYZ54321_0", 11) == NpTitleIdInvalid && commId.commId.num == 42,
+        "a rejected communication id leaves the object as it was");
+    Require(_ZN3sce2np8NpCommId5ParseEPS1_PKcm(&commId, "ABCD12345_09xyz", 12) == 0 && commId.commId.num == 9
+            && std::memcmp(commId.commId.data, "ABCD12345", 9) == 0,
+        "the sized parse reads only the given length");
+
+    char text[16];
+    std::memset(text, 'x', sizeof(text));
+    Require(_ZN3sce2np8NpCommId5BuildERKS1_Pcm(&commId, text, 14) == 0 && std::strcmp(text, "ABCD12345_09") == 0 && text[13] == '\0'
+            && text[14] == 'x',
+        "building writes the id and clears the rest of the buffer");
+    Require(_ZN3sce2np8NpCommId5BuildERKS1_Pcm(&commId, text, 12) == NpUtilBufferTooSmall && text[0] == '\0', "building needs 13 bytes");
+
+    NpCommIdObject copy {};
+    _ZN3sce2np8NpCommIdC1ERKS1_(&copy, &commId);
+    NpCommunicationId plain = commId.commId;
+    plain.dummy = 'q';
+    Require(_ZNK3sce2np8NpCommId6EqualsERKS1_(&copy, &commId) && _ZN3sce2npeqERKNS0_8NpCommIdERK20SceNpCommunicationId(&copy, &plain)
+            && _ZNK3sce2np8NpCommId6EqualsEPKc(&copy, "ABCD12345_09") && !_ZNK3sce2np8NpCommId6EqualsEPKc(&copy, "ABCD12345_9"),
+        "equal communication ids compare equal, ignoring the spare byte");
+    plain.num = 10;
+    Require(_ZN3sce2npneERK20SceNpCommunicationIdRKNS0_8NpCommIdE(&plain, &copy) && !_ZNK3sce2np8NpCommId6EqualsERK20SceNpCommunicationId(&copy, &plain),
+        "the number takes part in the comparison");
+    _ZN3sce2np8NpCommIdC2ERK20SceNpCommunicationId(&copy, &plain);
+    Require(copy.commId.dummy == 'q', "constructing from a plain id copies all twelve bytes");
+    _ZN3sce2np8NpCommId5ClearEv(&copy);
+    Require(_ZNK3sce2np8NpCommId7IsEmptyEv(&copy) && copy.commId.dummy == '\0', "clearing empties the communication id");
+
+    AllocatorRecord record {};
+    NpAllocator allocator {RecordAllocate, nullptr, RecordRelease, &record};
+    auto* owned = static_cast<NpCommIdObject*>(_ZN3sce2np6ObjectnwEmR14SceNpAllocator(sizeof(NpCommIdObject), &allocator));
+    _ZN3sce2np8NpCommIdC1Ev(owned);
+    using Destructor = void APS5_VABI (*)(NpCommIdObject*);
+    reinterpret_cast<Destructor>(owned->vtable[1])(owned);
+    Require(record.released == record.block.data(), "the deleting destructor frees through the stored allocator");
+}
+
 int main() {
     TestAtomics();
     TestSemaphoresAndFlags();
@@ -1016,6 +1071,7 @@ int main() {
     TestTitleIdObjects();
     TestStreamHelpers();
     TestRefObjects();
+    TestCommIdObjects();
     TestBase64();
     TestNumbers();
     TestHexAndCopies();
