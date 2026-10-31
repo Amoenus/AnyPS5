@@ -1260,7 +1260,7 @@ int APS5_VABI _ZN3sce2np9RefObject6AddRefEv(NpRefObject* self) {
 int APS5_VABI _ZN3sce2np9RefObject7ReleaseEv(NpRefObject* self) {
     using Destroy = void(APS5_VABI*)(NpRefObject*);
     const int count = static_cast<int>(static_cast<std::uint32_t>(sceNpAtomicDec32(&self->refCount)) - 1);
-    if (count == 0) reinterpret_cast<Destroy>(self->vtable[1])(self);
+    if (count == 0) reinterpret_cast<Destroy>(const_cast<void*>(self->vtable[1]))(self);
     return count;
 }
 

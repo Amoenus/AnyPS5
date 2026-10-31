@@ -1055,7 +1055,7 @@ void TestCommIdObjects() {
     auto* owned = static_cast<NpCommIdObject*>(_ZN3sce2np6ObjectnwEmR14SceNpAllocator(sizeof(NpCommIdObject), &allocator));
     _ZN3sce2np8NpCommIdC1Ev(owned);
     using Destructor = void APS5_VABI (*)(NpCommIdObject*);
-    reinterpret_cast<Destructor>(owned->vtable[1])(owned);
+    reinterpret_cast<Destructor>(const_cast<void*>(owned->vtable[1]))(owned);
     Require(record.released == record.block.data(), "the deleting destructor frees through the stored allocator");
 }
 
