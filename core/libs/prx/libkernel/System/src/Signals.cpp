@@ -777,12 +777,26 @@ int APS5_VABI sigwaitinfo_nid_postfix(const GuestSignalSet* set, void* info) {
 int APS5_VABI sigwait_nid_postfix(const GuestSignalSet* set, int* received) {
     if (set == nullptr || received == nullptr) return 22;
     GuestSignalSet requestedSet{};
-    if (!GuestCopyIn_nid_no_patch(&requestedSet, set, sizeof(requestedSet))) return 14;
-    if (!SetHasSignal(requestedSet)) return 22;
+    const int saved = *__error_nid_postfix();
+    if (!GuestCopyIn_nid_no_patch(&requestedSet, set, sizeof(requestedSet))) {
+        *__error_nid_postfix() = saved;
+        return 14;
+    }
+    if (!SetHasSignal(requestedSet)) {
+        *__error_nid_postfix() = saved;
+        return 22;
+    }
     int guest = 0;
     const int result = WaitForPendingInSet(requestedSet, true, nullptr, &guest);
-    if (result != 0) return result;
-    if (!GuestCopyOut_nid_no_patch(received, &guest, sizeof(guest))) return 14;
+    if (result != 0) {
+        *__error_nid_postfix() = saved;
+        return result;
+    }
+    if (!GuestCopyOut_nid_no_patch(received, &guest, sizeof(guest))) {
+        *__error_nid_postfix() = saved;
+        return 14;
+    }
+    *__error_nid_postfix() = saved;
     return 0;
 }
 
