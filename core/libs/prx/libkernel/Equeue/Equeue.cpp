@@ -942,8 +942,8 @@ struct CloseObserverRegistry {
 };
 
 static CloseObserverRegistry& GetCloseObserverRegistry() {
-    static CloseObserverRegistry registry;
-    return registry;
+    static auto* registry = new CloseObserverRegistry;
+    return *registry;
 }
 
 extern "C" void RegisterDescriptorCloseObserver_nid_no_patch(void (*observer)(int descriptor)) {
