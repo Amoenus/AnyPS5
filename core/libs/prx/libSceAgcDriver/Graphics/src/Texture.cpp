@@ -436,7 +436,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                 batch = std::make_unique<CommandBatch>(context);
                 commands = batch->Handle();
             }
-            const VkImageSubresourceRange range{aspect, 0, descriptor.mipCount, 0, geometry.imageLayers};
+            const VkImageSubresourceRange range{aspect, 0, imageInfo.mipLevels, 0, geometry.imageLayers};
             VkImageMemoryBarrier toTransferDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
             toTransferDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             toTransferDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
