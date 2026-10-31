@@ -307,6 +307,7 @@ class EnvReferenceTests(unittest.TestCase):
         (root / "core" / "Fallback.hpp").write_text(
             'static constexpr const char* FALLBACK_ENV = "APS5_FALLBACK_DB";\n', encoding="utf-8")
         (root / "core" / "Fallback.cpp").write_text(
+            '#include "Fallback.hpp"\n'
             "static float gain() {\n"
             "    const char* text = std::getenv(FALLBACK_ENV);\n"
             "    return text ? 1.0f : 0.0f;\n"
@@ -314,7 +315,7 @@ class EnvReferenceTests(unittest.TestCase):
         found = env_reference.reads([root / "core"])
         self.assertIn("APS5_FALLBACK_DB", found)
         self.assertEqual(found["APS5_FALLBACK_DB"], [(
-            (root / "core" / "Fallback.cpp").as_posix(), 2, "string", "")])
+            (root / "core" / "Fallback.cpp").as_posix(), 3, "string", "")])
 
     def test_reads_ignore_a_constant_name_bound_to_two_names(self):
         root = self.fixture()
@@ -344,6 +345,7 @@ class EnvReferenceTests(unittest.TestCase):
         (root / "core" / "Fallback.hpp").write_text(
             'static constexpr const char* FALLBACK_ENV = "APS5_FALLBACK_DB";\n', encoding="utf-8")
         (root / "core" / "Fallback.cpp").write_text(
+            '#include "Fallback.hpp"\n'
             "const char* text = std::getenv(FALLBACK_ENV);\n", encoding="utf-8")
         found = env_reference.reads([root / "core"])
         self.assertIn("APS5_FALLBACK_DB", found)
