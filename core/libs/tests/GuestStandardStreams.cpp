@@ -89,6 +89,28 @@ static bool CheckFileBytes(const std::string& filename, const std::string& expec
     return false;
 }
 
+static void CheckGetcharPutchar() {
+    auto* const savedInput = __stdinp_nid_postfix;
+    auto* const savedOutput = __stdoutp_nid_postfix;
+    FileStream input(TemporaryFile::Open());
+    Require(fputc_nid_postfix('T', &input) == 'T' && fputc_nid_postfix(0xff, &input) == 0xff);
+    rewind_nid_postfix(&input);
+    __stdinp_nid_postfix = &input;
+    Require(getchar_nid_postfix() == 'T' && getchar_nid_postfix() == 0xff);
+    Require(getchar_nid_postfix() == EOF && feof_nid_postfix(&input) != 0 && ferror_nid_postfix(&input) == 0);
+    FileStream output(TemporaryFile::Open());
+    __stdoutp_nid_postfix = &output;
+    const int written[] = {putchar_nid_postfix('U'), putchar_nid_postfix(0x141), putchar_nid_postfix(-1)};
+    __stdinp_nid_postfix = savedInput;
+    __stdoutp_nid_postfix = savedOutput;
+    Require(written[0] == 'U' && written[1] == 0x41 && written[2] == 0xff);
+    rewind_nid_postfix(&output);
+    Require(fgetc_nid_postfix(&output) == 'U' && fgetc_nid_postfix(&output) == 0x41 && fgetc_nid_postfix(&output) == 0xff);
+    Require(fgetc_nid_postfix(&output) == EOF);
+    input.Close();
+    output.Close();
+}
+
 static void CheckGetcPutc() {
     FileStream stream(TemporaryFile::Open());
     Require(putc_nid_postfix('A', &stream) == 'A');
@@ -1093,6 +1115,7 @@ int main(int argc, char** argv) {
     CheckSupplementaryWideCharacters();
     CheckUnlockedStreams();
     CheckGetcPutc();
+    CheckGetcharPutchar();
     CheckUnlockedStreamLock(false);
     CheckUnlockedStreamLock(true);
     CheckUnlockedStreamLock(false, feof_unlocked_nid_postfix);

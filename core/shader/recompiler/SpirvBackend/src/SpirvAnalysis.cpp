@@ -349,6 +349,7 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
                 requirements.float64Interpolation = true;
             } else if (IsFloat64Opcode(inst->Opcode())) {
                 requirements.float64 = true;
+                requirements.float64NeedsDevice = requirements.float64NeedsDevice || !IsIntegerFloat64Opcode(inst->Opcode());
             }
             if (addressAccess != AddressAccess::None) {
                 const auto memoryIndex = inst->Flags<MemoryFlags>().index;
@@ -522,6 +523,10 @@ std::unordered_set<const IrValue*> WaveUniformValues(const IrProgram& program) {
         if (!lanes) uniform.insert(value);
     }
     return uniform;
+}
+
+bool IsIntegerFloat64Opcode(IrOpcode opcode) {
+    return opcode == IrOpcode::FPAdd64 || opcode == IrOpcode::FPMul64 || opcode == IrOpcode::ConvertF32F64 || opcode == IrOpcode::ConvertF64F32;
 }
 
 }
