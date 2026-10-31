@@ -2,6 +2,7 @@
 
 #include "SceTypes.hpp"
 #include "prx/libwebrtc/include/ExpFilter.hpp"
+#include "prx/libwebrtc/include/RtcpCommonHeader.hpp"
 
 extern "C" {
 
@@ -222,7 +223,7 @@ int APS5_VABI _ZNK6webrtc4rtcp10RtcpPacket5BuildEv_nid_postfix(void);
 int APS5_VABI _ZN6webrtc4rtcp3App5ParseERKNS0_12CommonHeaderE_nid_postfix(void);
 int APS5_VABI _ZN6webrtc4rtcp3AppC1Ev_nid_postfix(void);
 int APS5_VABI _ZN6webrtc4rtcp3AppD1Ev_nid_postfix(void);
-int APS5_VABI _ZN6webrtc4rtcp12CommonHeader5ParseEPKhm_nid_postfix(void);
+bool APS5_VABI _ZN6webrtc4rtcp12CommonHeader5ParseEPKhm_nid_postfix(WebRtcRtcpCommonHeader* header, const std::uint8_t* buffer, std::size_t size);
 int APS5_VABI libwebrtcUnknown34(void);
 int APS5_VABI _ZN6webrtc4rtcp14CompoundPacketC1Ev_nid_postfix(void);
 int APS5_VABI _ZN6webrtc4rtcp14CompoundPacketD1Ev_nid_postfix(void);
