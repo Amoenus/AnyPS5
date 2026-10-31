@@ -394,10 +394,24 @@ public:
         Require(resource.pipeBankXor == target.pipeBankXor && resource.dccAddress == target.htileAddress && resource.iterate256 == target.iterate256 && resource.dccPipeAligned == target.htilePipeAligned && !resource.dccAlphaOnMsb, "native multisample depth sampled metadata or XOR mismatch");
     }
 
+    std::string FastClearRefusal(const char* origin, std::uint64_t input0 = 0u, std::uint64_t input1 = 0u, std::uint64_t input2 = 0u) const {
+        char text[1024];
+        std::snprintf(text, sizeof(text), "native multisample depth fast-clear transition is not implemented (origin=%s depth=0x%llx extent=%ux%u samples=%u format=%u stencil=0x%llx HTILE=0x%llx sampling=%u pending=0x%x clearPending=%u clearGeneration=%llu completionQueued=%u clearBits=0x%08x initialClearBits=0x%08x stencilClear=%u iterate256=%u pipeAligned=%u depthOnly=%u stencilHtile=%u VRS=%u slices=%u/%u input0=0x%llx input1=0x%llx input2=0x%llx)",
+            origin, static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, target.samples, static_cast<unsigned>(target.format), static_cast<unsigned long long>(target.stencilAddress), static_cast<unsigned long long>(target.htileAddress),
+            static_cast<unsigned>(samplingActive), pendingClear, static_cast<unsigned>(clearPending), static_cast<unsigned long long>(clearGeneration), static_cast<unsigned>(clearCompletionQueued), std::bit_cast<std::uint32_t>(clearDepth), std::bit_cast<std::uint32_t>(target.clearDepth), static_cast<unsigned>(clearStencil),
+            static_cast<unsigned>(target.iterate256), static_cast<unsigned>(target.htilePipeAligned), static_cast<unsigned>(target.htileDepthOnly), static_cast<unsigned>(target.htileStencil), target.htileVrsEncoding, target.firstSlice, target.lastSlice,
+            static_cast<unsigned long long>(input0), static_cast<unsigned long long>(input1), static_cast<unsigned long long>(input2));
+        return text;
+    }
+
+    void RequireNoPendingFastClear(const char* origin) const {
+        if (pendingClear != 0u) Require(false, FastClearRefusal(origin));
+    }
+
     void ApplyFastClear() {
         if (samplingActive) {
             CheckCurrent();
-            Require(pendingClear == 0u, "native multisample depth fast-clear transition is not implemented");
+            RequireNoPendingFastClear("apply-pending");
         }
         const auto aspects = pendingClear & (VK_IMAGE_ASPECT_DEPTH_BIT | (target.stencilAddress != 0 ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u));
         pendingClear = 0;
@@ -2337,7 +2351,7 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, 
         if (!tookStorage) surface->SyncFromMemory(mirrorResource(target), true);
     }
     if (cleared && (!created || inherits)) {
-        if (target.samples != 1u) surface->sampling.Refuse("native multisample depth fast-clear transition is not implemented");
+        if (target.samples != 1u) surface->sampling.Refuse(surface->FastClearRefusal("bind-cleared", created, inherits, htileCleared).c_str());
         if (!created) surface->NoteHtileClear(VK_IMAGE_ASPECT_DEPTH_BIT);
     }
     if (!created) surface->NoteHtileClear(htileCleared);
@@ -2686,7 +2700,7 @@ bool NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::siz
             continue;
         }
         if (!HtileFillCovers(surface->target.htileAddress, surface->target.extent, htileAddress, bytes)) continue;
-        if (surface->target.samples != 1u) surface->sampling.Refuse("native multisample depth fast-clear transition is not implemented");
+        if (surface->target.samples != 1u) surface->sampling.Refuse(surface->FastClearRefusal("htile-cover", htileAddress, bytes, nativeBytes).c_str());
         surface->NoteHtileClear(VK_IMAGE_ASPECT_DEPTH_BIT);
         existing = true;
     }
@@ -2789,7 +2803,7 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
         } else {
             found->CheckCurrent();
             found->CheckResource(resource);
-            Require(found->pendingClear == 0u, "native multisample depth fast-clear transition is not implemented");
+            found->RequireNoPendingFastClear("sample-pending");
         }
         RecordMemoryBarrier(context, recorder->Commands(), VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
         Recorder::CountBarriers(Recorder::CommandClass::Draw, 1);
