@@ -1424,19 +1424,22 @@ void verifyTypeZeroImageMaterialization() {
     static std::uint64_t lastPendingAddr = 0;
     static bool gateSecondWaitOnSrtRoot = false;
 
+    static bool settledRecord0 = false;
+    static bool knownRecord0 = false;
+
     AgcDriver::GuestMemory::SetFlushHook([](std::uint64_t address, std::size_t bytes) {
         if (phase == 1u && !flushed && address < syncEnd && syncBegin < address + bytes) {
             flushed = true;
             ++waits;
             std::memcpy(reinterpret_cast<void*>(record0Addr), pendingT0.data(), sizeof(pendingT0));
             if (record1Addr != 0u) std::memcpy(reinterpret_cast<void*>(record1Addr), pendingT1.data(), sizeof(pendingT1));
-        } else if (phase == 2u || phase == 3u) {
+        } else if (phase == 2u || phase == 3u || phase == 6u) {
             if (waits == 0u && address < record1Addr + 32u && record1Addr + 12u < address + bytes) {
                 ++waits;
                 std::memcpy(reinterpret_cast<void*>(record1Addr), pendingT1.data(), sizeof(pendingT1));
             } else if ((waits == 1u || (phase == 3u && waits >= 1u)) && address < record2Addr + 32u && record2Addr + 12u < address + bytes) {
                 ++waits;
-                std::memcpy(reinterpret_cast<void*>(record0Addr), pendingT0.data(), sizeof(pendingT0));
+                if (phase != 6u) std::memcpy(reinterpret_cast<void*>(record0Addr), pendingT0.data(), sizeof(pendingT0));
                 std::memcpy(reinterpret_cast<void*>(record2Addr), pendingT2.data(), sizeof(pendingT2));
             } else if (phase == 2u && waits == 2u && address < record0Addr + 32u && record0Addr < address + bytes) {
                 ++forcedHookCalls;
@@ -1484,6 +1487,24 @@ void verifyTypeZeroImageMaterialization() {
             if (address >= record1Addr && address + bytes <= record1Addr + 32u) return Pending::None;
             if ((!gateSecondWaitOnSrtRoot || srtRootReads >= 2u) && address >= record2Addr + 12u && address < record2Addr + 32u && bytes == sizeof(std::uint32_t)) return Pending::Sync;
             return Pending::Raw;
+        }
+        if (phase == 6u && waits == 2u) {
+            if (settledRecord0) return Pending::None;
+            if (address >= record1Addr && address < record1Addr + 32u) {
+                settledRecord0 = true;
+                std::memcpy(reinterpret_cast<void*>(record0Addr), pendingT0.data(), sizeof(pendingT0));
+                return Pending::None;
+            }
+            if (address >= record0Addr && address + bytes <= record0Addr + 32u) {
+                if (knownRecord0) {
+                    if (known.size() == bytes) {
+                        std::memcpy(known.data(), reinterpret_cast<const std::byte*>(record0Addr) + (address - record0Addr), bytes);
+                    }
+                    return Pending::KnownValue;
+                }
+                return Pending::Raw;
+            }
+            return Pending::None;
         }
         if (phase == 2u && waits == 2u) {
             if (gateSecondWaitOnSrtRoot &&
@@ -1703,7 +1724,80 @@ void verifyTypeZeroImageMaterialization() {
             return std::equal(oldT.begin(), oldT.end(), value.dwords.begin());
         }), "forced pass exception scope: a normal pass over Raw words after a throwing forced attempt waited on the hook or bumped rawInvalidations");
     }
+    for (const bool useKnown : {false, true}) {
+        gateSecondWaitOnSrtRoot = true;
+        knownRecord0 = useKnown;
+        settledRecord0 = false;
+        const std::uint32_t stride = 48u;
+        const std::size_t stepWords = stride / sizeof(std::uint32_t);
+        std::fill(srt.begin(), srt.end(), 0u);
+        std::copy(oldT.begin(), oldT.end(), srt.begin());
+        std::copy(oldT.begin(), oldT.end(), srt.begin() + stepWords);
+        std::copy(oldT.begin(), oldT.end(), srt.begin() + 2u * stepWords);
+        fillWholeSrt(srt.data() + 512u, srt.data(), stride, 3u);
+        RecompileRequest settleReq = wideTableReq;
+        settleReq.context.userData = inPageUserData;
+        phase = 6u;
+        waits = 0u;
+        srtRootReads = 0u;
+        lastPendingAddr = 0u;
+        flushed = false;
+        record0Addr = srtAddress;
+        record1Addr = srtAddress + stride;
+        record2Addr = srtAddress + 2u * stride;
+        pendingT0 = newT;
+        pendingT1 = thirdT;
+        pendingT2 = newT;
+        AgcDriver::ShaderMemory settleMemory({}, multiPending, nullptr, hookWaits);
+        const auto settleCapture = settleMemory.Capture(settleReq);
+        const auto& col = settleCapture->snapshot.tables.tables.at(0);
+        require(settledRecord0 && waits == 2u && col.keys == 3u, "settled force-sync test setup did not reach attempt 2 with settled record0");
+        require(col.words.at(col.codes.at(0)).dwords == newT && col.words.at(col.codes.at(1)).dwords == thirdT && col.words.at(col.codes.at(2)).dwords == newT,
+                useKnown ? "settled force-sync KnownValue: entering SrtDescriptorForceSync did not invalidate cached KnownValue words whose write settled before attempt 2"
+                         : "settled force-sync Raw: entering SrtDescriptorForceSync did not invalidate cached Raw words whose write settled before attempt 2");
+    }
     gateSecondWaitOnSrtRoot = false;
+    knownRecord0 = false;
+
+    {
+        srt.fill(0u);
+        std::copy(oldT.begin(), oldT.end(), srt.begin());
+        std::copy(outputV.begin(), outputV.end(), srt.begin() + 16u);
+        srt[20] = 1u;
+        phase = 0u;
+        waits = 0u;
+        flushed = false;
+        AgcDriver::ShaderMemory nestedScopeMemory({}, multiPending, nullptr, hookWaits);
+        static_cast<void>(nestedScopeMemory.Capture(request));
+        const auto before = AgcDriver::ShaderMemory::descriptorScope(&nestedScopeMemory, 0u);
+        const auto firstEnter = AgcDriver::ShaderMemory::descriptorScope(&nestedScopeMemory, SrtDescriptorForceSync);
+        require(firstEnter == before + 1u, "nested SrtDescriptorForceSync: 0->1 transition with cached Raw words did not increment rawInvalidations once");
+        static_cast<void>(nestedScopeMemory.Capture(request));
+        const auto afterForcedRead = AgcDriver::ShaderMemory::descriptorScope(&nestedScopeMemory, 0u);
+        const auto secondEnter = AgcDriver::ShaderMemory::descriptorScope(&nestedScopeMemory, SrtDescriptorForceSync);
+        const auto firstExit = AgcDriver::ShaderMemory::descriptorScope(&nestedScopeMemory, SrtDescriptorEndForceSync);
+        const auto secondExit = AgcDriver::ShaderMemory::descriptorScope(&nestedScopeMemory, SrtDescriptorEndForceSync);
+        require(afterForcedRead == firstEnter && secondEnter == firstEnter && firstExit == firstEnter && secondExit == firstEnter,
+                "nested SrtDescriptorForceSync: nested 1->2 transition or scope exit altered rawInvalidations");
+    }
+
+    {
+        srt.fill(0u);
+        std::copy(oldT.begin(), oldT.end(), srt.begin());
+        std::copy(outputV.begin(), outputV.end(), srt.begin() + 16u);
+        srt[20] = 1u;
+        phase = 1u;
+        waits = 0u;
+        flushed = true;
+        AgcDriver::ShaderMemory settledScopeMemory({}, multiPending, nullptr, hookWaits);
+        const auto settledCapture = settledScopeMemory.Capture(request);
+        const auto before = AgcDriver::ShaderMemory::descriptorScope(&settledScopeMemory, 0u);
+        const auto entered = AgcDriver::ShaderMemory::descriptorScope(&settledScopeMemory, SrtDescriptorForceSync);
+        const auto exited = AgcDriver::ShaderMemory::descriptorScope(&settledScopeMemory, SrtDescriptorEndForceSync);
+        require(!settledCapture->snapshot.buffers.empty() && entered == before && exited == before,
+                "settled SrtDescriptorForceSync: a 0->1 transition over cached words read with no pending write incremented rawInvalidations");
+    }
+
 }
 
 void verifyOutOfRangeConstantReads() {
