@@ -124,8 +124,8 @@ std::size_t ImagePagesSize();
 // folded at report time; a finished thread's totals move to `retired`. Nothing is counted without
 // the profile switch (the counters are only ever printed under it).
 // Debug aid: APS5_SHARED_MEMORY_COUNTERS=1 accumulates into one shared set with atomic RMWs as before.
-enum MemoryCounterKind { CounterRead, CounterCompare, CounterWrite, CounterChangedWrite, CounterCollect, CounterVerify, CounterQuery, MemoryCounterCount };
-constexpr const char* MemoryCounterNames[MemoryCounterCount] = {"read", "compare", "write", "write-changed", "collect", "verify", "query"};
+enum MemoryCounterKind { CounterRead, CounterCompare, CounterWrite, CounterChangedWrite, CounterCollect, CounterVerify, CounterQuery, CounterCollectOrdinary, CounterCollectUncached, CounterCollectHints, MemoryCounterCount };
+constexpr const char* MemoryCounterNames[MemoryCounterCount] = {"read", "compare", "write", "write-changed", "collect", "verify", "query", "collect-ordinary", "collect-uncached", "collect-hints"};
 
 struct MemoryCounter {
     std::atomic<std::uint64_t> calls{0};
@@ -321,11 +321,13 @@ bool MemoryProfiled() {
 
 class TimedAccess {
 public:
-    TimedAccess(MemoryCounterKind kind, std::uint64_t bytes) : kind(kind), bytes(bytes), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    TimedAccess(MemoryCounterKind kind, std::uint64_t bytes, MemoryCounterKind detail = MemoryCounterCount) : kind(kind), detail(detail), bytes(bytes), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
     ~TimedAccess() {
         if (!MemoryProfiled()) return;
         const auto now = std::chrono::steady_clock::now();
-        CounterFor(kind).Add(bytes, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count()), SharedMemoryCounters());
+        const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count());
+        CounterFor(kind).Add(bytes, elapsed, SharedMemoryCounters());
+        if (detail != MemoryCounterCount) CounterFor(detail).Add(bytes, elapsed, SharedMemoryCounters());
         auto& state = Profile();
         const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         auto last = state.lastReport.load();
@@ -358,6 +360,7 @@ public:
     }
 private:
     MemoryCounterKind kind;
+    MemoryCounterKind detail;
     std::uint64_t bytes;
     std::chrono::steady_clock::time_point start;
 };
@@ -1635,7 +1638,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
             }
         }
     }
-    const TimedAccess timed(CounterCollect, bytes);
+    const TimedAccess timed(CounterCollect, bytes, useMemo ? CounterCollectOrdinary : CounterCollectUncached);
 #ifndef _WIN32
     if (useMemo && HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get() != 0 && bytes <= WriteBlockBytes) {
         const auto begin = first & ~(WriteBlockBytes - 1);
@@ -2215,7 +2218,7 @@ std::uint64_t UntrackedHint(std::uint64_t address, std::size_t bytes) {
     if (memoized) {
         collectMemoHits.fetch_add(1, std::memory_order_relaxed);
     } else {
-        const TimedAccess timed(CounterCollect, bytes);
+        const TimedAccess timed(CounterCollect, bytes, CounterCollectHints);
         if (!walkHints(tracker, first, stop)) return 0;
         if (collectMemoEnabled()) threadHintMemo.entries[threadHintMemo.next++ % threadHintMemo.entries.size()] = {first, stop, epoch, unwatched, mapping};
     }
