@@ -1,9 +1,10 @@
 import argparse
 import bisect
 import functools
+import posixpath
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nid_names import CPP_TOKEN
@@ -151,11 +152,69 @@ def constant_forms(prefixes=PREFIXES):
     )
 
 
-def identifier_reads(code, constants, prefixes=PREFIXES):
+SHADOW = re.compile(r'(?<![\w.:>])[A-Za-z_][\w:]*(?:\s*[*&]+\s*|\s+)(?:const\s+)?(?P<name>[A-Za-z_]\w*)\s*(?P<after>[=;,)\[{(])')
+INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*"([^"]+)"', re.M)
+
+
+def literal_start(prefixes=PREFIXES):
+    return re.compile(r'=\s*(?:u8|u|U|L)?"(?:' + "|".join(re.escape(prefix) for prefix in prefixes) + ")")
+
+
+def uncommented(text):
+    return CPP_TOKEN.sub(lambda token: " " * len(token.group()) if token.group("comment") else token.group(), text)
+
+
+def declared_constants(commentless, prefixes=PREFIXES):
+    found = {}
+    for match in constant_forms(tuple(prefixes))[0].finditer(commentless):
+        found.setdefault(match.group(1), set()).add(match.group("name"))
+    return found
+
+
+def shadowed_names(commentless, prefixes=PREFIXES):
+    literal = literal_start(prefixes)
+    names = set()
+    for line in commentless.split("\n"):
+        if "constexpr" in line:
+            continue
+        for match in SHADOW.finditer(line):
+            if match.group("after") == "=" and literal.match(line, match.start("after")):
+                continue
+            names.add(match.group("name"))
+    return names
+
+
+def visible_constants(path, sources, commentless, declared):
+    by_name = {}
+    for other in sources:
+        by_name.setdefault(other.name, []).append(other)
+    full = {other.as_posix(): other for other in sources}
+    seen, pending, found = set(), [path], {}
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for ident, names in declared[current].items():
+            found.setdefault(ident, set()).update(names)
+        for include in INCLUDE.findall(commentless[current]):
+            relative = posixpath.normpath(posixpath.join(current.parent.as_posix(), include))
+            if relative in full:
+                pending.append(full[relative])
+            else:
+                pending.extend(other for other in by_name.get(PurePosixPath(include).name, [])
+                               if other.as_posix().endswith("/" + include) or other.as_posix() == include)
+    return found
+
+
+def identifier_reads(code, constants, shadowed, prefixes=PREFIXES):
     _, reader_form = constant_forms(tuple(prefixes))
     out = []
     for match in reader_form.finditer(code):
-        names = constants.get(match.group("ident"), set())
+        ident = match.group("ident")
+        if ident in shadowed:
+            continue
+        names = constants.get(ident, set())
         if len(names) == 1:
             out.append((match.group(1), _NamedRead(match, next(iter(names)))))
     return out
@@ -171,15 +230,13 @@ def reads(roots, prefixes=PREFIXES):
             except (OSError, UnicodeDecodeError) as error:
                 raise ValueError(f"cannot read {path.as_posix()}: {error}") from error
             sources.append((path, text))
-    constant_form, _ = constant_forms(tuple(prefixes))
-    constants = {}
-    for _, text in sources:
-        for match in constant_form.finditer(text):
-            constants.setdefault(match.group(1), set()).add(match.group("name"))
+    commentless = {path: uncommented(text) for path, text in sources}
+    declared = {path: declared_constants(commentless[path], prefixes) for path, _ in sources}
     for path, text in sources:
+        constants = visible_constants(path, [item for item, _ in sources], commentless, declared)
         matches = line_reads(text, prefixes)
         code = CPP_TOKEN.sub(lambda token: token.group() if token.group("code") else " " * len(token.group()), text)
-        matches += identifier_reads(code, constants, prefixes)
+        matches += identifier_reads(code, constants, shadowed_names(commentless[path], prefixes), prefixes)
         if not matches:
             continue
         starts = [0] + [match.end() for match in re.finditer("\n", text)]
