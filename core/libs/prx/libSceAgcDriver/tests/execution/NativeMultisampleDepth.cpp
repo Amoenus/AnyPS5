@@ -908,7 +908,7 @@ void CheckClearDispatch() {
     }
 }
 
-void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing, std::optional<bool> depthOnlyOverride, ClearFault fault, std::unique_lock<AgcDriver::GuestMemory::GpuMutexType>& gpuLock, bool iterate256 = true) {
+void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments, bool one, bool clearing, std::optional<bool> depthOnlyOverride, ClearFault fault, std::unique_lock<AgcDriver::GuestMemory::GpuMutexType>& gpuLock, bool iterate256 = true, bool initialOwner = false) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
     TargetMemory memory(bytes), metadata(65536u, fault == ClearFault::DriverDispatch || fault == ClearFault::DriverBufferDispatch);
@@ -931,6 +931,14 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
         Context context;
         ~Cleanup() { recorder.Sync(); ClearCachedTextures(context.device); ClearDepthSurfaces(context.device); }
     } cleanup{recorder, context};
+    if (initialOwner) {
+        auto owner = target;
+        owner.samples = 1u;
+        owner.htileAddress = 0u;
+        owner.clearDepth = 0.75f;
+        Require(DepthSurfaceView(context, owner) != VK_NULL_HANDLE, "initial depth owner was not created");
+        Require(!NoteHtileDepthClear(target.htileAddress, metadataBytes, metadataBytes), "unbound initial HTILE clear became a completion candidate");
+    }
     if (!one) {
         metadata.Data()[metadataBytes - 1u] = std::byte{0x7f};
         QueueTargetByteWrite(context, recorder, target.htileAddress + metadataBytes - 1u, std::byte{0});
@@ -1576,6 +1584,19 @@ int main(int argc, char** argv) {
                 TargetRefuses([&] { CheckDepthTarget(context, VK_FORMAT_D32_SFLOAT, 4u, false, true, false, fault, lock); }, expected);
                 std::printf("Native depth clear fault=%u refused: %s\n", static_cast<std::uint32_t>(fault), expected);
             }
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--initial-owner") {
+            std::uint32_t checked = 0u, unavailable = 0u;
+            for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) {
+                for (const auto samples : {2u, 4u, 8u}) {
+                    if (!DepthSupported(context, format, samples)) { unavailable += 4u; continue; }
+                    for (const bool depthOnly : {false, true}) {
+                        for (const bool one : {false, true}) { CheckDepthTarget(context, format, samples, one, false, depthOnly, ClearFault::None, lock, true, true); ++checked; }
+                    }
+                }
+            }
+            std::printf("Native depth initial owner cases checked=%u unavailable=%u\n", checked, unavailable);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--clears") {
