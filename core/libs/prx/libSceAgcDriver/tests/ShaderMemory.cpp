@@ -1972,6 +1972,69 @@ void verifyTypeZeroImageMaterialization() {
         };
         constexpr std::uint64_t RetryBase = 0x10000u;
         const std::array<std::uint32_t, 2> retryUserData{static_cast<std::uint32_t>(RetryBase), 0u};
+        IrProgram retryProgram;
+        describe(retryProgram);
+        const auto retryPlan = ResourceMaterializer{}.ExtractPlan(retryProgram);
+        struct RetryMemory {
+            std::array<std::uint32_t, 4> words{};
+            std::array<std::uint32_t, 4> settled{};
+            std::uint64_t epoch = 0u;
+            std::uint32_t depth = 0u;
+            std::uint32_t forcedEntries = 0u;
+            std::uint32_t speculativeReads = 0u;
+            std::uint32_t forcedReads = 0u;
+            bool waitOnLastWord = false;
+        };
+        auto tornV = outputV;
+        tornV[3] = 0x50000facu;
+        std::uint32_t passReads = 0u;
+        for (const bool waitOnLastWord : {false, true}) {
+            RetryMemory state;
+            state.words = tornV;
+            state.settled = outputV;
+            state.waitOnLastWord = waitOnLastWord;
+            SrtRuntime retryRuntime{retryUserData};
+            retryRuntime.userContext = &state;
+            retryRuntime.readMemory = +[](void* ctx, std::uint64_t address, std::uint32_t* value) {
+                auto& self = *static_cast<RetryMemory*>(ctx);
+                if (address < RetryBase || address >= RetryBase + sizeof(self.words)) return false;
+                const auto index = static_cast<std::size_t>((address - RetryBase) / sizeof(std::uint32_t));
+                ++(self.depth == 0u ? self.speculativeReads : self.forcedReads);
+                if (self.waitOnLastWord && self.depth == 0u && index + 1u == self.words.size() && self.words != self.settled) {
+                    self.words = self.settled;
+                    ++self.epoch;
+                    throw std::runtime_error("descriptor read waited on a GPU write and then faulted");
+                }
+                *value = self.words[index];
+                return true;
+            };
+            retryRuntime.readSpecializationMemory = retryRuntime.readMemory;
+            retryRuntime.descriptorScope = +[](void* ctx, std::size_t bytes) -> std::uint64_t {
+                auto& self = *static_cast<RetryMemory*>(ctx);
+                if (bytes == SrtDescriptorForceSync) {
+                    if (self.depth++ == 0u) {
+                        ++self.forcedEntries;
+                        self.words = self.settled;
+                    }
+                } else if (bytes == SrtDescriptorEndForceSync) {
+                    --self.depth;
+                }
+                return self.epoch;
+            };
+            ResourceSnapshot retrySnapshot;
+            ResourceMaterializer{}.Materialize(retryPlan, retryRuntime, retrySnapshot);
+            require(!retrySnapshot.buffers.empty() && std::equal(outputV.begin(), outputV.end(), retrySnapshot.buffers[0].dwords.begin()),
+                    "descriptor retry policy: Materialize did not settle on the valid V#");
+            if (!waitOnLastWord) {
+                passReads = state.forcedReads;
+                require(passReads != 0u && state.forcedEntries == 1u && state.speculativeReads == passReads,
+                        "descriptor retry policy: a failed speculative pass that changed no epoch was repeated speculatively instead of going straight to SrtDescriptorForceSync");
+            } else {
+                require(state.forcedEntries == 0u && state.speculativeReads == 2u * passReads,
+                        "descriptor retry policy: a speculative pass that faulted after its read moved the epoch forced SrtDescriptorForceSync instead of retrying speculatively over the refreshed words");
+            }
+        }
+
         IrProgram fillProgram;
         describe(fillProgram);
         auto& uniform = fillProgram.Resources().uniformFill;

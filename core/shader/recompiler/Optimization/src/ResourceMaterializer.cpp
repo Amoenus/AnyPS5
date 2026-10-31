@@ -2661,6 +2661,7 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
                 throw;
             } catch (const std::runtime_error&) {
                 if (runtime.descriptorScope == nullptr || attempt == 2u) throw;
+                if (runtime.descriptorScope(runtime.userContext, 0u) == beforeSnapshot) attempt = 1u;
             }
         }
         if (!completed) throw std::runtime_error("runtime resource snapshot did not stabilize");
