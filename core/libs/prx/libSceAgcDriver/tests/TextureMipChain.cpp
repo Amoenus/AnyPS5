@@ -411,7 +411,7 @@ void TestClearedMipRanges(const Context& context, TextureDetiler& detiler) {
         const auto [image, info] = *mock.images.begin();
         Require(info.mipLevels == expected, "a sampled GPU clear allocated the wrong mip count");
         Require(mock.clears.size() == 1u && mock.clears.front().first == image, "a sampled GPU clear did not clear its image exactly once");
-        Require(mock.uploads.empty(), "a sampled GPU clear uploaded guest texels");
+        Require(mock.copies.empty(), "a sampled GPU clear uploaded guest texels");
         checkInsideImage(image, info, "a GPU-cleared sampled texture");
         Require(mock.clears.front().second.baseMipLevel == 0u && mock.clears.front().second.levelCount == expected && mock.clears.front().second.baseArrayLayer == 0u && mock.clears.front().second.layerCount == 4u, "a sampled GPU clear did not cover every allocated mip and layer");
     }
