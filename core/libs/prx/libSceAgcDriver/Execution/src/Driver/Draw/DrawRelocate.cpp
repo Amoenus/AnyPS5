@@ -128,7 +128,7 @@ void Driver::tagUserValueWords(DispatchVariant& variant, const DrawProgram& prog
         variant.valueWords |= std::uint64_t {1} << index;
         variant.valueSlots.push_back({index, binding, word});
         const auto records = program.userData[index + 2];
-        if (records != 0 && !taken(index + 2) && !elsewhere(index + 2, records)) {
+        if (records != 0 && !taken(index + 2) && bound(records) == 1 && !elsewhere(index + 2, records)) {
             variant.valueWords |= std::uint64_t {1} << (index + 2);
             variant.valueSlots.push_back({index + 2, binding, word + 2});
         }
