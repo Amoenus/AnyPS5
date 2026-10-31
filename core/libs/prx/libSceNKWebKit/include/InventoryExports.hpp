@@ -2788,7 +2788,7 @@ int APS5_VABI _ZN3WTF31sixCharacterHashStringToIntegerEPKc();
 int APS5_VABI _ZN3WTF33indexOfBestMatchingLanguageInListERKNS_6StringERKNS_6VectorIS0_Lm0ENS_15CrashOnOverflowELm16ENS_10FastMallocEEERb();
 int APS5_VABI _ZN3WTF37canCurrentThreadAccessThreadLocalDataERNS_6ThreadE();
 int APS5_VABI _ZN3WTF37parseDateFromNullTerminatedCharactersEPKc();
-int APS5_VABI _ZN3WTF37parseDateFromNullTerminatedCharactersEPKcRb();
+double APS5_VABI _ZN3WTF37parseDateFromNullTerminatedCharactersEPKcRb(const char* dateString, bool* isLocalTime);
 int APS5_VABI _ZN3WTF3ICU12majorVersionEv();
 int APS5_VABI _ZN3WTF3ICU12minorVersionEv();
 int APS5_VABI _ZN3WTF3URL10invalidateEv();
