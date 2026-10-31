@@ -4643,6 +4643,25 @@ void StorageTexture::FlushAllPending(const char* reason) {
     static_cast<void>(FlushPending(0, std::numeric_limits<std::size_t>::max(), nullptr, reason));
 }
 
+bool StorageTexture::FlushAllPendingUntil(const char* reason, const std::function<bool()>& stop) {
+    std::optional<PublishOnCpuScope> onCpu;
+    if (reason != nullptr && std::strcmp(reason, "idle") == 0) onCpu.emplace();
+    std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
+    {
+        auto& pending = Pending();
+        std::lock_guard lock(pending.mutex);
+        for (const auto* texture : pending.textures) ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
+    }
+    constexpr std::size_t piece = std::size_t{4} << 20u;
+    for (const auto& [address, bytes] : ranges) {
+        for (std::size_t offset = 0; offset < bytes; offset += piece) {
+            if (stop()) return false;
+            static_cast<void>(FlushPending(address + offset, std::min(piece, bytes - offset), nullptr, reason));
+        }
+    }
+    return true;
+}
+
 std::size_t StorageTexture::StoreSmallPending(const char* reason) {
     std::vector<std::shared_ptr<StorageTexture>> small;
     {
