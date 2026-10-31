@@ -71,12 +71,10 @@ std::optional<std::string> sessionLogin;
 
 extern "C" int SetLogin_nid_no_patch(const char* name) {
     if (name == nullptr) return 14;
-    std::string copy;
-    const int error = CopyGuestString_nid_no_patch(name, MaxLoginName, copy);
-    if (error == 14) return 14;
-    if (error != 0 || copy.size() >= MaxLoginName) return 22;
+    const std::size_t length = ::strnlen(name, MaxLoginName);
+    if (length == MaxLoginName) return 22;
     std::lock_guard lock(sessionMutex);
-    sessionLogin.emplace(std::move(copy));
+    sessionLogin.emplace(name, length);
     return 0;
 }
 
@@ -87,17 +85,25 @@ extern "C" int APS5_VABI getlogin_r_nid_postfix(char* output, int size) {
         std::lock_guard lock(sessionMutex);
         if (sessionLogin) {
             if (sessionLogin->size() + 1 > static_cast<std::size_t>(size)) return 34;
-            if (!GuestCopyOut_nid_no_patch(output, sessionLogin->c_str(), sessionLogin->size() + 1)) return 14;
-            return 0;
+            const int saved = errno;
+            const bool copied = GuestCopyOut_nid_no_patch(output, sessionLogin->c_str(), sessionLogin->size() + 1);
+            errno = saved;
+            return copied ? 0 : 14;
         }
     }
     char buffer[512]{};
     const int saved = errno;
     const int result = ReadLogin(buffer, static_cast<int>(sizeof(buffer)));
-    errno = saved;
-    if (result != 0) return result;
+    if (result != 0) {
+        errno = saved;
+        return result;
+    }
     const std::size_t length = std::strlen(buffer) + 1;
-    if (length > static_cast<std::size_t>(size)) return 34;
-    if (!GuestCopyOut_nid_no_patch(output, buffer, length)) return 14;
-    return 0;
+    if (length > static_cast<std::size_t>(size)) {
+        errno = saved;
+        return 34;
+    }
+    const bool copied = GuestCopyOut_nid_no_patch(output, buffer, length);
+    errno = saved;
+    return copied ? 0 : 14;
 }
