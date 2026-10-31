@@ -1,4 +1,4 @@
-#include "prx/libSceAudiodec/include/Api.hpp"
+#include "prx/libSceAudiodec.native/include/Api.hpp"
 #include "SceTypes.hpp"
 
 #include <cstdint>
@@ -20,12 +20,12 @@ using GetAjmContextFn = int (APS5_VABI*)(const void*, std::uint32_t*, std::uint3
 
 GetAjmContextFn Resolve() {
 #ifdef _WIN32
-    void* symbol = reinterpret_cast<void*>(GetProcAddress(LoadLibraryA("libSceAudiodec.prx"), "sceAudiodecGetAjmContext"));
+    void* symbol = reinterpret_cast<void*>(GetProcAddress(LoadLibraryA("libSceAudiodec.native.prx"), "sceAudiodecGetAjmContext"));
 #else
     void* symbol = dlsym(RTLD_DEFAULT, "sceAudiodecGetAjmContext");
 #endif
     if (!symbol) {
-        std::fprintf(stderr, "sceAudiodecGetAjmContext is not exported by libSceAudiodec\n");
+        std::fprintf(stderr, "sceAudiodecGetAjmContext is not exported by libSceAudiodec.native\n");
         std::abort();
     }
     return reinterpret_cast<GetAjmContextFn>(symbol);
