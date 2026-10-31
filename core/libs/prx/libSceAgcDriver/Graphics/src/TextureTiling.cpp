@@ -416,10 +416,6 @@ ThickLayout ComputeThickLayout(TextureTileMode tileMode, std::uint32_t format, s
     return result;
 }
 
-std::uint32_t FullMipChainLevels(std::uint32_t width, std::uint32_t height, std::uint32_t depth) {
-    return static_cast<std::uint32_t>(std::bit_width(std::max({width, height, depth, 1u})));
-}
-
 std::vector<TileMipLayout> ComputeGcnMipLayout(TextureTileMode tileMode, std::uint32_t format, std::uint32_t width, std::uint32_t height, std::uint32_t pitch, bool pow2Pad, std::uint32_t mipCount, bool linearGeneral, std::uint32_t layers) {
     Require(layers != 0, "a PS4 surface has at least one slice");
     Require(!linearGeneral || tileMode == TextureTileMode::kLinear, "LINEAR_GENERAL is a linear layout");
@@ -577,12 +573,17 @@ SurfaceGeometry describeGcnSurface(const GuestTextureResource& descriptor) {
     geometry.levelMajor = geometry.layers > 1u && descriptor.mipCount > 1u;
     geometry.mips = ComputeGcnMipLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, descriptor.gcnPitch, descriptor.gcnPow2Pad, descriptor.mipCount, descriptor.gcnLinearGeneral, geometry.layers);
     geometry.imageLayers = geometry.layers;
+    geometry.imageLevels = std::min(descriptor.mipCount, FullMipChainLevels(descriptor.width, descriptor.height, 1u));
     geometry.guestBytes = geometry.mips.back().tiledOffset + geometry.mips.back().tiledSize * geometry.layers;
     geometry.layerBytes = geometry.guestBytes / geometry.layers;
     for (const auto& mip : geometry.mips) geometry.sliceLinearBytes = std::max(geometry.sliceLinearBytes, mip.linearOffset + mip.linearSize);
     return geometry;
 }
 
+}
+
+std::uint32_t FullMipChainLevels(std::uint32_t width, std::uint32_t height, std::uint32_t depth) {
+    return static_cast<std::uint32_t>(std::bit_width(std::max({width, height, depth, 1u})));
 }
 
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor) {
