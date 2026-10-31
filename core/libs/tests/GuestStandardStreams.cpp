@@ -316,6 +316,18 @@ static void CheckFgetsSize() {
     stream.Close();
 }
 
+static void CheckFgetsSizeOne() {
+    FileStream stream(TemporaryFile::Open());
+    Require(fwrite_nid_postfix("line\n", 1, 5, &stream) == 5);
+    rewind_nid_postfix(&stream);
+    char buffer[8];
+    std::memset(buffer, '!', sizeof(buffer));
+    Require(fgets_nid_postfix(buffer, 1, &stream) == buffer && buffer[0] == '\0' && buffer[1] == '!');
+    Require(ftello_nid_postfix(&stream) == 0 && ferror_nid_postfix(&stream) == 0 && feof_nid_postfix(&stream) == 0);
+    Require(fgets_nid_postfix(buffer, sizeof(buffer), &stream) == buffer && std::strcmp(buffer, "line\n") == 0);
+    stream.Close();
+}
+
 static void CheckSupplementaryWideCharacters() {
     const char16_t text[] = u"A\U0001F600\n";
     FileStream stream(TemporaryFile::Open());
@@ -1112,6 +1124,7 @@ int main(int argc, char** argv) {
     CheckRewind();
     CheckUngetcEndOfFile();
     CheckFgetsSize();
+    CheckFgetsSizeOne();
     CheckSupplementaryWideCharacters();
     CheckUnlockedStreams();
     CheckGetcPutc();

@@ -335,6 +335,7 @@ std::unordered_map<const IrValue*, std::uint32_t> FunctionLdsLaneAddresses(const
 }
 
 SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
+    bool storageWrites = false;
     SpirvRequirements requirements {};
     for (const IrBlock* block : program.BlockOrder()) {
         for (const IrValue* inst : block->Instructions()) {
@@ -383,7 +384,13 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
                     requirements.subgroupLocalInvocationId = requirements.subgroupLocalInvocationId || program.Resources().stage == IrShaderStage::Compute;
                 }
             }
+            const auto bufferAccess = BufferAccessOf(inst->Opcode());
+            const auto imageAccess = ImageOpcodeInfoOf(inst->Opcode()).access;
             const auto sharedAccess = SharedAccessOf(inst->Opcode());
+            storageWrites = storageWrites ||
+                (bufferAccess != BufferAccess::None && bufferAccess != BufferAccess::Read) ||
+                (addressAccess != AddressAccess::None && addressAccess != AddressAccess::Read) ||
+                (imageAccess != ImageAccess::None && imageAccess != ImageAccess::Read) || sharedAccess != SharedAccess::None;
             if (sharedAccess == SharedAccess::Atomic && inst->Type() == IrType::U64) {
                 requirements.sharedInt64Atomics = true;
             }
@@ -484,6 +491,11 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
             requirements.functionLdsDwords = static_cast<std::uint32_t>(std::max<std::uint64_t>((needed + 63u) & ~63ull, 64u));
         }
     }
+    const auto& info = program.Info();
+    const auto writtenImage = [](const ImageResource& image) { return image.written || image.atomic || image.atomic64 || image.targetMerge; };
+    requirements.readOnlyStorage = !storageWrites && program.Resources().stage == IrShaderStage::Pixel && !info.bdaWrites && !info.usesFaultBuffer && !info.usesDma &&
+        std::ranges::none_of(info.buffers, [](const BufferResource& buffer) { return buffer.written || buffer.atomic; }) &&
+        std::ranges::none_of(info.images, writtenImage) && std::ranges::none_of(info.runtimeImageModes, [&](const auto& modes) { return std::ranges::any_of(modes, writtenImage); });
     requirements.coherentBufferAlias = requirements.coherentBuffers && !program.Metadata().invalidatesCaches;
     return requirements;
 }
