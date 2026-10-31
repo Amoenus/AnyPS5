@@ -124,8 +124,8 @@ std::size_t ImagePagesSize();
 // folded at report time; a finished thread's totals move to `retired`. Nothing is counted without
 // the profile switch (the counters are only ever printed under it).
 // Debug aid: APS5_SHARED_MEMORY_COUNTERS=1 accumulates into one shared set with atomic RMWs as before.
-enum MemoryCounterKind { CounterRead, CounterCompare, CounterWrite, CounterChangedWrite, CounterCollect, CounterVerify, CounterQuery, CounterCollectOrdinary, CounterCollectUncached, CounterCollectHints, MemoryCounterCount };
-constexpr const char* MemoryCounterNames[MemoryCounterCount] = {"read", "compare", "write", "write-changed", "collect", "verify", "query", "collect-ordinary", "collect-uncached", "collect-hints"};
+enum MemoryCounterKind { CounterRead, CounterCompare, CounterWrite, CounterChangedWrite, CounterCollect, CounterVerify, CounterQuery, CounterCollectOrdinary, CounterCollectUncached, CounterCollectHints, CounterCollectNativeColor, MemoryCounterCount };
+constexpr const char* MemoryCounterNames[MemoryCounterCount] = {"read", "compare", "write", "write-changed", "collect", "verify", "query", "collect-ordinary", "collect-uncached", "collect-hints", "collect-native-color"};
 
 struct MemoryCounter {
     std::atomic<std::uint64_t> calls{0};
@@ -321,13 +321,14 @@ bool MemoryProfiled() {
 
 class TimedAccess {
 public:
-    TimedAccess(MemoryCounterKind kind, std::uint64_t bytes, MemoryCounterKind detail = MemoryCounterCount) : kind(kind), detail(detail), bytes(bytes), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    TimedAccess(MemoryCounterKind kind, std::uint64_t bytes, MemoryCounterKind detail = MemoryCounterCount, MemoryCounterKind subset = MemoryCounterCount) : kind(kind), detail(detail), subset(subset), bytes(bytes), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
     ~TimedAccess() {
         if (!MemoryProfiled()) return;
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count());
         CounterFor(kind).Add(bytes, elapsed, SharedMemoryCounters());
         if (detail != MemoryCounterCount) CounterFor(detail).Add(bytes, elapsed, SharedMemoryCounters());
+        if (subset != MemoryCounterCount) CounterFor(subset).Add(bytes, elapsed, SharedMemoryCounters());
         auto& state = Profile();
         const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         auto last = state.lastReport.load();
@@ -361,6 +362,7 @@ public:
 private:
     MemoryCounterKind kind;
     MemoryCounterKind detail;
+    MemoryCounterKind subset;
     std::uint64_t bytes;
     std::chrono::steady_clock::time_point start;
 };
@@ -1593,7 +1595,7 @@ bool walkWrites(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop, 
     return complete;
 }
 
-std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoized) {
+std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoized, MemoryCounterKind subset = MemoryCounterCount) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return 0;
     auto& tracker = Tracker();
     // Whole pages, so a page shared with the next range is collected with either.
@@ -1638,7 +1640,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
             }
         }
     }
-    const TimedAccess timed(CounterCollect, bytes, useMemo ? CounterCollectOrdinary : CounterCollectUncached);
+    const TimedAccess timed(CounterCollect, bytes, useMemo ? CounterCollectOrdinary : CounterCollectUncached, subset);
 #ifndef _WIN32
     if (useMemo && HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get() != 0 && bytes <= WriteBlockBytes) {
         const auto begin = first & ~(WriteBlockBytes - 1);
@@ -1674,6 +1676,10 @@ std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes) {
 
 std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
     return collectWrites(address, bytes, false);
+}
+
+std::uint64_t CollectNativeColorWritesUncached_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    return collectWrites(address, bytes, false, CounterCollectNativeColor);
 }
 
 std::uint64_t WriteGeneration() {
