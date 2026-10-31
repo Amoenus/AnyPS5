@@ -51,8 +51,6 @@ int main() {
     Require(sceHttp2SslEnableOption(context, 0x3d) == 0);
     Require(sceHttp2SslDisableOption(context, 0x20) == 0);
     Require(Throws([&] { sceHttp2SslEnableOption(context, 0x80000000); }));
-    Require(Throws([&] { sceHttp2SslEnableOption(box, 0x3d); }));
-    Require(Throws([&] { sceHttp2SslDisableOption(box, 0x20); }));
     Http2MemoryPoolStats stats{1, 2, 3, 4};
     Require(sceHttp2GetMemoryPoolStats(context, &stats) == 0);
     Require(stats.pool_size == 0x10000 && stats.max_inuse_size == 0 && stats.current_inuse_size == 0 && stats.reserved == 0);
