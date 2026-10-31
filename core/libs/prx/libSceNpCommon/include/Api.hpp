@@ -116,6 +116,18 @@ struct NpRefObject {
     std::int32_t refCount;
 };
 
+struct NpCommunicationId {
+    char data[9];
+    char term;
+    std::uint8_t num;
+    char dummy;
+};
+
+struct NpCommIdObject {
+    const void* const* vtable;
+    NpCommunicationId commId;
+};
+
 struct NpTitleIdObject {
     const void* const* vtable;
     NpTitleId titleId;
@@ -352,7 +364,6 @@ int APS5_VABI _ZN3sce2np15CancelableScopeD0Ev(void);
 int APS5_VABI _ZN3sce2np10Cancelable7DestroyEv(void);
 int APS5_VABI _ZThn8_N3sce2np9LocalFileD1Ev(void);
 int APS5_VABI _ZNK3sce2np10JsonString6GetStrEPcm(void);
-int APS5_VABI _ZN3sce2np8NpCommIdC2ERK20SceNpCommunicationId(void);
 int APS5_VABI _ZN3sce2np10Cancelable10LockCancelEPKciS3_(void);
 int APS5_VABI _ZN3sce2np8WorkItem10SetPendingEv(void);
 int APS5_VABI _ZN3sce2np7Callout4StopEv(void);
@@ -480,6 +491,30 @@ void APS5_VABI _ZN3sce2np9RefObjectD2Ev(NpRefObject* self);
 void APS5_VABI _ZN3sce2np9RefObjectD0Ev(NpRefObject* self);
 int APS5_VABI _ZN3sce2np9RefObject6AddRefEv(NpRefObject* self);
 int APS5_VABI _ZN3sce2np9RefObject7ReleaseEv(NpRefObject* self);
+int APS5_VABI sceNpUtilParseTitleId(NpCommunicationId* parts, const char* titleId);
+void APS5_VABI _ZN3sce2np8NpCommIdC1Ev(NpCommIdObject* self);
+void APS5_VABI _ZN3sce2np8NpCommIdC2Ev(NpCommIdObject* self);
+void APS5_VABI _ZN3sce2np8NpCommIdC1ERKS1_(NpCommIdObject* self, const NpCommIdObject* other);
+void APS5_VABI _ZN3sce2np8NpCommIdC2ERKS1_(NpCommIdObject* self, const NpCommIdObject* other);
+void APS5_VABI _ZN3sce2np8NpCommIdC1ERK20SceNpCommunicationId(NpCommIdObject* self, const NpCommunicationId* commId);
+void APS5_VABI _ZN3sce2np8NpCommIdC2ERK20SceNpCommunicationId(NpCommIdObject* self, const NpCommunicationId* commId);
+void APS5_VABI _ZN3sce2np8NpCommIdD1Ev(NpCommIdObject* self);
+void APS5_VABI _ZN3sce2np8NpCommIdD2Ev(NpCommIdObject* self);
+void APS5_VABI _ZN3sce2np8NpCommIdD0Ev(NpCommIdObject* self);
+void APS5_VABI _ZN3sce2np8NpCommId5ClearEv(NpCommIdObject* self);
+bool APS5_VABI _ZNK3sce2np8NpCommId7IsEmptyEv(const NpCommIdObject* self);
+bool APS5_VABI _ZNK3sce2np8NpCommId6EqualsEPKc(const NpCommIdObject* self, const char* commId);
+bool APS5_VABI _ZNK3sce2np8NpCommId6EqualsERKS1_(const NpCommIdObject* self, const NpCommIdObject* other);
+bool APS5_VABI _ZNK3sce2np8NpCommId6EqualsERK20SceNpCommunicationId(const NpCommIdObject* self, const NpCommunicationId* commId);
+int APS5_VABI _ZN3sce2np8NpCommId5ParseEPS1_PKc(NpCommIdObject* out, const char* text);
+int APS5_VABI _ZN3sce2np8NpCommId5ParseEPS1_PKcm(NpCommIdObject* out, const char* text, std::size_t length);
+int APS5_VABI _ZN3sce2np8NpCommId5BuildERKS1_Pcm(const NpCommIdObject* commId, char* text, std::size_t size);
+bool APS5_VABI _ZN3sce2npeqERKNS0_8NpCommIdES3_(const NpCommIdObject* lhs, const NpCommIdObject* rhs);
+bool APS5_VABI _ZN3sce2npeqERK20SceNpCommunicationIdRKNS0_8NpCommIdE(const NpCommunicationId* lhs, const NpCommIdObject* rhs);
+bool APS5_VABI _ZN3sce2npeqERKNS0_8NpCommIdERK20SceNpCommunicationId(const NpCommIdObject* lhs, const NpCommunicationId* rhs);
+bool APS5_VABI _ZN3sce2npneERKNS0_8NpCommIdES3_(const NpCommIdObject* lhs, const NpCommIdObject* rhs);
+bool APS5_VABI _ZN3sce2npneERK20SceNpCommunicationIdRKNS0_8NpCommIdE(const NpCommunicationId* lhs, const NpCommIdObject* rhs);
+bool APS5_VABI _ZN3sce2npneERKNS0_8NpCommIdERK20SceNpCommunicationId(const NpCommIdObject* lhs, const NpCommunicationId* rhs);
 [[noreturn]] void APS5_VABI sceNpPanic(void);
 
 }
