@@ -6,6 +6,29 @@
 - [sceAgcDriverRegisterDefaultOwner](../../../core/libs/prx/libSceAgcDriver/Unimplemented.cpp) (libSceAgcDriver) - takes one uint32 owner by value (OpenAGC `include/agcdriver.h`, SharpEmu `AgcExports.DriverResources.cs`) and returns 0 without recording it. PPSA21480 treats the code 0x8A6C9018 it returned before as fatal. Console behaviour is unverified: OpenAGC describes the function as a firmware 5.50 stub that returns 0x8A6C9018, SharpEmu returns 0. The one call in PPSA21480 (0x7f41f) is followed by a test of the sign of the result only; a negative result ends in a coredump user string write and `abort()` (0x131d0-0x13214).
 - [sceAgcDriverSetResourceRegistrationInfo](../../../core/libs/prx/libSceAgcDriver/Resource/src/Registration.cpp) (libSceAgcDriver) - returns 0 without storing the info, as the retail `libSceAgcDriver.sprx` body does; registration is unavailable, so nothing reads it back.
 
+### Additional callable exports
+
+- [Additional callable exports](../../../core/libs/prx/libSceAgcDriver/Export.cpp) - 16 entries present in both version-labelled images are import-resolution declarations only. None is listed in the pinned public 3.20 catalogue for this library. Neither label independently authenticates retail firmware provenance. Parameter lists, return types and behavior are unverified; parameterless `int` declarations are placeholders, not verified ABI contracts. Every entry throws through `NotImplemented_nid_no_patch`. Unidentified names use literal NID aliases. No runtime functionality is implemented. Data exports require separate layout and ownership analysis. Identified candidate names match their NIDs in the [public symbol database](https://github.com/zecoxao/sce_symbols/blob/2883963a0a514ba6e77407a08ef4730a65e88254/aerolib.csv) or [supplemental catalog](https://github.com/claimore22/ps5rs/blob/2304be5131221bae0dac24b9767cabffda33f747/data/nids.csv).
+
+| Name | NID |
+| --- | --- |
+| `Unknown` | `6WO4CscVnfM` |
+| `Unknown` | `6v-D6CQHA4Y` |
+| `Unknown` | `8CXPPlNmvIc` |
+| `Unknown` | `Cia3HgY0WiY` |
+| `Unknown` | `DGN+IaHNR8o` |
+| `Unknown` | `EqwPDQyh+Ec` |
+| `Unknown` | `IGYqP+WKCgc` |
+| `Unknown` | `LgctzJSGy7s` |
+| `Unknown` | `NmE3PfE211o` |
+| `Unknown` | `O144kUYDSBo` |
+| `Unknown` | `gpF0LZ3+19c` |
+| `Unknown` | `mxyUaQfPgb8` |
+| `Unknown` | `oFb2hMcoJa4` |
+| `Unknown` | `sW7yp7NVlrk` |
+| `Unknown` | `tD2ECNSuTQQ` |
+| `Unknown` | `wxdcyVqXJEY` |
+
 ### Unknown function info
 
 - [sceAgcDriverSubmitCommandBuffer, sceAgcDriverSubmitMultiCommandBuffers](../../../core/libs/prx/libSceAgcDriver/Submit/src/CommandBuffer.cpp) (libSceAgcDriver) - `queue_context` is treated as a pointer to context whose queue identifier is stored 4 bytes in, matching KytyPS5 (`src/libs/agc.cpp` `AgcDriverSubmitCommandBuffer` / `get_driver_queue`). A null context returns `EINVAL` (22). Whether the console validates other context fields before queue dispatch is unverified. Compute queues are still accepted only for 0x20 to 0x57; queue 0x58 and above throw. Console acceptance of 0x58 on these entrypoints was not measured
