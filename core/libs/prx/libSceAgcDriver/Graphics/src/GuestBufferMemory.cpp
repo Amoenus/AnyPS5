@@ -144,7 +144,9 @@ void SetHeapMirrorBudget(std::uint64_t bytes) {
 }
 
 namespace {
+struct RefreshBlock;
 static thread_local GuestBufferMemory* buildingBufferMemory = nullptr;
+static thread_local std::vector<RefreshBlock>* buildingBlocks = nullptr;
 
 struct RetiredImport;
 
@@ -3358,6 +3360,7 @@ void sweepMirrors(std::uint64_t neededBytes, std::uint64_t protectAddress) {
                 }
             }
             if (victim == state.entries.end()) break;
+            if (buildingBlocks != nullptr) std::erase_if(*buildingBlocks, [&](const RefreshBlock& block) { return block.mirror == victim->second.get(); });
             if (buildingBufferMemory != nullptr) {
                 buildingBufferMemory->RecordEvicted(victim->first);
                 if (buildingBufferMemory->HoldsMirror(victim->second)) {
@@ -4456,7 +4459,10 @@ void GuestBufferMemory::RecordEvicted(std::uint64_t address) {
 void GuestBufferMemory::AcquireRegistered() {
     struct BuildingScope {
         explicit BuildingScope(GuestBufferMemory* self) { buildingBufferMemory = self; }
-        ~BuildingScope() { buildingBufferMemory = nullptr; }
+        ~BuildingScope() {
+            buildingBufferMemory = nullptr;
+            buildingBlocks = nullptr;
+        }
     };
     const BuildingScope buildingScope(this);
     Require(!uploaded && regions.empty() && lease.empty() && space == nullptr, "guest allocation lease must precede resource registration");
@@ -4474,6 +4480,7 @@ void GuestBufferMemory::AcquireRegistered() {
     // APS5_NO_SORTED_SNAPSHOT_LOOKUP=1: AddSnapshot scans the regions as before instead of searching.
     static const bool sortedLookup = std::getenv("APS5_NO_SORTED_SNAPSHOT_LOOKUP") == nullptr;
     std::vector<RefreshBlock> blocks;
+    buildingBlocks = &blocks;
     std::vector<ImageMirror*> heaps;
     bool mirrored = false;
     bool served = false;
