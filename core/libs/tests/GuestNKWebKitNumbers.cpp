@@ -1,4 +1,4 @@
-#include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libSceNKWebKit/libSceNKWebKit.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -10,19 +10,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-extern "C" {
-float APS5_VABI _ZN3WTF17charactersToFloatEPKDsmPb(const char16_t* data, std::size_t length, bool* ok);
-float APS5_VABI _ZN3WTF17charactersToFloatEPKDsmRm(const char16_t* data, std::size_t length, std::size_t* parsedLength);
-float APS5_VABI _ZN3WTF17charactersToFloatEPKhmPb(const unsigned char* data, std::size_t length, bool* ok);
-float APS5_VABI _ZN3WTF17charactersToFloatEPKhmRm(const unsigned char* data, std::size_t length, std::size_t* parsedLength);
-double APS5_VABI _ZN3WTF18charactersToDoubleEPKDsmPb(const char16_t* data, std::size_t length, bool* ok);
-double APS5_VABI _ZN3WTF18charactersToDoubleEPKhmPb(const unsigned char* data, std::size_t length, bool* ok);
-float APS5_VABI _ZN3WTF17double_conversion23StringToDoubleConverter13StringToFloatEPKcmPm(const char* buffer, std::size_t length, std::size_t* processedCharactersCount);
-float APS5_VABI _ZN3WTF17double_conversion23StringToDoubleConverter13StringToFloatEPKtmPm(const std::uint16_t* buffer, std::size_t length, std::size_t* processedCharactersCount);
-double APS5_VABI _ZN3WTF17double_conversion23StringToDoubleConverter14StringToDoubleEPKcmPm(const char* buffer, std::size_t length, std::size_t* processedCharactersCount);
-double APS5_VABI _ZN3WTF17double_conversion23StringToDoubleConverter14StringToDoubleEPKtmPm(const std::uint16_t* buffer, std::size_t length, std::size_t* processedCharactersCount);
-}
 
 static void Check(bool value, int line) {
     if (!value) {
