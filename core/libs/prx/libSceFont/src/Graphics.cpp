@@ -31,6 +31,9 @@ constexpr std::uint32_t FillEffects = 0x1033f;
 std::atomic<Font::GraphicsErrorCallback> g_errorCallback{nullptr};
 
 constexpr std::uint16_t DrawupFrameTag = 0xf53;
+constexpr std::uint8_t DrawupTypeFlatColor = 0x10;
+constexpr std::uint8_t DrawupTypeLinearGradient = 0x20;
+constexpr std::uint8_t DrawupTypeRadialGradient = 0x30;
 constexpr std::uint8_t DrawupTypeTextureImage = 0x40;
 constexpr std::uint8_t DrawupTypeTexturePattern = 0x50;
 constexpr std::uint32_t DrawupRecordHeader = 0x80;
@@ -42,11 +45,28 @@ struct FontDrawupRecord {
     std::uint16_t flags;
     std::uint32_t sequence;
     FontDrawupRecord* next;
-    std::uint32_t state;
-    std::uint32_t mode;
-    void* payload;
-    float quad[4];
-    std::uint8_t reserved[0x50];
+    union {
+        struct {
+            std::uint32_t state;
+            std::uint32_t mode;
+            void* payload;
+            float quad[4];
+        } texture;
+        struct {
+            std::uint32_t color;
+        } flat;
+        struct {
+            std::uint32_t color1;
+            std::uint32_t color2;
+            float extent0;
+            float extent1;
+            std::uint32_t mode;
+            std::uint32_t unused;
+            float values[4];
+            std::uint64_t tail;
+        } gradient;
+        std::uint8_t raw[0x70];
+    };
 };
 
 struct FontDrawupPoolEntry {
@@ -379,14 +399,102 @@ FontDrawupRecord* DrawupAllocate(FontDrawupFrame* frame, std::uint32_t mode, int
     record->flags = 0;
     record->sequence = frame->sequence;
     record->next = nullptr;
-    record->state = 0;
-    record->mode = mode;
-    record->payload = reinterpret_cast<std::uint8_t*>(record) + DrawupRecordHeader;
     return record;
+}
+
+std::uint32_t DrawupPackColor(const float* color) {
+    const auto channel = [](float value) {
+        const float scaled = value * 255.0f + 0.5f;
+        if (!(scaled >= -0x1p63f && scaled < 0x1p63f)) return std::uint32_t{0};
+        return static_cast<std::uint32_t>(static_cast<std::int64_t>(scaled));
+    };
+    return channel(color[0]) | (channel(color[1]) << 8) | (channel(color[2]) << 16) | (channel(color[3]) << 24);
+}
+
+bool DrawupColorValid(const float* color) {
+    for (int i = 0; i < 4; ++i) {
+        if (0.0f > color[i] || color[i] > 1.0f) return false;
+    }
+    return true;
 }
 
 int DrawupFrameError(FontDrawupFrame* frame, int error) {
     return frame ? DrawupRecordError(frame, error) : Fail(error);
+}
+
+int DrawupGradientRecord(FontGraphicsFrame* graphicsObject, std::uint32_t mode, const void* color1,
+        const void* color2, void** output, float extent0, float extent1, float x0, float y0,
+        float x1, float y1, std::uint8_t type) {
+    if (output) *output = nullptr;
+    auto* const frame = reinterpret_cast<FontDrawupFrame*>(graphicsObject);
+    if (!frame || frame->tag != DrawupFrameTag)
+        return DrawupFrameError(frame, FONT_GRAPHICS_ERROR_INVALID_OBJECT);
+    if (frame->error)
+        return DrawupRecordError(frame, FONT_GRAPHICS_ERROR_STICKY);
+    const auto* const c1 = static_cast<const float*>(color1);
+    const auto* const c2 = static_cast<const float*>(color2);
+    if (0.0f >= extent0 || 0.0f >= extent1 || mode > 2 || !c1 || !c2 || !DrawupColorValid(c1) || !DrawupColorValid(c2) || !output)
+        return DrawupRecordError(frame, SCE_FONT_ERROR_INVALID_PARAMETER);
+    if (!frame->object)
+        return DrawupRecordError(frame, FONT_GRAPHICS_ERROR_UNINITIALIZED);
+    if (frame->sequence == DrawupPoolSealed)
+        return DrawupRecordError(frame, FONT_GRAPHICS_ERROR_SEALED);
+    int error = 0;
+    FontDrawupRecord* const record = DrawupAllocate(frame, 0, &error);
+    if (!record) return error;
+    record->type = type;
+    record->gradient.color1 = DrawupPackColor(c1);
+    record->gradient.color2 = DrawupPackColor(c2);
+    record->gradient.extent0 = extent0;
+    record->gradient.extent1 = extent1;
+    record->gradient.mode = mode;
+    record->gradient.unused = 0;
+    record->gradient.values[0] = x0;
+    record->gradient.values[1] = y0;
+    record->gradient.values[2] = x1;
+    record->gradient.values[3] = y1;
+    if (type == DrawupTypeRadialGradient) record->gradient.tail = 0;
+    DrawupEnqueue(frame, record);
+    *output = record;
+    return SCE_FONT_OK;
+}
+
+int GraphicsDrawupFillFlatColor(FontGraphicsFrame* graphicsObject, const void* color, void** output) {
+    if (output) *output = nullptr;
+    auto* const frame = reinterpret_cast<FontDrawupFrame*>(graphicsObject);
+    if (!frame || frame->tag != DrawupFrameTag)
+        return DrawupFrameError(frame, FONT_GRAPHICS_ERROR_INVALID_OBJECT);
+    if (frame->error)
+        return DrawupRecordError(frame, FONT_GRAPHICS_ERROR_STICKY);
+    const auto* const channels = static_cast<const float*>(color);
+    if (!channels || !DrawupColorValid(channels) || !output)
+        return DrawupRecordError(frame, SCE_FONT_ERROR_INVALID_PARAMETER);
+    if (!frame->object)
+        return DrawupRecordError(frame, FONT_GRAPHICS_ERROR_UNINITIALIZED);
+    if (frame->sequence == DrawupPoolSealed)
+        return DrawupRecordError(frame, FONT_GRAPHICS_ERROR_SEALED);
+    int error = 0;
+    FontDrawupRecord* const record = DrawupAllocate(frame, 0, &error);
+    if (!record) return error;
+    record->type = DrawupTypeFlatColor;
+    record->flat.color = DrawupPackColor(channels);
+    DrawupEnqueue(frame, record);
+    *output = record;
+    return SCE_FONT_OK;
+}
+
+int GraphicsDrawupFillLinearGradient(FontGraphicsFrame* graphicsObject, std::uint32_t mode,
+        const void* color1, const void* color2, void** output,
+        float extent0, float extent1, float x0, float y0, float x1, float y1) {
+    return DrawupGradientRecord(graphicsObject, mode, color1, color2, output,
+            extent0, extent1, x0, y0, x1, y1, DrawupTypeLinearGradient);
+}
+
+int GraphicsDrawupFillRadialGradient(FontGraphicsFrame* graphicsObject, std::uint32_t mode,
+        const void* color1, const void* color2, void** output,
+        float extent0, float extent1, float x0, float y0, float x1, float y1) {
+    return DrawupGradientRecord(graphicsObject, mode, color1, color2, output,
+            extent0, extent1, x0, y0, x1, y1, DrawupTypeRadialGradient);
 }
 
 int GraphicsDrawupFillTextureImageObject(FontGraphicsFrame* graphicsObject, const void* fillObject,
@@ -407,11 +515,14 @@ int GraphicsDrawupFillTextureImageObject(FontGraphicsFrame* graphicsObject, cons
     FontDrawupRecord* const record = DrawupAllocate(frame, mode, &error);
     if (!record) return error;
     record->type = DrawupTypeTextureImage;
-    record->quad[0] = x;
-    record->quad[1] = y;
-    record->quad[2] = x + width;
-    record->quad[3] = y + height;
-    std::memcpy(record->payload, fillObject, mode);
+    record->texture.state = 0;
+    record->texture.mode = mode;
+    record->texture.payload = reinterpret_cast<std::uint8_t*>(record) + DrawupRecordHeader;
+    record->texture.quad[0] = x;
+    record->texture.quad[1] = y;
+    record->texture.quad[2] = x + width;
+    record->texture.quad[3] = y + height;
+    std::memcpy(record->texture.payload, fillObject, mode);
     DrawupEnqueue(frame, record);
     *output = record;
     return SCE_FONT_OK;
@@ -444,13 +555,16 @@ int GraphicsDrawupFillTexturePatternObject(FontGraphicsFrame* graphicsObject, co
     FontDrawupRecord* const record = DrawupAllocate(frame, mode, &error);
     if (!record) return error;
     record->type = DrawupTypeTexturePattern;
-    auto* const params = reinterpret_cast<std::uint32_t*>(record->quad);
+    record->texture.state = 0;
+    record->texture.mode = mode;
+    record->texture.payload = reinterpret_cast<std::uint8_t*>(record) + DrawupRecordHeader;
+    auto* const params = reinterpret_cast<std::uint32_t*>(record->texture.quad);
     params[0] = formatWord;
     params[1] = selectWord;
     auto* const dims = reinterpret_cast<std::uint8_t*>(&params[2]);
     dims[0] = static_cast<std::uint8_t>(dimension1 - 1);
     dims[1] = static_cast<std::uint8_t>(dimension2 - 1);
-    std::memcpy(record->payload, fillObject, mode);
+    std::memcpy(record->texture.payload, fillObject, mode);
     DrawupEnqueue(frame, record);
     *output = record;
     return SCE_FONT_OK;

@@ -13,8 +13,15 @@ namespace {
 
 using FontDrawupSignature = int (APS5_VABI *)(FontGraphicsFrame*, const void*, std::uint32_t, void**, float, float, float, float);
 using FontDrawupPatternSignature = int (APS5_VABI *)(FontGraphicsFrame*, const void*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, void**);
+using FontDrawupFlatSignature = int (APS5_VABI *)(FontGraphicsFrame*, const void*, void**);
+using FontDrawupGradientSignature = int (APS5_VABI *)(FontGraphicsFrame*, std::uint32_t, const void*, const void*, void**, float, float, float, float, float, float);
+using FontGradientSegmentSignature = int (APS5_VABI *)(FontGraphicsFrame*, void*, float, const void*);
 static_assert(std::is_same_v<decltype(&sceFontGraphicsDrawupFillTextureImageObject), FontDrawupSignature>);
 static_assert(std::is_same_v<decltype(&sceFontGraphicsDrawupFillTexturePatternObject), FontDrawupPatternSignature>);
+static_assert(std::is_same_v<decltype(&sceFontGraphicsDrawupFillFlatColor), FontDrawupFlatSignature>);
+static_assert(std::is_same_v<decltype(&sceFontGraphicsDrawupFillLinearGradient), FontDrawupGradientSignature>);
+static_assert(std::is_same_v<decltype(&sceFontGraphicsDrawupFillRadialGradient), FontDrawupGradientSignature>);
+static_assert(std::is_same_v<decltype(&sceFontGraphicsAppendGradientSegment), FontGradientSegmentSignature>);
 
 constexpr int Uninitialized = static_cast<int>(0x80460001);
 constexpr int InvalidParameter = static_cast<int>(0x80460002);
@@ -428,21 +435,122 @@ void DrawupTextureRecords() {
         f.pool.entries[0].used = 2;
         f.pool.used = 2;
         f.pool.entries[0].scan = f.nodes + 2;
-        Require(sceFontGraphicsDrawupFillTexturePatternObject(frame, f.descriptor, 0, 0, 0, 1, 0, 0, 1, &out) == 0);
+        const float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        Require(sceFontGraphicsDrawupFillFlatColor(frame, color, &out) == 0);
         auto* record = static_cast<TestDrawupRecord*>(out);
         Require(record == reinterpret_cast<TestDrawupRecord*>(f.memory + 2 * 0x80));
-        Require(record->type == 0x50 && record->mode == 0);
-        Require(record->params[0] == (0x100 | 0x1000) && record->params[1] == (4 | 0x40));
-        auto* dims = reinterpret_cast<const std::uint8_t*>(&record->params[2]);
-        Require(dims[0] == 0 && dims[1] == 0);
-        Require(AllBytes(*record, 0x2a, 0x80, 0));
+        Require(record->type == 0x10 && record->state == 0xffffffff);
+        Require(AllBytes(*record, 0x14, 0x80, 0));
         Require(f.memory[0] == 0xa5 && f.memory[0x7f] == 0xa5 && f.memory[0x80] == 0xa5 && f.memory[0xff] == 0xa5);
         Require(f.nodes[0] == ((2 << 1) | 1) && f.nodes[1] == 1);
         Require(f.nodes[2] == ((3 << 1) | 1) && f.nodes[3] == (TotalSlots << 1));
         Require(f.pool.used == 3 && f.pool.entries[0].used == 3);
         f.pool.entries[0].scan = f.nodes + TotalSlots;
         f.frame.error = 0;
-        RequireError(sceFontGraphicsDrawupFillTexturePatternObject(frame, f.descriptor, 0, 0, 0, 1, 0, 0, 1, &out), NoRecordSpace);
+        RequireError(sceFontGraphicsDrawupFillFlatColor(frame, color, &out), NoRecordSpace);
+    }
+}
+
+void DrawupFillRecords() {
+    {
+        DrawupFixture f;
+        auto* frame = reinterpret_cast<FontGraphicsFrame*>(&f.frame);
+        void* out = reinterpret_cast<void*>(0xdead);
+        std::memset(f.memory, 0xa5, sizeof(f.memory));
+        const float color[4] = {1.0f, 0.5f, 0.0f, 1.0f};
+        Require(sceFontGraphicsDrawupFillFlatColor(frame, color, &out) == 0);
+        auto* record = static_cast<TestDrawupRecord*>(out);
+        Require(record == reinterpret_cast<TestDrawupRecord*>(f.memory));
+        Require(record->type == 0x10 && record->sizeTag == 0x80 && record->flags == 0);
+        Require(record->sequence == 0 && record->next == nullptr);
+        Require(record->state == 0xff0080ff);
+        Require(AllBytes(*record, 0x14, 0x80, 0xa5));
+        Require(f.object.head == record && f.object.tail == record && f.frame.sequence == 1);
+        Require(f.pool.used == 1 && f.pool.entries[0].used == 1);
+        const float nanColor[4] = {NaN, 0.0f, 0.0f, 0.0f};
+        Require(sceFontGraphicsDrawupFillFlatColor(frame, nanColor, &out) == 0);
+        Require(static_cast<TestDrawupRecord*>(out)->state == 0x00000000);
+        f.frame.error = 0;
+        RequireError(sceFontGraphicsDrawupFillFlatColor(nullptr, color, &out), InvalidObject);
+        f.frame.error = 0;
+        RequireError(sceFontGraphicsDrawupFillFlatColor(frame, nullptr, &out), InvalidParameter);
+        f.frame.error = 0;
+        const float over[4] = {0.0f, 0.0f, 0.0f, 1.5f};
+        RequireError(sceFontGraphicsDrawupFillFlatColor(frame, over, &out), InvalidParameter);
+        f.frame.error = 0;
+        const float under[4] = {0.0f, -0.5f, 0.0f, 0.0f};
+        RequireError(sceFontGraphicsDrawupFillFlatColor(frame, under, &out), InvalidParameter);
+        f.frame.error = 0;
+        RequireError(sceFontGraphicsDrawupFillFlatColor(frame, color, nullptr), InvalidParameter);
+        f.frame.error = 0;
+        f.frame.object = nullptr;
+        RequireError(sceFontGraphicsDrawupFillFlatColor(frame, color, &out), Uninitialized);
+        f.frame.object = &f.object;
+        f.frame.error = 0;
+        f.frame.sequence = 0xffffffff;
+        RequireError(sceFontGraphicsDrawupFillFlatColor(frame, color, &out), Sealed);
+        Require(f.frame.error == Sealed);
+        f.frame.error = 0;
+        f.frame.sequence = 1;
+    }
+    {
+        DrawupFixture f;
+        auto* frame = reinterpret_cast<FontGraphicsFrame*>(&f.frame);
+        void* out = nullptr;
+        std::memset(f.memory, 0xa5, sizeof(f.memory));
+        const float c1[4] = {0.0f, 0.25f, 0.5f, 1.0f};
+        const float c2[4] = {1.0f, 0.75f, 0.5f, 0.25f};
+        Require(sceFontGraphicsDrawupFillLinearGradient(frame, 2, c1, c2, &out, 2.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f) == 0);
+        auto* record = static_cast<TestDrawupRecord*>(out);
+        Require(record->type == 0x20 && record->sizeTag == 0x80 && record->flags == 0);
+        Require(record->sequence == 0 && record->next == nullptr);
+        Require(record->state == 0xff804000 && record->mode == 0x4080bfff);
+        const auto* extents = reinterpret_cast<const float*>(&record->payload);
+        Require(extents[0] == 2.0f && extents[1] == 4.0f);
+        Require(record->params[0] == 2 && record->params[1] == 0);
+        const auto* values = reinterpret_cast<const float*>(&record->params[2]);
+        Require(values[0] == 1.0f && values[1] == 2.0f && values[2] == 3.0f && values[3] == 4.0f);
+        Require(AllBytes(*record, 0x38, 0x80, 0xa5));
+        f.frame.error = 0;
+        RequireError(sceFontGraphicsDrawupFillLinearGradient(frame, 3, c1, c2, &out, 2.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f), InvalidParameter);
+        f.frame.error = 0;
+        RequireError(sceFontGraphicsDrawupFillLinearGradient(frame, 2, c1, c2, &out, 0.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f), InvalidParameter);
+        f.frame.error = 0;
+        RequireError(sceFontGraphicsDrawupFillLinearGradient(frame, 2, c1, c2, &out, 2.0f, -1.0f, 1.0f, 2.0f, 3.0f, 4.0f), InvalidParameter);
+        f.frame.error = 0;
+        Require(sceFontGraphicsDrawupFillLinearGradient(frame, 2, c1, c2, &out, NaN, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f) == 0);
+        record = static_cast<TestDrawupRecord*>(out);
+        extents = reinterpret_cast<const float*>(&record->payload);
+        Require(std::isnan(extents[0]) && extents[1] == 4.0f);
+        f.frame.error = 0;
+        RequireError(sceFontGraphicsDrawupFillLinearGradient(frame, 2, nullptr, c2, &out, 2.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f), InvalidParameter);
+        f.frame.error = 0;
+        const float bad[4] = {0.0f, 0.0f, 0.0f, 2.0f};
+        RequireError(sceFontGraphicsDrawupFillLinearGradient(frame, 2, bad, c2, &out, 2.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f), InvalidParameter);
+        f.frame.error = 0;
+        RequireError(sceFontGraphicsDrawupFillLinearGradient(frame, 2, c1, c2, nullptr, 2.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f), InvalidParameter);
+        f.frame.error = 0;
+        f.frame.sequence = 0xffffffff;
+        RequireError(sceFontGraphicsDrawupFillLinearGradient(frame, 2, c1, c2, &out, 2.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f), Sealed);
+        Require(f.frame.error == Sealed);
+        f.frame.error = 0;
+        f.frame.sequence = 2;
+    }
+    {
+        DrawupFixture f;
+        auto* frame = reinterpret_cast<FontGraphicsFrame*>(&f.frame);
+        void* out = nullptr;
+        std::memset(f.memory, 0xa5, sizeof(f.memory));
+        const float c1[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        const float c2[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        Require(sceFontGraphicsDrawupFillRadialGradient(frame, 0, c1, c2, &out, 0.5f, 0.5f, 0.0f, 0.0f, 1.0f, 1.0f) == 0);
+        auto* record = static_cast<TestDrawupRecord*>(out);
+        Require(record->type == 0x30 && record->sizeTag == 0x80 && record->flags == 0);
+        Require(record->state == 0xffffffff && record->mode == 0);
+        const auto* values = reinterpret_cast<const float*>(&record->params[2]);
+        Require(values[0] == 0.0f && values[1] == 0.0f && values[2] == 1.0f && values[3] == 1.0f);
+        Require(record->params[6] == 0 && record->params[7] == 0);
+        Require(AllBytes(*record, 0x40, 0x80, 0xa5));
     }
     {
         DrawupFixture f;
@@ -474,6 +582,7 @@ int main() {
     FillPlots();
     FillRates();
     DrawupTextureRecords();
+    DrawupFillRecords();
     Require(g_errorCount == g_expectedErrors);
     sceFontSetGraphicsErrorCallback(nullptr);
     const int before = g_errorCount;
