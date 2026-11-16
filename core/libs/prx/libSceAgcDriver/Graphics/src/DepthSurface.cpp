@@ -3290,7 +3290,7 @@ void DepthSurface::PublishToGuest() {
     publication.clear();
     if (superseded[0]) RetireMultisampleColorTarget(sampling.depthAlias->active);
     if (superseded[2]) RetireMultisampleColorTarget(sampling.stencilAlias->active);
-    if (!stencil) {
+    if (!stencil && !bare) {
         active->store(false, std::memory_order_release);
     }
 }
