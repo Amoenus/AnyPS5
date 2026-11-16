@@ -2608,7 +2608,7 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
         // collects cost the same wherever they run.
         if (precollectImages()) phase(BuildPhase::Precollect);
         if (drawBuild && !usesBda && std::all_of(allocations.begin(), allocations.end(), [&](const Allocation& allocation) { return !allocation.guest || allocation.pushByte >= 0 || (allocation.dataAllocation >= 0 && allocation.dataByte < allocations[static_cast<std::size_t>(allocation.dataAllocation)].size); })) guestMemory.AllowAdjustedRegions();
-        requireGuestBuffers();
+        synchronizeGuestBuffers();
         guestMemory.UploadPrepare(usesBda);
         timing.uploadMs = phase(BuildPhase::Upload);
         splitSets = SplitsSets(context, shaders);
@@ -2872,7 +2872,7 @@ void ShaderResources::buildComplete() {
         resolveImageTables();
         Require(registeredImageViewsCurrent(registeredImageViews), "AGC graphics: registered image range changed during resource materialization");
         timing.bindingsMs += phase(BuildPhase::Images);
-        requireGuestBuffers();
+        synchronizeGuestBuffers();
         deferredImages.clear();
         guestMemory.UploadFinish(usesBda, htileClear);
         timing.uploadMs += phase(BuildPhase::Upload);
@@ -4461,13 +4461,13 @@ ShaderResources::IndexOutcome ShaderResources::indexRevalidate(std::span<const C
     return outcome(partial || !replaced.empty() ? IndexOutcome::Partial : IndexOutcome::Accepted);
 }
 
-bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofReport* report) {
+bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofReport* report, std::span<const MovedBuffer> moved) {
     if (!registeredImageViewsCurrent(registeredImageViews)) {
         if (report != nullptr) *report = {ProofPath::Full, ProofFailure::Other};
         provedEpoch = 0;
         return false;
     }
-    requireGuestBuffers();
+    synchronizeGuestBuffers(moved);
     if (EpochProofs()) {
         const auto epoch = GuestMemory::CollectEpoch();
         const auto proof = GuestMemory::ProofSerial();
@@ -7118,7 +7118,7 @@ std::size_t ShaderResources::DrawUploadLimit() {
 }
 
 std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved, bool movedOnly, const BdaResources* faultRecord) const {
-    requireGuestBuffers(moved);
+    synchronizeGuestBuffers(moved);
     if ((_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) || (usesBda && !spaceReuse)) return {};
     prepareFaultSlot();
     auto split = guestMemory.SplitInPlaceReads();
@@ -7344,25 +7344,7 @@ void ShaderResources::BindDrawUse(VkCommandBuffer commands, VkPipelineLayout lay
     if (fragmentSet != VK_NULL_HANDLE) context.Resolved(&DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, ShaderRecompiler::RuntimeAbi::FragmentDescriptorSet, 1, &fragmentSet, 0, nullptr);
 }
 
-void ShaderResources::prepareFaultSlot() const {
-    if (bda == nullptr) return;
-    const auto* recorder = Recorder::Active();
-    bda->NoteUse(recorder != nullptr && recorder->Device() == context.device ? recorder->OpenSerial() : std::numeric_limits<std::uint64_t>::max());
-    if (!bda->TakeFaultSlot(context)) return;
-    std::vector<VkWriteDescriptorSet> writes;
-    writes.reserve(faultDescriptors.size());
-    for (const auto& fault : faultDescriptors) {
-        descriptorBuffers[fault.buffer] = bda->Fault();
-        auto write = descriptorWrites[fault.write];
-        write.dstArrayElement = fault.element;
-        write.descriptorCount = 1;
-        write.pBufferInfo = &descriptorBuffers[fault.buffer];
-        writes.push_back(write);
-    }
-    if (!writes.empty()) context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
-}
-
-void ShaderResources::requireGuestBuffers(std::span<const MovedBuffer> moved) const {
+void ShaderResources::synchronizeGuestBuffers(std::span<const MovedBuffer> moved) const {
     std::unique_lock gpu(GuestMemory::GpuMutex(), std::defer_lock);
     if (!guestMemory.Writes().empty() && !deferredImages.empty() && HasResidentDepthGuards_nid_no_patch()) {
         gpu.lock();
@@ -7382,6 +7364,41 @@ void ShaderResources::requireGuestBuffers(std::span<const MovedBuffer> moved) co
             }
         }
     }
+    for (const auto written : {true, false}) {
+        for (std::size_t index = 0; index < allocations.size(); ++index) {
+            const auto& item = allocations[index];
+            if (!item.guest || item.written != written) continue;
+            const auto override = std::find_if(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return entry.allocation == index; });
+            const auto address = override != moved.end() ? override->address : item.address;
+            const auto bytes = override != moved.end() ? override->size : item.size;
+            if (written) {
+                RequireNoResidentDepthRead_nid_no_patch(address, bytes, htileClear);
+                RequireNoMultisampleColorTarget(address, bytes, "a shader buffer write");
+            }
+            else SynchronizeMultisampleTargetRead_nid_no_patch(address, bytes);
+        }
+    }
+}
+
+void ShaderResources::prepareFaultSlot() const {
+    if (bda == nullptr) return;
+    const auto* recorder = Recorder::Active();
+    bda->NoteUse(recorder != nullptr && recorder->Device() == context.device ? recorder->OpenSerial() : std::numeric_limits<std::uint64_t>::max());
+    if (!bda->TakeFaultSlot(context)) return;
+    std::vector<VkWriteDescriptorSet> writes;
+    writes.reserve(faultDescriptors.size());
+    for (const auto& fault : faultDescriptors) {
+        descriptorBuffers[fault.buffer] = bda->Fault();
+        auto write = descriptorWrites[fault.write];
+        write.dstArrayElement = fault.element;
+        write.descriptorCount = 1;
+        write.pBufferInfo = &descriptorBuffers[fault.buffer];
+        writes.push_back(write);
+    }
+    if (!writes.empty()) context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+}
+
+void ShaderResources::requireGuestBuffers(std::span<const MovedBuffer> moved) const {
     for (std::size_t index = 0; index < allocations.size(); ++index) {
         const auto& item = allocations[index];
         if (!item.guest) continue;

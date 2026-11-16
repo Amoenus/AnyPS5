@@ -661,6 +661,10 @@ public:
         if (colorBytes != 0 && offset <= bytes && colorBytes <= bytes - offset) paddingFill = pattern;
     }
 
+    bool CanPublishColor() const {
+        return target.tileMode == ColorTileMode::RenderTarget && target.dccAddress == 0u && target.cmaskAddress == 0u && !guestColorBaseline.empty();
+    }
+
     MultisampleColorSnapshot ColorSnapshot() {
         Require(target.tileMode == ColorTileMode::RenderTarget && target.dccAddress == 0 && target.cmaskAddress == 0, "guest color snapshots with unsupported tiling or multisample metadata are not implemented");
         Require(!guestColorBaseline.empty(), "guest color snapshot has no initial footprint");
@@ -677,6 +681,33 @@ public:
         Require(layout.Bytes() == current.size(), "guest color snapshot layout and footprint differ");
         layout.Tile(samples, current);
         return {std::move(original), std::move(current)};
+    }
+
+    void PublishColorSnapshot(const MultisampleColorSnapshot& snapshot) {
+        Require(snapshot.original.size() == guestColorBaseline.size() && snapshot.current.size() == guestColorBaseline.size() && !guestColorBaseline.empty(), "guest color publication snapshot sizes differ");
+        const auto bytes = snapshot.current.size();
+        Require(bytes <= std::numeric_limits<std::uint64_t>::max() - target.address, "guest color publication range overflows");
+        const auto end = target.address + bytes;
+        const auto leases = pinGuestColor(true);
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(target.address), bytes, 1u, true);
+        Require(!Recorder::SnapshotWriteOverlaps(target.address, bytes), "pending guest writes overlap native color publication");
+        const std::array<std::pair<std::uint64_t, std::uint64_t>, 1> ranges{{{target.address, end}}};
+        Require(!StorageTexture::AnyPendingOverlaps(ranges), "pending storage image results overlap native color publication");
+        GuestMemory::StoreOwnBytes(target.address, bytes, [&] {
+            Require(active->load(std::memory_order_acquire), "multisampled color target was retired before publication");
+            Require(GuestMemory::CompareMapped(target.address, snapshot.original) == GuestMemory::Compare::Equal, "guest color changed before native multisample publication");
+            auto* destination = reinterpret_cast<std::byte*>(target.address);
+            for (std::size_t offset = 0; offset < bytes;) {
+                if (snapshot.current[offset] == snapshot.original[offset]) {
+                    ++offset;
+                    continue;
+                }
+                const auto first = offset++;
+                while (offset < bytes && snapshot.current[offset] != snapshot.original[offset]) ++offset;
+                std::memcpy(destination + first, snapshot.current.data() + first, offset - first);
+            }
+        });
+        active->store(false, std::memory_order_release);
     }
 
     void NoteMetadataFill(std::uint64_t fillAddress, std::size_t fillBytes, std::uint32_t pattern) {
@@ -965,7 +996,29 @@ private:
         return *recorder;
     }
 
+    GuestAllocations::Lease::Ranges pinGuestColor(bool writable) const {
+        const auto bytes = guestColorBaseline.size();
+        Require(bytes != 0u && bytes <= std::numeric_limits<std::uint64_t>::max() - target.address, "guest color mapping range overflows");
+        const auto end = target.address + bytes;
+        const auto available = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
+        GuestAllocations::Lease::Ranges leases;
+        auto cursor = target.address;
+        for (const auto& range : available) {
+            if (range->address > cursor) break;
+            Require(range->bytes <= std::numeric_limits<std::uint64_t>::max() - range->address, "guest color mapping is invalid");
+            const auto rangeEnd = range->address + range->bytes;
+            if (rangeEnd <= cursor) continue;
+            Require(!writable || range->writable, "guest color publication requires writable registered guest memory for its whole footprint");
+            leases.push_back(range);
+            cursor = std::min(end, rangeEnd);
+            if (cursor == end) return leases;
+        }
+        Require(cursor == end, writable ? "guest color publication requires writable registered guest memory for its whole footprint" : "guest color snapshot requires readable registered guest memory for its whole footprint");
+        return leases;
+    }
+
     std::vector<std::byte> currentGuestColor() const {
+        const auto leases = pinGuestColor(false);
         if (GuestMemory::CompareMapped(target.address, guestColorBaseline) == GuestMemory::Compare::Equal) return guestColorBaseline;
         if (paddingFill) {
             auto filled = guestColorBaseline;
@@ -1183,7 +1236,7 @@ bool mayOverlapGuarded(std::uint64_t address, std::uint64_t bytes) {
 }
 
 void guardReads(std::uint64_t address, std::size_t bytes) {
-    RequireNoMultisampleTarget(address, bytes, "a CPU read");
+    SynchronizeMultisampleTargetRead_nid_no_patch(address, bytes);
 }
 
 struct RecordedSingleClear {
@@ -1686,6 +1739,7 @@ bool TakeMultisampledClear(MultisampledCmask& cmask, MultisampledColorFill& colo
 }
 
 void PrepareMultisampleTargetForDraw_nid_no_patch(const Context& context, const ColorTarget& target) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
     {
         TargetsLock lock;
         discardRetiredTargets();
@@ -1698,6 +1752,8 @@ void PrepareMultisampleTargetForDraw_nid_no_patch(const Context& context, const 
     Require(target.elementBytes != 0u && target.elementBytes <= 16u && 16u % target.elementBytes == 0u, "initial multisample color texel size is not implemented");
     const auto bytes = MultisampledColorBytes(target);
     Require(bytes != 0u && bytes <= std::numeric_limits<std::size_t>::max() && target.address <= std::numeric_limits<std::uint64_t>::max() - bytes, "initial multisample color footprint is not implemented");
+    Require(!ResidentDepthGuardOverlaps_nid_no_patch(target.address, static_cast<std::size_t>(bytes)), "initial multisample color contents overlap resident native depth");
+    SynchronizeMultisampleTargetRead_nid_no_patch(target.address, static_cast<std::size_t>(bytes));
     const auto requireUnowned = [&] {
         Require(!ResidentDepthGuardOverlaps_nid_no_patch(target.address, static_cast<std::size_t>(bytes)), "initial multisample color contents overlap resident native depth");
         std::shared_lock guardLock(guardedMutex());
@@ -1852,6 +1908,83 @@ std::vector<std::byte> ReadMultisampleTargetSamples_nid_no_patch(const Context& 
 MultisampleColorSnapshot ReadMultisampleTargetColorSnapshot_nid_no_patch(const Context& context, const ColorTarget& target) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
     return snapshotTarget(context, target)->ColorSnapshot();
+}
+
+void PublishMultisampleTargetColor_nid_no_patch(const Context& context, const ColorTarget& target) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    const auto owner = snapshotTarget(context, target);
+    const auto retireReusedOwner = [&] {
+        const auto colorBytes = guardedColorBytes(owner->target);
+        Require(colorBytes <= std::numeric_limits<std::size_t>::max() && colorBytes <= std::numeric_limits<std::uint64_t>::max() - target.address, "reused color publication range overflows");
+        const auto bytes = static_cast<std::size_t>(colorBytes);
+        const auto used = owner->use->writes.load(std::memory_order_acquire);
+        if (!owner->use->claimed.load(std::memory_order_acquire) && (used == 0 || !GuestMemory::Watched(target.address, bytes) || GuestMemory::UnchangedSinceCollected(target.address, bytes, used))) return false;
+        {
+            std::unique_lock lock(guardedMutex());
+            owner->active->store(false, std::memory_order_release);
+            std::erase_if(guarded(), [&](const auto& range) { return range.active == owner->active; });
+            guardedGeneration().fetch_add(1, std::memory_order_release);
+            anyGuarded().store(!guarded().empty(), std::memory_order_release);
+        }
+        UpdateResidentImageUnmapObserver_nid_no_patch();
+        return true;
+    };
+    if (retireReusedOwner()) return;
+    const auto snapshot = owner->ColorSnapshot();
+    if (retireReusedOwner()) return;
+    const auto bytes = snapshot.current.size();
+    Require(bytes <= std::numeric_limits<std::uint64_t>::max() - target.address, "guest color publication range overflows");
+    RequireNoResidentDepthRead_nid_no_patch(target.address, bytes);
+    {
+        std::shared_lock lock(guardedMutex());
+        for (const auto& range : guarded()) {
+            if (range.active == owner->active || !range.active->load(std::memory_order_acquire)) continue;
+            Require(target.address >= range.address + range.bytes || range.address >= target.address + bytes, "another native color owner overlaps guest color publication");
+        }
+    }
+    owner->PublishColorSnapshot(snapshot);
+    {
+        std::lock_guard lock(targetsMutex());
+        discardRetiredTargets();
+    }
+    {
+        std::unique_lock lock(guardedMutex());
+        std::erase_if(guarded(), [&](const auto& range) { return range.active == owner->active; });
+        guardedGeneration().fetch_add(1, std::memory_order_release);
+        anyGuarded().store(!guarded().empty(), std::memory_order_release);
+    }
+    UpdateResidentImageUnmapObserver_nid_no_patch();
+}
+
+void SynchronizeMultisampleTargetRead_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0u) return;
+    Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "native multisample read range overflows");
+    RequireNoResidentDepthRead_nid_no_patch(address, bytes);
+    if (!anyGuarded().load(std::memory_order_acquire)) return;
+    std::vector<std::shared_ptr<std::atomic<bool>>> overlapping;
+    {
+        std::shared_lock lock(guardedMutex());
+        for (const auto& range : guarded()) {
+            if (!range.active->load(std::memory_order_acquire) || address >= range.address + range.bytes || range.address >= address + bytes) continue;
+            overlapping.push_back(range.active);
+        }
+    }
+    if (overlapping.empty()) return;
+    Require(!targetsMutexHeld, "native multisample publication while holding the target list lock is not implemented");
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    Require(!Recorder::InCompletion(), "native multisample publication during a recorder completion is not implemented");
+    std::vector<std::shared_ptr<MultisampleTarget>> owners;
+    {
+        std::lock_guard lock(targetsMutex());
+        for (const auto& target : targets()) {
+            if (!target->active->load(std::memory_order_acquire)) continue;
+            if (std::find(overlapping.begin(), overlapping.end(), target->active) != overlapping.end()) owners.push_back(target);
+        }
+    }
+    for (const auto& owner : owners) {
+        if (owner->CanPublishColor()) PublishMultisampleTargetColor_nid_no_patch(owner->context, owner->target);
+    }
+    RequireNoMultisampleTarget(address, bytes, "a CPU read");
 }
 
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource, bool uintStorage) {
