@@ -1,3 +1,4 @@
+#include "prx/libkernel/include/Api.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
@@ -26,6 +27,9 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <filesystem>
+#endif
 #endif
 
 namespace {
@@ -140,8 +144,19 @@ int DuplicateDescriptor(int descriptor) {
 }
 #else
 int CreateBacking(std::size_t bytes, int* descriptor, std::shared_ptr<JitObject>* object) {
+#ifdef __APPLE__
+    auto path = (std::filesystem::temp_directory_path() / "anyps5-jit-XXXXXX").string();
+    const int file = mkstemp(path.data());
+    if (file < 0) return HostFailure("create JIT shared memory", errno);
+    if (unlink(path.c_str()) != 0 || fcntl(file, F_SETFD, FD_CLOEXEC) != 0) {
+        const int error = errno;
+        ::close(file);
+        return HostFailure("create JIT shared memory", error);
+    }
+#else
     const int file = memfd_create("anyps5 jit shared memory", MFD_CLOEXEC);
     if (file < 0) return HostFailure("create JIT shared memory", errno);
+#endif
     const bool representable = bytes <= static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
     if (!representable || ftruncate(file, static_cast<off_t>(bytes)) != 0) {
         const int error = !representable || errno == EFBIG ? ENOMEM : errno;
@@ -165,7 +180,13 @@ void ForgetJitSharedMemory(int descriptor) {
     g_jitDescriptors.erase(descriptor);
 }
 
+bool IsJitSharedMemory(int descriptor) {
+    std::lock_guard lock(g_jitLock);
+    return g_jitDescriptors.contains(descriptor);
+}
+
 void DuplicateJitSharedMemory(int from, int to) {
+    if (from == to) return;
     std::lock_guard lock(g_jitLock);
     g_jitDescriptors.erase(to);
     const auto source = g_jitDescriptors.find(from);
@@ -180,39 +201,58 @@ int APS5_VABI sceKernelJitCreateSharedMemory(const char* name, std::size_t len, 
     int descriptor = -1;
     std::shared_ptr<JitObject> object;
     if (const int result = CreateBacking(len, &descriptor, &object)) return result;
-    std::lock_guard lock(g_jitLock);
-    g_jitDescriptors.insert_or_assign(descriptor, JitDescriptor{std::move(object), maxProt});
-    *fdOut = descriptor;
+    {
+        std::lock_guard lock(g_jitLock);
+        g_jitDescriptors.insert_or_assign(descriptor, JitDescriptor{std::move(object), maxProt});
+    }
+    if (!GuestCopyOut_nid_no_patch(fdOut, &descriptor, sizeof(descriptor))) {
+        close_nid_postfix(descriptor);
+        return SCE_KERNEL_ERROR_EFAULT;
+    }
     return 0;
 }
 
 int APS5_VABI sceKernelJitCreateAliasOfSharedMemory(int fd, int maxProt, int* fdOut) {
     if (fdOut == nullptr || (maxProt & ~CpuProtection) != 0) return SCE_KERNEL_ERROR_EINVAL;
-    std::lock_guard lock(g_jitLock);
-    const auto source = g_jitDescriptors.find(fd);
-    if (source == g_jitDescriptors.end()) return SCE_KERNEL_ERROR_EBADF;
-    if ((Granted(maxProt) & ~Granted(source->second.maxProtection)) != 0) return SCE_KERNEL_ERROR_EACCES;
-    const int alias = DuplicateDescriptor(fd);
-    if (alias < 0) return HostFailure("duplicate JIT shared memory descriptor", errno);
-    g_jitDescriptors.insert_or_assign(alias, JitDescriptor{source->second.object, maxProt});
-    *fdOut = alias;
+    int alias = -1;
+    {
+        std::lock_guard lock(g_jitLock);
+        const auto source = g_jitDescriptors.find(fd);
+        if (source == g_jitDescriptors.end()) return SCE_KERNEL_ERROR_EBADF;
+        if ((Granted(maxProt) & ~Granted(source->second.maxProtection)) != 0) return SCE_KERNEL_ERROR_EACCES;
+        alias = DuplicateDescriptor(fd);
+        if (alias < 0) return HostFailure("duplicate JIT shared memory descriptor", errno);
+        g_jitDescriptors.insert_or_assign(alias, JitDescriptor{source->second.object, maxProt});
+    }
+    if (!GuestCopyOut_nid_no_patch(fdOut, &alias, sizeof(alias))) {
+        close_nid_postfix(alias);
+        return SCE_KERNEL_ERROR_EFAULT;
+    }
     return 0;
 }
 
 int APS5_VABI sceKernelJitMapSharedMemory(int fd, int prot, void** startOut) {
     if (startOut == nullptr || (prot & ~CpuProtection) != 0) return SCE_KERNEL_ERROR_EINVAL;
-    std::lock_guard lock(g_jitLock);
-    const auto found = g_jitDescriptors.find(fd);
-    if (found == g_jitDescriptors.end()) return SCE_KERNEL_ERROR_EBADF;
-    if ((Granted(prot) & ~Granted(found->second.maxProtection)) != 0) return SCE_KERNEL_ERROR_EACCES;
-    const auto& object = *found->second.object;
-    void* address = *startOut;
-    std::uintptr_t arenaBase = 0;
-    std::size_t arenaBytes = 0;
-    GuestArena::GuestArenaRange_nid_postfix(&arenaBase, &arenaBytes);
-    if (arenaBytes != 0 && reinterpret_cast<std::uintptr_t>(address) - arenaBase >= arenaBytes) address = nullptr;
-    if (const int result = DoMapShared(&address, object.Bytes(), prot, object.Host(fd))) return result;
-    *startOut = address;
+    void* address = nullptr;
+    if (!GuestCopyIn_nid_no_patch(&address, startOut, sizeof(address))) return SCE_KERNEL_ERROR_EFAULT;
+    std::size_t bytes = 0;
+    {
+        std::lock_guard lock(g_jitLock);
+        const auto found = g_jitDescriptors.find(fd);
+        if (found == g_jitDescriptors.end()) return SCE_KERNEL_ERROR_EBADF;
+        if ((Granted(prot) & ~Granted(found->second.maxProtection)) != 0) return SCE_KERNEL_ERROR_EACCES;
+        const auto& object = *found->second.object;
+        std::uintptr_t arenaBase = 0;
+        std::size_t arenaBytes = 0;
+        GuestArena::GuestArenaRange_nid_postfix(&arenaBase, &arenaBytes);
+        if (arenaBytes != 0 && reinterpret_cast<std::uintptr_t>(address) - arenaBase >= arenaBytes) address = nullptr;
+        if (const int result = DoMapShared(&address, object.Bytes(), prot, object.Host(fd))) return result;
+        bytes = object.Bytes();
+    }
+    if (!GuestCopyOut_nid_no_patch(startOut, &address, sizeof(address))) {
+        sceKernelMunmap(reinterpret_cast<std::uint64_t>(address), bytes);
+        return SCE_KERNEL_ERROR_EFAULT;
+    }
     return 0;
 }
 

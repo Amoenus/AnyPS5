@@ -2,6 +2,7 @@
 #include <relinker/analysis/UnusedNidFilter/StrictReachability.hpp>
 #include <relinker/analysis/UnusedNidFilter/EhFrameReader.hpp>
 #include <relinker/parsing/ElfReader.hpp>
+#include <elfpatcher/general/ElfConstants.hpp>
 #include <cstring>
 #include <sstream>
 #include <limits>
@@ -22,6 +23,7 @@ public:
         requireRange(header.ProgramHeaderOffset, static_cast<std::uint64_t>(header.ProgramHeaderCount) * 56);
         headers = reader.ReadProgramHeaders();
         for (const auto& segment : headers) {
+            if (segment.Type == Elfpatcher::PT_NULL || segment.Type == Elfpatcher::PT_GNU_STACK) continue;
             requireRange(segment.Offset, segment.FileSize);
             if (segment.MemorySize > std::numeric_limits<VirtualAddress>::max() - segment.MappedAddress)
                 throw RelinkerException("Strict filter: segment address overflow", segment.MappedAddress);
@@ -34,17 +36,19 @@ public:
                 throw RelinkerException("Strict filter: invalid load segment size", segment.Offset);
             if (segment.Type != 2) continue;
             if (!tags.empty()) throw RelinkerException("Strict filter: multiple dynamic segments");
-            if (segment.FileSize % 16 != 0) throw RelinkerException("Strict filter: truncated dynamic segment", segment.Offset);
             bool terminated = false;
-            for (std::uint64_t offset = 0; offset < segment.FileSize; offset += 16) {
+            for (std::uint64_t offset = 0; segment.FileSize - offset >= 16; offset += 16) {
                 const auto tag = read<std::int64_t>(segment.Offset + offset);
                 if (tag == 0) {
                     terminated = true;
                     break;
                 }
-                if (tag == 1 || (tag >= 0x61000000 && tag != 0x6100002F && tag != 0x61000031 && tag != 0x61000033 && tag != 0x61000039 && tag != 0x6100003B && tag != 0x6100003F)) continue;
-                if (!tags.emplace(tag, read<std::uint64_t>(segment.Offset + offset + 8)).second)
-                    throw RelinkerException("Strict filter: duplicate dynamic tag", segment.Offset + offset);
+                if (tag == 17 || tag == 18 || tag == 19) throw RelinkerException("Strict filter: DT_REL relocations are not supported");
+                if (tag == 1 || (tag >= 0x61000000 && tag != 0x6ffffef5 && tag != 0x6100002F && tag != 0x61000031 && tag != 0x61000033 && tag != 0x61000039 && tag != 0x6100003B && tag != 0x6100003F)) continue;
+                const auto value = read<std::uint64_t>(segment.Offset + offset + 8);
+                const auto [entry, inserted] = tags.emplace(tag, value);
+                if (!inserted && entry->second != value)
+                    throw RelinkerException("Strict filter: conflicting duplicate dynamic tag", segment.Offset + offset);
             }
             if (!terminated) throw RelinkerException("Strict filter: unterminated dynamic segment", segment.Offset);
         }
@@ -64,6 +68,8 @@ public:
         for (const auto& reference : references) {
             if (reference.RelocationTypeValue != 1 && reference.RelocationTypeValue != 6 && reference.RelocationTypeValue != 7)
                 throw RelinkerException("Strict filter: unsupported imported relocation", reference.RelocationAddress);
+            if (reference.RelocationAddress > std::numeric_limits<VirtualAddress>::max() - 8)
+                throw RelinkerException("Strict filter: imported slot address overflow", reference.RelocationAddress);
             if (!input.ImportSlots.insert(reference.RelocationAddress).second)
                 throw RelinkerException("Strict filter: duplicate imported slot", reference.RelocationAddress);
         }
@@ -71,6 +77,8 @@ public:
         const auto rela = table(7, 0x6100002F);
         const auto relaSize = value(8, 0x61000031);
         if (rela.has_value() != relaSize.has_value()) throw RelinkerException("Strict filter: incomplete relocation table metadata");
+        if (const auto entrySize = value(9, 0x61000033); entrySize && *entrySize != 24)
+            throw RelinkerException("Strict filter: invalid RELA entry size");
         if (rela) {
             if (value(9, 0x61000033) != 24 || *relaSize % 24 != 0)
                 throw RelinkerException("Strict filter: invalid RELA entry size");
@@ -86,7 +94,10 @@ public:
                         throw RelinkerException("Strict filter: relative relocation has a symbol", slot);
                 }
                 const auto target = read<std::uint64_t>(*rela + offset + 16);
-                if (input.ImportSlots.contains(slot) || !input.Pointers.emplace(slot, target).second)
+                if (target > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                    throw RelinkerException("Strict filter: relative relocation target address is negative", slot);
+                const auto [recorded, inserted] = input.Pointers.emplace(slot, target);
+                if (input.ImportSlots.contains(slot) || (!inserted && recorded->second != target))
                     throw RelinkerException("Strict filter: overlapping pointer relocations", slot);
 
             }
@@ -98,9 +109,11 @@ public:
         for (const auto& [addressTag, sizeTag] : {std::pair{25, 27}, std::pair{26, 28}, std::pair{32, 33}}) {
             const auto array = value(addressTag, 0x60000000 + addressTag);
             const auto size = value(sizeTag, 0x60000000 + sizeTag);
-            if (array.has_value() != size.has_value()) throw RelinkerException("Strict filter: incomplete constructor array metadata");
-            if (!array) continue;
+            if (size && !array) throw RelinkerException("Strict filter: incomplete constructor array metadata");
+            if (!size || *size == 0) continue;
             if (*size % 8 != 0) throw RelinkerException("Strict filter: invalid constructor array size", *array);
+            if (*size > std::numeric_limits<VirtualAddress>::max() - *array)
+                throw RelinkerException("Strict filter: constructor array address overflow", *array);
             for (std::uint64_t offset = 0; offset < *size; offset += 8) {
                 const auto slot = *array + offset;
                 const auto position = input.Pointers.find(slot);
@@ -117,7 +130,66 @@ public:
                 if (size->second % 24 != 0) throw RelinkerException("Strict filter: invalid symbol table size");
                 count = size->second / 24;
             } else if (const auto hash = tags.find(4); hash != tags.end()) {
-                count = read<std::uint32_t>(fileOffset(hash->second, 8) + 4);
+                const auto hashOffset = fileOffset(hash->second, 8);
+                const auto nbucket = read<std::uint32_t>(hashOffset);
+                const auto nchain = read<std::uint32_t>(hashOffset + 4);
+                if (nbucket == 0 || nchain == 0)
+                    throw RelinkerException("Strict filter: invalid SysV hash header", hash->second);
+                if (static_cast<std::uint64_t>(nbucket) > (std::numeric_limits<std::uint32_t>::max() - 8) / 4 ||
+                    static_cast<std::uint64_t>(nchain) > (std::numeric_limits<std::uint32_t>::max() - 8 - static_cast<std::uint64_t>(nbucket) * 4) / 4)
+                    throw RelinkerException("Strict filter: invalid SysV hash geometry", hash->second);
+                const std::uint64_t hashSize = 8 + static_cast<std::uint64_t>(nbucket) * 4 + static_cast<std::uint64_t>(nchain) * 4;
+                const auto start = fileOffset(hash->second, hashSize);
+                for (std::uint64_t index = 0; index < nbucket; ++index) {
+                    const auto bucket = read<std::uint32_t>(start + 8 + index * 4);
+                    if (bucket >= nchain)
+                        throw RelinkerException("Strict filter: invalid SysV hash bucket index", hash->second);
+                }
+                for (std::uint64_t index = 0; index < nchain; ++index) {
+                    const auto chain = read<std::uint32_t>(start + 8 + static_cast<std::uint64_t>(nbucket) * 4 + index * 4);
+                    if (chain >= nchain)
+                        throw RelinkerException("Strict filter: invalid SysV hash chain index", hash->second);
+                }
+                count = nchain;
+            } else if (const auto gnuHash = tags.find(0x6ffffef5); gnuHash != tags.end()) {
+                const auto gnuAddress = gnuHash->second;
+                const auto header = fileOffset(gnuAddress, 16);
+                const auto bucketCount = read<std::uint32_t>(header);
+                const auto firstSymbol = read<std::uint32_t>(header + 4);
+                const auto bloomCount = read<std::uint32_t>(header + 8);
+                if (bucketCount == 0 || bloomCount == 0 || firstSymbol == 0)
+                    throw RelinkerException("Strict filter: invalid GNU hash header", gnuAddress);
+                if (static_cast<std::uint64_t>(bloomCount) > (std::numeric_limits<std::uint32_t>::max() - 16) / 8 ||
+                    static_cast<std::uint64_t>(bucketCount) > (std::numeric_limits<std::uint32_t>::max() - 16 - static_cast<std::uint64_t>(bloomCount) * 8) / 4)
+                    throw RelinkerException("Strict filter: invalid GNU hash geometry", gnuAddress);
+                const std::uint64_t bucketOffset = 16 + static_cast<std::uint64_t>(bloomCount) * 8;
+                const auto chainOffset = bucketOffset + static_cast<std::uint64_t>(bucketCount) * 4;
+                if (chainOffset > std::numeric_limits<std::uint64_t>::max() - gnuAddress)
+                    throw RelinkerException("Strict filter: invalid GNU hash header", gnuAddress);
+                const auto start = fileOffset(gnuAddress, chainOffset);
+                std::uint64_t lastBucket = 0;
+                for (std::uint64_t index = 0; index < bucketCount; ++index) {
+                    const auto bucket = read<std::uint32_t>(start + bucketOffset + index * 4);
+                    if (bucket != 0 && bucket < firstSymbol)
+                        throw RelinkerException("Strict filter: invalid GNU hash bucket", gnuAddress);
+                    lastBucket = std::max(lastBucket, static_cast<std::uint64_t>(bucket));
+                }
+                count = firstSymbol;
+                if (lastBucket != 0) {
+                    count = lastBucket;
+                    for (;;) {
+                        if (count - firstSymbol > (std::numeric_limits<std::uint64_t>::max() - chainOffset) / 4)
+                            throw RelinkerException("Strict filter: invalid GNU hash chain", gnuAddress);
+                        const auto offset = chainOffset + (count - firstSymbol) * 4;
+                        if (offset > std::numeric_limits<std::uint64_t>::max() - gnuAddress)
+                            throw RelinkerException("Strict filter: invalid GNU hash chain", gnuAddress);
+                        const auto chain = read<std::uint32_t>(fileOffset(gnuAddress + offset, 4));
+                        ++count;
+                        if (count > std::numeric_limits<std::uint32_t>::max() || count > bytes.size() / 24)
+                            throw RelinkerException("Strict filter: invalid GNU hash chain", gnuAddress);
+                        if (chain & 1) break;
+                    }
+                }
             } else {
                 throw RelinkerException("Strict filter: cannot establish dynamic symbol table bounds");
             }
@@ -129,7 +201,7 @@ public:
                 const auto info = read<std::uint8_t>(position + 4);
                 const auto type = info & 15;
                 if (type == 10) throw RelinkerException("Strict filter: IFUNC resolver is not modeled", position);
-                if (section == 0 || (info >> 4) == 0 || type != 2) continue;
+                if (section == 0 || section == Elfpatcher::SHN_ABS || (info >> 4) == 0 || type != 2) continue;
                 input.Entries.push_back(read<std::uint64_t>(position + 8));
             }
         }

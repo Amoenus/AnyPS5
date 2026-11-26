@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,7 +37,7 @@ def main():
         work = Path(directory)
 
         def run(*arguments):
-            return subprocess.run([str(relinker), *arguments], capture_output=True, text=True, timeout=60)
+            return subprocess.run([str(relinker), *arguments], capture_output=True, text=True, encoding="utf-8", timeout=60)
 
         def case(name):
             root = work / name
@@ -64,8 +65,9 @@ def main():
         assert f"Patch: eboot.bin [flip_bit] va={address:#x} off=" in result.stdout, result.stdout
         assert f"{expected:02x} -> {expected ^ 1:02x} (flip one bit)\n" in result.stdout, result.stdout
         manifest = output.parent / "app.patches.toml"
-        text = manifest.read_text()
+        text = manifest.read_text(encoding="utf-8")
         assert 'main_target = "eboot.bin"' in text and 'name = "flip_bit"' in text, text
+        assert 'main_target = "eboot.bin"\nlinux_base = 0x400000\n' in text, text
         assert f"Patch manifest: {manifest}\n" in result.stdout
         assert f'config = "{source.parent.as_posix()}/relinker-patches.toml"\n' in text, text
 
@@ -147,13 +149,38 @@ def main():
         result = run("--verify-patches", str(manifest), str(output), "--verify-output", "--executable", "picker/picker.bin")
         assert result.returncode == 2 and "output not found" in result.stderr, result.stderr
 
+        root, source, output = case("windows")
+        output = output.with_suffix(".exe")
+        (root / "in" / "picker").mkdir()
+        (root / "in" / "picker" / "picker.bin").write_bytes(image)
+        (root / "in" / "sce_module").mkdir()
+        (root / "p.toml").write_text(patch_text(address, expected, "flip_bit") + patch_text(address, expected, target="picker/picker.bin").replace("format = 1\n", "", 1))
+        result = run("--windows", "--executable", "picker/picker.bin", "--patches", str(root / "p.toml"), str(source), str(output))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        manifest = output.parent / "app.patches.toml"
+        text = manifest.read_text(encoding="utf-8")
+        assert "linux_base" not in text and text.count(f"va = {address:#x}\noutput_rva = 0x") == 2, text
+        before = sorted(str(path) for path in work.rglob("*"))
+        result = run("--verify-patches", str(manifest), str(output), "--verify-output", "--executable", "picker/picker.bin")
+        assert result.returncode == 0 and "applied: flip_bit eboot.bin" in result.stdout and "applied: picker/picker.bin" in result.stdout, (result.stdout, result.stderr)
+        assert sorted(str(path) for path in work.rglob("*")) == before, "verify wrote files"
+        offset = int(re.search(r"applied: flip_bit eboot\.bin va=0x[0-9a-f]+ off=0x([0-9a-f]+) ", result.stdout).group(1), 16)
+        tampered = bytearray(output.read_bytes())
+        assert tampered[offset] == expected ^ 1, (offset, tampered[offset])
+        tampered[offset] = expected
+        output.write_bytes(tampered)
+        result = run("--verify-patches", str(manifest), str(output), "--verify-output", "--executable", "picker/picker.bin")
+        assert result.returncode == 1 and "mismatch: flip_bit eboot.bin" in result.stdout and "patch is not applied" in result.stdout and "applied: picker/picker.bin" in result.stdout, (result.stdout, result.stderr)
+        result = run("--verify-patches", str(work / "plain" / "out" / "app.patches.toml"), str(output), "--verify-output")
+        assert result.returncode == 2 and "linux_base" in result.stderr, (result.stdout, result.stderr)
+
         relocation_overlap(relinker, work)
         writer_overlap(relinker, work)
 
 
 def relocation_overlap(relinker, work):
     def run(*arguments):
-        return subprocess.run([str(relinker), *arguments], capture_output=True, text=True, timeout=60)
+        return subprocess.run([str(relinker), *arguments], capture_output=True, text=True, encoding="utf-8", timeout=60)
 
     def patch_file(path, target, address, expected):
         path.write_text(f'format = 1\n\n[[patch]]\ntarget = "{target}"\nva = {address:#x}\nexpected = "{expected}"\nvalue = "ffff"\n')
@@ -176,6 +203,7 @@ def relocation_overlap(relinker, work):
                 assert result.returncode == 0, (kind, result.stdout, result.stderr)
 
     image = bytearray(importing())
+    struct.pack_into("<I", image, 64 + 4, 7)
     struct.pack_into("<qQ", image, DYNAMIC + 5 * 16, 8, 24)
     address = 0x4d00
     struct.pack_into("<QQq", image, 0x4700, address, 8, 0x4000)
@@ -195,7 +223,7 @@ def relocation_overlap(relinker, work):
 
 def writer_overlap(relinker, work):
     def run(*arguments):
-        return subprocess.run([str(relinker), *arguments], capture_output=True, text=True, timeout=60)
+        return subprocess.run([str(relinker), *arguments], capture_output=True, text=True, encoding="utf-8", timeout=60)
 
     def attempt(name, module, options, address, expected, value="ff", target="sce_module/sample.prx"):
         case = work / name

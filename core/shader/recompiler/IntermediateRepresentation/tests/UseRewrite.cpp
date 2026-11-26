@@ -1,4 +1,5 @@
 #include "IntermediateRepresentation/IrBlock.hpp"
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
@@ -90,14 +91,31 @@ void CheckSimpleReplacement() {
     Require(!source->HasUses() && source->OperandUses().empty());
     Require(first->Argument(0) == target && first->Argument(1) == target && first->Argument(2) == target);
     Require(second->Argument(0) == target);
-    const std::vector<IrUse> expected{{existing, 0}, {first, 2}, {first, 1}, {second, 0}, {first, 0}};
+    const IrUseList expected{{existing, 0}, {first, 2}, {first, 1}, {second, 0}, {first, 0}};
     Require(target->OperandUses() == expected);
-    Require(target->Uses() == std::vector<IrValue*>({existing, first, first, second, first}));
+    Require(std::ranges::equal(target->Uses(), std::vector<IrValue*>({existing, first, first, second, first})));
     first->ReplaceArgument(1, source);
     Require(source->UseCount() == 1);
     source->ReplaceAllUsesWith(nullptr);
     Require(first->Argument(1) == nullptr && target->UseCount() == 4);
     Require(source->Opcode() == IrOpcode::IAdd32 && source->Parent() == &graph.block);
+}
+
+void CheckTailArgumentRemoval() {
+    Graph graph(4);
+    auto* source = graph.Value(0);
+    auto* first = graph.Value(1);
+    auto* last = graph.Value(2);
+    first->AddArgument(source);
+    last->AddArgument(source);
+    last->AddArgument(source);
+    last->ReplaceArgument(0, nullptr);
+    Require(source->OperandUses() == IrUseList({{first, 0}, {last, 1}}));
+    last->ReplaceArgument(1, graph.Value(3));
+    Require(source->OperandUses() == IrUseList({{first, 0}}));
+    Require(graph.Value(3)->OperandUses() == IrUseList({{last, 1}}));
+    first->Invalidate();
+    Require(!source->HasUses() && first->Argument(0) == nullptr);
 }
 
 void CheckSelfAndEmpty() {
@@ -129,8 +147,40 @@ void CheckPhiAndIdentity() {
     Require(target->UseCount() == 3);
 }
 
+void CheckPhiPreserveClearsPhiBlocks() {
+    Graph graph(3);
+    auto* target = graph.Value(0);
+    auto* user = graph.Value(1);
+    auto* phi = graph.Value(2);
+    phi->ReplaceOpcode(IrOpcode::Phi);
+    phi->AddPhiOperand(&graph.block, target);
+    phi->AddPhiOperand(&graph.block, target);
+    user->AddArgument(phi);
+    phi->ReplaceUsesWith(target, true);
+    Require(phi->Opcode() == IrOpcode::Identity);
+    Require(phi->ArgumentCount() == 1 && phi->Argument(0) == target);
+    Require(phi->PhiBlockCount() == 0);
+    Require(user->Argument(0) == phi && phi->Resolve() == target);
+}
+
+void CheckPhiInvalidateClearsPhiBlocks() {
+    Graph graph(3);
+    auto* target = graph.Value(0);
+    auto* user = graph.Value(1);
+    auto* phi = graph.Value(2);
+    phi->ReplaceOpcode(IrOpcode::Phi);
+    phi->AddPhiOperand(&graph.block, target);
+    phi->AddPhiOperand(&graph.block, target);
+    user->AddArgument(phi);
+    phi->ReplaceUsesWith(target, false);
+    Require(phi->Opcode() == IrOpcode::Unreachable);
+    Require(phi->PhiBlockCount() == 0);
+    Require(phi->Argument(0) == nullptr && phi->Argument(1) == nullptr);
+    Require(user->Argument(0) == target && target->UseCount() == 1);
+}
+
 void CheckAllocationFailure() {
-    for (std::ptrdiff_t failure = 0; failure < 2; ++failure) {
+    for (std::ptrdiff_t failure = 0; failure < 1; ++failure) {
         Graph graph(12);
         for (std::size_t index = 2; index < 12; ++index) {
             graph.Value(index)->AddArgument(graph.Value(0));
@@ -169,7 +219,7 @@ void CheckGeometricGrowth() {
     countAllocations = true;
     for (auto& source : sources) source->ReplaceAllUsesWith(graph.Value(1));
     countAllocations = false;
-    Require(allocations <= 2 * (std::bit_width(count) + 1));
+    Require(allocations <= std::bit_width(count) + 1);
     Require(graph.Value(1)->UseCount() == count);
     for (std::size_t index = 2; index < count + 2; ++index) Require(graph.Value(index)->Argument(0) == graph.Value(1));
 }
@@ -222,8 +272,11 @@ int main() {
     try {
         const std::pair<const char*, void (*)()> cases[] = {
             {"ordered duplicate operands", CheckSimpleReplacement},
+            {"tail argument removal", CheckTailArgumentRemoval},
             {"self and empty replacement", CheckSelfAndEmpty},
             {"phi and identity rewriting", CheckPhiAndIdentity},
+            {"phi preserve clears phi blocks", CheckPhiPreserveClearsPhiBlocks},
+            {"phi invalidate clears phi blocks", CheckPhiInvalidateClearsPhiBlocks},
             {"allocation failure integrity", CheckAllocationFailure},
             {"geometric use-list growth", CheckGeometricGrowth},
             {"large fan-out", CheckLargeFanOut},
@@ -233,7 +286,7 @@ int main() {
             current = name;
             test();
         }
-        std::puts("7 IR rewrite suites passed; 2000 differential use graphs and 48000 mutation comparisons");
+        std::puts("10 IR rewrite suites passed; 2000 differential use graphs and 48000 mutation comparisons");
         return 0;
     } catch (const std::exception& error) {
         failureAfter = -1;

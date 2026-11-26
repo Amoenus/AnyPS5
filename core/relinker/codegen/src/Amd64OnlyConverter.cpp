@@ -2,6 +2,7 @@
 #include <codegen/IInstructionScanner.hpp>
 #include <codegen/CodegenException.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
+#include <codegen/x86/DecodedInstruction.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <codegen/x86/X64OpcodeConstants.hpp>
 #include <codegen/x86/IAmd64OnlyInstructionMatcher.hpp>
@@ -34,6 +35,7 @@ constexpr std::uint32_t kLoadSegment = 1;
 constexpr std::uint32_t kExecutableSegment = 1;
 constexpr std::uint8_t kLea = 0x8D;
 constexpr std::uint64_t kIslandSearchBytes = 0x100;
+constexpr std::size_t kFlagScanBytes = 0x80;
 
 struct Placement {
     std::vector<TrampolineSite> Sites;
@@ -51,11 +53,15 @@ public:
         const std::set<std::uint64_t>& branchTargets,
         const std::set<std::size_t>& pending,
         const std::set<std::size_t>& claimed,
-        const IAmd64OnlyInstructionMatcher& matcher
-    ) : _seg(seg), _matches(matches), _ph(ph), _branchTargets(branchTargets), _pending(pending), _claimed(claimed), _matcher(matcher) {}
+        const IAmd64OnlyInstructionMatcher& matcher,
+        const bool keepSegmentAccesses
+    ) : _seg(seg), _matches(matches), _ph(ph), _branchTargets(branchTargets), _pending(pending), _claimed(claimed), _matcher(matcher), _keepSegmentAccesses(keepSegmentAccesses) {}
 
     [[nodiscard]] std::optional<Placement> Window(const std::size_t index) const {
+        std::optional<Placement> fallback;
         for (const bool avoidSegment : {true, false}) {
+            if (!avoidSegment && _keepSegmentAccesses)
+                break;
             if (index + 1 < _matches.size() && (_pending.contains(index + 1) || _movable(index + 1, true, avoidSegment))) {
                 if (auto placement = _relocate(index, index, index + 1))
                     return placement;
@@ -64,8 +70,10 @@ public:
                 if (auto placement = _relocate(index, index - 1, index))
                     return placement;
             }
+            if (!fallback && index + 1 < _matches.size() && _pending.contains(index + 1))
+                fallback = _relocate(index, index, index + 1, true);
         }
-        return std::nullopt;
+        return fallback;
     }
 
     [[nodiscard]] std::optional<Placement> Island(const std::size_t index) {
@@ -95,10 +103,12 @@ private:
     const std::set<std::size_t>& _pending;
     const std::set<std::size_t>& _claimed;
     const IAmd64OnlyInstructionMatcher& _matcher;
+    const bool _keepSegmentAccesses;
     X64InstructionDecoder _decoder;
 
     [[nodiscard]] std::uint64_t _address(const std::size_t index) const { return _ph.MappedAddress + _matches[index].Offset; }
     [[nodiscard]] std::uint64_t _end(const std::size_t index) const { return _address(index) + _matches[index].Length; }
+    [[nodiscard]] static std::int64_t _distance(const std::uint64_t to, const std::uint64_t from) { return static_cast<std::int64_t>(to - from); }
     [[nodiscard]] std::span<const std::uint8_t> _bytes(const std::size_t index) const { return {_seg.data() + _matches[index].Offset, _matches[index].Length}; }
     [[nodiscard]] DecodedInstructionInfo _info(const std::size_t index) const { return _decoder.DecodeInstruction(_seg.data() + _matches[index].Offset, _matches[index].Length); }
 
@@ -107,13 +117,48 @@ private:
         return hit != _branchTargets.end() && *hit < end;
     }
 
+    [[nodiscard]] bool _int3(const std::size_t index) const {
+        const auto bytes = _bytes(index);
+        return bytes.size() == 1 && bytes[0] == X64OpcodeConstants::OneByteInt3;
+    }
+
+    [[nodiscard]] bool _padding(const std::size_t index) const {
+        const auto info = _info(index);
+        if (info.IsTwoByteOpcode)
+            return info.Opcode == X64OpcodeConstants::TwoByteNopModRm;
+        if (info.Opcode != X64OpcodeConstants::OneByteNop)
+            return _int3(index);
+        const auto prefixes = _bytes(index).first(info.OpcodeOffset);
+        return (info.RexPrefix & X64OpcodeConstants::RexBBit) == 0 && std::find(prefixes.begin(), prefixes.end(), X64OpcodeConstants::PrefixRep) == prefixes.end();
+    }
+
+    [[nodiscard]] bool _mayBeEntered(const std::size_t index) const {
+        for (auto previous = index; previous > 0; --previous) {
+            if (_end(previous - 1) != _address(previous) || _blocksFollowing(previous - 1))
+                return true;
+            if (!_padding(previous - 1))
+                return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool _enteredWithin(const std::size_t first, const std::size_t last) const {
+        if (_entered(_address(first), _end(last)))
+            return true;
+        for (auto index = first + 1; index <= last; ++index) {
+            if (!_int3(index) && _mayBeEntered(index))
+                return true;
+        }
+        return false;
+    }
+
     [[nodiscard]] bool _blocksFollowing(const std::size_t index) const {
         const auto kind = _info(index).FlowKind;
         return kind != ControlFlowKind::Sequential && kind != ControlFlowKind::ConditionalBranch;
     }
 
     [[nodiscard]] bool _movable(const std::size_t index, const bool last, const bool avoidSegment = false) const {
-        return !_claimed.contains(index) && !_pending.contains(index) && (last || !_blocksFollowing(index)) && !(avoidSegment && _info(index).SegmentPrefix != 0);
+        return !_claimed.contains(index) && !_pending.contains(index) && (last || !_blocksFollowing(index)) && !((avoidSegment || _keepSegmentAccesses) && _info(index).SegmentPrefix != 0);
     }
 
     [[nodiscard]] TrampolineSite _site(const std::uint64_t start, const std::size_t length, LoweredBody body) const {
@@ -129,15 +174,15 @@ private:
         };
     }
 
-    [[nodiscard]] std::optional<Placement> _relocate(const std::size_t index, const std::size_t first, const std::size_t last) const {
-        if (_entered(_address(first), _end(last)))
+    [[nodiscard]] std::optional<Placement> _relocate(const std::size_t index, const std::size_t first, const std::size_t last, const bool allowInPlace = false) const {
+        if (_enteredWithin(first, last))
             return std::nullopt;
         StubBodyBuilder body;
         Placement placement;
         try {
             for (auto k = first; k <= last; ++k) {
                 if (_pending.contains(k)) {
-                    _matcher.EmitOutOfLine(body, _bytes(k));
+                    _matcher.EmitOutOfLine(body, _bytes(k), allowInPlace);
                     if (k != index)
                         placement.Consumed.push_back(k);
                 } else {
@@ -157,12 +202,12 @@ private:
         using Amd64OnlySubstitutionTable::kJmpRel32;
         std::size_t head = 0;
         for (auto last = start; last < _matches.size(); ++last) {
-            if (!_movable(last, true) || _entered(_address(start), _end(last)))
+            if (!_movable(last, true) || _enteredWithin(start, last))
                 return std::nullopt;
             if (head == 0 && _end(last) - _address(start) >= kJmpRel32.Size)
                 head = static_cast<std::size_t>(_end(last) - _address(start));
             const auto island = _address(start) + head;
-            const auto reach = static_cast<std::int64_t>(island) - static_cast<std::int64_t>(_address(index) + kShortJumpSize);
+            const auto reach = _distance(island, _address(index) + kShortJumpSize);
             if (head != 0 && (reach < std::numeric_limits<std::int8_t>::min() || reach > std::numeric_limits<std::int8_t>::max()))
                 return std::nullopt;
             if (head != 0 && _end(last) >= island + kJmpRel32.Size) {
@@ -196,9 +241,9 @@ private:
         placement.Sites.push_back(_site(windowStart, head, moved.Finish()));
 
         StubBodyBuilder lowered;
-        lowered.Seek(static_cast<std::int64_t>(store) - static_cast<std::int64_t>(island));
+        lowered.Seek(_distance(store, island));
         _matcher.EmitOutOfLine(lowered, _bytes(index));
-        lowered.JumpTo(static_cast<std::int64_t>(_end(index)) - static_cast<std::int64_t>(island));
+        lowered.JumpTo(_distance(_end(index), island));
         placement.Sites.push_back(_site(island, kJmpRel32.Size, lowered.Finish()));
         placement.ReplacementLength = placement.Sites.back().Body.size();
         placement.Claimed.push_back(index);
@@ -206,14 +251,14 @@ private:
         const auto offset = _matches[index].Offset;
         std::fill_n(_seg.begin() + static_cast<std::ptrdiff_t>(offset), _matches[index].Length, Amd64OnlySubstitutionTable::kTrapFill);
         _seg[offset] = X64OpcodeConstants::OneByteJmpRel8;
-        _seg[offset + 1] = static_cast<std::uint8_t>(static_cast<std::int8_t>(static_cast<std::int64_t>(island) - static_cast<std::int64_t>(store + kShortJumpSize)));
+        _seg[offset + 1] = static_cast<std::uint8_t>(static_cast<std::int8_t>(_distance(island, store + kShortJumpSize)));
         return placement;
     }
 };
 
 class Amd64OnlyConverter : public IAmd64OnlyConverter {
 public:
-    Amd64OnlyConverter(const Amd64OnlyTarget target, std::function<void(std::uint64_t, std::uint64_t)> progress) : _matcher(MakeAmd64OnlyInstructionMatcher(target)), progress(std::move(progress)) {}
+    Amd64OnlyConverter(const Amd64OnlyTarget target, std::function<void(std::uint64_t, std::uint64_t)> progress, const bool keepSegmentAccesses) : _matcher(MakeAmd64OnlyInstructionMatcher(target)), progress(std::move(progress)), _keepSegmentAccesses(keepSegmentAccesses) {}
 
     [[nodiscard]] ConvertResult Convert(
         std::vector<std::uint8_t> fileBytes,
@@ -229,6 +274,7 @@ private:
 
     std::unique_ptr<IAmd64OnlyInstructionMatcher> _matcher;
     std::function<void(std::uint64_t, std::uint64_t)> progress;
+    bool _keepSegmentAccesses = false;
 
     void _convertSegment(
         std::vector<std::uint8_t>& fileBytes,
@@ -260,19 +306,40 @@ std::set<std::uint64_t> Amd64OnlyConverter::_collectBranchTargets(
         const auto match = std::lower_bound(matches.begin(), matches.end(), offset, [](const InstructionMatch& item, const std::uint64_t value) { return item.Offset < value; });
         return match != matches.end() && match->Offset == offset;
     };
+    const auto pastPrefixes = [&](const std::uint64_t address) {
+        const auto offset = address - ph.MappedAddress;
+        const auto after = std::upper_bound(matches.begin(), matches.end(), offset, [](const std::uint64_t value, const InstructionMatch& item) { return value < item.Offset; });
+        if (after == matches.begin())
+            return false;
+        const auto& match = *std::prev(after);
+        const auto inside = offset - match.Offset;
+        return inside != 0 && inside < match.Length && inside > DecodedInstruction{seg.data() + match.Offset, match.Length}.OpcodeOffset();
+    };
     const X64InstructionDecoder decoder;
     std::set<std::uint64_t> targets;
     for (const auto& match : matches) {
         const auto info = decoder.DecodeInstruction(seg.data() + match.Offset, match.Length);
-        const auto next = static_cast<std::int64_t>(ph.MappedAddress + match.Offset + info.Length);
+        const auto next = ph.MappedAddress + match.Offset + info.Length;
         if (info.HasBranchTarget && !info.HasRipRelativeDisp) {
-            const auto target = next + info.BranchDisp;
-            if (target >= 0)
-                targets.insert(static_cast<std::uint64_t>(target));
+            const auto displacement = static_cast<std::uint64_t>(info.BranchDisp);
+            const auto target = next + displacement;
+            const auto wrapped = info.BranchDisp < 0 ? target > next : target < next;
+            if (!wrapped && !pastPrefixes(target))
+                targets.insert(target);
         } else if (info.HasRipRelativeDisp && info.Opcode == kLea) {
             std::int32_t displacement;
             std::memcpy(&displacement, seg.data() + match.Offset + info.RipRelativeDispOffset, sizeof(displacement));
-            const auto table = static_cast<std::uint64_t>(next + displacement);
+            const auto prefixes = std::span(seg).subspan(match.Offset, info.OpcodeOffset);
+            const bool tableAddress32 = info.AddressSize32 || ((info.RexPrefix & X64OpcodeConstants::RexWBit) == 0 &&
+                std::find(prefixes.begin(), prefixes.end(), X64OpcodeConstants::PrefixOperandSize) == prefixes.end());
+            if (!tableAddress32) {
+                if (displacement < 0 && next < static_cast<std::uint64_t>(-static_cast<std::int64_t>(displacement)))
+                    continue;
+                if (displacement > 0 && std::numeric_limits<std::uint64_t>::max() - next < static_cast<std::uint64_t>(displacement))
+                    continue;
+            }
+            auto table = next + static_cast<std::uint64_t>(static_cast<std::int64_t>(displacement));
+            if (tableAddress32) table = static_cast<std::uint32_t>(table);
             for (const auto& data : segments) {
                 if (data.Type != kLoadSegment || table < data.MappedAddress || table - data.MappedAddress >= data.FileSize)
                     continue;
@@ -281,7 +348,15 @@ std::set<std::uint64_t> Amd64OnlyConverter::_collectBranchTargets(
                 for (auto entry = table; entry - data.MappedAddress + sizeof(std::int32_t) <= data.FileSize; entry += sizeof(std::int32_t)) {
                     std::int32_t relative;
                     std::memcpy(&relative, fileBytes.data() + data.Offset + (entry - data.MappedAddress), sizeof(relative));
-                    const auto target = table + static_cast<std::uint64_t>(static_cast<std::int64_t>(relative));
+                    if (!info.AddressSize32) {
+                        if (relative < 0 && table < static_cast<std::uint64_t>(-static_cast<std::int64_t>(relative)))
+                            break;
+                        if (relative > 0 && std::numeric_limits<std::uint64_t>::max() - table < static_cast<std::uint64_t>(relative))
+                            break;
+                    }
+                    const auto target = info.AddressSize32
+                        ? static_cast<std::uint64_t>(static_cast<std::uint32_t>(table + static_cast<std::uint64_t>(static_cast<std::int64_t>(relative))))
+                        : table + static_cast<std::uint64_t>(static_cast<std::int64_t>(relative));
                     if (!startsInstruction(target))
                         break;
                     targets.insert(target);
@@ -318,7 +393,9 @@ void Amd64OnlyConverter::_convertSegment(
     for (std::size_t index = 0; index < matches.size(); ++index) {
         if (progress && index != 0 && index % 4096 == 0) progress(completed + segSize + matches[index].Offset, total);
         const auto& match = matches[index];
-        auto substitution = _atFileOffset(ph.Offset + match.Offset, [&] { return _matcher->Match(seg.data() + match.Offset, match.Length); });
+        const auto next = match.Offset + match.Length;
+        const std::span<const std::uint8_t> following(seg.data() + next, next < seg.size() ? std::min<std::size_t>(seg.size() - next, kFlagScanBytes) : 0);
+        auto substitution = _atFileOffset(ph.Offset + match.Offset, [&] { return _matcher->Match(seg.data() + match.Offset, match.Length, {}, following); });
         if (substitution.has_value())
             pending.push_back({index, match, std::move(*substitution)});
     }
@@ -362,7 +439,7 @@ void Amd64OnlyConverter::_convertSegment(
         }
         case Amd64OnlyLowering::Trampoline: {
             if (substitution.RelocatableWindow && match.Length < Amd64OnlySubstitutionTable::kJmpRel32.Size) {
-                WindowPlacer placer(seg, matches, ph, branchTargets, pendingIndices, claimed, *_matcher);
+                WindowPlacer placer(seg, matches, ph, branchTargets, pendingIndices, claimed, *_matcher, _keepSegmentAccesses);
                 auto placement = placer.Window(item.Index);
                 if (!placement)
                     placement = placer.Island(item.Index);
@@ -386,6 +463,8 @@ void Amd64OnlyConverter::_convertSegment(
                     for (auto next = item.Index + 1; siteLength < Amd64OnlySubstitutionTable::kJmpRel32.Size; ++next) {
                         if (next >= matches.size() || matches[next].Offset != match.Offset + siteLength)
                             throw CodegenException("AMD-only instruction too short for a jump and not followed by an instruction", fileOffset);
+                        if (claimed.contains(next))
+                            throw CodegenException("AMD-only instruction too short for a jump is followed by an instruction another stub already moved", ph.Offset + matches[next].Offset);
                         const auto& following = matches[next];
                         const std::span<const std::uint8_t> bytes(seg.data() + following.Offset, following.Length);
                         const auto info = decoder.DecodeInstruction(bytes.data(), bytes.size());
@@ -393,7 +472,7 @@ void Amd64OnlyConverter::_convertSegment(
                         if (amdOnly && trailingBytes == 0) {
                             sequence.push_back(bytes);
                             taken.push_back(next);
-                        } else if (amdOnly || info.FlowKind != ControlFlowKind::Sequential || info.HasBranchTarget) {
+                        } else if (amdOnly || info.FlowKind != ControlFlowKind::Sequential || info.HasBranchTarget || (_keepSegmentAccesses && info.SegmentPrefix != 0)) {
                             throw CodegenException("AMD-only instruction too short for a jump is followed by an instruction that cannot move", ph.Offset + following.Offset);
                         } else {
                             trailingBytes += following.Length;
@@ -471,8 +550,8 @@ ConvertResult Amd64OnlyConverter::Convert(
 
 }
 
-std::unique_ptr<IAmd64OnlyConverter> MakeAmd64OnlyConverter(const Amd64OnlyTarget target, std::function<void(std::uint64_t, std::uint64_t)> progress) {
-    return std::make_unique<Amd64OnlyConverter>(target, std::move(progress));
+std::unique_ptr<IAmd64OnlyConverter> MakeAmd64OnlyConverter(const Amd64OnlyTarget target, std::function<void(std::uint64_t, std::uint64_t)> progress, const bool keepSegmentAccesses) {
+    return std::make_unique<Amd64OnlyConverter>(target, std::move(progress), keepSegmentAccesses);
 }
 
 }

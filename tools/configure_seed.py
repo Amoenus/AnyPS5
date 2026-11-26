@@ -1,22 +1,46 @@
 import argparse
+import fnmatch
+import os
 import re
+import secrets
+import stat
 import sys
 from pathlib import Path
 
-CHECK = re.compile(r"^//(Have (include|includes|function|symbol|library) |Test |Result of (TRY_COMPILE|TRY_RUN|TEST_BIG_ENDIAN|check_))")
-ENTRY = re.compile(r"^([^#/:][^:]*):([A-Z]+)=(.*)$")
+CHECK = re.compile(r"^//(Have (include|includes|function|symbol|library|variable) |Test |Result of (TRY_COMPILE|TRY_RUN|try_run\(\)|TEST_BIG_ENDIAN|check_)|CHECK_TYPE_SIZE: )")
+ENTRY = re.compile(r"^([^#:][^:]*):([A-Z]+)=(.*)$")
+QUOTED_ENTRY = re.compile(r'^"(.*)":([A-Z]+)=(.*)$')
+QUOTED_DELIMITER = re.compile(r'":[A-Z]+=')
 
 
 def checks(cache):
-    found, doc = {}, ""
-    for line in Path(cache).read_text(encoding="utf-8").splitlines():
-        if line.startswith("//"):
-            doc = line
-            continue
-        match = ENTRY.match(line)
-        if match and match.group(2) == "INTERNAL" and CHECK.match(doc):
-            found[match.group(1)] = (match.group(3), doc[2:])
-        doc = ""
+    cache = Path(cache)
+    if not stat.S_ISREG(cache.stat().st_mode):
+        raise OSError("configure cache must be a regular file")
+    found, doc = {}, []
+    with cache.open(encoding="utf-8-sig") as source:
+        for raw in source:
+            line = raw.removesuffix("\n")
+            if line.startswith("//"):
+                doc.append(line)
+                continue
+            quoted = QUOTED_ENTRY.match(line)
+            match = (None if len(QUOTED_DELIMITER.findall(line)) > 1 else quoted) if quoted else ENTRY.match(line)
+            if match:
+                name, kind, value = match.groups()
+                if kind == "INTERNAL" and doc and CHECK.match(doc[0]):
+                    help_text = "".join("\n" + line[4:] if line.startswith("//\\n") else line[2:] for line in doc)
+                    if len(value) >= 2 and value[0] == value[-1] == "'":
+                        value = value[1:-1]
+                    found[name] = (value, help_text)
+                else:
+                    found.pop(name, None)
+            doc = []
+    architecture_sizes = {name for name, (value, doc) in found.items()
+                          if value == "0" and doc.startswith("CHECK_TYPE_SIZE: ")}
+    if architecture_sizes:
+        return {name: entry for name, entry in found.items()
+                if name not in architecture_sizes and not entry[1].startswith("Result of TRY_COMPILE")}
     return found
 
 
@@ -24,14 +48,76 @@ def quote(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
 
 
-def main():
+def write_seed(path, text):
+    destination = Path(os.path.realpath(path))
+    try:
+        metadata = destination.stat()
+    except FileNotFoundError:
+        metadata = None
+    if metadata is not None and not stat.S_ISREG(metadata.st_mode):
+        raise OSError(f"Seed output must be a regular file: {path}")
+    if metadata is not None and os.name == "nt" and metadata.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY:
+        raise PermissionError(f"Seed output is read-only: {path}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        candidate = destination.parent / (".configure-seed-" + secrets.token_hex(16))
+        with candidate.open("x", encoding="utf-8", newline="\n") as output:
+            temporary = candidate
+            if metadata is not None:
+                temporary.chmod(stat.S_IMODE(metadata.st_mode))
+            output.write(text)
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def selected(results, include, exclude):
+    return {name: entry for name, entry in results.items()
+            if (not include or any(fnmatch.fnmatchcase(name, pattern) for pattern in include))
+            and not any(fnmatch.fnmatchcase(name, pattern) for pattern in exclude)}
+
+
+def render(found):
+    return "".join(f"set({quote(name)} {quote(value)} CACHE INTERNAL {quote(doc)})\n"
+                   for name, (value, doc) in sorted(found.items()))
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(description="Write the configure check results of a CMake cache as an initial cache file")
     parser.add_argument("cache", help="CMakeCache.txt of a configured tree")
-    parser.add_argument("seed", help="file to pass to cmake -C")
-    args = parser.parse_args()
-    found = checks(args.cache)
-    Path(args.seed).write_text("".join(f"set({quote(name)} {quote(value)} CACHE INTERNAL {quote(doc)})\n"
-                                       for name, (value, doc) in sorted(found.items())), encoding="utf-8")
+    parser.add_argument("seed", nargs="?", help="file to pass to cmake -C")
+    parser.add_argument("--include", action="append", default=[], metavar="GLOB",
+                        help="seed matching check names only; repeat to include several patterns")
+    parser.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                        help="omit matching check names after inclusion; patterns are case-sensitive")
+    parser.add_argument("--stdout", action="store_true", help="write CMake seed text to stdout instead of a file")
+    args = parser.parse_args(argv)
+    if args.stdout == (args.seed is not None):
+        parser.error("provide either a seed file or --stdout")
+    if args.stdout:
+        try:
+            results = checks(Path(args.cache))
+        except (OSError, UnicodeDecodeError) as error:
+            parser.error(f"{args.cache}: {error}")
+        sys.stdout.write(render(selected(results, args.include, args.exclude)))
+        return 0
+    cache, seed = Path(args.cache), Path(args.seed)
+    if os.path.realpath(cache) == os.path.realpath(seed) or (cache.exists() and seed.exists() and cache.samefile(seed)):
+        parser.error("seed output would overwrite the input cache")
+    try:
+        results = checks(cache)
+    except (OSError, UnicodeDecodeError) as error:
+        parser.error(f"{cache}: {error}")
+    found = selected(results, args.include, args.exclude)
+    try:
+        write_seed(seed, render(found))
+    except OSError as error:
+        parser.error(f"{seed}: {error}")
     print(f"{len(found)} check results")
     return 0
 

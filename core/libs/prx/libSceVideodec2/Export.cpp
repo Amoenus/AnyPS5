@@ -1,3 +1,6 @@
+#include "prx/libSceVideodec2/include/Api.hpp"
+#include "prx/libSceVideodec2/include/PictureMetadata.hpp"
+#include <algorithm>
 #include <array>
 #include <span>
 #include <cstdint>
@@ -9,11 +12,16 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <cerrno>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include "prx/libc/include/General.hpp"
+#include "AvcMetadata.hpp"
+#include "HevcMetadata.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -24,116 +32,85 @@ extern "C" {
 
 namespace {
 
+using namespace SceVideodec2;
+using SceVideodec2::Internal::Crop;
+using SceVideodec2::Internal::PictureHeader;
+
+struct UnsupportedPictureInfo {
+    std::string reason;
+};
+
+template<typename TValue>
+bool CopyInGuest(TValue& destination, const TValue* source) {
+    const int savedErrno = errno;
+    const bool copied = GuestCopyIn_nid_no_patch(&destination, source, sizeof(TValue));
+    errno = savedErrno;
+    return copied;
+}
+
+template<typename TValue>
+bool CopyOutGuest(TValue* destination, const TValue& source) {
+    const int savedErrno = errno;
+    const bool copied = GuestCopyOut_nid_no_patch(destination, &source, sizeof(TValue));
+    errno = savedErrno;
+    return copied;
+}
+
+bool CopyInGuestBytes(void* destination, const void* source, std::size_t bytes) {
+    const int savedErrno = errno;
+    const bool copied = GuestCopyIn_nid_no_patch(destination, source, bytes);
+    errno = savedErrno;
+    return copied;
+}
+
+bool CopyOutGuestBytes(void* destination, const void* source, std::size_t bytes) {
+    const int savedErrno = errno;
+    const bool copied = GuestCopyOut_nid_no_patch(destination, source, bytes);
+    errno = savedErrno;
+    return copied;
+}
+
+enum class SizedReadStatus {
+    Ok,
+    BadPointer,
+    BadSize,
+};
+
+SizedReadStatus ReadOutputGuest(OutputInfo& destination, const OutputInfo* source) {
+    if (!source) return SizedReadStatus::BadPointer;
+    std::uint64_t thisSize = 0;
+    if (!CopyInGuestBytes(&thisSize, source, sizeof(thisSize))) return SizedReadStatus::BadPointer;
+    if (thisSize < offsetof(OutputInfo, frameFormat)) return SizedReadStatus::BadSize;
+    const auto bytes = static_cast<std::size_t>(std::min<std::uint64_t>(thisSize, sizeof(OutputInfo)));
+    return CopyInGuestBytes(&destination, source, bytes) ? SizedReadStatus::Ok : SizedReadStatus::BadPointer;
+}
+
+bool WriteOutputGuest(OutputInfo* destination, const OutputInfo& source) {
+    if (!destination || source.thisSize < offsetof(OutputInfo, frameFormat)) return false;
+    const auto bytes = static_cast<std::size_t>(std::min<std::uint64_t>(source.thisSize, sizeof(OutputInfo)));
+    return CopyOutGuestBytes(destination, &source, bytes);
+}
+
 constexpr std::uint64_t WorkMemoryBytes = 1u << 20u;
 constexpr std::uint32_t PitchAlignment = 256;
 constexpr std::uint32_t HeightAlignment = 32;
 constexpr std::uint32_t CodecAvc = 1;
 constexpr std::uint32_t CodecHevc = 974921;
 constexpr std::uint32_t CodecVp9 = 2382845;
-
-struct ComputeMemoryInfo {
-    std::uint64_t thisSize;
-    std::uint64_t cpuGpuMemorySize;
-    void* cpuGpuMemory;
-};
-
-struct ComputeConfigInfo {
-    std::uint64_t thisSize;
-    std::uint16_t computePipeId;
-    std::uint16_t computeQueueId;
-    bool checkMemoryType;
-};
-
-struct DecoderConfigInfo {
-    std::uint64_t thisSize;
-    std::uint32_t resourceType;
-    std::uint32_t codecType;
-    std::uint32_t profile;
-    std::uint32_t maxLevel;
-    std::int32_t maxFrameWidth;
-    std::int32_t maxFrameHeight;
-    std::int32_t maxDpbFrameCount;
-    std::uint32_t decodePipelineDepth;
-};
-
-struct DecoderMemoryInfo {
-    std::uint64_t thisSize;
-    std::uint64_t cpuMemorySize;
-    void* cpuMemory;
-    std::uint64_t gpuMemorySize;
-    void* gpuMemory;
-    std::uint64_t cpuGpuMemorySize;
-    void* cpuGpuMemory;
-    std::uint64_t maxFrameBufferSize;
-    std::uint32_t frameBufferAlignment;
-};
-
-struct InputData {
-    std::uint64_t thisSize;
-    const std::uint8_t* auData;
-    std::uint64_t auSize;
-    std::uint64_t ptsData;
-    std::uint64_t dtsData;
-    std::uint64_t attachedData;
-};
-
-struct FrameBuffer {
-    std::uint64_t thisSize;
-    void* frameBuffer;
-    std::uint64_t frameBufferSize;
-    bool isAccepted;
-};
-
-struct OutputInfo {
-    std::uint64_t thisSize;
-    bool isValid;
-    bool isErrorFrame;
-    std::uint8_t pictureCount;
-    std::uint32_t codecType;
-    std::uint32_t frameWidth;
-    std::uint32_t framePitch;
-    std::uint32_t frameHeight;
-    void* frameBuffer;
-    std::uint64_t frameBufferSize;
-    std::uint32_t frameFormat;
-    std::uint32_t framePitchInBytes;
-};
-
-struct AvcPictureInfo {
-    std::uint64_t thisSize;
-    bool isValid;
-    std::uint64_t ptsData;
-    std::uint64_t dtsData;
-    std::uint64_t attachedData;
-    std::uint8_t idrPictureFlag;
-    std::uint8_t profileIdc;
-    std::uint8_t levelIdc;
-    std::uint32_t picWidthInLumaSamples;
-    std::uint32_t picHeightInLumaSamples;
-};
-
-struct Vp9PictureInfo {
-    std::uint64_t thisSize;
-    bool isValid;
-    std::uint64_t ptsData;
-    std::uint64_t dtsData;
-    std::uint64_t attachedData;
-    std::uint32_t profile;
-    std::uint32_t level;
-    std::uint32_t keyFrameFlag;
-    std::uint32_t intraOnly;
-    std::uint8_t bitDepth;
-    std::uint8_t colorRange;
-    std::uint32_t colorSpace;
-    std::uint32_t numFrames;
-    std::uint32_t frameWidth;
-    std::uint32_t frameHeight;
-    std::uint32_t renderWidth;
-    std::uint32_t renderHeight;
-};
+constexpr std::size_t MaxAvcParameterSetsBytes = 2u * 1024u * 1024u;
+constexpr int Videodec2ErrorAccessUnitSize = static_cast<int>(0x811D010Du);
+constexpr int Videodec2ErrorAccessUnitPointer = static_cast<int>(0x811D010Eu);
+constexpr int Videodec2ErrorStructureSize = static_cast<int>(0x811D0101u);
+constexpr int Videodec2ErrorArgumentPointer = static_cast<int>(0x811D0102u);
+constexpr int Videodec2ErrorFrameBufferSize = static_cast<int>(0x811D0106u);
+constexpr int Videodec2ErrorFrameBufferPointer = static_cast<int>(0x811D0107u);
+constexpr int Videodec2ErrorFrameBufferAlignment = static_cast<int>(0x811D0108u);
+constexpr int Videodec2ErrorPictureCount = static_cast<int>(0x811D010Fu);
+constexpr int Videodec2ErrorRefusedComputeQueue = static_cast<int>(0x811D0110u);
 
 static_assert(sizeof(Vp9PictureInfo) == 88);
 static_assert(offsetof(Vp9PictureInfo, colorSpace) == 60);
+static_assert(sizeof(OutputInfo) == 0x38 && offsetof(OutputInfo, isDiscardedFrame) == 0xb && offsetof(OutputInfo, codecType) == 0xc && offsetof(OutputInfo, frameBuffer) == 0x20);
 
 class Vp9Bits {
 public:
@@ -267,12 +244,13 @@ std::vector<Vp9Unit> ParseVp9Packet(std::span<const std::uint8_t> bytes, std::ar
     return result;
 }
 
-struct Crop {
-    std::uint32_t left = 0;
-    std::uint32_t right = 0;
-    std::uint32_t top = 0;
-    std::uint32_t bottom = 0;
-};
+Crop FrameCrop(const AVFrame& frame) {
+    const auto* descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame.format));
+    if (!descriptor) throw std::runtime_error("Videodec2: unknown decoded pixel format");
+    return {static_cast<std::uint32_t>(frame.crop_left), static_cast<std::uint32_t>(frame.crop_right),
+            static_cast<std::uint32_t>(frame.crop_top), static_cast<std::uint32_t>(frame.crop_bottom),
+            descriptor->log2_chroma_w, descriptor->log2_chroma_h};
+}
 
 struct Picture {
     std::uint64_t pts = 0;
@@ -281,6 +259,11 @@ struct Picture {
     bool idr = false;
     Vp9PictureInfo vp9{};
     Crop crop{};
+    bool hevcIdr = false;
+    std::uint8_t bitDepthMinus8 = 0;
+    bool avcIdr = false;
+    Videodec2Hevc::Metadata hevc;
+    Videodec2Avc::Metadata avc;
 };
 
 struct FrameDeleter {
@@ -294,6 +277,7 @@ struct Decoder {
     std::uint32_t height = 0;
     std::uint32_t profile = 0;
     std::uint32_t level = 0;
+    std::uint32_t sampleBytes = 1;
     std::map<const void*, Picture> pictures;
     std::uint64_t decoded = 0;
     std::mutex mutex;
@@ -304,9 +288,14 @@ struct Decoder {
     std::deque<FramePointer> ready;
     std::vector<std::uint8_t> annexB;
     std::vector<std::uint8_t> parameterSets;
+    std::vector<std::uint8_t> frameStaging;
+    bool lengthPrefixed = false;
+    bool shortStartCodes = false;
     bool flushing = false;
     std::array<Vp9PictureInfo, 8> vp9References{};
     Vp9PictureInfo vp9Colors{};
+    Videodec2Hevc::State hevc;
+    Videodec2Avc::State avc;
 
     ~Decoder() {
         sws_freeContext(scaler);
@@ -329,12 +318,20 @@ std::uint32_t AlignUp(std::uint32_t value, std::uint32_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
 
-std::uint64_t ChromaOffset(std::uint32_t width, std::uint32_t height) {
-    return static_cast<std::uint64_t>(AlignUp(width, PitchAlignment)) * height;
+std::uint32_t PitchBytes(std::uint32_t width, std::uint32_t sampleBytes) {
+    return AlignUp(width * sampleBytes, PitchAlignment);
 }
 
-std::uint64_t LumaBytes(std::uint32_t width, std::uint32_t height) {
-    return static_cast<std::uint64_t>(AlignUp(width, PitchAlignment)) * AlignUp(height, HeightAlignment);
+std::uint64_t ChromaOffset(std::uint32_t width, std::uint32_t height, std::uint32_t sampleBytes) {
+    return static_cast<std::uint64_t>(PitchBytes(width, sampleBytes)) * height;
+}
+
+std::uint64_t LumaBytes(std::uint32_t width, std::uint32_t height, std::uint32_t sampleBytes) {
+    return static_cast<std::uint64_t>(PitchBytes(width, sampleBytes)) * AlignUp(height, HeightAlignment);
+}
+
+std::uint32_t ConfiguredSampleBytes(std::uint32_t codec, std::uint32_t profile) {
+    return (codec == CodecHevc || codec == CodecVp9) && profile == 2 ? 2 : 1;
 }
 
 template <typename TObject>
@@ -372,21 +369,45 @@ void OpenCodec(Decoder& decoder) {
     }
 }
 
-const std::vector<std::uint8_t>* ToAnnexB(Decoder& decoder, const std::uint8_t* data, std::size_t size) {
-    if (size >= 4 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || (data[2] == 0 && data[3] == 1))) {
-        decoder.annexB.assign(data, data + size);
-        return &decoder.annexB;
-    }
-    decoder.annexB.clear();
+bool TilesAsAvcc(const std::uint8_t* data, std::size_t size) {
+    if (size < 4) return false;
     for (std::size_t index = 0; index < size;) {
-        if (size - index < 4) throw std::runtime_error("Videodec2: truncated NAL length");
+        if (size - index < 4) return false;
         const std::size_t length = (static_cast<std::size_t>(data[index]) << 24u) | (static_cast<std::size_t>(data[index + 1]) << 16u) | (static_cast<std::size_t>(data[index + 2]) << 8u) | data[index + 3];
-        if (length == 0 || length > size - index - 4) throw std::runtime_error("Videodec2: invalid NAL length");
-        static constexpr std::uint8_t startCode[4] = {0, 0, 0, 1};
-        decoder.annexB.insert(decoder.annexB.end(), startCode, startCode + 4);
-        decoder.annexB.insert(decoder.annexB.end(), data + index + 4, data + index + 4 + length);
+        if (length == 0 || length > size - index - 4) return false;
         index += 4 + length;
     }
+    return true;
+}
+
+bool StartsWithStartCode(const std::uint8_t* data, std::size_t size) {
+    return size >= 3 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || (size >= 4 && data[2] == 0 && data[3] == 1));
+}
+
+const std::vector<std::uint8_t>* ToAnnexB(Decoder& decoder, const std::uint8_t* data, std::size_t size) {
+    const bool tiles = TilesAsAvcc(data, size);
+    const bool opensWithStartCode = StartsWithStartCode(data, size);
+    if (!tiles && !opensWithStartCode) throw std::runtime_error("Videodec2: access unit is neither Annex-B nor length-prefixed");
+    const bool shortStartCode = opensWithStartCode && data[2] == 1;
+    bool lengthPrefixed = tiles;
+    if (tiles && opensWithStartCode) {
+        lengthPrefixed = shortStartCode ? !decoder.shortStartCodes : decoder.lengthPrefixed;
+    } else {
+        decoder.lengthPrefixed = tiles;
+        if (shortStartCode) decoder.shortStartCodes = true;
+    }
+    if (lengthPrefixed) {
+        decoder.annexB.clear();
+        for (std::size_t index = 0; index < size;) {
+            const std::size_t length = (static_cast<std::size_t>(data[index]) << 24u) | (static_cast<std::size_t>(data[index + 1]) << 16u) | (static_cast<std::size_t>(data[index + 2]) << 8u) | data[index + 3];
+            static constexpr std::uint8_t startCode[4] = {0, 0, 0, 1};
+            decoder.annexB.insert(decoder.annexB.end(), startCode, startCode + 4);
+            decoder.annexB.insert(decoder.annexB.end(), data + index + 4, data + index + 4 + length);
+            index += 4 + length;
+        }
+        return &decoder.annexB;
+    }
+    decoder.annexB.assign(data, data + size);
     return &decoder.annexB;
 }
 
@@ -395,6 +416,26 @@ bool CarriesAvcSlice(const std::vector<std::uint8_t>& unit) {
         if (unit[index] != 0 || unit[index + 1] != 0 || unit[index + 2] != 1) continue;
         const auto type = unit[index + 3] & 0x1fu;
         if (type >= 1 && type <= 5) return true;
+        index += 2;
+    }
+    return false;
+}
+
+bool StartsHevcIdr(const std::vector<std::uint8_t>& unit) {
+    for (std::size_t index = 0; index + 3 < unit.size(); ++index) {
+        if (unit[index] != 0 || unit[index + 1] != 0 || unit[index + 2] != 1) continue;
+        const auto type = (unit[index + 3] >> 1u) & 0x3fu;
+        if (type < 32) return type == 19 || type == 20;
+        index += 2;
+    }
+    return false;
+}
+
+bool StartsAvcIdr(const std::vector<std::uint8_t>& unit) {
+    for (std::size_t index = 0; index + 3 < unit.size(); ++index) {
+        if (unit[index] != 0 || unit[index + 1] != 0 || unit[index + 2] != 1) continue;
+        const auto type = unit[index + 3] & 0x1fu;
+        if (type >= 1 && type <= 5) return type == 5;
         index += 2;
     }
     return false;
@@ -417,18 +458,53 @@ void Send(Decoder& decoder, const AVPacket* packet) {
     Receive(decoder);
 }
 
+bool CopyOutNv12Planes(std::uint8_t* target, const std::uint8_t* lumaSrc, const std::uint8_t* chromaSrc, std::uint64_t chromaOffset, std::uint32_t pitch, std::uint32_t rowBytes, std::uint32_t height) {
+    if (rowBytes == pitch) {
+        if (!CopyOutGuestBytes(target, lumaSrc, static_cast<std::size_t>(pitch) * height)) return false;
+        return CopyOutGuestBytes(target + chromaOffset, chromaSrc, static_cast<std::size_t>(pitch) * (height / 2));
+    }
+    for (std::uint32_t row = 0; row < height; ++row) {
+        if (!CopyOutGuestBytes(target + static_cast<std::size_t>(row) * pitch, lumaSrc + static_cast<std::size_t>(row) * pitch, rowBytes)) return false;
+    }
+    auto* chromaDst = target + chromaOffset;
+    for (std::uint32_t row = 0; row < height / 2; ++row) {
+        if (!CopyOutGuestBytes(chromaDst + static_cast<std::size_t>(row) * pitch, chromaSrc + static_cast<std::size_t>(row) * pitch, rowBytes)) return false;
+    }
+    return true;
+}
+
 bool WriteNv12(Decoder& decoder, const AVFrame& frame, std::uint8_t* target, std::uint64_t bytes) {
     if (frame.width <= 0 || frame.height <= 0 || frame.width % 2 != 0 || frame.height % 2 != 0) throw std::runtime_error("Videodec2: unsupported frame dimensions");
     const auto width = static_cast<std::uint32_t>(frame.width);
     const auto height = static_cast<std::uint32_t>(frame.height);
-    const auto pitch = AlignUp(width, PitchAlignment);
-    const auto luma = ChromaOffset(width, height);
-    if (luma + static_cast<std::uint64_t>(pitch) * (height / 2) > bytes) return false;
-    std::uint8_t* planes[4] = {target, target + luma, nullptr, nullptr};
-    const int strides[4] = {static_cast<int>(pitch), static_cast<int>(pitch), 0, 0};
     const auto format = static_cast<AVPixelFormat>(frame.format);
     const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(format);
-    if (descriptor == nullptr || descriptor->comp[0].depth > 8) throw std::runtime_error("Videodec2: output deeper than 8 bits is not implemented");
+    if (descriptor == nullptr || descriptor->comp[0].depth > 10) throw std::runtime_error("Videodec2: output deeper than 10 bits is not implemented");
+    const std::uint32_t sampleBytes = descriptor->comp[0].depth > 8 ? 2 : 1;
+    if (sampleBytes == 2 && format != AV_PIX_FMT_YUV420P10LE) throw std::runtime_error("Videodec2: 10-bit output from a decoded format other than yuv420p10le is not implemented");
+    decoder.sampleBytes = sampleBytes;
+    const auto rowBytes = width * sampleBytes;
+    const auto pitch = PitchBytes(width, sampleBytes);
+    const auto luma = ChromaOffset(width, height, sampleBytes);
+    const auto totalBytes = luma + static_cast<std::uint64_t>(pitch) * (height / 2);
+    if (totalBytes > bytes) return false;
+    decoder.frameStaging.resize(static_cast<std::size_t>(totalBytes));
+    std::uint8_t* planes[4] = {decoder.frameStaging.data(), decoder.frameStaging.data() + luma, nullptr, nullptr};
+    const int strides[4] = {static_cast<int>(pitch), static_cast<int>(pitch), 0, 0};
+    if (sampleBytes == 2) {
+        for (std::uint32_t row = 0; row < height; ++row) std::memcpy(planes[0] + static_cast<std::size_t>(row) * pitch, frame.data[0] + static_cast<std::ptrdiff_t>(row) * frame.linesize[0], static_cast<std::size_t>(width) * 2);
+        for (std::uint32_t row = 0; row < height / 2; ++row) {
+            const auto* u = frame.data[1] + static_cast<std::ptrdiff_t>(row) * frame.linesize[1];
+            const auto* v = frame.data[2] + static_cast<std::ptrdiff_t>(row) * frame.linesize[2];
+            auto* uv = planes[1] + static_cast<std::size_t>(row) * pitch;
+            for (std::uint32_t column = 0; column < width / 2; ++column) {
+                std::memcpy(uv + column * 4, u + column * 2, 2);
+                std::memcpy(uv + column * 4 + 2, v + column * 2, 2);
+            }
+        }
+        if (!CopyOutNv12Planes(target, planes[0], planes[1], luma, pitch, rowBytes, height)) throw std::runtime_error("Videodec2: invalid argument pointer");
+        return true;
+    }
     if (format == AV_PIX_FMT_YUV420P || format == AV_PIX_FMT_YUVJ420P) {
         for (std::uint32_t row = 0; row < height; ++row) std::memcpy(planes[0] + static_cast<std::size_t>(row) * pitch, frame.data[0] + static_cast<std::ptrdiff_t>(row) * frame.linesize[0], width);
         for (std::uint32_t row = 0; row < height / 2; ++row) {
@@ -440,21 +516,32 @@ bool WriteNv12(Decoder& decoder, const AVFrame& frame, std::uint8_t* target, std
                 uv[column * 2 + 1] = v[column];
             }
         }
+        if (!CopyOutNv12Planes(target, planes[0], planes[1], luma, pitch, rowBytes, height)) throw std::runtime_error("Videodec2: invalid argument pointer");
         return true;
     }
     decoder.scaler = sws_getCachedContext(decoder.scaler, frame.width, frame.height, format, frame.width, frame.height, AV_PIX_FMT_NV12, SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (decoder.scaler == nullptr) return false;
-    return sws_scale(decoder.scaler, frame.data, frame.linesize, 0, frame.height, planes, strides) == frame.height;
+    if (sws_scale(decoder.scaler, frame.data, frame.linesize, 0, frame.height, planes, strides) != frame.height) return false;
+    if (!CopyOutNv12Planes(target, planes[0], planes[1], luma, pitch, rowBytes, height)) throw std::runtime_error("Videodec2: invalid argument pointer");
+    return true;
 }
 
-void EmitDecoded(std::uint64_t handle, Decoder& decoder, FrameBuffer* frame, OutputInfo* output) {
-    output->isValid = false;
-    output->isErrorFrame = false;
-    output->pictureCount = 0;
-    output->codecType = decoder.codec;
-    if (frame) frame->isAccepted = false;
+void ClearOutput(const Decoder& decoder, FrameBuffer* frame, FrameBuffer* localFrame, OutputInfo* output, OutputInfo& localOutput) {
+    localOutput.isValid = false;
+    localOutput.isErrorFrame = false;
+    localOutput.pictureCount = 0;
+    localOutput.codecType = decoder.codec;
+    if (!WriteOutputGuest(output, localOutput)) throw std::runtime_error("Videodec2: invalid argument pointer");
+    if (frame && localFrame) {
+        localFrame->isAccepted = false;
+        if (!CopyOutGuest(frame, *localFrame)) throw std::runtime_error("Videodec2: invalid argument pointer");
+    }
+}
+
+void EmitDecoded(std::uint64_t handle, Decoder& decoder, FrameBuffer* frame, FrameBuffer* localFrame, OutputInfo* output, OutputInfo& localOutput) {
+    ClearOutput(decoder, frame, localFrame, output, localOutput);
     if (decoder.ready.empty()) return;
-    if (!frame || !frame->frameBuffer) throw std::runtime_error("Videodec2: missing output buffer");
+    if (!frame || !localFrame || !localFrame->frameBuffer) throw std::runtime_error("Videodec2: missing output buffer");
     const auto picture = std::move(decoder.ready.front());
     decoder.ready.pop_front();
     const auto key = picture->pts;
@@ -463,29 +550,34 @@ void EmitDecoded(std::uint64_t handle, Decoder& decoder, FrameBuffer* frame, Out
     auto timestamps = found->second;
     decoder.inputs.erase(found);
     timestamps.idr = (picture->flags & AV_FRAME_FLAG_KEY) != 0;
-    timestamps.crop = {static_cast<std::uint32_t>(picture->crop_left), static_cast<std::uint32_t>(picture->crop_right), static_cast<std::uint32_t>(picture->crop_top), static_cast<std::uint32_t>(picture->crop_bottom)};
+    timestamps.crop = FrameCrop(*picture);
     decoder.width = static_cast<std::uint32_t>(picture->width);
     decoder.height = static_cast<std::uint32_t>(picture->height);
     if (decoder.context->profile > 0) decoder.profile = static_cast<std::uint32_t>(decoder.context->profile) & 0xffu;
     if (decoder.context->level > 0) decoder.level = static_cast<std::uint32_t>(decoder.context->level);
-    if (!WriteNv12(decoder, *picture, static_cast<std::uint8_t*>(frame->frameBuffer), frame->frameBufferSize)) throw std::runtime_error("Videodec2: NV12 conversion failed");
-    const auto pitch = AlignUp(decoder.width, PitchAlignment);
-    frame->isAccepted = true;
-    output->isValid = true;
-    output->isErrorFrame = false;
-    output->pictureCount = 1;
-    output->frameWidth = decoder.width;
-    output->framePitch = pitch;
-    output->frameHeight = decoder.height;
-    output->frameBuffer = frame->frameBuffer;
-    output->frameBufferSize = frame->frameBufferSize;
-    if (Fits(output, offsetof(OutputInfo, framePitchInBytes) + 4)) {
-        output->frameFormat = 0;
-        output->framePitchInBytes = pitch;
+    if (!WriteNv12(decoder, *picture, static_cast<std::uint8_t*>(localFrame->frameBuffer), localFrame->frameBufferSize)) throw std::runtime_error("Videodec2: NV12 conversion failed");
+    timestamps.bitDepthMinus8 = decoder.sampleBytes == 2 ? 2 : 0;
+    const auto pitch = PitchBytes(decoder.width, decoder.sampleBytes);
+    localFrame->isAccepted = true;
+    localOutput.isValid = true;
+    localOutput.isErrorFrame = false;
+    localOutput.pictureCount = 1;
+    localOutput.isDiscardedFrame = false;
+    localOutput.frameWidth = decoder.width;
+    localOutput.framePitch = pitch / decoder.sampleBytes;
+    localOutput.frameHeight = decoder.height;
+    localOutput.frameBuffer = localFrame->frameBuffer;
+    localOutput.frameBufferSize = localFrame->frameBufferSize;
+    if (Fits(&localOutput, offsetof(OutputInfo, framePitchInBytes) + 4)) {
+        localOutput.frameFormat = 0;
+        localOutput.framePitchInBytes = pitch;
     }
-    decoder.pictures[frame->frameBuffer] = timestamps;
+    if (!CopyOutGuest(frame, *localFrame) || !WriteOutputGuest(output, localOutput)) {
+        throw std::runtime_error("Videodec2: invalid argument pointer");
+    }
+    decoder.pictures[localFrame->frameBuffer] = timestamps;
     std::lock_guard guard(lock);
-    if (decoders.contains(handle)) pictureOwners[frame->frameBuffer] = handle;
+    if (decoders.contains(handle)) pictureOwners[localFrame->frameBuffer] = handle;
 }
 
 }
@@ -493,50 +585,81 @@ void EmitDecoded(std::uint64_t handle, Decoder& decoder, FrameBuffer* frame, Out
 extern "C" {
 
 int APS5_VABI sceVideodec2QueryComputeMemoryInfo_nid_postfix(ComputeMemoryInfo* info) {
-    if (!info) throw std::runtime_error("Videodec2: invalid argument pointer");
-    if (Trace()) std::fprintf(stderr, "[videodec2] QueryComputeMemoryInfo size=%llu\n", static_cast<unsigned long long>(info->thisSize));
-    info->cpuGpuMemorySize = WorkMemoryBytes;
+    ComputeMemoryInfo localInfo{};
+    if (!info || !CopyInGuest(localInfo, info)) return Videodec2ErrorArgumentPointer;
+    if (localInfo.thisSize != sizeof(ComputeMemoryInfo)) return Videodec2ErrorStructureSize;
+    if (Trace()) std::fprintf(stderr, "[videodec2] QueryComputeMemoryInfo size=%llu\n", static_cast<unsigned long long>(localInfo.thisSize));
+    localInfo.cpuGpuMemorySize = WorkMemoryBytes;
+    if (!CopyOutGuest(info, localInfo)) return Videodec2ErrorArgumentPointer;
     return 0;
 }
 
 int APS5_VABI sceVideodec2AllocateComputeQueue_nid_postfix(const ComputeConfigInfo* config, const ComputeMemoryInfo* memory, std::uint64_t* queue) {
-    if (!config || !memory || !queue) throw std::runtime_error("Videodec2: invalid argument pointer");
-    if (Trace()) std::fprintf(stderr, "[videodec2] AllocateComputeQueue config=%llu memory=%llu\n", static_cast<unsigned long long>(config->thisSize), static_cast<unsigned long long>(memory->thisSize));
+    ComputeConfigInfo localConfig{};
+    ComputeMemoryInfo localMemory{};
+    if (!config || !memory || !queue || !CopyInGuest(localConfig, config) || !CopyInGuest(localMemory, memory)) {
+        throw std::runtime_error("Videodec2: invalid argument pointer");
+    }
+    if (Trace()) std::fprintf(stderr, "[videodec2] AllocateComputeQueue config=%llu memory=%llu\n", static_cast<unsigned long long>(localConfig.thisSize), static_cast<unsigned long long>(localMemory.thisSize));
     std::lock_guard guard(lock);
-    *queue = nextQueue++;
+    const std::uint64_t allocated = nextQueue;
+    if (!CopyOutGuest(queue, allocated)) throw std::runtime_error("Videodec2: invalid argument pointer");
+    ++nextQueue;
     return 0;
 }
 
 int APS5_VABI sceVideodec2ReleaseComputeQueue_nid_postfix(std::uint64_t queue) {
-    (void)queue;
+    if (queue == 0) return Videodec2ErrorRefusedComputeQueue;
     return 0;
 }
 
 int APS5_VABI sceVideodec2QueryDecoderMemoryInfo_nid_postfix(const DecoderConfigInfo* config, DecoderMemoryInfo* memory) {
-    if (!config || !memory) throw std::runtime_error("Videodec2: invalid argument pointer");
-    if (Trace()) std::fprintf(stderr, "[videodec2] QueryDecoderMemoryInfo config=%llu memory=%llu codec=%u profile=%u %dx%d dpb=%d\n", static_cast<unsigned long long>(config->thisSize), static_cast<unsigned long long>(memory->thisSize), config->codecType, config->profile, config->maxFrameWidth, config->maxFrameHeight, config->maxDpbFrameCount);
-    memory->cpuMemorySize = WorkMemoryBytes;
-    memory->gpuMemorySize = WorkMemoryBytes;
-    memory->cpuGpuMemorySize = WorkMemoryBytes;
-    if (config->maxFrameWidth <= 0 || config->maxFrameHeight <= 0) throw std::runtime_error("Videodec2: invalid frame dimensions");
-    const auto width = static_cast<std::uint32_t>(config->maxFrameWidth);
-    const auto height = static_cast<std::uint32_t>(config->maxFrameHeight);
-    memory->maxFrameBufferSize = LumaBytes(width, height) * 3 / 2;
-    memory->frameBufferAlignment = PitchAlignment;
+    DecoderConfigInfo localConfig{};
+    DecoderMemoryInfo localMemory{};
+    if (!config || !memory || !CopyInGuest(localConfig, config) || !CopyInGuest(localMemory, memory)) {
+        throw std::runtime_error("Videodec2: invalid argument pointer");
+    }
+    if (Trace()) std::fprintf(stderr, "[videodec2] QueryDecoderMemoryInfo config=%llu memory=%llu codec=%u profile=%u %dx%d dpb=%d\n", static_cast<unsigned long long>(localConfig.thisSize), static_cast<unsigned long long>(localMemory.thisSize), localConfig.codecType, localConfig.profile, localConfig.maxFrameWidth, localConfig.maxFrameHeight, localConfig.maxDpbFrameCount);
+    localMemory.cpuMemorySize = WorkMemoryBytes;
+    localMemory.gpuMemorySize = WorkMemoryBytes;
+    localMemory.cpuGpuMemorySize = WorkMemoryBytes;
+    if (localConfig.maxFrameWidth <= 0 || localConfig.maxFrameHeight <= 0) {
+        if (!CopyOutGuest(memory, localMemory)) throw std::runtime_error("Videodec2: invalid argument pointer");
+        throw std::runtime_error("Videodec2: invalid frame dimensions");
+    }
+    const auto width = static_cast<std::uint32_t>(localConfig.maxFrameWidth);
+    const auto height = static_cast<std::uint32_t>(localConfig.maxFrameHeight);
+    localMemory.maxFrameBufferSize = LumaBytes(width, height, ConfiguredSampleBytes(localConfig.codecType, localConfig.profile)) * 3 / 2;
+    localMemory.frameBufferAlignment = PitchAlignment;
+    if (!CopyOutGuest(memory, localMemory)) throw std::runtime_error("Videodec2: invalid argument pointer");
     return 0;
 }
 
 int APS5_VABI sceVideodec2CreateDecoder_nid_postfix(const DecoderConfigInfo* config, const DecoderMemoryInfo* memory, std::uint64_t* handle) {
-    if (!config || !memory || !handle) throw std::runtime_error("Videodec2: invalid argument pointer");
-    CodecId(config->codecType);
+    DecoderConfigInfo localConfig{};
+    DecoderMemoryInfo localMemory{};
+    if (!config || !memory || !handle || !CopyInGuest(localConfig, config) || !CopyInGuest(localMemory, memory)) {
+        throw std::runtime_error("Videodec2: invalid argument pointer");
+    }
+    CodecId(localConfig.codecType);
     auto decoder = std::make_shared<Decoder>();
-    decoder->codec = config->codecType;
+    decoder->codec = localConfig.codecType;
     OpenCodec(*decoder);
     std::lock_guard guard(lock);
-    *handle = nextDecoder++;
-    decoders.emplace(*handle, decoder);
-    std::fprintf(stderr, "[videodec2] decoder %llu: codec=%u max %dx%d (%s)\n", static_cast<unsigned long long>(*handle), config->codecType, config->maxFrameWidth, config->maxFrameHeight, decoder->context->codec->long_name);
+    const std::uint64_t allocated = nextDecoder;
+    if (!CopyOutGuest(handle, allocated)) throw std::runtime_error("Videodec2: invalid argument pointer");
+    ++nextDecoder;
+    decoders.emplace(allocated, decoder);
+    std::fprintf(stderr, "[videodec2] decoder %llu: codec=%u max %dx%d (%s)\n", static_cast<unsigned long long>(allocated), localConfig.codecType, localConfig.maxFrameWidth, localConfig.maxFrameHeight, decoder->context->codec->long_name);
     return 0;
+}
+
+int APS5_VABI sceVideodec2CreateHevcDecoder(const DecoderConfigInfo* config, const DecoderMemoryInfo* memory, std::uint64_t* handle) {
+    return sceVideodec2CreateDecoder_nid_postfix(config, memory, handle);
+}
+
+int APS5_VABI sceVideodec2QueryHevcDecoderMemoryInfo(const DecoderConfigInfo* config, DecoderMemoryInfo* memory) {
+    return sceVideodec2QueryDecoderMemoryInfo_nid_postfix(config, memory);
 }
 
 int APS5_VABI sceVideodec2DeleteDecoder_nid_postfix(std::uint64_t handle) {
@@ -547,23 +670,43 @@ int APS5_VABI sceVideodec2DeleteDecoder_nid_postfix(std::uint64_t handle) {
 }
 
 int APS5_VABI sceVideodec2Decode_nid_postfix(std::uint64_t handle, const InputData* input, FrameBuffer* frame, OutputInfo* output) {
-    if (!input || !output) throw std::runtime_error("Videodec2: invalid argument pointer");
+    InputData localInput{};
+    OutputInfo localOutput{};
+    FrameBuffer localFrame{};
+    if (!input || !output || !CopyInGuest(localInput, input)) {
+        throw std::runtime_error("Videodec2: invalid argument pointer");
+    }
+    const auto outputStatus = ReadOutputGuest(localOutput, output);
+    if (outputStatus == SizedReadStatus::BadPointer) throw std::runtime_error("Videodec2: invalid argument pointer");
+    if (outputStatus == SizedReadStatus::BadSize) return Videodec2ErrorStructureSize;
+    if (frame && !CopyInGuest(localFrame, frame)) {
+        throw std::runtime_error("Videodec2: invalid argument pointer");
+    }
     const auto found = FindDecoder(handle);
     if (!found) throw std::runtime_error("Videodec2: invalid decoder handle");
     auto& decoder = *found;
     std::lock_guard guard(decoder.mutex);
-    if (Trace() && decoder.decoded < 3) std::fprintf(stderr, "[videodec2] Decode input=%llu frame=%llu output=%llu au=%llu pts=%llu size=%ux%u fb=%p/%llu\n", static_cast<unsigned long long>(input->thisSize), static_cast<unsigned long long>(frame ? frame->thisSize : 0), static_cast<unsigned long long>(output->thisSize), static_cast<unsigned long long>(input->auSize), static_cast<unsigned long long>(input->ptsData), decoder.width, decoder.height, frame ? frame->frameBuffer : nullptr, static_cast<unsigned long long>(frame ? frame->frameBufferSize : 0));
+    if (!localInput.auData || localInput.auSize == 0) {
+        ClearOutput(decoder, frame, frame ? &localFrame : nullptr, output, localOutput);
+        return localInput.auData ? Videodec2ErrorAccessUnitSize : Videodec2ErrorAccessUnitPointer;
+    }
+    if (Trace() && decoder.decoded < 3) std::fprintf(stderr, "[videodec2] Decode input=%llu frame=%llu output=%llu au=%llu pts=%llu size=%ux%u fb=%p/%llu\n", static_cast<unsigned long long>(localInput.thisSize), static_cast<unsigned long long>(frame ? localFrame.thisSize : 0), static_cast<unsigned long long>(localOutput.thisSize), static_cast<unsigned long long>(localInput.auSize), static_cast<unsigned long long>(localInput.ptsData), decoder.width, decoder.height, frame ? localFrame.frameBuffer : nullptr, static_cast<unsigned long long>(frame ? localFrame.frameBufferSize : 0));
     ++decoder.decoded;
-    const Picture picture{input->ptsData, input->dtsData, input->attachedData};
+    const Picture picture{localInput.ptsData, localInput.dtsData, localInput.attachedData};
     if (decoder.flushing) {
         avcodec_flush_buffers(decoder.context);
+        decoder.hevc.afterEnd = true;
         decoder.flushing = false;
     }
-    if (!input->auData || input->auSize == 0 || input->auSize > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) throw std::runtime_error("Videodec2: invalid access unit");
+    if (localInput.auSize > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) throw std::runtime_error("Videodec2: invalid access unit");
+    std::vector<std::uint8_t> auBytes(static_cast<std::size_t>(localInput.auSize));
+    if (!CopyInGuestBytes(auBytes.data(), localInput.auData, auBytes.size())) {
+        throw std::runtime_error("Videodec2: invalid argument pointer");
+    }
     if (decoder.codec == CodecVp9) {
         auto references = decoder.vp9References;
         auto colors = decoder.vp9Colors;
-        const auto units = ParseVp9Packet({input->auData, static_cast<std::size_t>(input->auSize)}, references, colors);
+        const auto units = ParseVp9Packet(auBytes, references, colors);
         for (const auto& unit : units) {
             AVPacket* packet = av_packet_alloc();
             if (!packet) throw std::runtime_error("Videodec2: cannot allocate VP9 packet");
@@ -584,13 +727,15 @@ int APS5_VABI sceVideodec2Decode_nid_postfix(std::uint64_t handle, const InputDa
         }
         decoder.vp9References = references;
         decoder.vp9Colors = colors;
-        EmitDecoded(handle, decoder, frame, output);
+        EmitDecoded(handle, decoder, frame, frame ? &localFrame : nullptr, output, localOutput);
         return 0;
     }
-    const auto* unit = ToAnnexB(decoder, input->auData, static_cast<std::size_t>(input->auSize));
+    const auto* unit = ToAnnexB(decoder, auBytes.data(), auBytes.size());
     if (decoder.codec == CodecAvc && !CarriesAvcSlice(*unit)) {
+        if (decoder.parameterSets.size() + unit->size() > MaxAvcParameterSetsBytes) throw std::runtime_error("Videodec2: invalid access unit");
+        Videodec2Avc::Parse_nid_no_patch(decoder.avc, *unit);
         decoder.parameterSets.insert(decoder.parameterSets.end(), unit->begin(), unit->end());
-        EmitDecoded(handle, decoder, frame, output);
+        EmitDecoded(handle, decoder, frame, frame ? &localFrame : nullptr, output, localOutput);
         return 0;
     }
     AVPacket* packet = av_packet_alloc();
@@ -599,27 +744,47 @@ int APS5_VABI sceVideodec2Decode_nid_postfix(std::uint64_t handle, const InputDa
     const std::unique_ptr<AVPacket, decltype(freePacket)> packetOwner(packet, freePacket);
     if (decoder.parameterSets.size() + unit->size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) throw std::runtime_error("Videodec2: invalid access unit");
     if (av_new_packet(packet, static_cast<int>(decoder.parameterSets.size() + unit->size())) < 0) throw std::runtime_error("Videodec2: cannot allocate packet data");
-    std::memcpy(packet->data, decoder.parameterSets.data(), decoder.parameterSets.size());
+    if (!decoder.parameterSets.empty()) std::memcpy(packet->data, decoder.parameterSets.data(), decoder.parameterSets.size());
     std::memcpy(packet->data + decoder.parameterSets.size(), unit->data(), unit->size());
     decoder.parameterSets.clear();
     packet->pts = decoder.nextKey;
-    decoder.inputs.emplace(decoder.nextKey++, picture);
+    auto tagged = picture;
+    tagged.hevcIdr = decoder.codec == CodecHevc && StartsHevcIdr(*unit);
+    tagged.avcIdr = decoder.codec == CodecAvc && StartsAvcIdr(*unit);
+    if (decoder.codec == CodecHevc) {
+        tagged.hevc = Videodec2Hevc::Parse_nid_no_patch(decoder.hevc, *unit);
+        tagged.hevc.info.ptsData = picture.pts;
+        tagged.hevc.info.dtsData = picture.dts;
+        tagged.hevc.info.attachedData = picture.attached;
+    }
+    if (decoder.codec == CodecAvc) {
+        tagged.avc = Videodec2Avc::Parse_nid_no_patch(decoder.avc, *unit);
+        tagged.avc.info.ptsData = picture.pts;
+        tagged.avc.info.dtsData = picture.dts;
+        tagged.avc.info.attachedData = picture.attached;
+    }
+    decoder.inputs.emplace(decoder.nextKey++, tagged);
     Send(decoder, packet);
-    EmitDecoded(handle, decoder, frame, output);
+    EmitDecoded(handle, decoder, frame, frame ? &localFrame : nullptr, output, localOutput);
     return 0;
 }
 
 int APS5_VABI sceVideodec2Flush_nid_postfix(std::uint64_t handle, FrameBuffer* frame, OutputInfo* output) {
-    if (!output) throw std::runtime_error("Videodec2: invalid argument pointer");
+    OutputInfo localOutput{};
+    FrameBuffer localFrame{};
+    const auto outputStatus = ReadOutputGuest(localOutput, output);
+    if (outputStatus == SizedReadStatus::BadPointer) throw std::runtime_error("Videodec2: invalid argument pointer");
+    if (outputStatus == SizedReadStatus::BadSize) return Videodec2ErrorStructureSize;
+    if (frame && !CopyInGuest(localFrame, frame)) throw std::runtime_error("Videodec2: invalid argument pointer");
     const auto found = FindDecoder(handle);
     if (!found) throw std::runtime_error("Videodec2: invalid decoder handle");
     auto& decoder = *found;
     std::lock_guard guard(decoder.mutex);
-    if (!decoder.flushing) {
+    if (!decoder.flushing && decoder.ready.empty() && !decoder.inputs.empty()) {
         Send(decoder, nullptr);
         decoder.flushing = true;
     }
-    EmitDecoded(handle, decoder, frame, output);
+    EmitDecoded(handle, decoder, frame, frame ? &localFrame : nullptr, output, localOutput);
     return 0;
 }
 
@@ -636,6 +801,7 @@ int APS5_VABI sceVideodec2Reset_nid_postfix(std::uint64_t handle) {
         std::erase_if(pictureOwners, [handle](const auto& owner) { return owner.second == handle; });
     }
     avcodec_flush_buffers(decoder.context);
+    decoder.hevc.afterEnd = true;
     decoder.ready.clear();
     decoder.inputs.clear();
     decoder.parameterSets.clear();
@@ -643,9 +809,50 @@ int APS5_VABI sceVideodec2Reset_nid_postfix(std::uint64_t handle) {
     return 0;
 }
 
-int APS5_VABI sceVideodec2GetPictureInfo_nid_postfix(const OutputInfo* output, AvcPictureInfo* first, void* second) {
-    (void)second;
-    if (!output || !first) throw std::runtime_error("Videodec2: invalid argument pointer");
+static std::uint64_t PictureInfoSize(const void* info) {
+    std::uint64_t size = 0;
+    std::memcpy(&size, info, sizeof(size));
+    return size;
+}
+
+static bool PictureInfoSizeSupported(const void* info) {
+    switch (PictureInfoSize(info)) {
+    case 0x58:
+    case 0x68:
+    case 0x78:
+    case 0x88:
+    case 0xa8:
+    case 0xb8: return true;
+    default: return false;
+    }
+}
+
+static int PictureArguments(const OutputInfo* output, void* first, void* second) {
+    if (!first) return Videodec2ErrorArgumentPointer;
+    auto* firstValidity = static_cast<std::uint8_t*>(first) + 8;
+    GuestArena::HostWrite firstAccess(firstValidity, sizeof(std::uint32_t));
+    if (!firstAccess.Open()) throw UnsupportedPictureInfo{"a picture info record the guest cannot write"};
+    std::optional<GuestArena::HostWrite> secondAccess;
+    if (second) {
+        secondAccess.emplace(static_cast<std::uint8_t*>(second) + 8, sizeof(std::uint32_t));
+        if (!secondAccess->Open()) throw UnsupportedPictureInfo{"a second picture info record the guest cannot write"};
+    }
+    std::memset(firstValidity, 0, sizeof(std::uint32_t));
+    if (second) std::memset(static_cast<std::uint8_t*>(second) + 8, 0, sizeof(std::uint32_t));
+    if (!output) return Videodec2ErrorArgumentPointer;
+    if (output->thisSize != 0x30 && output->thisSize != 0x38) return Videodec2ErrorStructureSize;
+    if ((reinterpret_cast<std::uintptr_t>(output->frameBuffer) & 0xffu) != 0) return Videodec2ErrorFrameBufferAlignment;
+    if (!output->frameBuffer) return Videodec2ErrorFrameBufferPointer;
+    if (output->pictureCount != 1 && output->pictureCount != 2) return Videodec2ErrorPictureCount;
+    if (output->frameBufferSize <= std::uint64_t{output->pictureCount} * 0x400u) return Videodec2ErrorFrameBufferSize;
+    if (!PictureInfoSizeSupported(first) || (output->pictureCount == 2 && second && !PictureInfoSizeSupported(second))) return Videodec2ErrorStructureSize;
+    return 0;
+}
+
+static int GetPictureInfo(const OutputInfo* output, void* first, void* second) {
+    const int result = PictureArguments(output, first, second);
+    if (result != 0) return result;
+    if (output->pictureCount != 1) throw UnsupportedPictureInfo{"a query for two pictures"};
     const auto owner = [output]() -> std::uint64_t {
         std::lock_guard guard(lock);
         const auto found = pictureOwners.find(output->frameBuffer);
@@ -657,65 +864,98 @@ int APS5_VABI sceVideodec2GetPictureInfo_nid_postfix(const OutputInfo* output, A
         std::lock_guard guard(decoder->mutex);
         if (owner() != handle) continue;
         const auto found = decoder->pictures.find(output->frameBuffer);
-        if (found == decoder->pictures.end()) throw std::runtime_error("Videodec2: owned picture is missing");
-        if (decoder->codec != CodecAvc) throw std::runtime_error("Videodec2: picture info is only implemented for H.264");
-        const auto& picture = found->second;
-        first->isValid = true;
-        first->ptsData = picture.pts;
-        first->dtsData = picture.dts;
-        first->attachedData = picture.attached;
-        if (Fits(first, offsetof(AvcPictureInfo, picHeightInLumaSamples) + 4)) {
-            first->idrPictureFlag = picture.idr ? 1 : 0;
-            first->profileIdc = static_cast<std::uint8_t>(decoder->profile);
-            first->levelIdc = static_cast<std::uint8_t>(decoder->level);
-            first->picWidthInLumaSamples = output->frameWidth;
-            first->picHeightInLumaSamples = output->frameHeight;
+        if (found == decoder->pictures.end()) throw UnsupportedPictureInfo{"a frame buffer its decoder holds no picture for"};
+        const auto size = PictureInfoSize(first);
+        if (decoder->codec == CodecVp9 && size == sizeof(Vp9PictureInfo)) {
+            GuestArena::HostWrite access(first, sizeof(Vp9PictureInfo));
+            if (!access.Open()) throw UnsupportedPictureInfo{"a picture info record the guest cannot write"};
+            std::memcpy(first, &found->second.vp9, sizeof(Vp9PictureInfo));
+            std::memcpy(first, &size, sizeof(size));
+            return 0;
         }
-        return 0;
+        if (decoder->codec == CodecHevc && size == sizeof(Videodec2Hevc::PictureInfo)) {
+            if (!found->second.hevc.unsupported.empty()) throw UnsupportedPictureInfo{found->second.hevc.unsupported};
+            GuestArena::HostWrite access(first, sizeof(Videodec2Hevc::PictureInfo));
+            if (!access.Open()) throw UnsupportedPictureInfo{"a picture info record the guest cannot write"};
+            std::memcpy(first, &found->second.hevc.info, sizeof(Videodec2Hevc::PictureInfo));
+            std::memcpy(first, &size, sizeof(size));
+            return 0;
+        }
+        if (decoder->codec == CodecAvc && size == sizeof(Videodec2Avc::PictureInfo)) {
+            if (!found->second.avc.unsupported.empty()) throw UnsupportedPictureInfo{found->second.avc.unsupported};
+            GuestArena::HostWrite access(first, sizeof(Videodec2Avc::PictureInfo));
+            if (!access.Open()) throw UnsupportedPictureInfo{"a picture info record the guest cannot write"};
+            std::memcpy(first, &found->second.avc.info, sizeof(Videodec2Avc::PictureInfo));
+            std::memcpy(first, &size, sizeof(size));
+            return 0;
+        }
+        throw UnsupportedPictureInfo{"a picture info size this decoder's codec doesn't use"};
     }
-    first->isValid = false;
-    return 0;
+    throw UnsupportedPictureInfo{"a frame buffer no decoder owns"};
+}
+
+int APS5_VABI sceVideodec2GetPictureInfo_nid_postfix(const OutputInfo* output, AvcPictureInfo* first, void* second) {
+    try { return GetPictureInfo(output, first, second); }
+    catch (const UnsupportedPictureInfo& error) { NotImplemented_nid_no_patch((std::string(__func__) + " (" + error.reason + ")").c_str()); }
 }
 
 int APS5_VABI sceVideodec2GetAvcPictureInfo_nid_postfix(const OutputInfo* output, AvcPictureInfo* first, AvcPictureInfo* second) {
-    return sceVideodec2GetPictureInfo_nid_postfix(output, first, second);
+    try { return GetPictureInfo(output, first, second); }
+    catch (const UnsupportedPictureInfo& error) { NotImplemented_nid_no_patch((std::string(__func__) + " (" + error.reason + ")").c_str()); }
+}
+
+int APS5_VABI sceVideodec2GetHevcPictureInfo_nid_postfix(const OutputInfo* output, Videodec2Hevc::PictureInfo* info) {
+    try { return GetPictureInfo(output, info, nullptr); }
+    catch (const UnsupportedPictureInfo& error) { NotImplemented_nid_no_patch((std::string(__func__) + " (" + error.reason + ")").c_str()); }
 }
 
 int APS5_VABI sceVideodec2GetVp9PictureInfo_nid_postfix(const OutputInfo* output, Vp9PictureInfo* info) {
-    if (!output || !info) throw std::runtime_error("Videodec2: invalid VP9 picture argument");
-    if (!Fits(output, offsetof(OutputInfo, frameBuffer) + sizeof(output->frameBuffer)) || !Fits(info, sizeof(Vp9PictureInfo)))
-        throw std::runtime_error("Videodec2: VP9 picture structure is too small");
-    const auto owner = [output]() -> std::uint64_t {
-        std::lock_guard guard(lock);
-        const auto found = pictureOwners.find(output->frameBuffer);
-        return found != pictureOwners.end() ? found->second : 0;
-    };
-    for (auto handle = owner(); handle != 0; handle = owner()) {
-        const auto decoder = FindDecoder(handle);
-        if (!decoder) continue;
-        std::lock_guard guard(decoder->mutex);
-        if (owner() != handle) continue;
-        const auto found = decoder->pictures.find(output->frameBuffer);
-        if (found == decoder->pictures.end()) throw std::runtime_error("Videodec2: owned VP9 picture is missing");
-        if (decoder->codec != CodecVp9) throw std::runtime_error("Videodec2: VP9 info requested for another codec");
-        const auto size = info->thisSize;
-        *info = found->second.vp9;
-        info->thisSize = size;
-        return 0;
-    }
-    info->isValid = false;
-    return 0;
+    try { return GetPictureInfo(output, info, nullptr); }
+    catch (const UnsupportedPictureInfo& error) { NotImplemented_nid_no_patch((std::string(__func__) + " (" + error.reason + ")").c_str()); }
 }
 
-void Videodec2PictureCrop_nid_no_patch(std::uint64_t handle, const void* frameBuffer, Crop* crop) {
-    if (!crop) throw std::runtime_error("Videodec2: invalid argument pointer");
+bool Videodec2CopyParsedPictureInfo_nid_no_patch(std::uint64_t handle, const void* frameBuffer, void* info, std::size_t size) {
+    const auto decoder = FindDecoder(handle);
+    if (!decoder) throw std::runtime_error("Videodec2: invalid decoder handle");
+    std::lock_guard guard(decoder->mutex);
+    const auto picture = decoder->pictures.find(frameBuffer);
+    if (picture == decoder->pictures.end()) throw std::runtime_error("Videodec2: unknown frame buffer");
+    const auto copy = [&](const auto& metadata) {
+        if (size != sizeof(metadata.info)) throw std::runtime_error("Videodec2: invalid picture info size");
+        if (!metadata.unsupported.empty() || !metadata.info.isValid) return false;
+        if (!CopyOutGuest(static_cast<decltype(metadata.info)*>(info), metadata.info)) throw std::runtime_error("Videodec2: invalid argument pointer");
+        return true;
+    };
+    if (decoder->codec == CodecAvc) return copy(picture->second.avc);
+    if (decoder->codec == CodecHevc) return copy(picture->second.hevc);
+    throw std::runtime_error("Videodec2: expected an AVC or HEVC picture");
+}
+
+void Videodec2PictureHeader_nid_no_patch(std::uint64_t handle, const void* frameBuffer, PictureHeader* header) {
+    if (!header) throw std::runtime_error("Videodec2: invalid argument pointer");
     const auto found = FindDecoder(handle);
     if (!found) throw std::runtime_error("Videodec2: invalid decoder handle");
     auto& decoder = *found;
     std::lock_guard guard(decoder.mutex);
     const auto picture = decoder.pictures.find(frameBuffer);
     if (picture == decoder.pictures.end()) throw std::runtime_error("Videodec2: unknown frame buffer");
-    *crop = picture->second.crop;
+    const auto& stored = picture->second;
+    const PictureHeader localHeader{stored.pts, stored.dts, stored.attached, stored.idr, stored.hevcIdr, decoder.profile, decoder.level, stored.crop, stored.bitDepthMinus8, stored.avcIdr};
+    if (!CopyOutGuest(header, localHeader)) throw std::runtime_error("Videodec2: invalid argument pointer");
+}
+
+void Videodec2Vp9PictureInfo_nid_no_patch(std::uint64_t handle, const void* frameBuffer, Vp9PictureInfo* info) {
+    if (!info) throw std::runtime_error("Videodec2: invalid argument pointer");
+    const auto found = FindDecoder(handle);
+    if (!found) throw std::runtime_error("Videodec2: invalid decoder handle");
+    auto& decoder = *found;
+    std::lock_guard guard(decoder.mutex);
+    if (decoder.codec != CodecVp9) throw std::runtime_error("Videodec2: VP9 picture info requested for another codec");
+    const auto picture = decoder.pictures.find(frameBuffer);
+    if (picture == decoder.pictures.end()) throw std::runtime_error("Videodec2: unknown frame buffer");
+    auto snapshot = picture->second.vp9;
+    snapshot.thisSize = sizeof(*info);
+    if (!CopyOutGuest(info, snapshot)) throw std::runtime_error("Videodec2: invalid argument pointer");
 }
 
 }

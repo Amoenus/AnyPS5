@@ -1,19 +1,16 @@
+#include "prx/libSceOpusDec/include/Api.hpp"
+#include "prx/libSceOpusDec/include/InventoryExports.hpp"
+#include <cerrno>
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
+#include <span>
 #include <stdexcept>
-
-extern "C" {
-int APS5_VABI sceOpusDecInitialize(std::uint32_t*);
-int APS5_VABI sceOpusDecTerminate(std::uint32_t*);
-int APS5_VABI sceOpusDecGetSize(int);
-int APS5_VABI sceOpusDecCreateEx(std::uint32_t*, void*, int, int);
-int APS5_VABI sceOpusDecDecode(void*, const std::uint8_t*, int, std::int16_t*, int);
-int APS5_VABI sceOpusDecDestroy(void*);
-}
+#include <opus.h>
 
 namespace {
 
@@ -46,11 +43,81 @@ const std::uint8_t OPUS_NARROWBAND[] = {
     10, 0, 0x08, 0x85, 0x89, 0x9D, 0x73, 0x0F, 0xC2, 0xB1, 0xE2, 0x48,
 };
 
+void CheckReference(int rate, int channels) {
+    std::uint32_t context = 0;
+    std::array<std::uint8_t, 640> state{};
+    Require(sceOpusDecInitialize(&context) == 0);
+    Require(sceOpusDecCreateEx(&context, state.data(), rate, channels) == 0);
+    int error = OPUS_OK;
+    auto* reference = opus_decoder_create(rate, channels, &error);
+    Require(reference && error == OPUS_OK);
+    std::array<std::uint8_t, 1500> longPacket{};
+    auto* repacketizer = opus_repacketizer_create();
+    Require(repacketizer != nullptr);
+    for (int i = 0; i < 6; ++i) Require(opus_repacketizer_cat(repacketizer, OPUS_STEREO + 2, OPUS_STEREO[0]) == OPUS_OK);
+    const int longSize = opus_repacketizer_out(repacketizer, longPacket.data() + 2, static_cast<opus_int32>(longPacket.size() - 2));
+    Require(longSize > 0);
+    opus_repacketizer_destroy(repacketizer);
+    longPacket[0] = static_cast<std::uint8_t>(longSize);
+    longPacket[1] = static_cast<std::uint8_t>(longSize >> 8);
+    for (auto packets : {std::span<const std::uint8_t>(OPUS_NARROWBAND), std::span<const std::uint8_t>(OPUS_STEREO),
+             std::span<const std::uint8_t>(OPUS_NARROWBAND), std::span<const std::uint8_t>(longPacket.data(), longSize + 2)}) {
+        for (std::size_t offset = 0; offset < packets.size();) {
+            const int bytes = packets[offset] | (packets[offset + 1] << 8);
+            const auto* packet = packets.data() + offset + 2;
+            std::array<std::int16_t, 11520> expected{};
+            const int samples = opus_decode(reference, packet, bytes, expected.data(), 5760, 0);
+            Require(samples > 0);
+            const int count = samples * channels;
+            std::array<std::int16_t, 11522> actual{};
+            actual.fill(12345);
+            Require(sceOpusDecDecode(state.data(), packet, bytes, actual.data() + 1, count * 2 + 1) == count * 2);
+            if (!std::equal(expected.begin(), expected.begin() + count, actual.begin() + 1)) {
+                std::fprintf(stderr, "Opus PCM differs from libopus at %d Hz, %d channels, packet offset %zu\n", rate, channels, offset);
+                std::abort();
+            }
+            Require(actual.front() == 12345 && std::all_of(actual.begin() + count + 1, actual.end(), [](auto value) { return value == 12345; }));
+            std::array<std::int16_t, 11520> concealedExpected{};
+            Require(opus_decode(reference, nullptr, 0, concealedExpected.data(), samples, 0) == samples);
+            actual.fill(12345);
+            Require(sceOpusDecDecode(state.data(), nullptr, 0, actual.data() + 1, count * 2 + 1) == count * 2);
+            Require(actual.front() == 12345 && std::all_of(actual.begin() + count + 1, actual.end(), [](auto value) { return value == 12345; }));
+            Require(std::equal(concealedExpected.begin(), concealedExpected.begin() + count, actual.begin() + 1));
+            offset += bytes + 2;
+        }
+    }
+    opus_decoder_destroy(reference);
+    Require(sceOpusDecDestroy(state.data()) == 0);
+    Require(sceOpusDecTerminate(&context) == 0);
+}
+
 } // namespace
 
 int main() {
+    constexpr std::uint32_t errorBase = 0x81740000u;
+    Require(sceOpusDecInitialize(nullptr) == static_cast<int>(errorBase + 13));
+    errno = 71;
+    Require(sceOpusDecInitialize(reinterpret_cast<std::uint32_t*>(0x10)) == static_cast<int>(errorBase + 13));
+    Require(errno == 71);
+    Require(sceOpusDecDestroy(nullptr) == static_cast<int>(errorBase));
+    for (int rate : {8000, 12000, 16000, 24000, 48000})
+        for (int channels : {1, 2}) CheckReference(rate, channels);
     std::uint32_t context = 0, otherContext = 0;
     Require(sceOpusDecInitialize(&context) == 0);
+    std::array<std::uint8_t, 640> invalidState{};
+    std::int16_t output = 12345;
+    const std::uint8_t packet = 0;
+    Require(sceOpusDecCreateEx(nullptr, invalidState.data(), 0, 0) == static_cast<int>(errorBase));
+    Require(sceOpusDecCreateEx(&context, invalidState.data(), 0, 0) == static_cast<int>(errorBase + 2));
+    Require(sceOpusDecCreateEx(&context, invalidState.data(), 48000, 0) == static_cast<int>(errorBase + 3));
+    Require(sceOpusDecDecode(nullptr, nullptr, -1, nullptr, -1) == static_cast<int>(errorBase));
+    Require(sceOpusDecDecode(invalidState.data(), nullptr, -1, nullptr, -1) == static_cast<int>(errorBase + 6));
+    Require(sceOpusDecDecode(invalidState.data(), &packet, -1, nullptr, -1) == static_cast<int>(errorBase + 7));
+    Require(sceOpusDecDecode(invalidState.data(), &packet, 1, nullptr, -1) == static_cast<int>(errorBase + 8));
+    Require(sceOpusDecDecode(invalidState.data(), &packet, 1, &output, -1) == static_cast<int>(errorBase + 9));
+    Require(sceOpusDecDecode(invalidState.data(), &packet, 1, &output, 2) == static_cast<int>(errorBase + 1));
+    Require(output == 12345);
+
     Require(sceOpusDecInitialize(&otherContext) == 0 && context != otherContext);
     RequireThrows([&] { sceOpusDecInitialize(&context); });
     Require(sceOpusDecGetSize(1) == 640 && sceOpusDecGetSize(2) == 640);
@@ -60,17 +127,17 @@ int main() {
     Require(sceOpusDecCreateEx(&context, monoState.data(), 48000, 1) == 0);
     RequireThrows([&] { sceOpusDecTerminate(&context); });
     RequireThrows([&] { sceOpusDecCreateEx(&context, state.data(), 48000, 2); });
-    RequireThrows([&] { sceOpusDecGetSize(3); });
+    Require(sceOpusDecGetSize(3) == static_cast<int>(errorBase + 3));
     std::array<std::uint8_t, 640> unsupported{};
     for (int rate : {0, 22050, 44100, 96000})
-        RequireThrows([&] { sceOpusDecCreateEx(&context, unsupported.data(), rate, 2); });
+        Require(sceOpusDecCreateEx(&context, unsupported.data(), rate, 2) == static_cast<int>(errorBase + 2));
     std::array<std::int16_t, 1922> pcm{}, reference{};
     pcm.fill(12345);
     RequireThrows([&] { sceOpusDecDecode(state.data(), OPUS_STEREO + 2, 70, pcm.data() + 1, 3839); });
     Require(std::all_of(pcm.begin(), pcm.end(), [](auto value) { return value == 12345; }));
     const std::uint8_t malformed[] = {0x7f};
     RequireThrows([&] { sceOpusDecDecode(state.data(), malformed, 1, pcm.data() + 1, 3840); });
-    RequireThrows([&] { sceOpusDecDecode(state.data(), nullptr, 0, pcm.data() + 1, 3840); });
+    RequireThrows([&] { sceOpusDecDecode(state.data(), nullptr, 0, pcm.data() + 1, 479); });
     Require(std::all_of(pcm.begin(), pcm.end(), [](auto value) { return value == 12345; }));
     std::size_t offset = 0;
     for (int frame = 0; frame < 3; ++frame) {
@@ -80,6 +147,39 @@ int main() {
         Require(pcm.front() == 12345 && pcm.back() == 12345);
         Require(sceOpusDecDecode(otherState.data(), packet, bytes, reference.data() + 1, 3840) == 3840);
         Require(std::equal(pcm.begin() + 1, pcm.end() - 1, reference.begin() + 1));
+        if (frame == 0) {
+            std::array<std::uint8_t, 640> plcState{};
+            Require(sceOpusDecCreateEx(&context, plcState.data(), 48000, 2) == 0);
+            Require(sceOpusDecDecode(plcState.data(), packet, bytes, pcm.data() + 1, 3840) == 3840);
+            pcm.fill(12345);
+            Require(sceOpusDecDecode(plcState.data(), nullptr, 0, pcm.data() + 1, 3841) == 3840);
+            Require(pcm.front() == 12345 && pcm.back() == 12345);
+            Require(std::any_of(pcm.begin() + 1, pcm.end() - 1, [](auto value) { return value != 12345; }));
+            Require(sceOpusDecDestroy(plcState.data()) == 0);
+            std::array<std::uint8_t, 640> widePlcState{};
+            Require(sceOpusDecCreateEx(&context, widePlcState.data(), 48000, 2) == 0);
+            std::array<std::int16_t, 11522> wide{};
+            wide.fill(12345);
+            Require(sceOpusDecDecode(widePlcState.data(), packet, bytes, wide.data() + 1, 3840) == 3840);
+            int referenceError = OPUS_OK;
+            auto* concealReference = opus_decoder_create(48000, 2, &referenceError);
+            Require(concealReference && referenceError == OPUS_OK);
+            std::array<std::int16_t, 1920> warm{}, concealedExpected{};
+            Require(opus_decode(concealReference, packet, bytes, warm.data(), 960, 0) == 960);
+            Require(opus_decode(concealReference, nullptr, 0, concealedExpected.data(), 960, 0) == 960);
+            wide.fill(12345);
+            Require(sceOpusDecDecode(widePlcState.data(), nullptr, 0, wide.data() + 1, 23040) == 3840);
+            Require(wide.front() == 12345 && std::all_of(wide.begin() + 1921, wide.end(), [](auto value) { return value == 12345; }));
+            Require(std::equal(concealedExpected.begin(), concealedExpected.end(), wide.begin() + 1));
+            wide.fill(12345);
+            Require(sceOpusDecDecode(widePlcState.data(), nullptr, 0, wide.data() + 1, 3839) == 3360);
+            Require(wide.front() == 12345 && std::all_of(wide.begin() + 1681, wide.end(), [](auto value) { return value == 12345; }));
+            std::array<std::int16_t, 1680> shortExpected{};
+            Require(opus_decode(concealReference, nullptr, 0, shortExpected.data(), 840, 0) == 840);
+            Require(std::equal(shortExpected.begin(), shortExpected.end(), wide.begin() + 1));
+            opus_decoder_destroy(concealReference);
+            Require(sceOpusDecDestroy(widePlcState.data()) == 0);
+        }
         if (frame == 1) {
             Require(sceOpusDecCreateEx(&context, unsupported.data(), 48000, 2) == 0);
             std::array<std::int16_t, 1920> fresh{};
@@ -119,8 +219,8 @@ int main() {
     }
 
     Require(sceOpusDecDestroy(state.data()) == 0);
-    RequireThrows([&] { sceOpusDecDestroy(state.data()); });
-    RequireThrows([&] { sceOpusDecDecode(state.data(), OPUS_STEREO + 2, 70, pcm.data(), 3840); });
+    Require(sceOpusDecDestroy(state.data()) == static_cast<int>(errorBase + 1));
+    Require(sceOpusDecDecode(state.data(), OPUS_STEREO + 2, 70, pcm.data(), 3840) == static_cast<int>(errorBase + 1));
     Require(sceOpusDecCreateEx(&context, state.data(), 48000, 2) == 0);
     Require(sceOpusDecDecode(state.data(), OPUS_STEREO + 2, 70, pcm.data(), 3840) == 3840);
     std::array<std::int16_t, 3842> rejected;
@@ -157,4 +257,31 @@ int main() {
     Require(narrow.front() == 12345 && narrow.back() == 12345);
     Require(sceOpusDecDestroy(narrowState.data()) == 0);
     Require(sceOpusDecTerminate(&narrowContext) == 0);
+
+    std::uint32_t untouchedValue = 0x5a5a5a5a;
+    std::array<std::uint8_t, 0x100> fakeState{};
+    Require(sceOpusDecGetAjmContext(nullptr, &untouchedValue) == static_cast<int>(0x81740000));
+    Require(sceOpusDecGetAjmContext(fakeState.data(), nullptr) == 0);
+    Require(libSceOpusDecUnknown_gMazl3u8Y40_nid_no_patch(nullptr, &untouchedValue) == static_cast<int>(0x81740000));
+    Require(libSceOpusDecUnknown_gMazl3u8Y40_nid_no_patch(fakeState.data(), nullptr) == 0);
+    Require(untouchedValue == 0x5a5a5a5a);
+    Require(libSceOpusDecUnknown_jXVNwfmd1II_nid_no_patch(nullptr) == static_cast<int>(0x8174000d));
+
+    constexpr int sizeArgument = static_cast<int>(0x81740003);
+    constexpr int secondArgument = static_cast<int>(0x81740016);
+    constexpr int thirdArgument = static_cast<int>(0x81740017);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(0, 1, 0) == sizeArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(13, 1, 0) == sizeArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(-1, 1, 0) == sizeArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(1, 0, 0) == secondArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(1, 13, 0) == secondArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(0, 0, 0) == sizeArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(2, 1, 2) == thirdArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(2, 1, -1) == thirdArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(12, 7, 6) == sizeArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(12, 12, 1) == sizeArgument);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(1, 1, 0) == 0x290);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(1, 1, 1) == 0x290);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(12, 6, 6) == 0x290);
+    Require(libSceOpusDecUnknown_ark0tPj4meI_nid_no_patch(12, 12, 0) == 0x290);
 }

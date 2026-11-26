@@ -1,19 +1,77 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace GuestSockets {
 
+struct LingerValue {
+    std::int32_t enabled = 0;
+    std::int32_t seconds = 0;
+};
+
+struct LocalCredentials {
+    std::uint32_t version = 0;
+    std::uint32_t user = 0;
+    std::int16_t groupCount = 0;
+    std::uint16_t reserved = 0;
+    std::uint32_t groups[16]{};
+    std::uint32_t reservedTail = 0;
+    std::uint64_t unused = 0;
+};
+static_assert(sizeof(LocalCredentials) == 88);
+static_assert(offsetof(LocalCredentials, groups) == 12);
+
 struct SocketOptionState {
+#ifdef _WIN32
+    LingerValue udpLinger;
+#endif
     int reportedError = 0;
     bool nonblocking = false;
     bool noSignal = false;
     std::int64_t sendTimeout = 0;
     std::int64_t receiveTimeout = 0;
+    int sendBuffer = 0;
+    int receiveBuffer = 0;
+    int sendLowWater = 0;
+    int receiveLowWater = 0;
+    int ipTimeToLive = 64;
+    int ipTypeOfService = 0;
+    int multicastTimeToLive = 1;
+    bool multicastLoop = true;
+    int tcpMaximumSegment = 536;
+    unsigned int tcpKeepIdle = 0;
+    unsigned int tcpKeepInterval = 0;
+    unsigned int tcpKeepCount = 0;
+    int keptFlags = 0;
+    int tcpFlags = 0;
+    int ipReceiveOptions = 0;
+    std::uint32_t multicastInterface = 0;
+    std::vector<std::uint64_t> memberships;
 };
 
-int SetSocketLevelOption(std::uintptr_t native, SocketOptionState& state, int option, const void* value, std::uint32_t length);
-int GetSocketLevelOption(std::uintptr_t native, SocketOptionState& state, int type, int option, void* value, std::uint32_t* length);
-int SetTcpLevelOption(std::uintptr_t native, bool tcp, int option, const void* value, std::uint32_t length);
-int GetTcpLevelOption(std::uintptr_t native, bool tcp, int option, void* value, std::uint32_t* length);
+bool NativeListening(std::uintptr_t native, bool& listening);
+int SendBufferSize(SocketOptionState& state, int family, int type);
+int SetSocketLevelOption(std::uintptr_t native, SocketOptionState& state, int family, int type, int option, const void* value, std::uint32_t length);
+int GetSocketLevelOption(std::uintptr_t native, SocketOptionState& state, int family, int type, int option, void* value, std::uint32_t* length);
+int SetTcpLevelOption(std::uintptr_t native, SocketOptionState& state, bool tcp, int option, const void* value, std::uint32_t length);
+int GetTcpLevelOption(std::uintptr_t native, SocketOptionState& state, bool tcp, int option, void* value, std::uint32_t* length);
+int SetIpLevelOption(std::uintptr_t native, SocketOptionState& state, bool ipv4, bool datagram, int option, const void* value, std::uint32_t length);
+int GetIpLevelOption(SocketOptionState& state, bool ipv4, bool datagram, int option, void* value, std::uint32_t* length);
+int SetIpv6LevelOption(std::uintptr_t native, bool ipv6, int option, const void* value, std::uint32_t length);
+int GetIpv6LevelOption(std::uintptr_t native, bool ipv6, int option, void* value, std::uint32_t* length);
+int GetLocalLevelOption(const LocalCredentials* credentials, bool stream, int option, void* value, std::uint32_t* length);
 
 }
+
+extern "C" int GuestSocketSetIpv6LevelOption_nid_no_patch(std::uintptr_t native, bool ipv6, int option, const void* value, std::uint32_t length);
+extern "C" int GuestSocketGetIpv6LevelOption_nid_no_patch(std::uintptr_t native, bool ipv6, int option, void* value, std::uint32_t* length);
+extern "C" int GuestSocketSetLinger_nid_no_patch(std::uintptr_t native, const void* value, std::uint32_t length);
+extern "C" int GuestSocketGetLinger_nid_no_patch(std::uintptr_t native, void* value, std::uint32_t* length);
+
+#ifdef _WIN32
+extern "C" int GuestSocketSetUdpLinger_nid_no_patch(GuestSockets::LingerValue* stored, const void* value, std::uint32_t length);
+extern "C" int GuestSocketGetUdpLinger_nid_no_patch(const GuestSockets::LingerValue* stored, void* value, std::uint32_t* length);
+#endif
+
+extern "C" int GuestSocketSetReuseFlags_nid_no_patch(std::uintptr_t native, int option, int value, int* flags);

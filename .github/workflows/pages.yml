@@ -5,16 +5,27 @@ on:
     branches: [main]
     paths:
       - .github/workflows/pages.yml
+      - .github/workflows/pages-progress.yml
       - CMakeLists.txt
       - core/relinker/**
       - demo/web/**
       - tools/build_web.py
+      - tools/input-mapper/**
+      - tools/package_release.py
       - tools/nid_names.py
       - tools/progress.py
+      - tools/progress_prs.py
+      - tools/pr_overlap.py
+      - tools/shader_scan.py
+      - tools/isa_profiles.py
+      - tools/gfx1013_isa_forms.txt
+      - tools/rdna2_isa_forms.txt
       - tools/progress_history.py
       - tools/rdna_isa.txt
       - tools/test_web.py
   workflow_dispatch:
+  schedule:
+    - cron: '37 4 * * *'
   release:
     types: [published]
   workflow_run:
@@ -32,8 +43,9 @@ concurrency:
 
 jobs:
   pages:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    if: ${{ !github.event.repository.fork && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -42,22 +54,32 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - name: Build web converter
-        shell: bash
-        run: |
-          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
-          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.3
-          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.3
-          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
-          emcmake cmake -S . -B build-wasm -DANYPS5_BUILD_WASM=ON -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-wasm --target relinker_web --parallel 2
-      - name: Test web converter
-        run: python3 tools/test_web.py --build build-wasm
-      - name: Download latest release libraries
+      - name: Download matching release converter and libraries
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 tools/build_web.py --build build-wasm --libraries
-      - run: python3 tools/progress.py build-wasm/web
+        run: python3 tools/build_web.py --build build-wasm --release
+      - name: Prepare the open-PR estimate fallback
+        run: |
+          python3 - "$RUNNER_TEMP/open-pr-progress.json" <<'PY'
+          import json
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+          Path(sys.argv[1]).write_text(json.dumps({"available": False,
+              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+              "reason": "estimator failed before producing a result"}) + "\n", encoding="utf-8")
+          PY
+      - name: Estimate open-PR library progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        continue-on-error: true
+        run: python3 tools/progress_prs.py --output "$RUNNER_TEMP/open-pr-progress.json"
+      - run: python3 tools/progress.py --require-shader-source --open-pr-estimate "$RUNNER_TEMP/open-pr-progress.json" build-wasm/web
+      - name: Stage the input mapper
+        run: |
+          install -d build-wasm/web/input-mapper
+          install -m 0644 -t build-wasm/web/input-mapper \
+            tools/input-mapper/{index.html,styles.css,app.js,mapping.js,keys.js,capture.js,validation.js,i18n.js,dropdown.js}
       - run: python3 tools/progress_history.py build-wasm/web
       - uses: actions/upload-pages-artifact@v5
         with:

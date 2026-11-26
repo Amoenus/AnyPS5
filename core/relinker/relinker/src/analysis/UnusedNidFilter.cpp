@@ -4,6 +4,8 @@
 #include <relinker/analysis/UnusedNidFilter/IGotAccessIndex.hpp>
 #include <relinker/analysis/UnusedNidFilter/IRelativeRelocationIndex.hpp>
 #include <relinker/parsing/ElfReader.hpp>
+#include <elfpatcher/general/ElfConstants.hpp>
+#include <limits>
 
 namespace Relinker {
 
@@ -17,6 +19,12 @@ public:
         const std::vector<VirtualAddress>& extraEntries
     ) override {
         if (textSection.empty()) throw RelinkerException("Cannot filter NIDs: text section is empty");
+        if (textSection.size() > std::numeric_limits<VirtualAddress>::max() - textVAddr)
+            throw RelinkerException("Cannot filter NIDs: text section range exceeds the address space");
+        for (const auto& ref : nidRefs) {
+            if (ref.RelocationAddress > std::numeric_limits<VirtualAddress>::max() - 8)
+                throw RelinkerException("Cannot filter NIDs: relocation slot address overflow", ref.RelocationAddress);
+        }
 
         auto relativeRelocations = UnusedNidFilter::BuildRelativeRelocationIndex(elfBytes);
         auto collector = UnusedNidFilter::MakeEntryPointCollector();
@@ -41,7 +49,7 @@ public:
 
         std::vector<NidReference> result;
         for (const auto& ref : nidRefs)
-            if (index->IsGotSlotAccessed(ref.RelocationAddress))
+            if (ref.RelocationTypeValue != Elfpatcher::R_X86_64_GLOB_DAT || index->IsGotSlotAccessed(ref.RelocationAddress))
                 result.push_back(ref);
         return result;
     }

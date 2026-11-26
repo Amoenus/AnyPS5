@@ -1,14 +1,18 @@
+#include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/General.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-
-extern "C" int* APS5_VABI __error_nid_postfix();
+#include <stdexcept>
 
 namespace {
 constexpr int kGuestInet = 2;
 constexpr int kGuestInet6 = 28;
 constexpr std::size_t kMaxText = 46;
+constexpr std::size_t kPadChunk = 4096;
 
 bool ParseDecimalPart(const char* begin, const char* end, std::uint8_t& value) {
     const std::ptrdiff_t length = end - begin;
@@ -189,29 +193,61 @@ std::size_t V6ToText(const std::uint8_t* bytes, char* out) {
 extern "C" {
 int APS5_VABI __inet_pton_nid_postfix(int family, const char* text, void* destination) {
     if (family != kGuestInet && family != kGuestInet6) { *__error_nid_postfix() = 47; return -1; }
-    if (!text || !destination) { *__error_nid_postfix() = 14; return -1; }
+    if (!text) throw std::runtime_error("inet_pton: null text");
+    std::string localText;
+    const int copyError = CopyGuestString_nid_no_patch(text, kMaxText, localText);
+    if (copyError == 63) return 0;
+    if (copyError != 0) { *__error_nid_postfix() = copyError; return -1; }
     if (family == kGuestInet) {
         std::uint8_t quad[4];
-        if (!ParseQuad(text, text + std::strlen(text), quad)) return 0;
-        std::memcpy(destination, quad, sizeof(quad));
+        if (!ParseQuad(localText.data(), localText.data() + localText.size(), quad)) return 0;
+        if (!destination) throw std::runtime_error("inet_pton: null destination");
+        if (!GuestCopyOut_nid_no_patch(destination, quad, sizeof(quad))) { *__error_nid_postfix() = 14; return -1; }
         return 1;
     }
     std::uint8_t address[16];
-    if (!TextToV6(text, address)) return 0;
-    std::memcpy(destination, address, sizeof(address));
+    if (!TextToV6(localText.c_str(), address)) return 0;
+    if (!destination) throw std::runtime_error("inet_pton: null destination");
+    if (!GuestCopyOut_nid_no_patch(destination, address, sizeof(address))) { *__error_nid_postfix() = 14; return -1; }
     return 1;
 }
 
 const char* APS5_VABI __inet_ntop_nid_postfix(int family, const void* source,
                                             char* destination, std::uint32_t capacity) {
     if (family != kGuestInet && family != kGuestInet6) { *__error_nid_postfix() = 47; return nullptr; }
-    if (!source || !destination) { *__error_nid_postfix() = 14; return nullptr; }
+    if (!source) throw std::runtime_error("inet_ntop: null source");
     char text[kMaxText + 1];
-    const auto* bytes = static_cast<const std::uint8_t*>(source);
+    std::uint8_t bytes[16];
+    if (!GuestCopyIn_nid_no_patch(bytes, source, family == kGuestInet ? 4 : sizeof(bytes))) { *__error_nid_postfix() = 14; return nullptr; }
     const std::size_t length = family == kGuestInet ? FormatQuad(bytes, text) : V6ToText(bytes, text);
     text[length] = '\0';
     if (length + 1 > capacity) { *__error_nid_postfix() = 28; return nullptr; }
-    std::memcpy(destination, text, length + 1);
+    if (!destination) throw std::runtime_error("inet_ntop: null destination");
+    if (!GuestCopyOut_nid_no_patch(destination, text, length + 1)) { *__error_nid_postfix() = 14; return nullptr; }
+    if (family == kGuestInet6) {
+        static const char zeros[kPadChunk]{};
+        for (std::size_t offset = length + 1; offset < capacity;) {
+            const std::size_t chunk = std::min<std::size_t>(kPadChunk, capacity - offset);
+            if (!GuestCopyOut_nid_no_patch(destination + offset, zeros, chunk)) { *__error_nid_postfix() = 14; return nullptr; }
+            offset += chunk;
+        }
+    }
     return destination;
+}
+
+std::uint32_t APS5_VABI htonl_nid_postfix(std::uint32_t value) {
+    return __builtin_bswap32(value);
+}
+
+std::uint32_t APS5_VABI ntohl_nid_postfix(std::uint32_t value) {
+    return __builtin_bswap32(value);
+}
+
+std::uint16_t APS5_VABI htons_nid_postfix(std::uint16_t value) {
+    return __builtin_bswap16(value);
+}
+
+std::uint16_t APS5_VABI ntohs_nid_postfix(std::uint16_t value) {
+    return __builtin_bswap16(value);
 }
 }

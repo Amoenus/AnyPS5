@@ -167,6 +167,53 @@ void grammarAccepted() {
     require(!ParsePatchFile("format = 1\n").MainTarget && ParsePatchFile("format = 1\n").Entries.empty(), "empty file");
 }
 
+void stringControls() {
+    const std::string del(1, '\x7f');
+    rejectsText(header("main_target = \"bad" + del + "text\"\n"), 2, "control characters");
+    rejectsText(header("[[patch]]\ndescription = \"bad" + del + "text\"\n"), 3, "control characters");
+    for (unsigned character = 0; character < 0x20; ++character) {
+        if (character == '\t' || character == '\n') continue;
+        rejectsText(header("[[patch]]\ndescription = \"bad" + std::string(1, static_cast<char>(character)) + "text\"\n"), 3, "control characters");
+    }
+    rejectsText(header("[[patch]]\ndescription = 'bad" + del + "text'\n"), 3, "single-quoted");
+    rejectsText(header("[[patch]]\ndescription = \"\"\"bad" + del + "text\"\"\"\n"), 3, "multiline");
+    rejectsText(header("[[patch]]\ndescription = '''bad" + del + "text'''\n"), 3, "single-quoted");
+}
+
+void commentControls() {
+    for (unsigned character = 0; character <= 0x7f; ++character) {
+        if (character == '\t' || character == '\n' || (character >= 0x20 && character < 0x7f)) continue;
+        const auto bad = "bad" + std::string(1, static_cast<char>(character)) + "text";
+        rejectsText(header("# " + bad + "\n"), 2, "control characters");
+        rejectsText("format = 1 # " + bad + "\n", 1, "control characters");
+    }
+    rejectsText(header("# trailing carriage return\r"), 2, "control characters");
+}
+
+void stringControlRoundTrip() {
+    for (const std::string description : {std::string("tab\ttext"), std::string("caf\xc3\xa9 \xe6\x97\xa5 \xf0\x9f\x98\x80 # text")}) {
+        const auto file = ParsePatchFile("# \t" + description + "\r\nformat = 1 # \t" + description + "\r\n[[patch]]\r\n"
+            "target = \"main.elf\"\r\nva = 4096\r\nexpected = \"00\"\r\nvalue = \"01\"\r\ndescription = \"" + description + "\"\r\n");
+        require(file.Entries.size() == 1 && file.Entries.front().Description == description, "valid tab or Unicode was not preserved");
+        const auto& parsed = file.Entries.front();
+        const AppliedPatch applied{parsed.Target, parsed.VirtualAddress, 0x1000, parsed.Expected, parsed.Value, parsed.Description, parsed.Name};
+        const auto reparsed = ParsePatchFile(WriteManifest({applied}, "main.elf", ""));
+        require(reparsed.Entries.size() == 1 && reparsed.Entries.front().Description == description, "valid patch string did not round-trip through the manifest");
+        require(reparsed.Entries.front().Expected == parsed.Expected && reparsed.Entries.front().Value == parsed.Value, "patch bytes changed during the string round trip");
+    }
+}
+
+void invalidUtf8() {
+    const std::vector<std::string> sequences{
+        "\x80", "\xc2", "\xc3(", "\xe0\x80\x80", "\xed\xa0\x80", "\xf4\x90\x80\x80"
+    };
+    for (const auto& sequence : sequences) {
+        rejects([&] { ParsePatchFile("format = 1\n# " + sequence + "\n"); }, "line 2: invalid UTF-8");
+        rejects([&] { ParsePatchFile("format = 1\nconfig = \"" + sequence + "\"\n"); }, "line 2: invalid UTF-8");
+        rejects([&] { ParsePatchFile(header("[[patch]]\ntarget = \"main.elf\"\nva = 0x1000\nexpected = \"00\"\nvalue = \"01\"\ndescription = \"" + sequence + "\"\n")); }, "line 7: invalid UTF-8");
+    }
+}
+
 void grammarRejected() {
     rejects([] { ParsePatchFile(""); }, "format = 1");
     rejectsText("format = 2\n", 1, "unsupported format");
@@ -282,6 +329,54 @@ void applyAndMismatch() {
     require(PatchTarget(bytes, "other", entries).Applied.empty() && bytes == original, "entry hit another target");
 }
 
+void programmaticWidths() {
+    auto bytes = twoSegmentFixture();
+    const auto original = bytes;
+    const ElfReader reader(original);
+    const std::vector<PatchEntry> invalid{
+        entry("t", 0x1000, {0}, {9, 8}),
+        entry("t", 0x1000, {0, 1}, {9}),
+        entry("t", 0x1000, {}, {}),
+        entry("t", 0x1000, {}, {9}),
+        entry("t", 0x1000, {0}, {}),
+    };
+    for (const auto& patch : invalid) {
+        const std::vector<PatchEntry> entries{entry("t", 0x1100, {0x80}, {1}), patch};
+        rejects([&] { ResolveRanges(reader, entries); }, "same nonzero width");
+        rejects([&] { PatchTarget(bytes, "t", entries); }, "same nonzero width");
+        require(bytes == original, "an invalid patch width wrote bytes");
+        rejects([&] { ApplyPatches(bytes, "t", entries, {{0x2000, 1, 0x1100}, {0x1000, patch.Expected.size(), 0x1000}}); }, "same nonzero width");
+        require(bytes == original, "direct application of an invalid patch width wrote bytes");
+        for (const bool outputMode : {false, true}) {
+            PatchFile file;
+            file.MainTarget = "t";
+            file.Entries = entries;
+            rejects([&] { VerifyPatches(file, {{"t", original}}, {}, outputMode); }, "same nonzero width");
+        }
+    }
+}
+
+void applicationRangeWidths() {
+    const std::vector<std::uint8_t> original{0, 1, 2, 3};
+    auto bytes = original;
+    const std::vector<PatchEntry> entries{entry("t", 0x1000, {0}, {9}), entry("t", 0x1002, {2, 3}, {8, 7})};
+    for (const std::uint64_t length : {0u, 1u, 3u}) {
+        rejects([&] { ApplyPatches(bytes, "t", entries, {{0, 1, 0x1000}, {2, length, 0x1002}}); }, "range length does not match");
+        require(bytes == original, "a mismatched range length wrote bytes");
+    }
+    rejects([&] { ApplyPatches(bytes, "t", {entry("t", 0x1003, {3, 4}, {8, 7})}, {{3, 1, 0x1003}}); }, "range length does not match");
+    require(bytes == original, "a truncated comparison range wrote bytes");
+    for (const std::uint64_t offset : std::array<std::uint64_t, 4>{3, 4, 5, UINT64_MAX}) {
+        rejects([&] { ApplyPatches(bytes, "t", entries, {{0, 1, 0x1000}, {offset, 2, 0x1002}}); }, "range exceeds the image");
+        require(bytes == original, "an out-of-bounds patch wrote bytes");
+    }
+    rejects([&] { ApplyPatches(bytes, "t", entries, {{0, 1, 0x1000}}); }, "ranges do not match");
+    require(bytes == original, "a missing range wrote bytes");
+    const auto applied = ApplyPatches(bytes, "t", entries, {{0, 1, 0x1000}, {2, 2, 0x1002}});
+    require(bytes == std::vector<std::uint8_t>({9, 1, 8, 7}) && applied.size() == 2, "valid boundary patches failed");
+    require(ApplyPatches(bytes, "t", {}, {}).empty(), "empty patch list was rejected");
+}
+
 void overlapWithWriters() {
     const std::vector<PatchedRange> patched{{0x1010, 2, 0x401010}};
     const auto reject = [&](const WriterSites& sites, const std::string& writer) { rejects([&] { CheckOverlaps("t", patched, sites); }, writer); };
@@ -305,6 +400,14 @@ void overlapWithWriters() {
     CheckOverlaps("t", patched, {.Traps = trapBefore});
     const std::vector<WriterRange> window{{0x100f, 4, "window"}};
     reject({.Traps = window}, "window");
+    const std::vector<Codegen::TrampolineSite> frame{{0x1011, 0x401011, 5, {}, {}, 0}};
+    reject({.RedZoneSites = frame}, "red-zone frame site");
+    const std::vector<Codegen::TrampolineSite> frameBefore{{0x100b, 0x40100b, 5, {}, {}, 0}};
+    CheckOverlaps("t", patched, {.RedZoneSites = frameBefore});
+    const std::vector<Codegen::RedZoneDisplacement> moved{{0x100f, {0x10, 0, 0, 0}}};
+    reject({.RedZoneDisplacements = moved}, "red-zone moved displacement");
+    const std::vector<Codegen::RedZoneDisplacement> movedBefore{{0x100f, {0x10}}};
+    CheckOverlaps("t", patched, {.RedZoneDisplacements = movedBefore});
 }
 
 void conversion() {
@@ -340,9 +443,66 @@ void conversion() {
     rejects([&] { converter.Convert(conversionInput(executable), failing); }, "expected 07 found 00");
     failing.Patches = {entry("custom-name.bin", 0x1000, {0xc3, 0}, {0, 0}), entry("custom-name.bin", 0x1001, {0}, {1})};
     rejects([&] { converter.Convert(conversionInput(executable), failing); }, "overlaps");
+    for (const auto target : {TargetSystem::Linux, TargetSystem::Windows, TargetSystem::MacOs}) {
+        failing.Target = target;
+        for (const char* name : {"custom-name.bin", "sce_module/plugin.prx"}) {
+            failing.Patches = {entry(name, 0x1001, {0}, {9, 8})};
+            rejects([&] { converter.Convert(conversionInput(executable), failing); }, "same nonzero width");
+        }
+    }
 
     const auto repeated = converter.Convert(conversionInput(executable), plain);
     require(repeated.Executable == baseline.Executable && repeated.Modules.front().Bytes == baseline.Modules.front().Bytes, "no entries changed the output");
+}
+
+std::vector<std::uint8_t> framedLeafFixture() {
+    auto bytes = conversionFixture();
+    Io::WriteU64(bytes, 64 + 32, 0x80);
+    Io::WriteU64(bytes, 64 + 40, 0x80);
+    std::fill(bytes.begin() + 0x1000, bytes.begin() + 0x1080, 0xcc);
+    const std::vector<std::uint8_t> caller{0xe8, 0x3b, 0x00, 0x00, 0x00, 0xc3};
+    const std::vector<std::uint8_t> leaf{0x53, 0x41, 0x56, 0x41, 0x57, 0x48, 0x89, 0x7c, 0x24, 0xf0, 0x48, 0x8b, 0x04, 0x24, 0x48, 0x8b, 0x44, 0x24, 0x08, 0x41, 0x5f, 0x41, 0x5e, 0x5b, 0xc3};
+    std::copy(caller.begin(), caller.end(), bytes.begin() + 0x1000);
+    std::copy(leaf.begin(), leaf.end(), bytes.begin() + 0x1040);
+    const auto ehFrameHeader = 64 + 7 * 56;
+    Io::WriteU32(bytes, ehFrameHeader, 0x6474e550);
+    Io::WriteU32(bytes, ehFrameHeader + 4, 4);
+    for (const auto field : {8, 16, 24}) Io::WriteU64(bytes, ehFrameHeader + field, 0x2900);
+    Io::WriteU64(bytes, ehFrameHeader + 32, 32);
+    Io::WriteU64(bytes, ehFrameHeader + 40, 32);
+    Io::WriteU64(bytes, ehFrameHeader + 48, 4);
+    Io::WriteU32(bytes, 0x2800, 9);
+    const std::vector<std::uint8_t> cie{1, 0, 1, 0x78, 16};
+    std::copy(cie.begin(), cie.end(), bytes.begin() + 0x2808);
+    Io::WriteU32(bytes, 0x2840, 20);
+    Io::WriteU32(bytes, 0x2844, 0x44);
+    Io::WriteU64(bytes, 0x2848, 0x1040);
+    Io::WriteU64(bytes, 0x2850, leaf.size());
+    bytes[0x2900] = 1;
+    bytes[0x2902] = 3;
+    Io::WriteU64(bytes, 0x2904, 0x2800);
+    Io::WriteU32(bytes, 0x290c, 1);
+    Io::WriteU64(bytes, 0x2910, 0x1040);
+    Io::WriteU64(bytes, 0x2918, 0x2840);
+    return bytes;
+}
+
+void framedLeafPatches() {
+    TestProgress progress;
+    const Conversion converter(progress);
+    const auto executable = framedLeafFixture();
+    ConversionOptions options;
+    options.TargetName = "custom-name.bin";
+    options.Target = TargetSystem::Windows;
+    options.FrameRedZone = true;
+    converter.Convert(conversionInput(executable), options);
+    require(progress.Messages.find("1 framed (1 without a frame pointer, 1 rsp operands moved, 2 in 1 operand stubs; 1 exits)") != std::string::npos, "the fixture's leaf was not framed with a moved displacement and an operand stub: " + progress.Messages);
+    options.Patches = {entry("custom-name.bin", 0x1010, {0xcc}, {0x90})};
+    require(converter.Convert(conversionInput(executable), options).AppliedPatches.size() == 1, "a patch outside the framed leaf was not applied");
+    options.Patches = {entry("custom-name.bin", 0x1049, {0xf0}, {0xe8})};
+    rejects([&] { converter.Convert(conversionInput(executable), options); }, "overlaps red-zone moved displacement at off=0x1049 length 1");
+    options.Patches = {entry("custom-name.bin", 0x104c, {0x04}, {0x0c})};
+    rejects([&] { converter.Convert(conversionInput(executable), options); }, "overlaps red-zone frame site at off=0x104a length 9");
 }
 
 void targets() {
@@ -385,7 +545,20 @@ void verify() {
     rejects([&] { VerifyPatches(ParsePatchFile(header("[[patch]]\ntarget = \"main.elf\"\nva = 0x1000\nexpected = \"00\"\nvalue = \"01\"\n")), outputs, {}, true); }, "no main_target");
     auto exec = twoSegmentFixture();
     Io::WriteU16(exec, 16, 2);
-    rejects([&] { VerifyPatches(file, {{"main.elf", exec}}, {}, true); }, "verify the input instead");
+    rejects([&] { VerifyPatches(file, {{"main.elf", exec}}, {}, true); }, "has no linux_base");
+    const auto based = ParsePatchFile(header("main_target = \"main.elf\"\nlinux_base = 0x400000\n[[patch]]\nname = \"one\"\ntarget = \"main.elf\"\nva = 0x1000\nexpected = \"0001\"\nvalue = \"0908\"\n"
+                                             "[[patch]]\ntarget = \"main.elf\"\nva = 0x1100\nexpected = \"ff\"\nvalue = \"01\"\n"));
+    require(based.LinuxBase == 0x400000, "linux_base was not read");
+    auto rebased = patchedBytes;
+    Io::WriteU16(rebased, 16, 2);
+    for (const std::size_t field : {64 + 16, 64 + 24, 120 + 16, 120 + 24}) Io::WriteU64(rebased, field, Io::ReadU64(rebased, field) + 0x400000);
+    output = VerifyPatches(based, {{"main.elf", rebased}}, {}, true);
+    require(output.size() == 2 && output[0].Status == VerifyStatus::Applied && output[1].Status == VerifyStatus::Applied, "fixed-base output applied");
+    require(output[0].VirtualAddress == 0x1000 && output[0].Offset == 0x1000 && output[1].Offset == 0x2000, "fixed-base output reported the rebased address");
+    output = VerifyPatches(based, {{"main.elf", exec}}, {}, true);
+    require(output[0].Status == VerifyStatus::Mismatch && output[0].Detail.find("PT_LOAD") != std::string::npos, "linux_base was not applied");
+    rejects([&] { VerifyPatches(based, outputs, {}, true); }, "has linux_base = 0x400000");
+    rejects([&] { VerifyPatches(ParsePatchFile(header("main_target = \"main.elf\"\nlinux_base = 0x400000\n[[patch]]\ntarget = \"main.elf\"\nva = 0xffffffffffffff00\nexpected = \"00\"\nvalue = \"01\"\n")), {{"main.elf", rebased}}, {}, true); }, "lies outside the address space at linux_base");
     rejects([&] { VerifyPatches(file, {{"main.elf", {'M', 'Z', 0x90, 0}}}, {}, true); }, "verify the input instead");
     rejects([&] { VerifyPatches(file, {{"main.elf", {0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1}}}, {}, true); }, "verify the input instead");
     rejects([&] { VerifyPatches(file, {{"main.elf", {}}}, {}, true); }, "verify the input instead");
@@ -406,6 +579,91 @@ void rangeFailureInVerify() {
     require(results.front().Status == VerifyStatus::Mismatch && results.front().Detail.find("PT_LOAD") != std::string::npos, "range failure should be a mismatch");
 }
 
+std::vector<std::uint8_t> peFixture() {
+    std::vector<std::uint8_t> bytes(0x600);
+    Io::WriteU16(bytes, 0, 0x5a4d);
+    Io::WriteU32(bytes, 0x3c, 0x80);
+    Io::WriteU32(bytes, 0x80, 0x4550);
+    Io::WriteU16(bytes, 0x84, 0x8664);
+    Io::WriteU16(bytes, 0x86, 2);
+    Io::WriteU16(bytes, 0x94, 240);
+    Io::WriteU16(bytes, 0x98, 0x20b);
+    const auto section = [&](const std::size_t index, const std::uint32_t rva, const std::uint32_t virtualSize, const std::uint32_t rawSize, const std::uint32_t rawOffset) {
+        const auto at = 0x188 + index * 40;
+        Io::WriteU32(bytes, at + 8, virtualSize);
+        Io::WriteU32(bytes, at + 12, rva);
+        Io::WriteU32(bytes, at + 16, rawSize);
+        Io::WriteU32(bytes, at + 20, rawOffset);
+    };
+    section(0, 0x10000, 0x2000, 0x200, 0x400);
+    section(1, 0x12000, 0x1000, 0, 0);
+    bytes[0x400] = 9;
+    bytes[0x401] = 8;
+    bytes[0x5ff] = 7;
+    return bytes;
+}
+
+void verifyWindowsOutput() {
+    const auto patch = [](const std::string& rva, const std::string& expected, const std::string& value, const std::string& target = "main.elf") {
+        return "[[patch]]\ntarget = \"" + target + "\"\nva = 0x1000\n" + (rva.empty() ? "" : "output_rva = " + rva + "\n") + "expected = \"" + expected + "\"\nvalue = \"" + value + "\"\n";
+    };
+    const std::string top = "main_target = \"main.elf\"\n";
+    const auto pe = peFixture();
+    const auto file = ParsePatchFile(header(top + patch("0x10000", "0001", "0908") + patch("0x101ff", "0101", "0700") + patch("0x10300", "ff", "00") + patch("0x12001", "ff", "01")
+                                            + patch("0x13800", "00", "01") + patch("0x11fff", "ffff", "0000") + patch("0x10000", "00", "01", "sce_module/libc.prx") + patch("0x12fff", "ffff", "0000")));
+    require(file.Entries[0].OutputRva == 0x10000, "output_rva was not read");
+    const auto results = VerifyPatches(file, {{"main.elf", pe}}, {}, true);
+    require(results[0].Status == VerifyStatus::Applied && results[0].Offset == 0x400 && results[0].VirtualAddress == 0x1000 && results[0].Detail == "0908", "PE entry in file data: " + results[0].Detail);
+    require(results[1].Status == VerifyStatus::Applied && results[1].Offset == 0x5ff, "PE entry crossing the end of the file data: " + results[1].Detail);
+    require(results[2].Status == VerifyStatus::Applied && results[2].Detail.find("not stored in the file") != std::string::npos, "PE entry in zero fill: " + results[2].Detail);
+    require(results[3].Status == VerifyStatus::Mismatch && results[3].Detail.find("expected 01 found 00") != std::string::npos, "PE entry in a section without file data: " + results[3].Detail);
+    require(results[4].Status == VerifyStatus::Mismatch && results[4].Detail.find("not inside the sections") != std::string::npos, "PE entry outside every section: " + results[4].Detail);
+    require(results[5].Status == VerifyStatus::Applied && results[5].Detail.find("not stored in the file") != std::string::npos, "PE entry across two sections: " + results[5].Detail);
+    require(results[6].Status == VerifyStatus::NotChecked, "PE module entry");
+    require(results[7].Status == VerifyStatus::Mismatch && results[7].Detail.find("not inside the sections") != std::string::npos, "PE entry past the last section: " + results[7].Detail);
+
+    auto unpatched = pe;
+    unpatched[0x400] = 0;
+    unpatched[0x401] = 1;
+    const auto single = ParsePatchFile(header(top + patch("0x10000", "0001", "0908")));
+    const auto missing = VerifyPatches(single, {{"main.elf", unpatched}}, {}, true);
+    require(missing[0].Status == VerifyStatus::Mismatch && missing[0].Detail.find("not applied") != std::string::npos, "unpatched PE output: " + missing[0].Detail);
+    auto truncated = pe;
+    truncated.resize(0x500);
+    const auto cut = VerifyPatches(ParsePatchFile(header(top + patch("0x10100", "00", "01"))), {{"main.elf", truncated}}, {}, true);
+    require(cut[0].Status == VerifyStatus::Mismatch && cut[0].Detail.find("out of bounds") != std::string::npos, "PE section data past the end of the file: " + cut[0].Detail);
+
+    rejects([&] { VerifyPatches(ParsePatchFile(header(top + patch("", "0001", "0908"))), {{"main.elf", pe}}, {}, true); }, "has no output_rva");
+    rejects([&] { VerifyPatches(ParsePatchFile(header(top + "linux_base = 0x400000\n" + patch("0x10000", "0001", "0908"))), {{"main.elf", pe}}, {}, true); }, "has linux_base = 0x400000");
+    rejects([&] { VerifyPatches(ParsePatchFile(header(top + patch("0x10000", "0001", "0908") + patch("0x10001", "01", "08"))), {{"main.elf", pe}}, {}, true); }, "overlaps");
+    for (const char* bad : {"\"0x10000\"", "-1", "0x100000000"}) rejectsText(header(patch(bad, "00", "01")), 5, "output_rva must be an integer from 0 to 0xffffffff");
+    require(ParsePatchFile(header(patch("0xffffffff", "00", "01"))).Entries[0].OutputRva == 0xffffffff, "largest output_rva was not read");
+    auto notPe = pe;
+    Io::WriteU16(notPe, 0x98, 0x10b);
+    rejects([&] { VerifyPatches(single, {{"main.elf", notPe}}, {}, true); }, "verify the input instead");
+    notPe = pe;
+    Io::WriteU16(notPe, 0x86, 0x4000);
+    rejects([&] { VerifyPatches(single, {{"main.elf", notPe}}, {}, true); }, "verify the input instead");
+
+    TestProgress progress;
+    const Conversion converter(progress);
+    ConversionOptions options;
+    options.TargetName = "custom-name.bin";
+    options.Target = TargetSystem::Windows;
+    options.Patches = {entry("custom-name.bin", 0x1001, {0}, {0x90}, "nop"), entry("sce_module/plugin.prx", 0x1002, {0}, {0x41})};
+    const auto converted = converter.Convert(conversionInput(conversionFixture()), options);
+    require(converted.AppliedPatches.size() == 2 && converted.AppliedPatches[0].OutputRva == 0x10001 && !converted.AppliedPatches[1].OutputRva, "Windows conversion did not record the executable entry's output_rva");
+    const auto text = WriteManifest(converted.AppliedPatches, "custom-name.bin", "");
+    require(text.find("va = 0x1001\noutput_rva = 0x10001\n") != std::string::npos && text.find("va = 0x1002\nexpected") != std::string::npos, "manifest output_rva: " + text);
+    const auto verified = VerifyPatches(ParsePatchFile(text), {{"custom-name.bin", converted.Executable}}, {}, true);
+    require(verified[0].Status == VerifyStatus::Applied && verified[1].Status == VerifyStatus::NotChecked, "converted PE output was not verified: " + verified[0].Detail);
+    auto tampered = converted.Executable;
+    tampered[verified[0].Offset] = 0;
+    require(VerifyPatches(ParsePatchFile(text), {{"custom-name.bin", tampered}}, {}, true)[0].Status == VerifyStatus::Mismatch, "tampered PE output was accepted");
+    options.Target = TargetSystem::Linux;
+    require(!converter.Convert(conversionInput(conversionFixture()), options).AppliedPatches[0].OutputRva, "Linux conversion recorded an output_rva");
+}
+
 void manifest() {
     const AppliedPatch first{"main.elf", 0x1000, 0x1000, {0, 1}, {9, 8}, "set \"x\" later", "alpha"};
     const AppliedPatch second{"sce_module/libc.prx", 0x2000, 0x2000, {5}, {6}, "", ""};
@@ -424,10 +682,15 @@ void manifest() {
     require(parsed.Entries[1].Name.empty() && parsed.Entries[1].Target == "sce_module/libc.prx" && parsed.Entries[1].Description.empty(), "second entry");
     require(text.find("name = \"alpha\"") != std::string::npos && text.find("main_target = \"main.elf\"") != std::string::npos, "manifest text");
     require(WriteManifest(AggregateManifest({{plain}, {second}}), "main.elf", "") == text, "manifest is not deterministic");
+    require(text.find("linux_base") == std::string::npos && !parsed.LinuxBase, "a manifest without a base wrote linux_base");
+    const auto based = WriteManifest({plain}, "main.elf", "", 0x400000);
+    require(based.find("main_target = \"main.elf\"\nlinux_base = 0x400000\n") != std::string::npos && ParsePatchFile(based).LinuxBase == 0x400000, "linux_base did not round-trip");
+    rejectsText(header("linux_base = \"0x400000\"\n"), 2, "linux_base must be a non-negative integer");
+    rejectsText(header("linux_base = -1\n"), 2, "linux_base must be a non-negative integer");
 }
 
 void reservedNames() {
-    for (const char* reserved : {"format", "relinker_version", "relinker_commit", "config", "config_sha256", "main_target", "settings", "settings_sha256"})
+    for (const char* reserved : {"format", "relinker_version", "relinker_commit", "config", "config_sha256", "main_target", "linux_base", "settings", "settings_sha256"})
         rejects([&] { ParsePatchFile(namedEntry(reserved)); }, "line 3: name is reserved");
     ParsePatchFile(header("settings = \"a\"\nsettings_sha256 = \"b\"\n"));
 }
@@ -501,6 +764,10 @@ int main() {
     try {
         grammarAccepted();
         grammarRejected();
+        stringControls();
+        commentControls();
+        stringControlRoundTrip();
+        invalidUtf8();
         integerRanges();
         boundsAndWidth();
         names();
@@ -511,11 +778,15 @@ int main() {
         ranges();
         headerRange();
         applyAndMismatch();
+        programmaticWidths();
+        applicationRangeWidths();
         overlapWithWriters();
         conversion();
+        framedLeafPatches();
         targets();
         verify();
         rangeFailureInVerify();
+        verifyWindowsOutput();
         manifest();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

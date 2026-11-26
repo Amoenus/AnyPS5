@@ -1,3 +1,4 @@
+#include "prx/libkernel/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include <cstddef>
@@ -6,17 +7,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <source_location>
-
-extern "C" {
-int APS5_VABI sceKernelJitCreateSharedMemory(const char*, std::size_t, int, int*);
-int APS5_VABI sceKernelJitCreateAliasOfSharedMemory(int, int, int*);
-int APS5_VABI sceKernelJitMapSharedMemory(int, int, void**);
-int APS5_VABI sceKernelMunmap(void*, std::size_t);
-int APS5_VABI close_nid_postfix(int);
-int APS5_VABI dup_nid_postfix(int);
-int APS5_VABI dup2_nid_postfix(int, int);
-int APS5_VABI shm_open_nid_postfix(const char*, int, int);
-}
 
 namespace {
 
@@ -77,10 +67,10 @@ void WriteThroughAliasRunsThroughExecutableView() {
     Require(close_nid_postfix(fd) == 0);
     auto* again = static_cast<unsigned char*>(Map(alias, Read));
     Require(again[Size - 1] == 0x5a);
-    Require(sceKernelMunmap(again, Size) == 0);
-    Require(sceKernelMunmap(writable, Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(again), Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(writable), Size) == 0);
     Require(Call(executable) == 0x12345678);
-    Require(sceKernelMunmap(executable, Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(executable), Size) == 0);
     Require(close_nid_postfix(alias) == 0);
 }
 
@@ -96,9 +86,24 @@ void OneViewWritesAndRuns() {
     Require(close_nid_postfix(fd) == 0);
     auto* view = static_cast<unsigned char*>(Map(duplicate, Read | Execute));
     Require(Call(view) == 42);
-    Require(sceKernelMunmap(view, Size) == 0);
-    Require(sceKernelMunmap(code, Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(view), Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(code), Size) == 0);
     Require(close_nid_postfix(duplicate) == 0);
+}
+
+void MmapOfTheDescriptorSharesTheObject() {
+    const int fd = Create(nullptr, Read | Write);
+    auto* jit = static_cast<volatile unsigned char*>(Map(fd, Read | Write));
+    void* mapped = mmap_nid_postfix(nullptr, Size, Read | Write, 0x1, fd, 0);
+    Require(mapped != reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1)));
+    auto* view = static_cast<volatile unsigned char*>(mapped);
+    jit[0x200] = 0x5a;
+    Require(view[0x200] == 0x5a);
+    view[0x300] = 0x6b;
+    Require(jit[0x300] == 0x6b);
+    Require(munmap_nid_postfix(mapped, Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(const_cast<unsigned char*>(jit)), Size) == 0);
+    Require(close_nid_postfix(fd) == 0);
 }
 
 void Dup2KeepsTheDescriptorTableInStep() {
@@ -121,9 +126,9 @@ void Dup2KeepsTheDescriptorTableInStep() {
     address = nullptr;
     Require(sceKernelJitMapSharedMemory(target, Read, &address) == SCE_KERNEL_ERROR_EBADF);
     Require(address == nullptr);
-    Require(sceKernelMunmap(same, Size) == 0);
-    Require(sceKernelMunmap(readable, Size) == 0);
-    Require(sceKernelMunmap(writable, Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(same), Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(readable), Size) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(writable), Size) == 0);
     Require(close_nid_postfix(plain) == 0);
     Require(close_nid_postfix(target) == 0);
     Require(close_nid_postfix(fd) == 0);
@@ -136,6 +141,7 @@ void InvalidArgumentsAreRejected() {
     Require(sceKernelJitCreateSharedMemory(nullptr, Size + 0x2000, Read | Write | Execute, &fd) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelJitCreateSharedMemory(nullptr, Size, 0x10, &fd) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelJitCreateSharedMemory(nullptr, Size, Read | Write | Execute, nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelJitCreateSharedMemory(nullptr, Size, Read | Write | Execute, reinterpret_cast<int*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
     Require(fd == -1);
 
     fd = Create(nullptr, Read | Execute);
@@ -144,11 +150,20 @@ void InvalidArgumentsAreRejected() {
     Require(sceKernelJitCreateAliasOfSharedMemory(fd, Read | Write, &alias) == SCE_KERNEL_ERROR_EACCES);
     Require(sceKernelJitCreateAliasOfSharedMemory(fd, 0x20, &alias) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelJitCreateAliasOfSharedMemory(fd, Read, nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelJitCreateAliasOfSharedMemory(fd, Read, reinterpret_cast<int*>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
     Require(sceKernelJitCreateAliasOfSharedMemory(-1, Read, &alias) == SCE_KERNEL_ERROR_EBADF);
     Require(alias == -1);
     Require(sceKernelJitMapSharedMemory(fd, Read | Write, &address) == SCE_KERNEL_ERROR_EACCES);
     Require(sceKernelJitMapSharedMemory(fd, 0x8, &address) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelJitMapSharedMemory(fd, Read, nullptr) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelJitMapSharedMemory(fd, Read, reinterpret_cast<void**>(0x10)) == SCE_KERNEL_ERROR_EFAULT);
+    void* roPage = mmap_nid_postfix(nullptr, 0x4000, Read | Write, 0x1002, -1, 0);
+    Require(roPage != reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1)));
+    auto* roOut = static_cast<void**>(roPage);
+    *roOut = nullptr;
+    Require(mprotect_nid_postfix(roPage, 0x4000, Read) == 0);
+    Require(sceKernelJitMapSharedMemory(fd, Read, roOut) == SCE_KERNEL_ERROR_EFAULT);
+    Require(munmap_nid_postfix(roPage, 0x4000) == 0);
     Require(sceKernelJitMapSharedMemory(-1, Read, &address) == SCE_KERNEL_ERROR_EBADF);
     Require(address == nullptr);
     Require(sceKernelJitCreateAliasOfSharedMemory(fd, Read, &alias) == 0);
@@ -170,5 +185,8 @@ int main() {
     WriteThroughAliasRunsThroughExecutableView();
     OneViewWritesAndRuns();
     Dup2KeepsTheDescriptorTableInStep();
+#ifndef __APPLE__
+    MmapOfTheDescriptorSharesTheObject();
+#endif
     InvalidArgumentsAreRejected();
 }

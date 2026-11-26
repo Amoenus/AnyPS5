@@ -49,26 +49,32 @@ namespace ShaderRecompiler
         const auto& pixel = *inputInfo.pixel;
         std::vector<FragmentParameter> result;
         std::array<bool, 32> readsP10{};
+        std::array<bool, 32> readsP20{};
         for (const auto& block : program.Blocks()) {
             for (const auto* instruction : block->Instructions()) {
-                if (instruction->Opcode() != IrOpcode::GetInterpolationParameter || instruction->Argument(2)->Resolve()->ImmediateU32() != 0u) continue;
+                if (instruction->Opcode() != IrOpcode::GetInterpolationParameter) continue;
+                const auto mode = instruction->Argument(2)->Resolve()->ImmediateU32();
                 const auto attribute = instruction->Argument(0)->Resolve()->ImmediateU32();
-                if (attribute < readsP10.size()) readsP10[attribute] = true;
+                if (attribute >= readsP10.size()) continue;
+                readsP10[attribute] = readsP10[attribute] || mode == 0u;
+                readsP20[attribute] = readsP20[attribute] || mode == 1u;
             }
         }
         for (const auto& input : program.Info().inputs) {
             if (input.kind != StageInputKind::Parameter) continue;
             const auto location = PixelInputLocation(pixel, input.location);
-            const bool flat = PixelInputIsFlat(pixel, input.location);
+            const bool flat = PixelInputIsFlat(pixel, input.location) || (input.location < 32u && (program.Metadata().pixelFirstVertexInputs >> input.location & 1u) != 0u);
             const bool flatP10 = flat && !input.perVertex && input.location < readsP10.size() && readsP10[input.location];
+            const bool flatP20 = flat && !input.perVertex && input.location < readsP20.size() && readsP20[input.location];
             const bool vertexOrder = input.perVertex && (input.location >= 32u || (program.Metadata().pixelVertexOrderInputs >> input.location & 1u) != 0u);
             const auto existing = std::find_if(result.begin(), result.end(), [&](const auto& parameter) { return parameter.location == location; });
             if (existing != result.end()) {
                 existing->flatP10 = existing->flatP10 || flatP10;
+                existing->flatP20 = existing->flatP20 || flatP20;
                 existing->vertexOrder = existing->vertexOrder || vertexOrder;
                 continue;
             }
-            result.push_back({location, location, flat, input.perVertex, PixelInputIsCustom(pixel, input.location), flatP10, vertexOrder});
+            result.push_back({location, location, flat, input.perVertex, PixelInputIsCustom(pixel, input.location), flatP10, vertexOrder, flatP20});
         }
         return result;
     }
@@ -81,7 +87,7 @@ namespace ShaderRecompiler
     }
 
     bool PixelParameterIsFlat(const SpirvEmitterState& state, std::uint32_t attr) {
-        return StageOf(state) == IrShaderStage::Pixel && PixelInputIsFlat(PixelInfo(state), attr);
+        return StageOf(state) == IrShaderStage::Pixel && (PixelInputIsFlat(PixelInfo(state), attr) || (attr < 32u && (state.program.Metadata().pixelFirstVertexInputs >> attr & 1u) != 0u));
     }
 
     bool PixelParameterIsCustom(const SpirvEmitterState& state, std::uint32_t attr) {
@@ -150,7 +156,7 @@ namespace ShaderRecompiler
     }
 
     bool OrderedPixelShader(const SpirvEmitterState& state) {
-        return state.program.Resources().stage == IrShaderStage::Pixel && state.inputInfo.pixel != nullptr && state.inputInfo.pixel->psOrderedPixelShader;
+        return state.program.Resources().stage == IrShaderStage::Pixel && state.inputInfo.pixel != nullptr && (state.inputInfo.pixel->psOrderedPixelShader || !state.inputInfo.pixel->merges.empty());
     }
 
     const SpirvInputBinding* SpirvInputBindingForParameter(const SpirvEmitterState& state, std::uint32_t location) {
@@ -196,7 +202,7 @@ namespace ShaderRecompiler
     }
 
     std::uint32_t EmitLocalInvocationIndex(SpirvEmitterState& state) {
-        if (state.spannedWave) {
+        if (state.spannedWave && !state.spannedAnySubgroup) {
             const auto subgroup = state.module.AllocateId();
             const auto invocation = state.module.AllocateId();
             state.module.AddFunction(spv::OpLoad, TypeU32(state), subgroup, state.subgroupIdVariable);

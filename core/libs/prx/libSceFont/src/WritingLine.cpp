@@ -1,34 +1,32 @@
+#include "prx/libSceFont/include/Api.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
+#include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
 
+#include "prx/libSceFont/include/FontInternal.hpp"
 #include "prx/libSceFont/include/FontTypes.hpp"
 
 namespace {
 
-constexpr std::int32_t WRITING_FORM_HORIZONTAL = 0x10;
 constexpr std::int32_t WRITING_FORM_HORIZONTAL_RTL = 0x11;
 constexpr std::int32_t WRITING_FORM_HORIZONTAL_LTR = 0x12;
-constexpr std::uint16_t CREATE_WRITING_LINE_DETAIL_ID = 0x0FD5;
 constexpr std::uint64_t WRITING_ATTRIBUTE_ID_MASK = 0xFF;
 constexpr std::uint64_t WRITING_ATTRIBUTE_ID = 0xFA;
 constexpr std::uint64_t WRITING_ATTRIBUTE_SPACE_BEFORE = std::uint64_t{1} << 30;
 constexpr std::uint64_t WRITING_ATTRIBUTE_SPACE_AFTER = std::uint64_t{1} << 31;
 constexpr std::size_t WRITING_LEVEL_COUNT = 0x7F;
 
-struct CreateWritingLineDetail {
-    std::uint16_t detailId;
-};
-
 struct WritingOrder {
     void* orderer = nullptr;
     WritingOrder* prev = nullptr;
     WritingOrder* next = nullptr;
+    std::uint64_t reserved = 0;
     std::uint64_t attribute = 0;
     FontWritingMetrics metrics{};
 };
@@ -39,34 +37,47 @@ struct WritingLevel {
 };
 
 struct WritingLine {
+    std::uint16_t kind = 0xF0A;
+    std::uint16_t reserved = 0;
     std::int32_t form = 0;
+    const FontMemory* memory = nullptr;
     FontWritingMetrics renderMetrics{};
     FontWritingLineStep step{};
     float advanceX = 0.0f;
     float advanceY = 0.0f;
     float orderingSpace = 0.0f;
     float steppedSpace = 0.0f;
-    std::size_t lastLevel = 0;
+    std::uint32_t lastLevel = 0;
+    std::uint32_t reservedLevel = 0;
+    WritingOrder* first = nullptr;
     WritingOrder* last = nullptr;
     WritingOrder* head = nullptr;
     WritingOrder* tail = nullptr;
     WritingOrder* cursor = nullptr;
+    std::uint64_t reservedCursor = 0;
     std::array<WritingLevel, WRITING_LEVEL_COUNT> levels{};
-    std::deque<WritingOrder> orders;
 };
+
+static_assert(sizeof(WritingOrder) == 64);
+static_assert(offsetof(WritingOrder, attribute) == 32);
+static_assert(offsetof(WritingOrder, metrics) == 40);
+static_assert(sizeof(WritingLine) == 2208);
+static_assert(offsetof(WritingLine, step) == 40);
+static_assert(offsetof(WritingLine, advanceX) == 104);
+static_assert(offsetof(WritingLine, last) == 136);
+static_assert(offsetof(WritingLine, head) == 144);
+static_assert(offsetof(WritingLine, cursor) == 160);
+static_assert(offsetof(WritingLine, levels) == 176);
+
+bool IsMemoryValid(const FontMemory* memory) {
+    return memory && memory->mem_kind == 0xF00 && memory->iface && memory->iface->alloc && memory->iface->dealloc;
+}
 
 std::mutex linesMutex;
 std::unordered_set<WritingLine*> lines;
 
 [[noreturn]] void Unsupported(const char* function, const std::string& what) {
     throw std::runtime_error(std::string(function) + ": " + what);
-}
-
-WritingLine* GetLine(const char* function, void* writingLine) {
-    auto* line = static_cast<WritingLine*>(writingLine);
-    std::lock_guard lock(linesMutex);
-    if (!lines.contains(line)) Unsupported(function, "unknown writing line handle (error code not verified)");
-    return line;
 }
 
 bool IsRightToLeft(const WritingLine& line) {
@@ -94,7 +105,13 @@ float TailSpace(const WritingLine& line, const WritingOrder& order) {
 }
 
 void ResetOrders(WritingLine& line) {
-    line.orders.clear();
+    for (WritingOrder* order = line.head; order;) {
+        WritingOrder* next = order->next;
+        std::destroy_at(order);
+        line.memory->iface->dealloc(line.memory->mspace_handle, order);
+        order = next;
+    }
+    line.first = nullptr;
     line.levels.fill({});
     line.advanceX = 0.0f;
     line.advanceY = 0.0f;
@@ -217,53 +234,95 @@ void ExtendRenderMetrics(WritingLine& line) {
 extern "C" {
 
 int APS5_VABI sceFontCreateWritingLine(const FontMemory* memory, std::int32_t writingForm, const void* writingLineDetail, void** pWritingLine) {
-    (void)memory;
-    if (!pWritingLine) Unsupported(__func__, "null writing line pointer (error code not verified)");
-    if (writingForm != WRITING_FORM_HORIZONTAL && writingForm != WRITING_FORM_HORIZONTAL_RTL && writingForm != WRITING_FORM_HORIZONTAL_LTR)
-        Unsupported(__func__, "writing form " + std::to_string(writingForm) + " is not modelled");
-    if (writingLineDetail && static_cast<const CreateWritingLineDetail*>(writingLineDetail)->detailId != CREATE_WRITING_LINE_DETAIL_ID)
-        Unsupported(__func__, "unknown writing line detail id");
-    auto* line = new WritingLine{};
+    if (!memory) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    FontMemory probed{};
+    if (!Font::CopyInGuest(probed, memory) || !probed.iface) return SCE_FONT_ERROR_INVALID_MEMORY;
+    FontMemoryInterface iface{};
+    if (!Font::CopyInGuest(iface, probed.iface)) return SCE_FONT_ERROR_INVALID_MEMORY;
+    FontMemory validated = probed;
+    validated.iface = &iface;
+    if (!IsMemoryValid(&validated)) return SCE_FONT_ERROR_INVALID_MEMORY;
+    if (!pWritingLine || writingLineDetail || (writingForm != WRITING_FORM_HORIZONTAL_RTL && writingForm != WRITING_FORM_HORIZONTAL_LTR)) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    void* allocation = iface.alloc(probed.mspace_handle, sizeof(WritingLine));
+    if (!allocation) return SCE_FONT_ERROR_ALLOCATION_FAILED;
+    auto* line = std::construct_at(static_cast<WritingLine*>(allocation));
+    line->memory = memory;
     line->form = writingForm;
     {
         std::lock_guard lock(linesMutex);
-        lines.insert(line);
+        try {
+            lines.insert(line);
+        } catch (...) {
+            std::destroy_at(line);
+            iface.dealloc(probed.mspace_handle, allocation);
+            throw;
+        }
     }
-    *pWritingLine = line;
+    if (!Font::CopyOutGuest(pWritingLine, static_cast<void*>(line))) {
+        {
+            std::lock_guard lock(linesMutex);
+            lines.erase(line);
+        }
+        std::destroy_at(line);
+        iface.dealloc(probed.mspace_handle, allocation);
+        return SCE_FONT_ERROR_INVALID_PARAMETER;
+    }
     return SCE_FONT_OK;
 }
 
 int APS5_VABI sceFontDestroyWritingLine(void** pWritingLine) {
-    if (!pWritingLine || !*pWritingLine) return SCE_FONT_OK;
-    auto* line = GetLine(__func__, *pWritingLine);
+    if (!pWritingLine) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    void* handle = nullptr;
+    if (!Font::CopyInGuest(handle, pWritingLine) || !handle) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* line = static_cast<WritingLine*>(handle);
     {
         std::lock_guard lock(linesMutex);
+        if (!lines.contains(line) || !IsMemoryValid(line->memory)) return SCE_FONT_ERROR_INVALID_WRITING;
+        if (!Font::CopyOutGuest(pWritingLine, static_cast<void*>(nullptr))) return SCE_FONT_ERROR_INVALID_PARAMETER;
         lines.erase(line);
     }
-    delete line;
-    *pWritingLine = nullptr;
+    const FontMemory* memory = line->memory;
+    ResetOrders(*line);
+    line->kind = 0;
+    std::destroy_at(line);
+    memory->iface->dealloc(memory->mspace_handle, line);
     return SCE_FONT_OK;
 }
 
 int APS5_VABI sceFontWritingLineClear(void* writingLine) {
-    auto* line = GetLine(__func__, writingLine);
+    if (!writingLine) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* line = static_cast<WritingLine*>(writingLine);
+    {
+        std::lock_guard lock(linesMutex);
+        if (!lines.contains(line)) return SCE_FONT_ERROR_INVALID_WRITING;
+    }
+    if (!IsMemoryValid(line->memory)) return SCE_FONT_ERROR_INVALID_WRITING;
     ResetOrders(*line);
     return SCE_FONT_OK;
 }
 
 int APS5_VABI sceFontWritingLineWritesOrder(void* writingLine, std::uint64_t writingAttribute, const FontWritingMetrics* writingMetrics, void* writingOrderer) {
-    auto* line = GetLine(__func__, writingLine);
-    if (writingAttribute == 0) writingAttribute = WRITING_ATTRIBUTE_ID;
-    if ((writingAttribute & WRITING_ATTRIBUTE_ID_MASK) != WRITING_ATTRIBUTE_ID)
-        Unsupported(__func__, "writing attribute " + std::to_string(writingAttribute) + " is not modelled");
     const std::size_t level = (writingAttribute >> 8) & 0xFF;
-    if (level >= WRITING_LEVEL_COUNT) Unsupported(__func__, "embedding level " + std::to_string(level) + " (error code not verified)");
-    if (!writingOrderer) Unsupported(__func__, "null writing orderer (error code not verified)");
+    if (!writingLine || !writingOrderer || (writingAttribute & WRITING_ATTRIBUTE_ID_MASK) != WRITING_ATTRIBUTE_ID || level >= WRITING_LEVEL_COUNT) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* line = static_cast<WritingLine*>(writingLine);
+    {
+        std::lock_guard lock(linesMutex);
+        if (!lines.contains(line)) return SCE_FONT_ERROR_INVALID_WRITING;
+    }
+    if (!IsMemoryValid(line->memory)) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    FontWritingMetrics localMetrics{};
+    if (writingMetrics) {
+        const bool copied = GuestCopyIn_nid_no_patch(&localMetrics, writingMetrics, sizeof(localMetrics));
+        if (!copied) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    }
     if (line->cursor) ResetOrders(*line);
-    WritingOrder* order = &line->orders.emplace_back();
+    void* allocation = line->memory->iface->alloc(line->memory->mspace_handle, sizeof(WritingOrder));
+    if (!allocation) return SCE_FONT_ERROR_ALLOCATION_FAILED;
+    WritingOrder* order = std::construct_at(static_cast<WritingOrder*>(allocation));
+    if (!line->last) line->first = order;
     order->orderer = writingOrderer;
     order->attribute = writingAttribute;
-    if (writingMetrics) order->metrics = *writingMetrics;
+    if (writingMetrics) order->metrics = localMetrics;
     Link(*line, order, level);
     if (!order->prev) line->head = order;
     if (!order->next) line->tail = order;
@@ -271,13 +330,17 @@ int APS5_VABI sceFontWritingLineWritesOrder(void* writingLine, std::uint64_t wri
     line->advanceX += order->metrics.advanceX;
     line->advanceY += order->metrics.advanceY;
     line->last = order;
-    line->lastLevel = level;
+    line->lastLevel = static_cast<std::uint32_t>(level);
     return SCE_FONT_OK;
 }
 
 const FontWritingLineStep* APS5_VABI sceFontWritingLineRefersRenderStep(void* writingLine) {
     if (!writingLine) return nullptr;
-    auto* line = GetLine(__func__, writingLine);
+    auto* line = static_cast<WritingLine*>(writingLine);
+    {
+        std::lock_guard lock(linesMutex);
+        if (!lines.contains(line)) return nullptr;
+    }
     if (line->cursor) {
         ExtendRenderMetrics(*line);
     } else {
@@ -319,28 +382,48 @@ const FontWritingLineStep* APS5_VABI sceFontWritingLineRefersRenderStep(void* wr
 }
 
 int APS5_VABI sceFontWritingLineGetRenderMetrics(void* writingLine, FontWritingMetrics* writingMetrics) {
-    auto* line = GetLine(__func__, writingLine);
-    if (!writingMetrics) Unsupported(__func__, "null metrics pointer (error code not verified)");
-    *writingMetrics = line->renderMetrics;
+    if (!writingMetrics) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    if (!Font::CopyOutGuest(writingMetrics, FontWritingMetrics{})) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    if (!writingLine) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* line = static_cast<WritingLine*>(writingLine);
+    std::lock_guard lock(linesMutex);
+    if (!lines.contains(line)) return SCE_FONT_ERROR_INVALID_WRITING;
+    if (!Font::CopyOutGuest(writingMetrics, line->renderMetrics)) return SCE_FONT_ERROR_INVALID_PARAMETER;
     return SCE_FONT_OK;
 }
 
 int APS5_VABI sceFontWritingLineGetOrderingSpace(void* writingLine, float* advanceSpace, float* headSpace, float* inlineSpace, float* tailSpace) {
-    auto* line = GetLine(__func__, writingLine);
+    auto* line = static_cast<WritingLine*>(writingLine);
+    int error = SCE_FONT_OK;
+    {
+        std::lock_guard lock(linesMutex);
+        if (!line) error = SCE_FONT_ERROR_INVALID_PARAMETER;
+        else if (!lines.contains(line)) error = SCE_FONT_ERROR_INVALID_WRITING;
+        else if (line->form != WRITING_FORM_HORIZONTAL_RTL && line->form != WRITING_FORM_HORIZONTAL_LTR) error = SCE_FONT_ERROR_INVALID_PARAMETER;
+    }
+    if (error != SCE_FONT_OK) {
+        for (float* space : {advanceSpace, headSpace, inlineSpace, tailSpace}) {
+            if (space) Font::CopyOutGuest(space, 0.0f);
+        }
+        return error;
+    }
     if (headSpace && !tailSpace) Unsupported(__func__, "a head space pointer without a tail space pointer is not modelled");
-    if (advanceSpace) *advanceSpace = line->advanceX;
+    if (advanceSpace && !Font::CopyOutGuest(advanceSpace, line->advanceX)) return SCE_FONT_ERROR_INVALID_PARAMETER;
     if (headSpace) {
         const WritingOrder* leading = IsRightToLeft(*line) ? line->tail : line->head;
         const WritingOrder* trailing = IsRightToLeft(*line) ? line->head : line->tail;
+        float head = 0.0f;
+        float tail = 0.0f;
         if (IsRightToLeft(*line)) {
-            *headSpace = leading ? leading->metrics.Extent.right : 0.0f;
-            *tailSpace = trailing ? trailing->metrics.advanceX - trailing->metrics.Extent.left : 0.0f;
+            head = leading ? leading->metrics.Extent.right : 0.0f;
+            tail = trailing ? trailing->metrics.advanceX - trailing->metrics.Extent.left : 0.0f;
         } else {
-            *headSpace = leading ? leading->metrics.Extent.left : 0.0f;
-            *tailSpace = trailing ? trailing->metrics.advanceX - trailing->metrics.Extent.right : 0.0f;
+            head = leading ? leading->metrics.Extent.left : 0.0f;
+            tail = trailing ? trailing->metrics.advanceX - trailing->metrics.Extent.right : 0.0f;
         }
+        if (!Font::CopyOutGuest(headSpace, head) || !Font::CopyOutGuest(tailSpace, tail)) return SCE_FONT_ERROR_INVALID_PARAMETER;
     }
-    if (inlineSpace) *inlineSpace = line->orderingSpace;
+    if (inlineSpace && !Font::CopyOutGuest(inlineSpace, line->orderingSpace)) return SCE_FONT_ERROR_INVALID_PARAMETER;
     return SCE_FONT_OK;
 }
 

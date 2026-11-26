@@ -1,4 +1,6 @@
+#include "prx/libkernel/include/Api.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
+#include "prx/libc/include/HostThread.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
@@ -6,6 +8,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -17,10 +20,13 @@
 #include <windows.h>
 #include <io.h>
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libc/include/WindowsVerbatimPath.hpp"
 #elif defined(__APPLE__)
 #include <fcntl.h>
 #include <sys/event.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#elif defined(__EMSCRIPTEN__)
 #include <unistd.h>
 #else
 #include <dirent.h>
@@ -67,6 +73,7 @@ public:
         stopSignal = ends[1];
         ::fcntl(stopEvent, F_SETFD, FD_CLOEXEC);
         ::fcntl(stopSignal, F_SETFD, FD_CLOEXEC);
+#elif defined(__EMSCRIPTEN__)
 #else
         stopEvent = ::eventfd(0, EFD_CLOEXEC);
         if (stopEvent < 0) {
@@ -165,19 +172,6 @@ struct Snapshot {
 };
 
 bool TakeSnapshot(HANDLE handle, Snapshot& snapshot) {
-    FILE_BASIC_INFO basic{};
-    FILE_STANDARD_INFO standard{};
-    if (!::GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) ||
-        !::GetFileInformationByHandleEx(handle, FileStandardInfo, &standard, sizeof(standard))) {
-        return false;
-    }
-    snapshot.size = static_cast<std::uint64_t>(standard.EndOfFile.QuadPart);
-    snapshot.links = standard.NumberOfLinks;
-    snapshot.deletePending = standard.DeletePending != FALSE;
-    snapshot.attributes = basic.FileAttributes;
-    snapshot.creation = basic.CreationTime.QuadPart;
-    snapshot.lastWrite = basic.LastWriteTime.QuadPart;
-    snapshot.change = basic.ChangeTime.QuadPart;
     std::wstring path(MAX_PATH, L'\0');
     auto length = ::GetFinalPathNameByHandleW(handle, path.data(), static_cast<DWORD>(path.size()), FILE_NAME_NORMALIZED);
     if (length >= path.size()) {
@@ -188,11 +182,32 @@ bool TakeSnapshot(HANDLE handle, Snapshot& snapshot) {
         path.resize(length);
         snapshot.path = std::move(path);
     }
+    FILE_BASIC_INFO basic{};
+    FILE_STANDARD_INFO standard{};
+    FILE_BASIC_INFO settled{};
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        if (!::GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) ||
+            !::GetFileInformationByHandleEx(handle, FileStandardInfo, &standard, sizeof(standard)) ||
+            !::GetFileInformationByHandleEx(handle, FileBasicInfo, &settled, sizeof(settled))) {
+            return false;
+        }
+        if (settled.LastWriteTime.QuadPart == basic.LastWriteTime.QuadPart && settled.ChangeTime.QuadPart == basic.ChangeTime.QuadPart &&
+            settled.CreationTime.QuadPart == basic.CreationTime.QuadPart && settled.FileAttributes == basic.FileAttributes) {
+            break;
+        }
+    }
+    snapshot.size = static_cast<std::uint64_t>(standard.EndOfFile.QuadPart);
+    snapshot.links = standard.NumberOfLinks;
+    snapshot.deletePending = standard.DeletePending != FALSE;
+    snapshot.attributes = basic.FileAttributes;
+    snapshot.creation = basic.CreationTime.QuadPart;
+    snapshot.lastWrite = basic.LastWriteTime.QuadPart;
+    snapshot.change = basic.ChangeTime.QuadPart;
     return true;
 }
 
 bool IsDeleted(const Snapshot& snapshot) {
-    return snapshot.deletePending || snapshot.links == 0;
+    return snapshot.deletePending || snapshot.links == 0 || snapshot.path.find(L"\\$Extend\\$Deleted\\") != std::wstring::npos;
 }
 
 std::vector<std::uint32_t> SnapshotHints(const Snapshot& before, const Snapshot& after, bool directory) {
@@ -212,7 +227,7 @@ std::vector<std::uint32_t> SnapshotHints(const Snapshot& before, const Snapshot&
     } else if (!directory && hints.empty() && after.change != before.change) {
         hints.push_back(NOTE_ATTRIB);
     }
-    if ((after.deletePending && !before.deletePending) || after.links < before.links) {
+    if ((after.deletePending && !before.deletePending) || after.links < before.links || (!IsDeleted(before) && IsDeleted(after))) {
         hints.push_back(NOTE_DELETE);
     }
     if (!after.path.empty() && after.path != before.path && !IsDeleted(after)) {
@@ -343,7 +358,10 @@ void RunHostWatch(std::shared_ptr<VnodeWatch> watch, HostWatch host) {
 int OpenHostWatch(int descriptor, std::uint32_t notes, HostWatch& host) {
     if (const auto directory = File::DirectoryDescriptorPath(descriptor)) {
         host.directory = true;
-        host.target = ::CreateFileW(directory->wstring().c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        std::error_code pathError;
+        const auto verbatim = NativeVerbatimPath_nid_no_patch(*directory, pathError);
+        const auto& openPath = pathError ? *directory : verbatim;
+        host.target = ::CreateFileW(openPath.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     } else {
         const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
@@ -368,7 +386,9 @@ int OpenHostWatch(int descriptor, std::uint32_t notes, HostWatch& host) {
         throw std::runtime_error("EVFILT_VNODE: reading the watched file failed, error=" + std::to_string(error));
     }
     try {
-        host.parent = WatchParent(host.last.path);
+        if (!IsDeleted(host.last)) {
+            host.parent = WatchParent(host.last.path);
+        }
         if (host.directory) {
             host.entries = WatchContents(host.last.path, FILE_NOTIFY_CHANGE_FILE_NAME, "entries");
             host.subdirectories = WatchContents(host.last.path, FILE_NOTIFY_CHANGE_DIR_NAME, "subdirectories");
@@ -452,6 +472,19 @@ int OpenHostWatch(int descriptor, std::uint32_t, HostWatch& host) {
         throw std::runtime_error("EVFILT_VNODE: kqueue failed, errno=" + std::to_string(error));
     }
     return 0;
+}
+
+#elif defined(__EMSCRIPTEN__)
+
+struct HostWatch {};
+
+void CloseHostWatch(HostWatch&) {}
+
+void RunHostWatch(std::shared_ptr<VnodeWatch>, HostWatch) {}
+
+int OpenHostWatch(int, std::uint32_t, HostWatch&) {
+    NotImplemented_nid_no_patch("EVFILT_VNODE in WebAssembly");
+    return GUEST_EINVAL;
 }
 
 #else
@@ -692,7 +725,7 @@ int VnodeDescriptorError(int descriptor) {
     if (!DescriptorIsOpen_nid_no_patch(descriptor)) {
         return GUEST_EBADF;
     }
-    return IsKqueueDescriptor(descriptor) ? GUEST_EINVAL : 0;
+    return IsKqueueDescriptor_nid_no_patch(descriptor) ? GUEST_EINVAL : 0;
 }
 
 }
@@ -743,7 +776,14 @@ int AddVnodeEvent(const KernelEqueueRef& queue, int descriptor, std::uint32_t ff
         CloseHostWatch(host);
         return result == EQUEUE_OK ? 0 : result & 0xffff;
     }
-    std::thread(RunHostWatch, watch, std::move(host)).detach();
+    Libc::StartHostThread([watch, host = std::move(host)]() mutable {
+        try {
+            RunHostWatch(watch, std::move(host));
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "%s\n", error.what());
+            std::fflush(stderr);
+        }
+    }).detach();
     return 0;
 }
 

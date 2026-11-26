@@ -1,31 +1,36 @@
+#include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
-extern "C" {
-int APS5_VABI socket_nid_postfix(int, int, int);
-int APS5_VABI bind_nid_postfix(int, const void*, std::uint32_t);
-int APS5_VABI listen_nid_postfix(int, int);
-int APS5_VABI getsockname_nid_postfix(int, void*, std::uint32_t*);
-int APS5_VABI connect_nid_postfix(int, const void*, std::uint32_t);
-int APS5_VABI accept_nid_postfix(int, void*, std::uint32_t*);
-int APS5_VABI setsockopt_nid_postfix(int, int, int, const void*, std::uint32_t);
-int APS5_VABI getsockopt_nid_postfix(int, int, int, void*, std::uint32_t*);
-int APS5_VABI fcntl_nid_postfix(int, int, ...);
-int APS5_VABI poll_nid_postfix(void*, std::uint32_t, int);
-int APS5_VABI close_nid_postfix(int);
-int* APS5_VABI __error_nid_postfix();
-}
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 
 namespace {
 
 constexpr int Stream = 1;
 constexpr int Datagram = 2;
+constexpr int SequencedPacket = 5;
+
+struct LocalCredentials {
+    std::uint32_t version;
+    std::uint32_t user;
+    std::int16_t groupCount;
+    std::uint32_t groups[16];
+    std::uint64_t unused;
+};
+static_assert(sizeof(LocalCredentials) == 88);
 constexpr int SolSocket = 0xffff;
 constexpr int SoAcceptConnection = 0x2;
+constexpr int SoReuseAddr = 0x4;
 constexpr int SoDebug = 0x1;
 constexpr int SoKeepAlive = 0x8;
 constexpr int SoBroadcast = 0x20;
@@ -34,7 +39,11 @@ constexpr int SoLinger = 0x80;
 constexpr int SoReusePort = 0x200;
 constexpr int SoTimestamp = 0x400;
 constexpr int SoNoSigpipe = 0x800;
+constexpr int SoAcceptFilter = 0x1000;
 constexpr int SoSendBuffer = 0x1001;
+constexpr int SoReceiveBuffer = 0x1002;
+constexpr int SoSendLowWater = 0x1003;
+constexpr int SoReceiveLowWater = 0x1004;
 constexpr int SoError = 0x1007;
 constexpr int SoType = 0x1008;
 constexpr int ErrorInvalid = 22;
@@ -46,12 +55,6 @@ constexpr int ErrorBadDescriptor = 9;
 struct Linger {
     std::int32_t enabled;
     std::int32_t seconds;
-};
-
-struct PollDescriptor {
-    std::int32_t descriptor;
-    std::int16_t events;
-    std::int16_t revents;
 };
 
 void Require(bool condition, const char* what) {
@@ -95,7 +98,7 @@ std::array<std::uint8_t, 16> Listen(int* listener) {
 }
 
 void WaitUntilSettled(int descriptor) {
-    PollDescriptor entry{descriptor, 0x1 | 0x4, 0};
+    GuestPollDescriptor entry{descriptor, 0x1 | 0x4, 0};
     Require(poll_nid_postfix(&entry, 1, 6000) == 1, "the nonblocking connect did not settle within 6 s");
 }
 
@@ -103,6 +106,7 @@ void ReportsTypeAndListening() {
     const int stream = socket_nid_postfix(2, Stream, 0);
     const int datagram = socket_nid_postfix(2, Datagram, 0);
     Require(stream >= 0 && datagram >= 0, "socket failed");
+    Require(GetInt(stream, SoError) == 0, "SO_ERROR of a fresh socket must be 0");
     Require(GetInt(stream, SoType) == Stream, "SO_TYPE of a stream socket must be SOCK_STREAM (1)");
     Require(GetInt(datagram, SoType) == Datagram, "SO_TYPE of a datagram socket must be SOCK_DGRAM (2)");
     Require(GetInt(stream, SoAcceptConnection) == 0, "SO_ACCEPTCONN must be 0 before listen");
@@ -141,6 +145,22 @@ void ReportsAndClearsTheConnectError() {
     Require(close_nid_postfix(failing) == 0, "close failed");
 }
 
+void ReconnectAfterARefusalFails() {
+    int closed = -1;
+    auto refused = Listen(&closed);
+    Require(close_nid_postfix(closed) == 0, "close failed");
+    const int failing = socket_nid_postfix(2, Stream, 0);
+    Require(failing >= 0 && fcntl_nid_postfix(failing, 4, 4) == 0, "nonblocking socket setup failed");
+    const int attempt = connect_nid_postfix(failing, refused.data(), refused.size());
+    Require(attempt == -1, "a connect to a closed port must not succeed");
+    if (*__error_nid_postfix() == 36) {
+        WaitUntilSettled(failing);
+        Require(connect_nid_postfix(failing, refused.data(), refused.size()) == -1 && *__error_nid_postfix() == ErrorConnectionRefused,
+            "a connect after a refused nonblocking one must fail with ECONNREFUSED (61), not start another attempt");
+    }
+    Require(close_nid_postfix(failing) == 0, "close failed");
+}
+
 void BooleanOptionsReportTheirBit() {
     const int stream = socket_nid_postfix(2, Stream, 0);
     const int datagram = socket_nid_postfix(2, Datagram, 0);
@@ -154,14 +174,85 @@ void BooleanOptionsReportTheirBit() {
     Require(GetInt(datagram, SoBroadcast) == SoBroadcast, "SO_BROADCAST reads back as its bit");
     SetInt(stream, SoNoSigpipe, 1);
     Require(GetInt(stream, SoNoSigpipe) == SoNoSigpipe, "SO_NOSIGPIPE reads back as its bit");
-    for (const int option : {SoReusePort, SoDebug, SoUseLoopback, SoTimestamp}) {
-        const int one = 1;
-        Require(SetFails(stream, SolSocket, option, &one, sizeof(one), ErrorNoProtocolOption), "an option no title needs must fail with ENOPROTOOPT (42)");
+    for (const int option : {SoReuseAddr, SoReusePort, SoDebug, SoUseLoopback, SoTimestamp, 0x2000, 0x10000}) {
+        Require(GetInt(stream, option) == 0, "a kept flag starts off");
+        SetInt(stream, option, 5);
+        Require(GetInt(stream, option) == option, "a kept flag reads back as its bit");
+        SetInt(stream, option, 0);
+        Require(GetInt(stream, option) == 0, "a kept flag turns off");
+    }
+    for (const int option : {0x4000, 0x8000}) {
+        SetInt(stream, option, 1);
         int value = 0;
         std::uint32_t size = sizeof(value);
-        Require(getsockopt_nid_postfix(stream, SolSocket, option, &value, &size) == -1 && *__error_nid_postfix() == ErrorNoProtocolOption, "getsockopt of an option no title needs must fail with ENOPROTOOPT (42)");
+        Require(getsockopt_nid_postfix(stream, SolSocket, option, &value, &size) == -1 && *__error_nid_postfix() == ErrorNoProtocolOption, "SO_NO_OFFLOAD and SO_NO_DDP are accepted but cannot be read");
     }
+    for (const int descriptor : {stream, datagram})
+        for (const int setting : {5, 0}) {
+            Require(SetFails(descriptor, SolSocket, 0x1000, &setting, sizeof(setting), ErrorInvalid), "SO_ACCEPTFILTER on a socket that is not listening must fail with EINVAL (22)");
+            std::uint64_t filter = 0xbbbbbbbbbbbbbbbbull;
+            std::uint32_t size = sizeof(filter);
+            Require(getsockopt_nid_postfix(descriptor, SolSocket, 0x1000, &filter, &size) == -1 && *__error_nid_postfix() == ErrorInvalid && filter == 0xbbbbbbbbbbbbbbbbull, "getsockopt of SO_ACCEPTFILTER on a socket that is not listening must fail with EINVAL (22)");
+        }
+    const unsigned char narrowFlag = 1;
+    Require(SetFails(stream, SolSocket, SoDebug, &narrowFlag, 1, ErrorInvalid), "a flag shorter than an int must fail with EINVAL (22)");
+    Require(SetFails(stream, SolSocket, SoReuseAddr, &narrowFlag, 1, ErrorInvalid), "a flag shorter than an int must fail with EINVAL (22)");
     Require(close_nid_postfix(stream) == 0 && close_nid_postfix(datagram) == 0, "close failed");
+}
+
+void AcceptFilterFollowsFreeBsd() {
+    const int stream = socket_nid_postfix(2, Stream, 0);
+    Require(stream >= 0, "socket failed");
+    Require(SetFails(stream, SolSocket, SoAcceptFilter, nullptr, 0, ErrorInvalid), "removing the accept filter of a socket that is not listening must fail with EINVAL (22)");
+    Require(close_nid_postfix(stream) == 0, "close failed");
+    int listener = -1;
+    Listen(&listener);
+    Require(setsockopt_nid_postfix(listener, SolSocket, SoAcceptFilter, nullptr, 0) == 0, "a NULL SO_ACCEPTFILTER value on a listener removes the filter and returns 0");
+    const std::array<std::uint8_t, 255> shortArgument{};
+    Require(SetFails(listener, SolSocket, SoAcceptFilter, shortArgument.data(), shortArgument.size(), ErrorInvalid), "an SO_ACCEPTFILTER value shorter than struct accept_filter_arg (256 bytes) must fail with EINVAL (22)");
+    std::array<std::uint8_t, 256> filter{};
+    filter.fill(0xbb);
+    std::uint32_t size = filter.size();
+    Require(getsockopt_nid_postfix(listener, SolSocket, SoAcceptFilter, filter.data(), &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "getsockopt of SO_ACCEPTFILTER on a listener without a filter must fail with EINVAL (22)");
+    Require(size == filter.size() && filter[0] == 0xbb && filter[255] == 0xbb, "a failed SO_ACCEPTFILTER get must leave the buffer and its length unchanged");
+    constexpr int ErrorNoEntry = 2;
+    constexpr int ErrorBadAddress = 14;
+    const int otherStream = socket_nid_postfix(2, Stream, 0);
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    Require(otherStream >= 0 && datagram >= 0, "socket failed");
+    for (const char* name : {"dataready", "httpready", "dnsready", ""}) {
+        std::array<std::uint8_t, 256> argument{};
+        std::memcpy(argument.data(), name, std::strlen(name));
+        for (const int descriptor : {listener, otherStream, datagram}) {
+            Require(SetFails(descriptor, SolSocket, SoAcceptFilter, argument.data(), argument.size(), ErrorNoEntry), "an SO_ACCEPTFILTER argument must fail with ENOENT (2), as firmware 13.60 registers no accept filter");
+        }
+        std::array<std::uint8_t, 300> longer{};
+        std::memcpy(longer.data(), name, std::strlen(name));
+        Require(SetFails(listener, SolSocket, SoAcceptFilter, longer.data(), longer.size(), ErrorNoEntry), "a longer SO_ACCEPTFILTER argument must also fail with ENOENT (2)");
+    }
+    Require(SetFails(otherStream, SolSocket, SoAcceptFilter, reinterpret_cast<const void*>(std::uintptr_t{0x10}), 256, ErrorBadAddress), "an unreadable SO_ACCEPTFILTER argument must fail with EFAULT (14)");
+    size = filter.size();
+    Require(getsockopt_nid_postfix(listener, SolSocket, SoAcceptFilter, filter.data(), &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "a refused SO_ACCEPTFILTER must leave the listener without a filter");
+    Require(setsockopt_nid_postfix(listener, SolSocket, SoAcceptFilter, nullptr, 0) == 0, "removing the filter still returns 0 after a refused set");
+    Require(close_nid_postfix(otherStream) == 0 && close_nid_postfix(datagram) == 0, "close failed");
+    Require(close_nid_postfix(listener) == 0, "close failed");
+}
+
+void ReusePortSharesAPort() {
+    const int first = socket_nid_postfix(2, Datagram, 0);
+    const int second = socket_nid_postfix(2, Datagram, 0);
+    const int third = socket_nid_postfix(2, Datagram, 0);
+    Require(first >= 0 && second >= 0 && third >= 0, "socket failed");
+    SetInt(first, SoReusePort, 1);
+    SetInt(second, SoReusePort, 1);
+    Require(GetInt(first, SoReusePort) == SoReusePort && GetInt(first, 0x4) == 0, "SO_REUSEPORT does not read back as SO_REUSEADDR");
+    auto address = Loopback(0);
+    Require(bind_nid_postfix(first, address.data(), address.size()) == 0, "bind failed");
+    std::uint32_t size = address.size();
+    Require(getsockname_nid_postfix(first, address.data(), &size) == 0, "getsockname failed");
+    Require(bind_nid_postfix(second, address.data(), address.size()) == 0, "a second SO_REUSEPORT socket must bind the same port");
+    Require(bind_nid_postfix(third, address.data(), address.size()) == -1 && *__error_nid_postfix() == 48, "a socket without SO_REUSEPORT must fail with EADDRINUSE (48)");
+    Require(close_nid_postfix(first) == 0 && close_nid_postfix(second) == 0 && close_nid_postfix(third) == 0, "close failed");
 }
 
 void LingerFollowsFreeBsd() {
@@ -185,6 +276,44 @@ void LingerFollowsFreeBsd() {
     Require(close_nid_postfix(stream) == 0, "close failed");
 }
 
+#ifdef _WIN32
+void DatagramLingerFollowsSocket(int family) {
+    const int first = socket_nid_postfix(family, Datagram, 0);
+    const int other = socket_nid_postfix(family, Datagram, 0);
+    Require(first >= 0 && other >= 0, "opening UDP sockets failed");
+    const int alias = dup_nid_postfix(first);
+    Require(alias >= 0, "dup of UDP socket failed");
+    const auto check = [](int fd, int enabled, int seconds) {
+        Linger read{-1, -1};
+        std::uint32_t length = sizeof(read);
+        Require(getsockopt_nid_postfix(fd, SolSocket, SoLinger, &read, &length) == 0, "UDP SO_LINGER get failed");
+        Require(length == sizeof(read) && read.enabled == enabled && read.seconds == seconds, "wrong UDP linger state");
+    };
+    check(first, 0, 0);
+    const Linger on{-3, 65535};
+    Require(setsockopt_nid_postfix(first, SolSocket, SoLinger, &on, sizeof(on)) == 0, "UDP SO_LINGER set failed");
+    check(alias, SoLinger, 65535);
+    check(other, 0, 0);
+    const Linger invalid{0, 65536};
+    Require(SetFails(alias, SolSocket, SoLinger, &invalid, sizeof(invalid), ErrorDomain), "UDP linger out of range accepted");
+    Require(SetFails(alias, SolSocket, SoLinger, &invalid, 7, ErrorInvalid), "short UDP linger value accepted");
+    check(first, SoLinger, 65535);
+    Linger shortRead{-1, -1};
+    std::uint32_t length = sizeof(shortRead.enabled);
+    Require(getsockopt_nid_postfix(alias, SolSocket, SoLinger, &shortRead, &length) == 0 && length == 4 &&
+            shortRead.enabled == SoLinger && shortRead.seconds == -1, "short UDP linger read overwrote the buffer");
+    Require(close_nid_postfix(first) == 0, "closing first UDP descriptor failed");
+    const Linger off{0, 7};
+    Require(setsockopt_nid_postfix(alias, SolSocket, SoLinger, &off, sizeof(off)) == 0, "disabling UDP linger failed");
+    check(alias, 0, 7);
+    Require(close_nid_postfix(alias) == 0 && close_nid_postfix(other) == 0, "closing UDP sockets failed");
+    const int fresh = socket_nid_postfix(family, Datagram, 0);
+    Require(fresh >= 0, "reopening UDP socket failed");
+    check(fresh, 0, 0);
+    Require(close_nid_postfix(fresh) == 0, "closing fresh UDP socket failed");
+}
+#endif
+
 void LengthsFollowFreeBsd() {
     const int stream = socket_nid_postfix(2, Stream, 0);
     Require(stream >= 0, "socket failed");
@@ -204,6 +333,209 @@ void LengthsFollowFreeBsd() {
     Require(close_nid_postfix(stream) == 0, "close failed");
 }
 
+void BuffersFollowThePs5() {
+    const int stream = socket_nid_postfix(2, Stream, 0);
+    const int datagram = socket_nid_postfix(28, Datagram, 0);
+    Require(stream >= 0 && datagram >= 0, "socket failed");
+    Require(GetInt(stream, SoSendBuffer) == 32768 && GetInt(stream, SoReceiveBuffer) == 65536, "a stream socket starts with 32768 and 65536 bytes");
+    Require(GetInt(stream, SoSendLowWater) == 2048 && GetInt(stream, SoReceiveLowWater) == 1, "the low-water marks start at 2048 and 1");
+    Require(GetInt(datagram, SoSendBuffer) == 9216 && GetInt(datagram, SoReceiveBuffer) == 42080, "a datagram socket starts with 9216 and 42080 bytes");
+    SetInt(stream, SoSendBuffer, 1000);
+    Require(GetInt(stream, SoSendBuffer) == 1000 && GetInt(stream, SoSendLowWater) == 1000, "a smaller buffer is kept and lowers its low-water mark");
+    SetInt(stream, SoReceiveBuffer, 524289);
+    Require(GetInt(stream, SoReceiveBuffer) == 524288, "a buffer above 512 KiB is limited to 524288 bytes");
+    SetInt(stream, SoSendBuffer, 5592405);
+    Require(GetInt(stream, SoSendBuffer) == 524288, "the largest reservation is accepted and limited");
+    const int tooLarge = 5592406;
+    Require(SetFails(stream, SolSocket, SoSendBuffer, &tooLarge, sizeof(tooLarge), 55), "a reservation above sb_max must fail with ENOBUFS (55)");
+    Require(GetInt(stream, SoSendBuffer) == 524288, "a failed reservation keeps the buffer");
+    SetInt(stream, SoReceiveLowWater, 600000);
+    Require(GetInt(stream, SoReceiveLowWater) == 524288, "a low-water mark above the buffer is limited to it");
+    SetInt(stream, SoReceiveBuffer, 50);
+    Require(GetInt(stream, SoReceiveLowWater) == 50, "a smaller buffer lowers the low-water mark");
+    const int zero = 0;
+    Require(SetFails(stream, SolSocket, SoReceiveLowWater, &zero, sizeof(zero), ErrorInvalid), "a low-water mark below 1 must fail with EINVAL (22)");
+    int pair[2] = {-1, -1};
+    Require(socketpair_nid_postfix(1, Stream, 0, pair) == 0, "socketpair failed");
+    Require(GetInt(pair[0], SoSendBuffer) == 8192 && GetInt(pair[0], SoReceiveBuffer) == 8192, "an AF_UNIX stream socket starts with 8192 bytes each way");
+    Require(close_nid_postfix(pair[0]) == 0 && close_nid_postfix(pair[1]) == 0, "close failed");
+    Require(socketpair_nid_postfix(1, Datagram, 0, pair) == 0, "socketpair failed");
+    Require(GetInt(pair[0], SoSendBuffer) == 2048 && GetInt(pair[0], SoReceiveBuffer) == 4096, "an AF_UNIX datagram socket starts with 2048 and 4096 bytes");
+    Require(close_nid_postfix(pair[0]) == 0 && close_nid_postfix(pair[1]) == 0, "close failed");
+    Require(close_nid_postfix(stream) == 0 && close_nid_postfix(datagram) == 0, "close failed");
+    const int listener = socket_nid_postfix(2, Stream, 0);
+    Require(listener >= 0, "socket failed");
+    auto address = Loopback(0);
+    Require(bind_nid_postfix(listener, address.data(), address.size()) == 0 && listen_nid_postfix(listener, 1) == 0, "listen failed");
+    std::uint32_t size = address.size();
+    Require(getsockname_nid_postfix(listener, address.data(), &size) == 0, "getsockname failed");
+    SetInt(listener, SoReceiveBuffer, 3000);
+    SetInt(listener, SoSendLowWater, 700);
+    const int client = socket_nid_postfix(2, Stream, 0);
+    Require(client >= 0 && connect_nid_postfix(client, address.data(), address.size()) == 0, "connect failed");
+    const int accepted = accept_nid_postfix(listener, nullptr, nullptr);
+    Require(accepted >= 0, "accept failed");
+    Require(GetInt(accepted, SoReceiveBuffer) == 3000 && GetInt(accepted, SoSendLowWater) == 700 && GetInt(accepted, SoSendBuffer) == 32768, "an accepted socket takes the listener's buffers");
+    Require(close_nid_postfix(accepted) == 0 && close_nid_postfix(client) == 0 && close_nid_postfix(listener) == 0, "close failed");
+}
+
+void NullValues() {
+    const int stream = socket_nid_postfix(2, Stream, 0);
+    Require(stream >= 0, "socket failed");
+    Require(SetFails(stream, SolSocket, SoKeepAlive, nullptr, sizeof(int), 14), "a null value with a length must fail with EFAULT (14)");
+    Require(SetFails(-1, SolSocket, SoKeepAlive, nullptr, sizeof(int), 14), "the null value is checked before the descriptor");
+    Require(SetFails(stream, SolSocket, 0x7fff, nullptr, sizeof(int), 14), "the null value is checked before the option");
+    Require(SetFails(stream, SolSocket, SoKeepAlive, nullptr, 0, ErrorInvalid), "a null value without a length must fail with EINVAL (22)");
+    std::uint32_t size = sizeof(int);
+    Require(getsockopt_nid_postfix(stream, SolSocket, SoSendBuffer, nullptr, &size) == 0 && size == 0, "getsockopt without a value succeeds with length 0");
+    Require(close_nid_postfix(stream) == 0, "close failed");
+}
+
+int GetIp(int descriptor, int option) {
+    int value = -12345;
+    std::uint32_t size = sizeof(value);
+    Require(getsockopt_nid_postfix(descriptor, 0, option, &value, &size) == 0 && size == sizeof(value), "getsockopt of an IPPROTO_IP option failed");
+    return value;
+}
+
+bool SetIp(int descriptor, int option, int value) {
+    return setsockopt_nid_postfix(descriptor, 0, option, &value, sizeof(value)) == 0;
+}
+
+void IpLevelFollowsThePs5() {
+    constexpr int IpTypeOfService = 3;
+    constexpr int IpTimeToLive = 4;
+    constexpr int IpMulticastTimeToLive = 10;
+    constexpr int IpMulticastLoop = 11;
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    const int datagram6 = socket_nid_postfix(28, Datagram, 0);
+    Require(datagram >= 0 && datagram6 >= 0, "socket failed");
+    Require(GetIp(datagram, IpTimeToLive) == 64 && GetIp(datagram, IpTypeOfService) == 0, "IP_TTL starts at 64 and IP_TOS at 0");
+    Require(GetIp(datagram, IpMulticastTimeToLive) == 1 && GetIp(datagram, IpMulticastLoop) == 1, "IP_MULTICAST_TTL and IP_MULTICAST_LOOP start at 1");
+    Require(SetIp(datagram, IpTimeToLive, 32) && GetIp(datagram, IpTimeToLive) == 32, "IP_TTL reads back");
+    Require(SetIp(datagram, IpTimeToLive, 300) && GetIp(datagram, IpTimeToLive) == 44, "IP_TTL keeps the low byte");
+    Require(SetIp(datagram, IpTimeToLive, -1) && GetIp(datagram, IpTimeToLive) == 255, "IP_TTL of -1 reads back as 255");
+    Require(SetIp(datagram, IpTimeToLive, 0) && GetIp(datagram, IpTimeToLive) == 0, "IP_TTL of 0 is kept");
+    const unsigned char byte = 9;
+    Require(SetFails(datagram, 0, IpTimeToLive, &byte, 1, ErrorInvalid), "a one-byte IP_TTL must fail with EINVAL (22)");
+    Require(SetIp(datagram, IpTypeOfService, 0x1ff) && GetIp(datagram, IpTypeOfService) == 0xff, "IP_TOS keeps the low byte");
+    Require(SetIp(datagram, IpTypeOfService, -1) && GetIp(datagram, IpTypeOfService) == 255, "IP_TOS of -1 reads back as 255");
+    Require(SetFails(datagram, 0, IpTypeOfService, &byte, 1, ErrorInvalid), "a one-byte IP_TOS must fail with EINVAL (22)");
+    const unsigned char seven = 7;
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastTimeToLive, &seven, 1) == 0 && GetIp(datagram, IpMulticastTimeToLive) == 7, "a one-byte IP_MULTICAST_TTL is accepted");
+    const int tooLarge = 300;
+    Require(SetFails(datagram, 0, IpMulticastTimeToLive, &tooLarge, sizeof(tooLarge), ErrorInvalid) && GetIp(datagram, IpMulticastTimeToLive) == 7, "IP_MULTICAST_TTL above 255 must fail with EINVAL (22)");
+    unsigned char narrow = 0xaa;
+    std::uint32_t size = 1;
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastTimeToLive, &narrow, &size) == 0 && size == 1 && narrow == 7, "a one-byte read gets the IP_MULTICAST_TTL byte");
+    Require(SetIp(datagram, IpMulticastLoop, 5) && GetIp(datagram, IpMulticastLoop) == 1, "IP_MULTICAST_LOOP reads back as 1");
+    Require(SetIp(datagram, IpMulticastLoop, 0) && GetIp(datagram, IpMulticastLoop) == 0, "IP_MULTICAST_LOOP can be turned off");
+    Require(SetIp(datagram, IpMulticastLoop, 1) && SetIp(datagram, IpMulticastLoop, 0x100) && GetIp(datagram, IpMulticastLoop) == 0, "an int IP_MULTICAST_LOOP keeps only its low byte");
+    int value = 0;
+    size = sizeof(value);
+    Require(getsockopt_nid_postfix(datagram6, 0, IpTimeToLive, &value, &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "IPPROTO_IP on an AF_INET6 socket must fail with EINVAL (22)");
+    size = sizeof(value);
+    Require(getsockopt_nid_postfix(datagram, 0, 0x7777, &value, &size) == -1 && *__error_nid_postfix() == ErrorNoProtocolOption, "an unknown IPPROTO_IP option must fail with ENOPROTOOPT (42)");
+    size = sizeof(value);
+    Require(getsockopt_nid_postfix(datagram, 99, 1, &value, &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "an unknown level must fail with EINVAL (22)");
+    Require(SetFails(datagram, 99, 1, &value, sizeof(value), ErrorInvalid), "setsockopt at an unknown level must fail with EINVAL (22)");
+    for (const int option : {7, 20, 65}) {
+        Require(GetIp(datagram, option) == 0, "a receive option starts off");
+        Require(SetIp(datagram, option, 5) && GetIp(datagram, option) == 1, "a receive option reads back as 1");
+        Require(SetIp(datagram, option, 0) && GetIp(datagram, option) == 0, "a receive option turns off");
+    }
+    Require(close_nid_postfix(datagram) == 0 && close_nid_postfix(datagram6) == 0, "close failed");
+}
+
+void MulticastMembership() {
+    constexpr int IpMulticastInterface = 9;
+    constexpr int IpAddMembership = 12;
+    constexpr int IpDropMembership = 13;
+    constexpr int ErrorNotSupported = 45;
+    constexpr int ErrorAddressNotAvailable = 49;
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    const int stream = socket_nid_postfix(2, Stream, 0);
+    Require(datagram >= 0 && stream >= 0, "socket failed");
+    const std::array<std::uint8_t, 8> group{224, 0, 0, 251, 0, 0, 0, 0};
+    const std::array<std::uint8_t, 8> unicast{10, 0, 0, 1, 0, 0, 0, 0};
+    const std::array<std::uint8_t, 8> other{224, 0, 0, 253, 0, 0, 0, 0};
+    Require(SetFails(stream, 0, IpAddMembership, group.data(), group.size(), ErrorNotSupported), "a stream socket must fail a membership with EOPNOTSUPP (45)");
+    Require(SetFails(datagram, 0, IpAddMembership, group.data(), 7, ErrorInvalid), "a short membership must fail with EINVAL (22)");
+    Require(SetFails(datagram, 0, IpAddMembership, unicast.data(), unicast.size(), ErrorInvalid), "a group that is not multicast must fail with EINVAL (22)");
+    Require(SetFails(datagram, 0, IpDropMembership, other.data(), other.size(), ErrorAddressNotAvailable), "dropping a group never joined must fail with EADDRNOTAVAIL (49)");
+    std::array<std::uint8_t, 4> address{0xaa, 0xaa, 0xaa, 0xaa};
+    std::uint32_t size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && size == 4 && address == std::array<std::uint8_t, 4>{}, "IP_MULTICAST_IF starts at INADDR_ANY");
+    const std::array<std::uint8_t, 4> loopback{127, 0, 0, 1};
+    const std::array<std::uint8_t, 12> anyIndex{};
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastInterface, anyIndex.data(), anyIndex.size()) == 0, "an ip_mreqn without an index selects the default interface");
+    size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && address == std::array<std::uint8_t, 4>{}, "the default interface reads back as INADDR_ANY");
+    const std::array<std::uint8_t, 12> addressWithoutIndex{224, 0, 0, 251, 127, 0, 0, 1, 0, 0, 0, 0};
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastInterface, addressWithoutIndex.data(), addressWithoutIndex.size()) == 0, "an ip_mreqn with index 0 clears the interface whatever its addresses, as inp_set_multicast_if does");
+    std::array<std::uint8_t, 12> request{};
+    request.fill(0xaa);
+    size = request.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, request.data(), &size) == 0 && size == 12 && request == std::array<std::uint8_t, 12>{}, "an ip_mreqn read with no interface selected is all zeros, as inp_getmoptions returns");
+    const std::array<std::uint8_t, 12> negativeIndex{0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff};
+    Require(SetFails(datagram, 0, IpMulticastInterface, negativeIndex.data(), negativeIndex.size(), ErrorInvalid), "a negative ip_mreqn index must fail with EINVAL (22)");
+    Require(SetFails(datagram, 0, IpMulticastInterface, loopback.data(), 2, ErrorInvalid), "a short IP_MULTICAST_IF must fail with EINVAL (22)");
+    for (const std::array<std::uint8_t, 4> indexAddress : {
+             std::array<std::uint8_t, 4>{0, 0, 0, 1},
+             std::array<std::uint8_t, 4>{0, 0, 0, 2},
+             std::array<std::uint8_t, 4>{0, 1, 0, 0},
+             std::array<std::uint8_t, 4>{0, 255, 255, 255},
+         }) {
+        Require(SetFails(datagram, 0, IpMulticastInterface, indexAddress.data(), indexAddress.size(), ErrorAddressNotAvailable),
+            "a 0.0.0.0/8 address other than INADDR_ANY must fail IP_MULTICAST_IF with EADDRNOTAVAIL (49)");
+        const std::array<std::uint8_t, 8> membership{224, 0, 0, 251, indexAddress[0], indexAddress[1], indexAddress[2], indexAddress[3]};
+        Require(SetFails(datagram, 0, IpAddMembership, membership.data(), membership.size(), ErrorAddressNotAvailable),
+            "a 0.0.0.0/8 interface address other than INADDR_ANY must fail IP_ADD_MEMBERSHIP with EADDRNOTAVAIL (49)");
+        Require(SetFails(datagram, 0, IpDropMembership, membership.data(), membership.size(), ErrorAddressNotAvailable),
+            "a 0.0.0.0/8 interface address other than INADDR_ANY must fail IP_DROP_MEMBERSHIP with EADDRNOTAVAIL (49)");
+    }
+    size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && size == 4 && address == std::array<std::uint8_t, 4>{},
+        "rejected IP_MULTICAST_IF addresses leave the selected interface unchanged");
+    Require(close_nid_postfix(datagram) == 0 && close_nid_postfix(stream) == 0, "close failed");
+}
+
+bool MulticastOnTheHost() {
+    constexpr int IpMulticastInterface = 9;
+    constexpr int IpAddMembership = 12;
+    constexpr int IpDropMembership = 13;
+    constexpr int ErrorAddressInUse = 48;
+    constexpr int ErrorAddressNotAvailable = 49;
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    Require(datagram >= 0, "socket failed");
+    const std::array<std::uint8_t, 8> group{224, 0, 0, 251, 0, 0, 0, 0};
+    if (setsockopt_nid_postfix(datagram, 0, IpAddMembership, group.data(), group.size()) != 0) {
+        Require(*__error_nid_postfix() == ErrorAddressNotAvailable, "a join no host interface can take must fail with EADDRNOTAVAIL (49)");
+        Require(close_nid_postfix(datagram) == 0, "close failed");
+        std::puts("skipped, the host has no interface that can join 224.0.0.251");
+        return false;
+    }
+    Require(SetFails(datagram, 0, IpAddMembership, group.data(), group.size(), ErrorAddressInUse), "joining twice must fail with EADDRINUSE (48)");
+    Require(setsockopt_nid_postfix(datagram, 0, IpDropMembership, group.data(), group.size()) == 0, "drop failed");
+    Require(SetFails(datagram, 0, IpDropMembership, group.data(), group.size(), ErrorAddressNotAvailable), "dropping twice must fail with EADDRNOTAVAIL (49)");
+    const std::array<std::uint8_t, 8> throughLoopback{224, 0, 0, 252, 127, 0, 0, 1};
+    const std::array<std::uint8_t, 8> anyInterface{224, 0, 0, 252, 0, 0, 0, 0};
+    Require(setsockopt_nid_postfix(datagram, 0, IpAddMembership, throughLoopback.data(), throughLoopback.size()) == 0, "joining 224.0.0.252 through 127.0.0.1 failed");
+    Require(setsockopt_nid_postfix(datagram, 0, IpDropMembership, anyInterface.data(), anyInterface.size()) == 0, "a drop through INADDR_ANY leaves the group on any interface");
+    Require(SetFails(datagram, 0, IpDropMembership, anyInterface.data(), anyInterface.size(), ErrorAddressNotAvailable), "dropping it again must fail with EADDRNOTAVAIL (49)");
+    const std::array<std::uint8_t, 4> loopback{127, 0, 0, 1};
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastInterface, loopback.data(), loopback.size()) == 0, "selecting the loopback interface for IP_MULTICAST_IF failed");
+    std::array<std::uint8_t, 4> address{0xaa, 0xaa, 0xaa, 0xaa};
+    std::uint32_t size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && size == 4 && address == loopback, "IP_MULTICAST_IF reads back");
+    const std::array<std::uint8_t, 12> anyIndex{};
+    Require(setsockopt_nid_postfix(datagram, 0, IpMulticastInterface, anyIndex.data(), anyIndex.size()) == 0, "an ip_mreqn without an index selects the default interface");
+    size = address.size();
+    Require(getsockopt_nid_postfix(datagram, 0, IpMulticastInterface, address.data(), &size) == 0 && address == std::array<std::uint8_t, 4>{}, "the default interface reads back as INADDR_ANY");
+    Require(close_nid_postfix(datagram) == 0, "close failed");
+    return true;
+}
+
 void UnknownRequestsFail() {
     const int stream = socket_nid_postfix(2, Stream, 0);
     Require(stream >= 0, "socket failed");
@@ -216,14 +548,237 @@ void UnknownRequestsFail() {
     Require(close_nid_postfix(stream) == 0, "close failed");
 }
 
+void UnknownLevelsFollowFreeBsd() {
+    const int stream = socket_nid_postfix(2, Stream, 0);
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    const int stream6 = socket_nid_postfix(28, Stream, 0);
+    const int datagram6 = socket_nid_postfix(28, Datagram, 0);
+    Require(stream >= 0 && datagram >= 0 && stream6 >= 0 && datagram6 >= 0, "socket failed");
+    const int one = 1;
+    int value = 0;
+    std::uint32_t size = sizeof(value);
+    for (const int level : {999, 17, -1}) {
+        Require(SetFails(stream, level, 1, &one, sizeof(one), ErrorInvalid), "an unknown protocol level on a stream socket must fail with EINVAL (22), ip_ctloutput");
+        size = sizeof(value);
+        Require(getsockopt_nid_postfix(stream, level, 1, &value, &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "getsockopt with an unknown protocol level must fail with EINVAL (22)");
+    }
+    Require(SetFails(datagram, 999, 1, &one, sizeof(one), ErrorInvalid), "an unknown protocol level on a datagram socket must fail with EINVAL (22)");
+    Require(SetFails(stream6, 0, 1, &one, sizeof(one), ErrorInvalid), "the IP level on an AF_INET6 socket must fail with EINVAL (22), ip6_ctloutput");
+    Require(SetFails(stream6, 999, 1, &one, sizeof(one), ErrorInvalid), "an unknown protocol level on an AF_INET6 socket must fail with EINVAL (22)");
+    Require(SetFails(stream, 0, 0x7777, &one, sizeof(one), ErrorNoProtocolOption), "an unknown IP-level option must fail with ENOPROTOOPT (42)");
+    Require(SetFails(datagram, 17, 77, &one, sizeof(one), ErrorNoProtocolOption), "a UDP-level option with no case in udp_ctloutput must fail with ENOPROTOOPT (42)");
+    Require(SetFails(datagram6, 17, 77, &one, sizeof(one), ErrorInvalid), "the UDP level on an AF_INET6 datagram socket must fail with EINVAL (22), ip6_ctloutput");
+    size = sizeof(value);
+    Require(getsockopt_nid_postfix(datagram6, 17, 77, &value, &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "getsockopt with the UDP level on an AF_INET6 datagram socket must fail with EINVAL (22)");
+    int pair[2]{-1, -1};
+    Require(socketpair_nid_postfix(1, Stream, 0, pair) == 0, "socketpair failed");
+    Require(SetFails(pair[0], 999, 1, &one, sizeof(one), ErrorInvalid), "an unknown protocol level on an AF_UNIX socket must fail with EINVAL (22), uipc_ctloutput");
+    Require(SetFails(pair[0], 0, 77, &one, sizeof(one), 45), "an unknown option at level 0 on an AF_UNIX socket must fail with EOPNOTSUPP (45), uipc_ctloutput");
+    size = sizeof(value);
+    Require(getsockopt_nid_postfix(pair[0], 0, 77, &value, &size) == -1 && *__error_nid_postfix() == 45, "getsockopt of an unknown option at level 0 on an AF_UNIX socket must fail with EOPNOTSUPP (45)");
+    Require(SetFails(pair[0], 0, 1, &one, sizeof(one), 45), "setting LOCAL_PEERCRED on an AF_UNIX socket must fail with EOPNOTSUPP (45)");
+    std::uint32_t original[16]{};
+    const int originalCount = getgroups_nid_postfix(16, original);
+    Require(originalCount >= 1, "getgroups failed");
+    std::uint32_t many[17]{};
+    for (std::uint32_t index = 0; index < 17; ++index) many[index] = index;
+#if defined(_WIN32) || defined(__APPLE__)
+    const int connectedTypes[]{Stream};
+#else
+    const int connectedTypes[]{Stream, SequencedPacket};
+#endif
+    for (const int type : connectedTypes) {
+        Require(setgroups_nid_postfix(17, many) == 0, "setgroups failed");
+        int connected[2]{-1, -1};
+        Require(socketpair_nid_postfix(1, type, 0, connected) == 0, "socketpair failed");
+        const std::uint32_t changed[2]{0, 5};
+        Require(setgroups_nid_postfix(2, changed) == 0, "setgroups failed");
+        for (const int end : connected) {
+            unsigned char bytes[88];
+            std::memset(bytes, 0xff, sizeof(bytes));
+            size = sizeof(bytes);
+            Require(getsockopt_nid_postfix(end, 0, 1, bytes, &size) == 0 && size == sizeof(bytes), "LOCAL_PEERCRED on a stream or sequenced-packet socketpair must succeed, as kern_socketpair calls unp_copy_peercred");
+            LocalCredentials credentials{};
+            std::memcpy(&credentials, bytes, sizeof(credentials));
+            Require(credentials.version == 0 && credentials.user == 0 && credentials.groupCount == 16 && std::equal(many, many + 16, credentials.groups), "LOCAL_PEERCRED must report the first 16 groups the pair was made with, as cru2x copies");
+            Require(bytes[10] == 0 && bytes[11] == 0 && bytes[76] == 0 && bytes[77] == 0 && bytes[78] == 0 && bytes[79] == 0 && credentials.unused == 0, "LOCAL_PEERCRED must clear the xucred padding, as cru2x starts with bzero");
+            std::uint32_t version = 0xffffffffu;
+            size = sizeof(version);
+            Require(getsockopt_nid_postfix(end, 0, 1, &version, &size) == 0 && size == sizeof(version) && version == 0, "a short LOCAL_PEERCRED read must copy only the bytes asked for");
+        }
+        for (const int end : connected) Require(close_nid_postfix(end) == 0, "close failed");
+    }
+    Require(setgroups_nid_postfix(originalCount, original) == 0, "setgroups failed");
+    LocalCredentials credentials{};
+    for (const int option : {2, 4}) {
+        value = -1;
+        size = sizeof(value);
+        Require(getsockopt_nid_postfix(pair[1], 0, option, &value, &size) == 0 && value == 0 && size == sizeof(value), "LOCAL_CREDS and LOCAL_CONNWAIT must read 0 on a socketpair");
+        value = -1;
+        size = 2;
+        Require(getsockopt_nid_postfix(pair[1], 0, option, &value, &size) == 0 && size == 2 && (value & 0xffff) == 0 && (value >> 16) == -1, "a short LOCAL_CREDS or LOCAL_CONNWAIT read must copy only the bytes asked for, as sooptcopyout does");
+    }
+    int datagramPair[2]{-1, -1};
+    Require(socketpair_nid_postfix(1, Datagram, 0, datagramPair) == 0, "socketpair failed");
+    size = sizeof(credentials);
+    Require(getsockopt_nid_postfix(datagramPair[0], 0, 1, &credentials, &size) == -1 && *__error_nid_postfix() == ErrorInvalid, "LOCAL_PEERCRED on a datagram socketpair must fail with EINVAL (22)");
+    for (const int descriptor : {stream, datagram, stream6, datagram6, pair[0], pair[1], datagramPair[0], datagramPair[1]}) Require(close_nid_postfix(descriptor) == 0, "close failed");
 }
 
-int main() {
+}
+
+constexpr int ErrorFault = 14;
+constexpr int SoReceiveTimeout = 0x1006;
+constexpr int SoNoSigpipe2 = 0x800;
+
+void* MapPage(bool readable) {
+#ifdef _WIN32
+    void* page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, readable ? PAGE_READONLY : PAGE_NOACCESS);
+    Require(page != nullptr, "VirtualAlloc failed");
+#else
+    void* page = mmap(nullptr, 4096, readable ? PROT_READ : PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    Require(page != MAP_FAILED, "mmap failed");
+#endif
+    return page;
+}
+
+void UnmapPage(void* page) {
+#ifdef _WIN32
+    VirtualFree(page, 0, MEM_RELEASE);
+#else
+    munmap(page, 4096);
+#endif
+}
+
+bool GetFails(int descriptor, int level, int option, void* value, std::uint32_t* size, int error) {
+    return getsockopt_nid_postfix(descriptor, level, option, value, size) == -1 && *__error_nid_postfix() == error;
+}
+
+void BadPointersFail() {
+    void* unreadable = MapPage(false);
+    void* readOnly = MapPage(true);
+    const int stream = socket_nid_postfix(2, Stream, 0);
+    const int datagram = socket_nid_postfix(2, Datagram, 0);
+    Require(stream >= 0 && datagram >= 0, "socket failed");
+    for (void* bad : {reinterpret_cast<void*>(0x10), unreadable}) {
+        Require(SetFails(stream, SolSocket, SoKeepAlive, bad, sizeof(int), ErrorFault), "setsockopt with an unreadable value must fail with EFAULT (14)");
+        Require(GetInt(stream, SoKeepAlive) == 0, "a faulting setsockopt must not change the option");
+        Require(SetFails(stream, SolSocket, SoLinger, bad, sizeof(Linger), ErrorFault), "SO_LINGER with an unreadable value must fail with EFAULT");
+        Require(SetFails(stream, SolSocket, SoReceiveTimeout, bad, 16, ErrorFault), "SO_RCVTIMEO with an unreadable value must fail with EFAULT");
+        Require(SetFails(stream, SolSocket, SoNoSigpipe2, bad, sizeof(int), ErrorFault), "SO_NOSIGPIPE with an unreadable value must fail with EFAULT");
+        Require(SetFails(stream, SolSocket, SoSendBuffer, bad, sizeof(int), ErrorFault), "SO_SNDBUF with an unreadable value must fail with EFAULT");
+        Require(SetFails(stream, 6, 1, bad, sizeof(int), ErrorFault), "TCP_NODELAY with an unreadable value must fail with EFAULT");
+        Require(SetFails(stream, 0, 4, bad, sizeof(int), ErrorFault), "IP_TTL with an unreadable value must fail with EFAULT");
+        Require(SetFails(datagram, 0, 12, bad, 8, ErrorFault), "IP_ADD_MEMBERSHIP with an unreadable value must fail with EFAULT");
+        Require(SetFails(datagram, 0, 9, bad, 4, ErrorFault), "IP_MULTICAST_IF with an unreadable value must fail with EFAULT");
+        Require(SetFails(datagram, 0, 9, bad, 12, ErrorFault), "IP_MULTICAST_IF with an unreadable ip_mreqn must fail with EFAULT");
+        Require(SetFails(datagram, 0, 10, bad, 1, ErrorFault), "IP_MULTICAST_TTL with an unreadable byte must fail with EFAULT");
+        Require(SetFails(datagram, 0, 10, bad, 4, ErrorFault), "IP_MULTICAST_TTL with an unreadable int must fail with EFAULT");
+        Require(SetFails(stream, SolSocket, SoKeepAlive, bad, 2, ErrorInvalid), "a short length is rejected before the value is read");
+        Require(SetFails(stream, SolSocket, 0x7777, bad, sizeof(int), ErrorNoProtocolOption), "an unknown option is rejected before the value is read");
+        Require(SetFails(stream, 99, SoKeepAlive, bad, sizeof(int), ErrorInvalid), "an unknown level is rejected before the value is read");
+        Require(SetFails(-1, SolSocket, SoKeepAlive, bad, sizeof(int), ErrorBadDescriptor), "the descriptor is checked before the value is read");
+    }
+    const int on = 1;
+    Require(SetFails(stream, SolSocket, SoKeepAlive, &on, 0x80000000u, ErrorInvalid), "a negative length must fail with EINVAL (22)");
+
+    for (void* bad : {reinterpret_cast<void*>(0x10), unreadable, readOnly}) {
+        std::uint32_t size = sizeof(int);
+        Require(GetFails(stream, SolSocket, SoType, bad, &size, ErrorFault) && size == sizeof(int), "getsockopt into an unwritable value must fail with EFAULT and keep the length");
+        Require(GetFails(stream, SolSocket, SoLinger, bad, &size, ErrorFault), "SO_LINGER into an unwritable value must fail with EFAULT");
+        size = 16;
+        Require(GetFails(stream, SolSocket, SoReceiveTimeout, bad, &size, ErrorFault), "SO_RCVTIMEO into an unwritable value must fail with EFAULT");
+        size = sizeof(int);
+        Require(GetFails(stream, 6, 1, bad, &size, ErrorFault), "TCP_NODELAY into an unwritable value must fail with EFAULT");
+        Require(GetFails(stream, 0, 4, bad, &size, ErrorFault), "IP_TTL into an unwritable value must fail with EFAULT");
+        Require(GetFails(datagram, 0, 9, bad, &size, ErrorFault), "IP_MULTICAST_IF into an unwritable value must fail with EFAULT");
+        Require(GetFails(stream, SolSocket, 0x7777, bad, &size, ErrorNoProtocolOption), "an unknown option is rejected before the value is written");
+        Require(GetFails(-1, SolSocket, SoType, bad, &size, ErrorBadDescriptor), "the descriptor is checked before the value is written");
+        std::uint32_t zero = 0;
+        Require(getsockopt_nid_postfix(stream, SolSocket, SoType, bad, &zero) == 0 && zero == 0, "a zero length never touches the value");
+    }
+
+    for (std::uint32_t* bad : {reinterpret_cast<std::uint32_t*>(0x10), static_cast<std::uint32_t*>(unreadable), static_cast<std::uint32_t*>(nullptr)}) {
+        int value = 0;
+        Require(GetFails(stream, SolSocket, SoType, &value, bad, ErrorFault), "getsockopt with an unreadable length must fail with EFAULT");
+        Require(GetFails(-1, SolSocket, SoType, &value, bad, ErrorFault), "the length is read before the descriptor is checked");
+        Require(GetFails(stream, SolSocket, 0x7777, &value, bad, ErrorFault), "the length is read before the option is checked");
+    }
+    for (std::uint32_t* bad : {reinterpret_cast<std::uint32_t*>(0x10), static_cast<std::uint32_t*>(unreadable), static_cast<std::uint32_t*>(readOnly), static_cast<std::uint32_t*>(nullptr)}) {
+        Require(GetFails(stream, SolSocket, SoType, nullptr, bad, ErrorFault), "the final length store failing must give EFAULT");
+        Require(GetFails(stream, SolSocket, 0x7777, nullptr, bad, ErrorNoProtocolOption), "an option error is reported before the length store");
+    }
+    int value = 0;
+    std::uint32_t size = sizeof(int);
+    Require(getsockopt_nid_postfix(stream, SolSocket, SoType, &value, &size) == 0 && value == Stream && size == sizeof(int), "valid getsockopt still works");
+    Require(close_nid_postfix(stream) == 0 && close_nid_postfix(datagram) == 0, "close failed");
+    UnmapPage(unreadable);
+    UnmapPage(readOnly);
+}
+
+void TimestampOptionBounds() {
+    const int descriptor = socket_nid_postfix(2, Datagram, 0);
+    Require(descriptor >= 0, "socket failed");
+
+    int one = 1;
+    for (const int option : {SoTimestamp, 0x2000}) {
+        Require(setsockopt_nid_postfix(-1, SolSocket, option, &one, sizeof(one)) == -1 && *__error_nid_postfix() == ErrorBadDescriptor, "setsockopt on bad fd must fail with EBADF");
+        int value = 0;
+        std::uint32_t length = sizeof(value);
+        Require(getsockopt_nid_postfix(-1, SolSocket, option, &value, &length) == -1 && *__error_nid_postfix() == ErrorBadDescriptor, "getsockopt on bad fd must fail with EBADF");
+
+        Require(setsockopt_nid_postfix(descriptor, SolSocket, option, nullptr, sizeof(one)) == -1 && *__error_nid_postfix() == ErrorFault, "setsockopt with null value must fail with EFAULT");
+        Require(setsockopt_nid_postfix(descriptor, SolSocket, option, reinterpret_cast<void*>(0x10), sizeof(one)) == -1 && *__error_nid_postfix() == ErrorFault, "setsockopt with invalid pointer value must fail with EFAULT");
+
+        for (const std::uint32_t badLength : {0u, 2u, 3u}) {
+            Require(setsockopt_nid_postfix(descriptor, SolSocket, option, &one, badLength) == -1 && *__error_nid_postfix() == ErrorInvalid, "setsockopt with invalid length must fail with EINVAL");
+        }
+
+        length = sizeof(value);
+        Require(getsockopt_nid_postfix(descriptor, SolSocket, option, &value, nullptr) == -1 && *__error_nid_postfix() == ErrorFault, "getsockopt with null length pointer must fail with EFAULT");
+        Require(getsockopt_nid_postfix(descriptor, SolSocket, option, &value, reinterpret_cast<std::uint32_t*>(0x10)) == -1 && *__error_nid_postfix() == ErrorFault, "getsockopt with invalid length pointer must fail with EFAULT");
+        length = sizeof(value);
+        Require(getsockopt_nid_postfix(descriptor, SolSocket, option, reinterpret_cast<void*>(0x10), &length) == -1 && *__error_nid_postfix() == ErrorFault, "getsockopt with invalid value pointer must fail with EFAULT");
+
+        std::int64_t wide = 1;
+        Require(setsockopt_nid_postfix(descriptor, SolSocket, option, &wide, sizeof(wide)) == 0, "8-byte wide setsockopt must succeed");
+        value = 0;
+        length = sizeof(value);
+        Require(getsockopt_nid_postfix(descriptor, SolSocket, option, &value, &length) == 0 && value == option && length == sizeof(int), "getsockopt reads back option value");
+
+        wide = 0;
+        Require(setsockopt_nid_postfix(descriptor, SolSocket, option, &wide, sizeof(wide)) == 0, "8-byte wide setsockopt clear must succeed");
+        value = -1;
+        length = sizeof(value);
+        Require(getsockopt_nid_postfix(descriptor, SolSocket, option, &value, &length) == 0 && value == 0 && length == sizeof(int), "getsockopt reads back 0 after clear");
+    }
+
+    Require(close_nid_postfix(descriptor) == 0, "close failed");
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "multicast") == 0) {
+        return MulticastOnTheHost() ? 0 : 77;
+    }
     ReportsTypeAndListening();
     ReportsAndClearsTheConnectError();
+    ReconnectAfterARefusalFails();
     BooleanOptionsReportTheirBit();
+    AcceptFilterFollowsFreeBsd();
+    ReusePortSharesAPort();
     LingerFollowsFreeBsd();
+#ifdef _WIN32
+    DatagramLingerFollowsSocket(2);
+    DatagramLingerFollowsSocket(28);
+#endif
     LengthsFollowFreeBsd();
+    BuffersFollowThePs5();
+    NullValues();
+    BadPointersFail();
+    TimestampOptionBounds();
+    IpLevelFollowsThePs5();
+    MulticastMembership();
     UnknownRequestsFail();
+    UnknownLevelsFollowFreeBsd();
     return 0;
 }

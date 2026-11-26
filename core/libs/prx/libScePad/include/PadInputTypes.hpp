@@ -23,7 +23,14 @@ enum class InputControl {
     Shake,
     ToggleMouse,
     ToggleFullscreen,
-    TogglePerformanceOverlay
+    TogglePerformanceOverlay,
+    Screenshot,
+    ShowPadStatus,
+    VolumeUp,
+    VolumeDown,
+    ToggleMute,
+    ReloadInputMapping,
+    ToggleBorderless
 };
 
 enum class PadButton : std::uint32_t {
@@ -61,6 +68,8 @@ struct InputBinding {
     InputControl control;
     PadButton button = PadButton::None;
     int wheelDirection = 0;
+    int wheelTilt = 0;
+    std::uint32_t padButtons = 0;
 };
 
 }

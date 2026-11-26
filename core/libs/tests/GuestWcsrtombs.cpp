@@ -1,12 +1,10 @@
+#include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-extern "C" std::size_t APS5_VABI wcsrtombs_nid_postfix(char*, const std::uint16_t**, std::size_t, void*);
-extern "C" int* APS5_VABI __error_nid_postfix();
 
 static void Require(bool value, const char* message) {
     if (!value) {
@@ -18,9 +16,8 @@ static void Require(bool value, const char* message) {
 int main() {
     const std::uint16_t text[] = {'a', 'b', 'c', 0};
     const std::uint16_t empty[] = {0};
-    const std::uint16_t invalid[] = {'a', 0x100, 'b', 0};
+    const std::uint16_t twoBytes[] = {'a', 0x100, 'b', 0};
     const std::uint16_t bytes[] = {0x7f, 0x80, 0xe9, 0xff, 0};
-    constexpr auto Failed = static_cast<std::size_t>(-1);
     std::uint64_t state[2]{};
     char out[8];
     const auto* source = text;
@@ -46,8 +43,8 @@ int main() {
     Require(wcsrtombs_nid_postfix(out, &source, 1, state) == 0, "empty string length");
     Require(source == nullptr && out[0] == 0 && out[1] == 'x', "empty string terminator");
     source = bytes;
-    Require(wcsrtombs_nid_postfix(out, &source, sizeof(out), state) == 4, "guest single-byte conversion length");
-    Require(source == nullptr && std::memcmp(out, "\x7f\x80\xe9\xff\0", 5) == 0, "guest high bytes");
+    Require(wcsrtombs_nid_postfix(out, &source, sizeof(out), state) == 7, "UTF-8 conversion length");
+    Require(source == nullptr && std::memcmp(out, "\x7f\xc2\x80\xc3\xa9\xc3\xbf\0", 8) == 0, "high characters become two UTF-8 bytes");
 
     source = text;
     Require(wcsrtombs_nid_postfix(nullptr, &source, 0, state) == 3 && source == text, "length query ignores capacity and preserves source");
@@ -55,21 +52,53 @@ int main() {
     source = empty;
     Require(wcsrtombs_nid_postfix(nullptr, &source, 0, state) == 0 && source == empty, "empty length query");
 
-    source = invalid;
+    source = twoBytes;
     std::memset(out, 'x', sizeof(out));
-    *__error_nid_postfix() = 0;
-    Require(wcsrtombs_nid_postfix(out, &source, sizeof(out), state) == Failed, "invalid character fails conversion");
-    Require(*__error_nid_postfix() == 86, "invalid character uses guest EILSEQ");
-    Require(source == invalid + 1 && std::memcmp(out, "axxxxxxx", 8) == 0, "error preserves prefix and identifies invalid character");
     *__error_nid_postfix() = 7;
-    Require(wcsrtombs_nid_postfix(out, &source, 0, state) == 0 && source == invalid + 1, "zero capacity does not convert invalid character");
-    Require(*__error_nid_postfix() == 7, "zero capacity preserves errno");
+    Require(wcsrtombs_nid_postfix(out, &source, sizeof(out), state) == 4, "a character above 0xff converts");
+    Require(source == nullptr && std::memcmp(out, "a\xc4\x80" "b\0", 5) == 0, "U+0100 becomes C4 80");
+    Require(*__error_nid_postfix() == 7, "conversion preserves errno");
+    source = twoBytes;
+    Require(wcsrtombs_nid_postfix(nullptr, &source, 0, state) == 4 && source == twoBytes, "length query counts UTF-8 bytes");
+    source = twoBytes;
+    std::memset(out, 'x', sizeof(out));
+    Require(wcsrtombs_nid_postfix(out, &source, 2, state) == 1 && source == twoBytes + 1, "a character that does not fit stops the conversion");
+    Require(std::memcmp(out, "axxxxxxx", 8) == 0, "no partial character is written");
 
-    source = invalid;
-    Require(wcsrtombs_nid_postfix(nullptr, &source, 0, state) == Failed, "length query rejects invalid character");
-    Require(*__error_nid_postfix() == 86 && source == invalid, "failed length query preserves source and reports guest EILSEQ");
-    source = invalid;
+    const std::uint16_t threeBytes[] = {'z', 0x20ac, 'w', 0};
+    std::memset(out, 'x', sizeof(out));
     *__error_nid_postfix() = 7;
-    Require(wcsrtombs_nid_postfix(out, &source, 1, state) == 1 && source == invalid + 1, "capacity stops before invalid character");
-    Require(*__error_nid_postfix() == 7, "unconverted invalid character does not set errno");
+    Require(wcstombs_nid_postfix(out, text, sizeof(out)) == 3, "wcstombs full conversion length");
+    Require(std::memcmp(out, "abc\0xxxx", 8) == 0, "wcstombs full conversion and terminator");
+    Require(*__error_nid_postfix() == 7, "wcstombs conversion preserves errno");
+
+    std::memset(out, 'x', sizeof(out));
+    Require(wcstombs_nid_postfix(out, text, 0) == 0, "wcstombs zero capacity length");
+    Require(out[0] == 'x', "wcstombs zero capacity leaves the output alone");
+
+    std::memset(out, 'x', sizeof(out));
+    Require(wcstombs_nid_postfix(out, text, 3) == 3, "wcstombs exact capacity length");
+    Require(std::memcmp(out, "abcxxxxx", 8) == 0, "wcstombs exact capacity leaves the terminator unwritten");
+
+    Require(wcstombs_nid_postfix(nullptr, text, 0) == 3, "wcstombs length query ignores the capacity");
+    Require(wcstombs_nid_postfix(nullptr, text, 10) == 3, "wcstombs length query on ascii");
+    Require(wcstombs_nid_postfix(nullptr, empty, 0) == 0, "wcstombs empty length query");
+    Require(wcstombs_nid_postfix(nullptr, twoBytes, 0) == 4, "wcstombs length query counts 2-byte utf8");
+    Require(wcstombs_nid_postfix(nullptr, threeBytes, 0) == 5, "wcstombs length query counts 3-byte utf8");
+
+    std::memset(out, 'x', sizeof(out));
+    Require(wcstombs_nid_postfix(out, twoBytes, sizeof(out)) == 4, "wcstombs converts 2-byte utf8");
+    Require(std::memcmp(out, "a\xc4\x80" "b\0xxx", 8) == 0, "wcstombs produces a valid 2-byte utf8 sequence");
+
+    std::memset(out, 'x', sizeof(out));
+    Require(wcstombs_nid_postfix(out, threeBytes, sizeof(out)) == 5, "wcstombs converts 3-byte utf8");
+    Require(std::memcmp(out, "z\xe2\x82\xacw\0xx", 8) == 0, "wcstombs produces a valid 3-byte utf8 sequence");
+
+    std::memset(out, 'x', sizeof(out));
+    Require(wcstombs_nid_postfix(out, twoBytes, 2) == 2, "wcstombs fills the capacity with the lead byte of a 2-byte character that does not fit");
+    Require(std::memcmp(out, "a\xc4" "xxxxxx", 8) == 0, "wcstombs writes the bytes of the 2-byte character that fit");
+
+    std::memset(out, 'x', sizeof(out));
+    Require(wcstombs_nid_postfix(out, threeBytes, 3) == 3, "wcstombs fills the capacity inside a 3-byte character");
+    Require(out[0] == 'z' && std::memcmp(out + 1, "\xe2\x82" "xxxxx", 7) == 0, "wcstombs writes the bytes of the 3-byte character that fit");
 }

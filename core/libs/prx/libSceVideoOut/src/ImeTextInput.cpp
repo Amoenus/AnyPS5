@@ -5,9 +5,37 @@
 
 #include "SDL_keyboard.h"
 
+namespace {
+
+bool IsPasteShortcut(const SDL_KeyboardEvent& key) {
+    const unsigned modifiers = key.keysym.mod;
+    if ((modifiers & KMOD_ALT) != 0) return false;
+#ifdef __APPLE__
+    const bool command = (modifiers & KMOD_GUI) != 0;
+#else
+    const bool command = (modifiers & KMOD_CTRL) != 0;
+#endif
+    if (command && key.keysym.sym == SDLK_v) return true;
+    return (modifiers & KMOD_SHIFT) != 0 && !command && key.keysym.scancode == SDL_SCANCODE_INSERT;
+}
+
+}
+
 void ImeTextInput::HandleEvent(const SDL_Event& event, unsigned windowId) {
     ImeHostInput input{};
     switch (event.type) {
+        case SDL_TEXTEDITING_EXT:
+            if (event.editExt.windowID != windowId || event.editExt.text == nullptr) return;
+            ImePublishPreedit_nid_postfix(event.editExt.text, std::strlen(event.editExt.text), event.editExt.start, event.editExt.length);
+            return;
+        case SDL_TEXTEDITING:
+            if (event.edit.windowID != windowId) return;
+            static_assert(sizeof(input.text) >= sizeof(event.edit.text));
+            std::memcpy(input.text, event.edit.text, sizeof(event.edit.text));
+            input.kind = ImeHostInputKind::Preedit;
+            input.start = event.edit.start;
+            input.length = event.edit.length;
+            break;
         case SDL_TEXTINPUT:
             if (event.text.windowID != windowId) return;
             static_assert(sizeof(input.text) >= sizeof(event.text.text));
@@ -16,13 +44,22 @@ void ImeTextInput::HandleEvent(const SDL_Event& event, unsigned windowId) {
             break;
         case SDL_KEYDOWN:
             if (event.key.windowID != windowId) return;
+            if (IsPasteShortcut(event.key)) {
+                if (event.key.repeat != 0 || clipboard == nullptr || !ImeCapturesKeyboard_nid_postfix()) return;
+                std::string text;
+                if (clipboard(text) && !text.empty()) ImePublishPaste_nid_postfix(text.data(), text.size());
+                return;
+            }
             switch (event.key.keysym.scancode) {
                 case SDL_SCANCODE_BACKSPACE: input.kind = ImeHostInputKind::Backspace; break;
                 case SDL_SCANCODE_DELETE: input.kind = ImeHostInputKind::Delete; break;
                 case SDL_SCANCODE_LEFT: input.kind = ImeHostInputKind::Left; break;
                 case SDL_SCANCODE_RIGHT: input.kind = ImeHostInputKind::Right; break;
-                case SDL_SCANCODE_HOME: input.kind = ImeHostInputKind::Home; break;
-                case SDL_SCANCODE_END: input.kind = ImeHostInputKind::End; break;
+                case SDL_SCANCODE_HOME:
+                case SDL_SCANCODE_END:
+                    input.kind = event.key.keysym.scancode == SDL_SCANCODE_HOME ? ImeHostInputKind::Home : ImeHostInputKind::End;
+                    input.moveToLineBoundary = (event.key.keysym.mod & KMOD_CTRL) == 0;
+                    break;
                 case SDL_SCANCODE_RETURN:
                 case SDL_SCANCODE_KP_ENTER:
                     if (event.key.repeat != 0) return;

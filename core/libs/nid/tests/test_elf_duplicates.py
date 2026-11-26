@@ -1,10 +1,12 @@
 import base64
 import hashlib
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
-from test_symbol_versions import build_image, patch, read_dynsym, IMPORTS, NID_NAME, SHN_UNDEF, STT_FUNC
+from test_symbol_versions import build_image, patch, read_dynsym, IMPORTS, NID_NAME, SHN_UNDEF, STT_FUNC, PATCHER
 
 
 def nid(name):
@@ -21,6 +23,7 @@ def image(names, addresses=None):
     return bytes(build_image(entries, False))
 
 
+@unittest.skipUnless(PATCHER is not None and PATCHER.is_file(), "nid_patcher executable required")
 class ElfDuplicateTests(unittest.TestCase):
     def test_exports_patched_to_one_name_are_rejected(self):
         cases = (
@@ -54,6 +57,18 @@ class ElfDuplicateTests(unittest.TestCase):
         self.assertIn(b"duplicate patched export name: sceAlphaComputeLength", result.stderr)
         self.assertEqual(after, before)
 
+    def test_crlf_preserve_export_list_keeps_named_export(self):
+        with tempfile.TemporaryDirectory(prefix="anyps5-nid-crlf-") as directory:
+            path = Path(directory) / "exports.so"
+            listing = Path(directory) / "preserve.txt"
+            path.write_bytes(image(["sceAlphaComputeLength", "sceBetaCopyString"]))
+            listing.write_bytes(b"sceAlphaComputeLength\r\n")
+            result = subprocess.run([PATCHER, "libTest", "--preserve-export-list", str(listing), str(path)], capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            patched = [entry[0] for entry in read_dynsym(path.read_bytes()) if entry[1] == 9]
+            self.assertIn("sceAlphaComputeLength", patched)
+            self.assertIn(nid("sceBetaCopyString"), patched)
+
     def test_distinct_exports_are_still_patched(self):
         names = ["sceAlphaComputeLength_nid_disambig1", "sceBetaCopyString_nid_postfix", "sceGammaKeep_nid_no_patch_cut"]
         result, after = patch(PATCHER, image(names), "distinct.so")
@@ -65,5 +80,4 @@ class ElfDuplicateTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    PATCHER = Path(sys.argv.pop(1)).resolve()
     unittest.main()

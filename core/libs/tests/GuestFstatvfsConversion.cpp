@@ -1,3 +1,4 @@
+#include "prx/libSceLibcInternal/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/File/include/KernelStatfs.hpp"
 #include <array>
@@ -6,8 +7,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-
-extern "C" int APS5_VABI fstatvfs_nid_postfix(int, void*);
 
 namespace {
 KernelStatfs backend;
@@ -25,6 +24,12 @@ void Check(bool value, int line) {
 #define Require(value) Check((value), __LINE__)
 
 extern "C" int* APS5_VABI __error_nid_postfix() { return &guestError; }
+
+extern "C" bool GuestCopyOut_nid_no_patch(void* destination, const void* source, std::size_t bytes) {
+    if (destination == nullptr) return false;
+    std::memcpy(destination, source, bytes);
+    return true;
+}
 
 extern "C" int APS5_VABI _fstatfs_nid_postfix(int descriptor, KernelStatfs* output) {
     Require(descriptor == 42);
@@ -55,7 +60,7 @@ int main() {
         };
         const int before = calls;
         guestError = 12345;
-        Require(fstatvfs_nid_postfix(42, output.data() + 1) == 0);
+        Require(fstatvfs_nid_postfix(42, reinterpret_cast<LibcStatvfs*>(output.data() + 1)) == 0);
         Require(calls == before + 1 && guestError == 12345);
         Require(output.front() == 0xA5A5A5A5A5A5A5A5ull && output.back() == output.front());
         Require(std::memcmp(output.data() + 1, expected.data(), sizeof(expected)) == 0);
@@ -63,7 +68,7 @@ int main() {
     backend.f_bavail = -1;
     backend.f_ffree = -2;
     std::array<std::uint64_t, 11> output{};
-    Require(fstatvfs_nid_postfix(42, output.data()) == 0);
+    Require(fstatvfs_nid_postfix(42, reinterpret_cast<LibcStatvfs*>(output.data())) == 0);
     Require(output[0] == std::numeric_limits<std::uint64_t>::max());
     Require(output[3] == std::numeric_limits<std::uint64_t>::max() - 1 && output[4] == output[3]);
     Require(fstatvfs_nid_postfix(42, nullptr) == -1 && guestError == 14);
@@ -71,7 +76,7 @@ int main() {
         backendError = failure;
         output.fill(0x5A5A5A5A5A5A5A5Aull);
         const auto saved = output;
-        Require(fstatvfs_nid_postfix(42, output.data()) == -1 && guestError == failure);
+        Require(fstatvfs_nid_postfix(42, reinterpret_cast<LibcStatvfs*>(output.data())) == -1 && guestError == failure);
         Require(output == saved);
         Require(fstatvfs_nid_postfix(42, nullptr) == -1 && guestError == failure);
     }

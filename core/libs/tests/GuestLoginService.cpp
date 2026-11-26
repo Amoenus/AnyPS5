@@ -1,31 +1,63 @@
+#include "prx/libSceLoginService/include/Api.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 
-#include <cstdio>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
-#include <stdexcept>
-#include <string>
 
-extern "C" {
-int APS5_VABI sceLoginServiceInitialize(void);
-int APS5_VABI sceLoginServiceTerminate(void);
-int APS5_VABI sceLoginServiceRequestDevices(void* param);
+namespace {
+
+void ClobberErrno(std::uintptr_t, std::size_t) {
+    errno = EACCES;
 }
 
-static void Require(bool value) {
+void Require(bool value) {
     if (!value) std::abort();
 }
 
+constexpr int kErrNotInitialized = static_cast<int>(0x813a0001u);
+constexpr int kErrInvalidArg = static_cast<int>(0x813a0003u);
+
+}
+
 int main() {
-    Require(sceLoginServiceInitialize() == 0);
-    Require(sceLoginServiceTerminate() == 0);
+    GuestArena::GuestArenaSetHostReadHook_nid_no_patch(ClobberErrno);
+
     unsigned char buffer[0x80]{};
-    try {
-        sceLoginServiceRequestDevices(buffer);
-    } catch (const std::runtime_error& error) {
-        if (std::string(error.what()) == "sceLoginServiceRequestDevices not implemented") return 0;
-        std::fprintf(stderr, "sceLoginServiceRequestDevices threw: %s\n", error.what());
-        return 1;
-    }
-    std::fprintf(stderr, "sceLoginServiceRequestDevices returned instead of reporting that it is not implemented\n");
-    return 1;
+    const auto* request = reinterpret_cast<const LoginServiceDeviceRequest*>(buffer);
+    const auto* unmappedLow = reinterpret_cast<const LoginServiceDeviceRequest*>(0x10);
+    const auto* unmappedHigh = reinterpret_cast<const LoginServiceDeviceRequest*>(~std::uintptr_t{0});
+
+    errno = EAGAIN;
+    Require(sceLoginServiceRequestDevices(nullptr) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+    Require(sceLoginServiceRequestDevices(unmappedLow) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+    Require(sceLoginServiceRequestDevices(unmappedHigh) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+    Require(sceLoginServiceRequestDevices(request) == kErrNotInitialized);
+    Require(errno == EAGAIN);
+
+    Require(sceLoginServiceInitialize() == 0);
+    Require(sceLoginServiceRequestDevices(nullptr) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+    Require(sceLoginServiceRequestDevices(unmappedLow) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+    Require(sceLoginServiceRequestDevices(unmappedHigh) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+
+    Require(sceLoginServiceTerminate() == 0);
+    Require(sceLoginServiceRequestDevices(nullptr) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+    Require(sceLoginServiceRequestDevices(unmappedLow) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+    Require(sceLoginServiceRequestDevices(unmappedHigh) == kErrInvalidArg);
+    Require(errno == EAGAIN);
+    Require(sceLoginServiceRequestDevices(request) == kErrNotInitialized);
+    Require(errno == EAGAIN);
+
+    GuestArena::GuestArenaSetHostReadHook_nid_no_patch(nullptr);
+    return 0;
 }

@@ -1,14 +1,9 @@
+#include "prx/libSceLibcInternal/include/Api.hpp"
 #include "SceTypes.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
-
-struct LibcUtimbuf {
-    std::int64_t actime;
-    std::int64_t modtime;
-};
-
-extern "C" int APS5_VABI utime_nid_postfix(const char*, const LibcUtimbuf*);
 
 namespace {
 int guestError;
@@ -30,6 +25,12 @@ void Require(bool condition, int line) {
 
 extern "C" int* APS5_VABI __error_nid_postfix() {
     return &guestError;
+}
+
+extern "C" bool GuestCopyIn_nid_no_patch(void* destination, const void* source, std::size_t bytes) {
+    if (source == nullptr) return false;
+    std::memcpy(destination, source, bytes);
+    return true;
 }
 
 extern "C" int APS5_VABI utimes_nid_postfix(const char* path, const KernelTimeval* times) {

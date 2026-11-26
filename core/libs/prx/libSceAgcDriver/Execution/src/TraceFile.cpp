@@ -3,12 +3,36 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
+#include <ios>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace AgcDriver {
+
+namespace {
+
+void RequireGood(const std::ofstream& output, const char* operation, const std::filesystem::path& path) {
+    if (!output) throw std::ios_base::failure(std::string(operation) + " " + path.string() + " failed");
+}
+
+}
+
+std::filesystem::path TraceFile::Directory() {
+#ifdef _WIN32
+    const wchar_t* directory = _wgetenv(L"APS5_TRACE_DIR");
+    return std::filesystem::path(directory != nullptr ? directory : L".");
+#else
+    const char* directory = std::getenv("APS5_TRACE_DIR");
+    return std::filesystem::path(directory != nullptr ? directory : ".");
+#endif
+}
 
 void TraceFile::WriteGzip(const std::filesystem::path& path, std::string_view text) {
     z_stream stream{};
@@ -17,9 +41,8 @@ void TraceFile::WriteGzip(const std::filesystem::path& path, std::string_view te
         z_stream& stream;
         ~End() { deflateEnd(&stream); }
     } end{stream};
-    std::ofstream output;
-    output.exceptions(std::ios::badbit | std::ios::failbit);
-    output.open(path, std::ios::binary | std::ios::trunc);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    RequireGood(output, "opening", path);
     const std::array<unsigned char, 10> header{0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff};
     output.write(reinterpret_cast<const char*>(header.data()), header.size());
     uLong crc = crc32(0, Z_NULL, 0);
@@ -39,6 +62,7 @@ void TraceFile::WriteGzip(const std::filesystem::path& path, std::string_view te
         status = deflate(&stream, offset == text.size() ? Z_FINISH : Z_NO_FLUSH);
         if (status != Z_OK && status != Z_STREAM_END) throw std::runtime_error("deflate failed with " + std::to_string(status));
         output.write(reinterpret_cast<const char*>(chunk.data()), static_cast<std::streamsize>(chunk.size() - stream.avail_out));
+        RequireGood(output, "writing", path);
     }
     std::array<unsigned char, 8> trailer{};
     const auto size = static_cast<std::uint32_t>(text.size());
@@ -48,14 +72,37 @@ void TraceFile::WriteGzip(const std::filesystem::path& path, std::string_view te
     }
     output.write(reinterpret_cast<const char*>(trailer.data()), trailer.size());
     output.close();
+    RequireGood(output, "writing", path);
+}
+
+void TraceFile::ReplaceGzip(const std::filesystem::path& path, std::string_view text) {
+    auto temporary = path;
+    temporary += ".tmp";
+    try {
+        WriteGzip(temporary, text);
+    } catch (...) {
+        std::error_code removeError;
+        if (!std::filesystem::is_directory(temporary, removeError)) std::filesystem::remove(temporary, removeError);
+        throw;
+    }
+    std::error_code error;
+#ifdef _WIN32
+    if (::MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) error = std::error_code(static_cast<int>(::GetLastError()), std::system_category());
+#else
+    std::filesystem::rename(temporary, path, error);
+#endif
+    if (!error) return;
+    std::error_code removeError;
+    std::filesystem::remove(temporary, removeError);
+    throw std::system_error(error, "replacing " + path.string());
 }
 
 void TraceFile::AppendLine(const std::filesystem::path& path, std::string_view line) {
-    std::ofstream output;
-    output.exceptions(std::ios::badbit | std::ios::failbit);
-    output.open(path, std::ios::binary | std::ios::app);
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    RequireGood(output, "opening", path);
     output.write(line.data(), static_cast<std::streamsize>(line.size()));
     output.close();
+    RequireGood(output, "appending to", path);
 }
 
 }

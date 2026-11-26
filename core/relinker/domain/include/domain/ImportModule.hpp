@@ -4,6 +4,7 @@
 #include <domain/Types.hpp>
 #include <algorithm>
 #include <array>
+#include <set>
 #include <span>
 #include <string_view>
 
@@ -16,6 +17,19 @@ inline std::string_view ModuleSuffix(const std::string_view name) {
     return suffix == ModuleSuffixes.end() ? std::string_view{} : *suffix;
 }
 
+inline bool ConsoleModuleSuffix(const std::string_view name) {
+    const auto suffix = ModuleSuffix(name);
+    return !suffix.empty() && suffix != ".prx";
+}
+
+inline std::string NeededLibraryName(std::string name) {
+    const auto suffix = ModuleSuffix(name);
+    if (!suffix.empty() && suffix != ".prx") name.replace(name.size() - suffix.size(), suffix.size(), ".prx");
+    if (name == "libSceGnmDriver_padebug.prx") name = "libSceGnmDriver.prx";
+    if (name == "libSceSsl2.prx") name = "libSceSsl.prx";
+    return name;
+}
+
 inline std::string ImportModuleName(std::string name) {
     name.resize(name.size() - ModuleSuffix(name).size());
     if (name.ends_with("-module")) name.resize(name.size() - 7);
@@ -23,7 +37,7 @@ inline std::string ImportModuleName(std::string name) {
     return name;
 }
 
-inline std::string DeclaredImportModule(const std::string& symbol, const std::map<std::uint64_t, std::string>& modules) {
+inline std::string DeclaredImportModule(const std::string& symbol, const std::map<std::uint64_t, std::string>& modules, const std::set<std::uint64_t>& ownModules = {}) {
     if (modules.empty()) return {};
     const auto first = symbol.find('#');
     if (first == std::string::npos) return {};
@@ -39,7 +53,10 @@ inline std::string DeclaredImportModule(const std::string& symbol, const std::ma
         id = id * 64u + digit;
     }
     const auto module = modules.find(id);
-    if (module == modules.end()) throw RelinkerException("Unknown import module ID: " + symbol);
+    if (module == modules.end()) {
+        if (ownModules.contains(id)) return {};
+        throw RelinkerException("Unknown import module ID: " + symbol);
+    }
     auto name = module->second;
     if (name.empty() || name.find_first_of("/\\:$\r\n") != std::string::npos)
         throw RelinkerException("Invalid import module name: " + name);
@@ -47,18 +64,27 @@ inline std::string DeclaredImportModule(const std::string& symbol, const std::ma
 }
 
 inline std::string ImportModule(const std::string& symbol, const std::map<std::uint64_t, std::string>& modules,
-    std::span<const std::string> dependencies = {}) {
-    auto name = DeclaredImportModule(symbol, modules);
+    std::span<const std::string> dependencies = {}, const std::set<std::uint64_t>& ownModules = {}) {
+    auto name = DeclaredImportModule(symbol, modules, ownModules);
     if (name.empty()) return {};
     if (ModuleSuffix(name).empty()) name += ".prx";
     if (std::find(dependencies.begin(), dependencies.end(), name) != dependencies.end()) return name;
-    std::string matched;
-    for (const auto& dependency : dependencies) {
-        if (ImportModuleName(dependency) != ImportModuleName(name)) continue;
-        if (!matched.empty() && matched != dependency) throw RelinkerException("Ambiguous import module dependency: " + name);
-        matched = dependency;
-    }
-    return matched;
+    const auto normalized = ImportModuleName(name);
+    auto lookup = normalized;
+    if (lookup == "libmonosgen") lookup = "libmonosgen-2_0";
+    if (lookup == "libSceGnmDriver") lookup = "libSceGnmDriver_padebug";
+    if (lookup == "libSceSsl") lookup = "libSceSsl2";
+    const auto findMatch = [&](const std::string& candidate) {
+        std::string matched;
+        for (const auto& dependency : dependencies) {
+            if (ImportModuleName(dependency) != candidate) continue;
+            if (!matched.empty() && matched != dependency) throw RelinkerException("Ambiguous import module dependency: " + name);
+            matched = dependency;
+        }
+        return matched;
+    };
+    if (const auto matched = findMatch(normalized); !matched.empty()) return matched;
+    return lookup == normalized ? std::string{} : findMatch(lookup);
 }
 
 }

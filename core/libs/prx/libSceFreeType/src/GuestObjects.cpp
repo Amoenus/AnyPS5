@@ -1,6 +1,33 @@
 #include "prx/libSceFreeType/include/GuestObjects.hpp"
 
 #include <cstddef>
+#include <stdexcept>
+
+namespace {
+
+void SyncCharmapPointers(FreeType::GuestFace& face) {
+    auto& rec = face.rec;
+    const auto host = face.host;
+    face.charmapPointers.resize(static_cast<std::size_t>(host->num_charmaps));
+    rec.charmap = nullptr;
+    for (std::size_t index = 0; index < face.charmapPointers.size(); ++index) {
+        const FT_CharMap charmap = host->charmaps[index];
+        const auto custom = face.customCharmaps.find(charmap);
+        FreeType::GuestCharMapRec* guest = nullptr;
+        if (custom == face.customCharmaps.end()) {
+            auto& builtin = face.charmaps[charmap];
+            builtin.clazz = face.nativeCharmapClass;
+            guest = &builtin.charmap;
+        } else {
+            guest = custom->second;
+        }
+        *guest = {&rec, static_cast<std::int32_t>(charmap->encoding), charmap->platform_id, charmap->encoding_id};
+        face.charmapPointers[index] = guest;
+        if (charmap == host->charmap) rec.charmap = guest;
+    }
+}
+
+}
 
 namespace FreeType {
 
@@ -13,6 +40,7 @@ GuestFace* FaceOf(const GuestGlyphSlotRec* slot) {
 }
 
 void SyncFace(GuestFace& face) {
+    RegisterBitmap_nid_no_patch(face);
     const FT_Face host = face.host;
     auto& rec = face.rec;
     rec.num_faces = host->num_faces;
@@ -29,15 +57,7 @@ void SyncFace(GuestFace& face) {
     }
     rec.num_fixed_sizes = host->num_fixed_sizes;
     rec.available_sizes = face.fixedSizes.empty() ? nullptr : face.fixedSizes.data();
-    face.charmaps.resize(static_cast<std::size_t>(host->num_charmaps));
-    face.charmapPointers.resize(face.charmaps.size());
-    rec.charmap = nullptr;
-    for (std::size_t index = 0; index < face.charmaps.size(); ++index) {
-        const FT_CharMap charmap = host->charmaps[index];
-        face.charmaps[index] = {&rec, static_cast<std::int32_t>(charmap->encoding), charmap->platform_id, charmap->encoding_id};
-        face.charmapPointers[index] = &face.charmaps[index];
-        if (charmap == host->charmap) rec.charmap = &face.charmaps[index];
-    }
+    SyncCharmapPointers(face);
     rec.num_charmaps = host->num_charmaps;
     rec.charmaps = face.charmapPointers.empty() ? nullptr : face.charmapPointers.data();
     rec.bbox = {host->bbox.xMin, host->bbox.yMin, host->bbox.xMax, host->bbox.yMax};
@@ -49,21 +69,49 @@ void SyncFace(GuestFace& face) {
     rec.max_advance_height = host->max_advance_height;
     rec.underline_position = host->underline_position;
     rec.underline_thickness = host->underline_thickness;
-    rec.glyph = &face.slot;
-    rec.size = &face.size;
+    rec.glyph = host->glyph ? &face.slot : nullptr;
     rec.internal = &face;
     SyncSize(face);
     SyncSlot(face);
 }
 
-void SyncSize(GuestFace& face) {
-    face.size.face = &face.rec;
-    if (!face.host->size) {
-        face.size.metrics = {};
+void SyncSizeRecord_nid_no_patch(GuestFace& face, GuestSizeRec& rec, FT_Size host) {
+    rec.face = &face.rec;
+    rec.internal = host;
+    if (!host) {
+        rec.metrics = {};
         return;
     }
-    const auto& metrics = face.host->size->metrics;
-    face.size.metrics = {metrics.x_ppem, metrics.y_ppem, metrics.x_scale, metrics.y_scale, metrics.ascender, metrics.descender, metrics.height, metrics.max_advance};
+    const auto& metrics = host->metrics;
+    rec.metrics = {metrics.x_ppem, metrics.y_ppem, metrics.x_scale, metrics.y_scale, metrics.ascender, metrics.descender, metrics.height, metrics.max_advance};
+}
+
+void SyncSizePointer_nid_no_patch(GuestFace& face) {
+    const FT_Size active = face.host->size;
+    if (!active) {
+        face.rec.size = nullptr;
+        return;
+    }
+    if (active == face.initialSize) {
+        face.rec.size = &face.size;
+        return;
+    }
+    for (auto& size : face.sizes) {
+        if (size.host != active) continue;
+        face.rec.size = &size.rec;
+        return;
+    }
+    throw std::runtime_error("FreeType: an active size created outside the guest bridge is not implemented");
+}
+
+void SyncSize(GuestFace& face) {
+    if (!face.sizeInitialized) {
+        face.initialSize = face.host->size;
+        face.sizeInitialized = true;
+        SyncSizeRecord_nid_no_patch(face, face.size, face.initialSize);
+    }
+    SyncSizePointer_nid_no_patch(face);
+    if (face.rec.size) SyncSizeRecord_nid_no_patch(face, *face.rec.size, face.host->size);
 }
 
 void SyncSlot(GuestFace& face) {
@@ -98,4 +146,16 @@ void SyncSlot(GuestFace& face) {
     slot.other = host->other;
 }
 
+extern "C" void FreeTypeSyncCharmaps_nid_no_patch(GuestFace& face) {
+    SyncCharmapPointers(face);
+    auto& rec = face.rec;
+    const auto host = face.host;
+    rec.num_charmaps = host->num_charmaps;
+    rec.charmaps = face.charmapPointers.empty() ? nullptr : face.charmapPointers.data();
+}
+
+}
+
+extern "C" void FreeTypeSyncFace_nid_no_patch(FreeType::GuestFaceRec* face) {
+    if (auto* owner = FreeType::FaceOf(face)) FreeType::SyncFace(*owner);
 }

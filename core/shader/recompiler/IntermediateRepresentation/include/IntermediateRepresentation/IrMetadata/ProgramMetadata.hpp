@@ -20,8 +20,10 @@ struct IrProgramMetadata {
     std::uint32_t pixelLinearInputs = 0;
     std::uint32_t pixelPerspectiveInputs = 0;
     std::uint32_t pixelVertexOrderInputs = 0;
+    std::uint32_t pixelFirstVertexInputs = 0;
     bool pixelIteratesSamples = false;
     bool barycentricEmulation = false;
+    bool barycentricBuiltinsUnnormalized = false;
     bool invalidatesCaches = false;
     std::vector<IrValue*> dynamicReads;
     bool shaderInfoComplete = false;
@@ -31,8 +33,10 @@ struct IrProgramMetadata {
     std::uint32_t vectorWindowBase = 0;
     std::uint32_t vectorWindowSize = 0;
     bool vectorWindowIndexedWrites = false;
+    bool splitState = false;
     std::uint32_t tessellationControlStride = 0;
     std::uint32_t tessellationPatchStride = 0;
+    std::uint32_t tessellationSharedStride = 0;
 };
 
 }

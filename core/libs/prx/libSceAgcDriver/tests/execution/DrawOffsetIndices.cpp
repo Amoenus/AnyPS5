@@ -4,6 +4,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "Recompiler.hpp"
 #include "VulkanTestDevice.hpp"
+#include "../WatchedBlock.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -50,6 +51,18 @@ alignas(256) constexpr std::array<std::uint32_t, 30> VertexCode{
     0xbf810000,
 };
 
+alignas(256) constexpr auto RuntimeFetchCode = [] {
+    std::array<std::uint32_t, 36> code{};
+    std::copy_n(VertexCode.begin(), 23, code.begin());
+    const std::array<std::uint32_t, 8> stores{
+        0xe0c01000, 0x80020c04, 0xe0c01004, 0x80020d04,
+        0xe0c01008, 0x80020e04, 0xe0c0100c, 0x80020f04
+    };
+    std::copy(stores.begin(), stores.end(), code.begin() + 23);
+    std::copy(VertexCode.begin() + 25, VertexCode.end(), code.begin() + 31);
+    return code;
+}();
+
 alignas(256) constexpr std::array<std::uint32_t, 30> PostAddCode{
     0x7e020280, 0x7e040280,
     0xd70f7d05, 0x00020a10,
@@ -68,6 +81,15 @@ alignas(256) constexpr std::array<std::uint32_t, 30> PostAddCode{
     0xf80008cf, 0x11101010,
     0xbf810000,
 };
+
+alignas(256) constexpr auto NoCarryCode = [] {
+    auto code = PostAddCode;
+    code[2] = 0x4a0a0a10u;
+    code[3] = 0xbf800000u;
+    code[4] = 0x4a101011u;
+    code[5] = 0xbf800000u;
+    return code;
+}();
 
 alignas(256) constexpr std::array<std::uint32_t, 30> CarryCode{
     0x7e020280, 0x7e040280,
@@ -184,20 +206,107 @@ alignas(256) constexpr std::array<std::uint32_t, 30> OtherVgprCode{
     0xbf810000,
 };
 
+alignas(256) constexpr std::array<std::uint32_t, 30> SadCode{
+    0x7e020280, 0x7e040280,
+    0xd55d0005, 0x04150010,
+    0xd70f7d08, 0x00021011,
+    0xf4080506, 0xfa000000,
+    0xf4080606, 0xfa000010,
+    0x02060b08,
+    0xbf8cc07f,
+    0xe0002000, 0x80050a03,
+    0xe0002000, 0x80060b03,
+    0xbf8c3f70,
+    0x4a08170a, 0x34080884,
+    0x7e180301, 0x7e1a0302, 0x7e1c0305, 0x7e1e0308,
+    0xe0781000, 0x80020c04,
+    0x7e200280, 0x7e2202f2,
+    0xf80008cf, 0x11101010,
+    0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 30> ExecAllCode{
+    0xbefe04c1, 0x7e040280,
+    0xd70f7d05, 0x00020a10,
+    0xd70f7d08, 0x00021011,
+    0xf4080506, 0xfa000000,
+    0xf4080606, 0xfa000010,
+    0x02060b08,
+    0xbf8cc07f,
+    0xe0002000, 0x80050a03,
+    0xe0002000, 0x80060b03,
+    0xbf8c3f70,
+    0x4a08170a, 0x34080884,
+    0x7e180301, 0x7e1a0302, 0x7e1c0305, 0x7e1e0308,
+    0xe0781000, 0x80020c04,
+    0x7e200280, 0x7e2202f2,
+    0xf80008cf, 0x11101010,
+    0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 34> ReloadCode{
+    0x7e020280, 0x7e040280,
+    0xd70f7d05, 0x00020a10,
+    0xd70f7d08, 0x00021011,
+    0xf4080506, 0xfa000000,
+    0xf4080606, 0xfa000010,
+    0x02060b08,
+    0xbf8cc07f,
+    0xe0002000, 0x80050a03,
+    0xe0002000, 0x80060b03,
+    0xbf8c3f70,
+    0x4a08170a, 0x34080884,
+    0x7e180301, 0x7e1a0302, 0x7e1c0305, 0x7e1e0308,
+    0xe0781000, 0x80020c04,
+    0x7e200280, 0x7e2202f2,
+    0xf80008cf, 0x11101010,
+    0xf4040407, 0xfa000000,
+    0xbf8cc07f,
+    0x80121110,
+    0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 33> SkippedReloadCode{
+    0x7e020280, 0x7e040280,
+    0xd70f7d05, 0x00020a10,
+    0xd70f7d08, 0x00021011,
+    0xf4080506, 0xfa000000,
+    0xf4080606, 0xfa000010,
+    0x02060b08,
+    0xbf8cc07f,
+    0xe0002000, 0x80050a03,
+    0xe0002000, 0x80060b03,
+    0xbf8c3f70,
+    0x4a08170a, 0x34080884,
+    0x7e180301, 0x7e1a0302, 0x7e1c0305, 0x7e1e0308,
+    0xe0781000, 0x80020c04,
+    0x7e200280, 0x7e2202f2,
+    0xf80008cf, 0x11101010,
+    0xbf840001,
+    0xbe900380,
+    0x80121110,
+    0xbf810000,
+};
+
 alignas(256) constexpr std::array<std::uint32_t, 5> PixelCode{0x7e0002f2u, 0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u};
 
 constexpr std::uint32_t Width = 64;
 constexpr std::uint32_t Height = 32;
 alignas(256) std::array<std::byte, Width * Height * 4> Pixels{};
 alignas(256) std::array<std::uint32_t, 4 * Slots> Output{};
-alignas(256) std::array<std::uint32_t, 2048> VertexSlots{};
+alignas(256) std::array<std::uint32_t, 65538> VertexSlots{};
 alignas(256) std::array<std::uint32_t, 60000> InstanceSlots{};
 alignas(256) std::array<std::uint32_t, 8> BufferTable{};
 alignas(256) constexpr std::array<std::uint16_t, 4> Indices{2, 0, 1, 0};
+alignas(256) constexpr std::array<std::uint16_t, 4> RaisedIndices{5, 3, 4, 0};
+alignas(256) constexpr std::array<std::uint16_t, 4> RestartIndices{0xffff, 5, 3, 4};
+alignas(256) constexpr std::array<std::uint16_t, 4> QuadIndices{0, 1, 2, 2};
 
-std::array<std::uint32_t, 4> SlotDescriptor(const void* data, std::uint32_t records) {
+constexpr std::size_t WatchedBytes = 65536;
+
+std::array<std::uint32_t, 4> SlotDescriptor(const void* data, std::uint32_t records, std::uint32_t outOfBoundsSelect = 0u) {
     const auto address = reinterpret_cast<std::uintptr_t>(data);
-    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (4u << 16u), records, 0x01014facu};
+    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (4u << 16u), records, 0x01014facu | (outOfBoundsSelect << 28u)};
 }
 
 std::array<std::uint32_t, 4> OutputDescriptor() {
@@ -222,6 +331,14 @@ public:
         records = static_cast<std::uint32_t*>(::operator new(RecordBytes, std::align_val_t{65536}));
         GuestAllocations::Mutation mutation;
         mutation.Add(records, RecordBytes, true, true, true);
+        indices = static_cast<std::uint16_t*>(::operator new(IndexBytes, std::align_val_t{65536}));
+        mutation.Add(indices, IndexBytes, true, true, true);
+    }
+
+    std::uintptr_t GuestIndices(const std::array<std::uint16_t, 4>& source) {
+        auto* slot = indices + IndexSlotElements * usedIndexSlots++;
+        std::copy(source.begin(), source.end(), slot);
+        return reinterpret_cast<std::uintptr_t>(slot);
     }
 
     std::vector<std::uint32_t> UserData(std::uint32_t baseVertex, std::uint32_t startInstance) const {
@@ -236,7 +353,7 @@ public:
         return userData;
     }
 
-    ShaderRecompiler::RecompileResult Vertex(std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData) const {
+    ShaderRecompiler::RecompileResult Vertex(std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, bool runtimeFetch = false) const {
         ShaderRecompiler::ShaderVertexStageInfo info{};
         info.resourcesNum = 2;
         info.resources[0].fields = {BufferTable[0], BufferTable[1], BufferTable[2], BufferTable[3]};
@@ -245,7 +362,7 @@ public:
         info.resourcesDst[1] = {11, 1, 1, 1};
         info.fetchAttribReg = 6;
         info.fetchBufferReg = 4;
-        info.fetchEmbedded = true;
+        info.fetchEmbedded = !runtimeFetch;
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{
             {reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)},
             {reinterpret_cast<std::uintptr_t>(BufferTable.data()), std::as_bytes(std::span(BufferTable))}
@@ -258,19 +375,20 @@ public:
         };
         request.useCache = false;
         auto result = ShaderRecompiler::Recompile(request);
-        Require(result.vertexOffsetSgpr == static_cast<std::int32_t>(BaseVertexSgpr) && result.instanceOffsetSgpr == static_cast<std::int32_t>(StartInstanceSgpr), "the fetch adds of s16 and s17 were not folded into the draw (vertex " + std::to_string(result.vertexOffsetSgpr) + ", instance " + std::to_string(result.instanceOffsetSgpr) + ")");
+        if (!runtimeFetch) Require(result.vertexOffsetSgpr == static_cast<std::int32_t>(BaseVertexSgpr) && result.instanceOffsetSgpr == static_cast<std::int32_t>(StartInstanceSgpr), "the fetch adds of s16 and s17 were not folded into the draw (vertex " + std::to_string(result.vertexOffsetSgpr) + ", instance " + std::to_string(result.instanceOffsetSgpr) + ")");
         return result;
     }
 
-    AgcDriver::Graphics::State State(bool rectList = false) const {
+    AgcDriver::Graphics::State State(bool rectList = false, bool restartStrip = false) const {
         AgcDriver::Graphics::State state{};
         state.stages = {AgcDriver::Graphics::ShaderPath::Vertex, 0u, 32u, 32u, std::nullopt, std::nullopt};
         state.color = {reinterpret_cast<std::uintptr_t>(Pixels.data()), {Width, Height}, VK_FORMAT_R8G8B8A8_UNORM, Pixels.size(), 0xe4u};
         state.colors = {state.color};
         state.hasColorTarget = true;
         state.renderExtent = {Width, Height};
-        state.topology = rectList ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        state.topology = rectList ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : restartStrip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         state.rectList = rectList;
+        state.primitiveRestart = restartStrip;
         state.viewport = {0.0f, static_cast<float>(Height), static_cast<float>(Width), -static_cast<float>(Height), 0.0f, 1.0f};
         state.scissor = {{0, 0}, {Width, Height}};
         state.cullMode = VK_CULL_MODE_NONE;
@@ -280,7 +398,7 @@ public:
         return state;
     }
 
-    void Draw(const ShaderRecompiler::RecompileResult& vertex, const AgcDriver::Pm4::DrawParameters& draw) {
+    void Draw(const ShaderRecompiler::RecompileResult& vertex, const AgcDriver::Pm4::DrawParameters& draw, bool restartStrip = false, bool compactRestart = false, bool quadList = false) {
         const auto vertexPush = static_cast<std::uint32_t>(vertex.pushConstants.size());
         ShaderRecompiler::ShaderPixelStageInfo pixelInfo{};
         pixelInfo.wave32 = true;
@@ -291,7 +409,17 @@ public:
         const auto pixel = ShaderRecompiler::Recompile(pixelRequest);
         const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderStage::Vertex, &vertex, 0u}, {ShaderStage::Fragment, &pixel, PixelPushOffset(vertexPush, device->Target())}}};
         Output.fill(Unwritten);
-        device->Draw(State(), draw, shaders);
+        if (compactRestart) {
+            auto context = device->graphicsContext();
+            context.primitiveListRestart = false;
+            auto state = State();
+            state.primitiveRestart = true;
+            AgcDriver::Graphics::Draw(context, state, draw, shaders);
+        } else {
+            auto state = State(false, restartStrip);
+            state.quadList = quadList;
+            device->Draw(state, draw, shaders);
+        }
         device->WaitIdle();
     }
 
@@ -328,7 +456,11 @@ public:
 
 private:
     static constexpr std::size_t RecordBytes = 65536;
+    static constexpr std::size_t IndexBytes = 65536;
+    static constexpr std::size_t IndexSlotElements = 128;
     std::uint32_t* records = nullptr;
+    std::uint16_t* indices = nullptr;
+    std::size_t usedIndexSlots = 0;
 };
 
 AgcDriver::DriverDetail::DrawProgram Program(const std::vector<std::uint32_t>& userData) {
@@ -363,7 +495,7 @@ std::string Analysis(Fixture& fixture) {
         bool vertex;
         bool instance;
     };
-    const std::array<Case, 8> cases{{
+    const std::array<Case, 12> cases{{
         {"a program that copies v5 and v8 before its fetch adds", VertexCode, true, true},
         {"a program whose fetch adds are the only readers of v5, v8, s16 and s17", PostAddCode, false, false},
         {"a program that reads the instance add's carry", CarryCode, false, true},
@@ -372,6 +504,10 @@ std::string Analysis(Fixture& fixture) {
         {"a program that writes EXEC before its fetch adds", ExecCode, true, true},
         {"a program that writes another add's carry to s17 before its fetch adds", CarryWriteCode, false, true},
         {"a program whose s16 add writes v0, not v5", OtherVgprCode, true, false},
+        {"a program whose vertex add is an unclamped v_sad_u32", SadCode, false, false},
+        {"a program that sets every EXEC bit with s_mov_b64 before its fetch adds", ExecAllCode, false, false},
+        {"a program that reloads s16 and s17 with s_load_dwordx2 from s[14:15] after its fetch adds and reads them", ReloadCode, false, false},
+        {"a program that reads s16 and s17 after a branch that can skip the write of s16", SkippedReloadCode, true, true},
     }};
     const auto userData = fixture.UserData(0x51u, 0x62u);
     std::string failures;
@@ -385,11 +521,30 @@ std::string Analysis(Fixture& fixture) {
     return failures;
 }
 
+std::string RuntimeFetch(Fixture& fixture, std::uint32_t index, bool compactRestart) {
+    const auto userData = fixture.UserData(0, 0);
+    const auto vertex = fixture.Vertex(RuntimeFetchCode, userData, true);
+    Require(vertex.vertexAttributes.empty(), "runtime fetch must not become fixed vertex attributes");
+    VertexSlots.fill(0);
+    InstanceSlots.fill(0);
+    alignas(256) static std::array<std::uint32_t, 5> indices{};
+    indices = {0xffffffffu, index, index, index, 0xffffffffu};
+    const auto first = compactRestart ? 0u : 1u;
+    const auto count = compactRestart ? 5u : 3u;
+    const AgcDriver::Pm4::DrawParameters draw{reinterpret_cast<std::uintptr_t>(indices.data() + first), count, 4, 1, 0, true, 0, 0};
+    fixture.Draw(vertex, draw, false, compactRestart);
+    std::cout << "runtime fetch, index " << index << ", compact restart " << compactRestart
+              << ", attributes " << vertex.vertexAttributes.size() << ": atomic readback "
+              << Output[0] << ' ' << Output[1] << ' ' << Output[2] << ' ' << Output[3] << '\n';
+    const std::array<std::uint32_t, 4> expected{index, 0, index, 0};
+    return std::equal(expected.begin(), expected.end(), Output.begin()) ? "" : "runtime-fetched VertexIndex was changed\n";
+}
+
 std::string Run(Fixture& fixture) {
     std::string failures = Analysis(fixture);
     const std::array<std::uint32_t, Vertices> autoIndices{0, 1, 2};
     const std::array<std::uint32_t, Vertices> bufferIndices{Indices[0], Indices[1], Indices[2]};
-    const auto indexAddress = reinterpret_cast<std::uintptr_t>(Indices.data());
+    const auto indexAddress = fixture.GuestIndices(Indices);
 
     {
         constexpr std::uint32_t indxOffset = 5;
@@ -413,6 +568,68 @@ std::string Run(Fixture& fixture) {
         fixture.Draw(vertex, draw);
         failures += fixture.Check("direct indexed draw, s16 1000, s17 40", bufferIndices, baseVertex, startInstance, true);
     }
+    {
+        constexpr std::uint32_t baseVertex = 1000;
+        constexpr std::uint32_t startInstance = 40;
+        const auto userData = fixture.UserData(baseVertex, startInstance);
+        const auto vertex = fixture.Vertex(VertexCode, userData);
+        const std::array<std::uint32_t, Vertices> raised{RaisedIndices[0], RaisedIndices[1], RaisedIndices[2]};
+        const auto draw = FoldedDraw(vertex, userData, {fixture.GuestIndices(RaisedIndices), Vertices, 2, Instances, 0, true, 0, 0});
+        fixture.Place(baseVertex, raised, startInstance);
+        fixture.Draw(vertex, draw);
+        failures += fixture.Check("direct indexed draw whose lowest index is 3, s16 1000, s17 40", raised, baseVertex, startInstance, true);
+    }
+    {
+        constexpr std::uint32_t baseVertex = 1000;
+        constexpr std::uint32_t startInstance = 40;
+        const auto userData = fixture.UserData(baseVertex, startInstance);
+        const auto vertex = fixture.Vertex(VertexCode, userData);
+        const std::array<std::uint32_t, Vertices> raised{RestartIndices[1], RestartIndices[2], RestartIndices[3]};
+        const auto draw = FoldedDraw(vertex, userData, {fixture.GuestIndices(RestartIndices), static_cast<std::uint32_t>(RestartIndices.size()), 2, Instances, 0, true, 0, 0});
+        fixture.Place(baseVertex, raised, startInstance);
+        fixture.Draw(vertex, draw, true);
+        failures += fixture.Check("direct indexed strip that starts with a restart index, lowest index 3, s16 1000, s17 40", raised, baseVertex, startInstance, true);
+    }
+    if (void* watched = AllocateWatched(WatchedBytes, WatchedBytes)) {
+        struct Release {
+            void* block;
+            ~Release() { ReleaseWatched(block, WatchedBytes); }
+        } release{watched};
+        constexpr std::uint32_t baseVertex = 1000;
+        constexpr std::uint32_t startInstance = 40;
+        auto* guestIndices = static_cast<std::uint16_t*>(watched);
+        std::copy(RaisedIndices.begin(), RaisedIndices.end(), guestIndices);
+        const auto userData = fixture.UserData(baseVertex, startInstance);
+        const auto vertex = fixture.Vertex(VertexCode, userData);
+        const std::array<std::uint32_t, Vertices> raised{RaisedIndices[0], RaisedIndices[1], RaisedIndices[2]};
+        const auto draw = FoldedDraw(vertex, userData, {reinterpret_cast<std::uintptr_t>(guestIndices), Vertices, 2, Instances, 0, true, 0, 0});
+        for (const auto* pass : {"first", "second"}) {
+            fixture.Place(baseVertex, raised, startInstance);
+            fixture.Draw(vertex, draw);
+            failures += fixture.Check(std::string("indexed draw from write-watched indices whose lowest index is 3, s16 1000, s17 40, ") + pass + " time", raised, baseVertex, startInstance, true);
+        }
+    } else {
+        std::cout << "write watching unavailable: indices kept between draws not tested\n";
+    }
+    {
+        constexpr std::uint32_t baseVertex = 1000;
+        constexpr std::uint32_t startInstance = 40;
+        const std::string what = "direct indexed quad-list draw, s16 1000, s17 40, vertex descriptor of exactly the fetched records";
+        const auto wholeSlots = SlotDescriptor(VertexSlots.data(), static_cast<std::uint32_t>(VertexSlots.size()));
+        const auto exactSlots = SlotDescriptor(VertexSlots.data(), baseVertex + Vertices, 3u);
+        std::copy(exactSlots.begin(), exactSlots.end(), BufferTable.begin());
+        const auto userData = fixture.UserData(baseVertex, startInstance);
+        const auto vertex = fixture.Vertex(VertexCode, userData);
+        const auto draw = FoldedDraw(vertex, userData, {reinterpret_cast<std::uintptr_t>(QuadIndices.data()), static_cast<std::uint32_t>(QuadIndices.size()), 2, Instances, 0, true, 0, 0});
+        fixture.Place(baseVertex, autoIndices, startInstance);
+        try {
+            fixture.Draw(vertex, draw, false, false, true);
+            failures += fixture.Check(what, autoIndices, baseVertex, startInstance, true);
+        } catch (const std::exception& error) {
+            failures += what + ": rejected: " + error.what() + "\n";
+        }
+        std::copy(wholeSlots.begin(), wholeSlots.end(), BufferTable.begin());
+    }
 
     const auto staleUserData = fixture.UserData(0x51u, 0x62u);
     const std::array<std::uint32_t, 5> indexedRecord{Vertices, Instances, 0, 700, 59455};
@@ -434,6 +651,40 @@ std::string Run(Fixture& fixture) {
         failures += fixture.Check(what + ", on the CPU path", bufferIndices, arguments.vertexOffset, arguments.firstInstance, true);
     }
     {
+        const std::string what = "indexed indirect record whose program reads no offset register";
+        auto noReads = fixture.Vertex(VertexCode, staleUserData);
+        noReads.vertexOffsetSgpr = -1;
+        noReads.instanceOffsetSgpr = -1;
+        noReads.vertexOffsetShared = false;
+        noReads.instanceOffsetShared = false;
+        noReads.vertexOffsetConflict = false;
+        noReads.instanceOffsetConflict = false;
+        noReads.userDataRegisterReads &= ~((std::uint64_t{1} << (BaseVertexSgpr - 8u)) | (std::uint64_t{1} << (StartInstanceSgpr - 8u)));
+        AgcDriver::Pm4::DrawParameters packet{indexAddress, static_cast<std::uint32_t>(Indices.size()), 2, 0, 0, true, 0, 0};
+        packet.indirect = indexedIndirect;
+        failures += Classified(fixture, what, noReads, staleUserData, packet, std::nullopt, Rule::Constant);
+        char line[256];
+        std::snprintf(line, sizeof(line), "%s: constants vertex %u instance %u\n", what.c_str(), packet.indirect->vertexConstant, packet.indirect->instanceConstant);
+        std::cout << line;
+        if (packet.indirect->vertexConstant != 0 || packet.indirect->instanceConstant != 0) failures += line;
+    }
+    if (fixture.device->DrawIndirectSupport().multi) {
+        const std::string what = "indexed indirect list of 300 records whose program reads no offset register";
+        auto noReads = fixture.Vertex(VertexCode, staleUserData);
+        noReads.vertexOffsetSgpr = -1;
+        noReads.instanceOffsetSgpr = -1;
+        noReads.vertexOffsetShared = false;
+        noReads.instanceOffsetShared = false;
+        noReads.vertexOffsetConflict = false;
+        noReads.instanceOffsetConflict = false;
+        noReads.userDataRegisterReads &= ~((std::uint64_t{1} << (BaseVertexSgpr - 8u)) | (std::uint64_t{1} << (StartInstanceSgpr - 8u)));
+        auto longIndirect = indexedIndirect;
+        longIndirect.count = 300;
+        AgcDriver::Pm4::DrawParameters packet{indexAddress, static_cast<std::uint32_t>(Indices.size()), 2, 0, 0, true, 0, 0};
+        packet.indirect = longIndirect;
+        failures += Classified(fixture, what, noReads, staleUserData, packet, std::nullopt, Rule::Constant);
+    }
+    {
         const std::string what = "auto indirect record whose program copies v5/v8 before its fetch adds, start vertex 300, start instance 7";
         const std::array<std::uint32_t, 4> record{Vertices, Instances, 300, 7};
         std::copy(record.begin(), record.end(), fixture.Records() + 16);
@@ -452,15 +703,16 @@ std::string Run(Fixture& fixture) {
         failures += fixture.Check(what + ", on the CPU path", autoIndices, arguments.firstVertexOrIndex, arguments.firstInstance, true);
     }
     if (fixture.device->DrawIndirectSupport().firstInstance) {
-        {
-            const std::string what = "indexed indirect record whose fetch adds are the only readers of v5/v8, user data s16 0x51, s17 0x62";
-            const auto vertex = fixture.Vertex(PostAddCode, staleUserData);
+        for (const auto* code : {&PostAddCode, &NoCarryCode}) {
+            const std::string what = std::string(code == &NoCarryCode ? "no-carry " : "carry ") + "indexed indirect record whose fetch adds are the only readers of v5/v8, user data s16 0x51, s17 0x62";
+            const auto vertex = fixture.Vertex(*code, staleUserData);
             AgcDriver::Pm4::DrawParameters draw{indexAddress, static_cast<std::uint32_t>(Indices.size()), 2, 0, 0, true, 0, 0};
             draw.indirect = indexedIndirect;
             failures += Classified(fixture, what, vertex, staleUserData, draw, std::nullopt, Rule::InPlace);
             fixture.Place(indexedRecord[3], bufferIndices, indexedRecord[4]);
             fixture.Draw(vertex, draw);
             failures += fixture.Check(what + ", drawn in place on the GPU", bufferIndices, indexedRecord[3], indexedRecord[4], false);
+            if (code == &NoCarryCode) std::cout << "no-carry indexed indirect GPU readback checked\n";
         }
         {
             const std::string what = "indexed indirect record whose packet names no register for its offsets, user data s16 0x51, s17 0x62";
@@ -491,12 +743,22 @@ std::string Run(Fixture& fixture) {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
         std::shared_ptr<AgcDriver::VulkanDevice> device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         Fixture fixture(device);
-        const auto failures = Run(fixture);
+        std::string failures;
+        if (argc == 1) failures = Run(fixture);
+        else {
+            Require(argc == 3 || argc == 4, "expected runtime-fetch INDEX [compact-restart]");
+            Require(std::string(argv[1]) == "runtime-fetch", "unknown case");
+            const auto index = std::stoul(argv[2]);
+            Require(index < VertexSlots.size(), "index exceeds the runtime input buffer");
+            const bool compactRestart = argc == 4;
+            if (compactRestart) Require(std::string(argv[3]) == "compact-restart", "unknown index path");
+            failures = RuntimeFetch(fixture, static_cast<std::uint32_t>(index), compactRestart);
+        }
         if (!failures.empty()) {
             std::cerr << "vertex and instance indices differ from the guest's:\n" << failures;
             return 1;

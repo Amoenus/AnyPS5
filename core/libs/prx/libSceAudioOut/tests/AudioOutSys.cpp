@@ -1,17 +1,10 @@
+#include "prx/libSceAudioOut/include/AudioOut.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <vector>
-
-extern "C" {
-int APS5_VABI sceAudioOutSysOpen(int userId, std::uint32_t mode);
-int APS5_VABI sceAudioOutSysConfigureOutput(int type, std::uint64_t flags, std::uint32_t mode, std::uint32_t target, std::uint64_t option);
-int APS5_VABI sceAudioOutSysClose(int handle);
-int APS5_VABI sceAudioOutExOpen(int userId, std::uint32_t mode);
-int APS5_VABI sceAudioOutOutput(int handle, const void* ptr);
-}
 
 static constexpr int SYSTEM_USER = 0xFF;
 
@@ -53,13 +46,27 @@ int main() {
     Require(Throws([] { sceAudioOutSysConfigureOutput(1, 0, 4, 1, 0); }), "another mode throws");
     Require(Throws([] { sceAudioOutSysConfigureOutput(1, 0, 5, 2, 0); }), "another target throws");
 
+    int mainOutput = -1;
+    Require(!Throws([&mainOutput] { mainOutput = sceAudioOutSetMainOutput(); }), "sceAudioOutSetMainOutput does not throw");
+    Require(mainOutput == 0, "sceAudioOutSetMainOutput returns 0");
+
     Require(sceAudioOutSysClose(truehd) == 0, "close the first Sys port");
     Require(Throws([truehd] { sceAudioOutSysClose(truehd); }), "a closed Sys port throws");
     const int ex = sceAudioOutExOpen(SYSTEM_USER, 0);
     Require(ex > 0, "an Ex port opens");
     Require(Throws([ex] { sceAudioOutSysClose(ex); }), "an Ex port is not a Sys port");
+    const int standard = sceAudioOutOpen(SYSTEM_USER, 0, 0, 256, 48000, 1);
+    Require(standard > 0, "a standard port opens");
+    Require(Throws([standard] { sceAudioOutSysClose(standard); }), "a standard port is not a Sys port");
+    Require(sceAudioOutClose(standard) == 0, "close standard port");
+    Require(sceAudioOutClose(0) == -2144993277, "handle 0 returns invalid handle");
     Require(Throws([] { sceAudioOutSysClose(0); }), "handle 0 is not a Sys port");
     Require(Throws([] { sceAudioOutSysClose(1000); }), "an out-of-range handle is not a Sys port");
     Require(sceAudioOutSysClose(second) == 0, "close the second Sys port");
+    const int third = sceAudioOutSysOpen(SYSTEM_USER, 5);
+    Require(third > 0, "a third mode 5 port opens");
+    Require(sceAudioOutClose(third) == 0, "close Sys port with regular close");
+    Require(Throws([third] { sceAudioOutSysClose(third); }), "a closed Sys port throws");
+    Require(sceAudioOutClose(third) == -2144993277, "closed handle returns invalid handle");
     return failed ? 1 : 0;
 }

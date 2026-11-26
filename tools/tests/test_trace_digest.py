@@ -1,4 +1,5 @@
 import contextlib
+from functools import lru_cache
 import gzip
 import io
 import json
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,7 +47,656 @@ SUMMARY = {"commit": "abc", "dirty": False, "env": {"APS5_TRACE_FRAMES": "600:3"
 STACKS = "# samples=5 depth=64 truncated=1\n# module a.prx 0x1000 0x1\nntdll.dll+0x1;a.prx+0x10;a.prx+0x20 3\nntdll.dll+0x1;a.prx+0x10;a.prx+0x30 1\n[truncated];a.prx+0x40;a.prx+0x30 1\n"
 
 
+def child_decoder_rejects(text):
+    probe = "import json, sys\ntry:\n    json.loads(sys.stdin.read())\nexcept RecursionError:\n    sys.exit(3)\n"
+    return subprocess.run([sys.executable, "-c", probe], input=text, text=True, encoding="utf-8",
+                          capture_output=True).returncode == 3
+
+
+@lru_cache(maxsize=2)
+def excessive_trace_json(opening, closing):
+    depth = sys.getrecursionlimit() + 64
+    for _ in range(8):
+        value = opening * depth + "0" + closing * depth
+        if child_decoder_rejects(value):
+            return opening * (depth + 128) + "0" + closing * (depth + 128)
+        depth *= 2
+    raise AssertionError("JSON decoder accepted every bounded nesting probe")
+
+
+class TraceWaitAncestryTests(unittest.TestCase):
+    def test_digest_classifies_each_slice_once(self):
+        events = [complete(1, "Worker.wait" if index % 3 == 0 else "work",
+                           index * 2, 1) for index in range(128)]
+        trace = trace_digest.Trace(events)
+        expected = trace_digest.digest(trace)
+        with mock.patch.object(trace_digest, "is_wait", wraps=trace_digest.is_wait) as check:
+            actual = trace_digest.digest(trace)
+        self.assertEqual(actual, expected)
+        self.assertEqual(check.call_count, len(events))
+
+    def test_wait_ancestry_survives_inner_pops_and_ends_with_parent(self):
+        events = [
+            complete(1, "wait.outer", 0, 100),
+            complete(1, "work.child", 1, 10),
+            complete(1, "work.grandchild", 2, 1),
+            complete(1, "work.sibling", 11, 10),
+            complete(1, "work.after", 100, 10),
+            complete(2, "work.other_thread", 2, 1),
+        ]
+        trace = trace_digest.Trace(list(reversed(events)))
+        self.assertEqual([(entry[2], entry[3], entry[4]) for entry in trace.slices[1]], [
+            ("wait.outer", 0, False),
+            ("work.child", 1, True),
+            ("work.grandchild", 2, True),
+            ("work.sibling", 1, True),
+            ("work.after", 0, False),
+        ])
+        self.assertEqual(trace.slices[2][0][3:], [0, False])
+
+    def test_inner_wait_does_not_leak_into_a_sibling(self):
+        events = [
+            complete(1, "work.outer", 0, 100),
+            complete(1, "wait.inner", 1, 10),
+            complete(1, "work.grandchild", 2, 1),
+            complete(1, "work.sibling", 11, 10),
+        ]
+        trace = trace_digest.Trace(events)
+        self.assertEqual([entry[4] for entry in trace.slices[1]], [False, False, True, False])
+
+    def test_non_wait_ancestry_checks_grow_linearly(self):
+        count = 512
+        events = [complete(1, "work", index, 2 * (count - index)) for index in range(count)]
+        with mock.patch.object(trace_digest, "is_wait", wraps=trace_digest.is_wait) as check:
+            trace = trace_digest.Trace(events)
+        self.assertLessEqual(check.call_count, count)
+        self.assertEqual([entry[3] for entry in trace.slices[1]], list(range(count)))
+        self.assertFalse(any(entry[4] for entry in trace.slices[1]))
+
+
+class GpuOccupancyTests(unittest.TestCase):
+    def trace(self, ranges, begin=0, end=15000, thread="gpu"):
+        events = [{"name": "thread_name", "ph": "M", "tid": 1, "args": {"name": thread}},
+                  {"name": "present", "ph": "i", "ts": begin, "args": {"present": 1}},
+                  {"name": "present", "ph": "i", "ts": end, "args": {"present": 2}}]
+        for index, (start, duration) in enumerate(ranges):
+            events.append(dict(complete(1, "batch", start, duration), args={"batch": index}))
+        return trace_digest.Trace(events)
+
+    def test_gpu_occupancy_is_the_union_of_clipped_ranges(self):
+        for ranges, expected in (([(0, 10000), (5000, 10000)], 15),
+                                 ([(0, 15000), (3000, 2000)], 15),
+                                 ([(1000, 2000), (6000, 3000)], 5),
+                                 ([(0, 5000), (5000, 10000)], 15),
+                                 ([(-5000, 10000), (3000, 20000)], 15),
+                                 ([(-10000, 5000), (20000, 5000)], 0)):
+            with self.subTest(ranges=ranges):
+                result = trace_digest.digest(self.trace(ranges))
+                gpu = result["threads"][0]
+                self.assertAlmostEqual(gpu["busy_ms_per_frame"], expected)
+                self.assertAlmostEqual(gpu["busy_pct"], expected / 15 * 100)
+                self.assertAlmostEqual(gpu["untraced_ms_per_frame"], 15 - expected)
+                self.assertEqual(gpu["wait_ms_per_frame"], 0)
+
+    def test_markdown_batch_ids_and_present_values_cannot_create_report_sections(self):
+        events = [{"name": "thread_name", "ph": "M", "tid": 1, "args": {"name": "gpu"}},
+                  {"name": "thread_name", "ph": "M", "tid": 2, "args": {"name": "worker"}},
+                  {"name": "present", "ph": "i", "ts": 0, "args": {"present": "1\n\n## Fake present"}},
+                  {"name": "present", "ph": "i", "ts": 15000, "args": {"present": 2}},
+                  dict(complete(1, "batch", 0, 10000), args={"batch": "7\n\n# Fake batch\n\n| a |\n|---|"}),
+                  complete(2, "Driver.wait", 1000, 4000)]
+        result = trace_digest.digest(trace_digest.Trace(events))
+        self.assertEqual(result["largest_gpu_batches"][0]["batch"], "7\n\n# Fake batch\n\n| a |\n|---|")
+        self.assertEqual(result["longest_waits"][0]["present"], "1\n\n## Fake present")
+        lines = trace_digest.markdown(result).splitlines()
+        self.assertFalse([line for line in lines if line.startswith(("#", "| a", "|---|:"))])
+        present = "present 1<br><br>## Fake present"
+        self.assertTrue(any(line.startswith(f"- {present}: ") for line in lines))
+        self.assertTrue(any(line.startswith("- Driver.wait (worker) ") and line.endswith(f", {present}") for line in lines))
+        self.assertTrue(any(line.startswith("- batch 7<br><br># Fake batch<br><br>&#124; a &#124;<br>&#124;---&#124;: ") and f", {present}: GPU " in line for line in lines))
+
+    def test_overlap_keeps_individual_batch_and_inclusive_slice_durations(self):
+        result = trace_digest.digest(self.trace([(0, 10000), (5000, 10000)]))
+        self.assertEqual([batch["ms"] for batch in result["largest_gpu_batches"]], [10, 10])
+        self.assertEqual(result["top_slices_ms_per_frame"], [{"name": "batch", "ms": 20}])
+        self.assertEqual(result["threads"][0]["top"], [{"name": "batch", "ms_per_frame": 15}])
+
+    def test_no_present_bounds_still_union_gpu_ranges(self):
+        trace = self.trace([(0, 10000), (5000, 10000)])
+        trace.presents.clear()
+        self.assertEqual(trace_digest.digest(trace)["threads"][0]["busy_ms_per_frame"], 15)
+
+    def test_cpu_scope_accounting_is_unchanged(self):
+        result = trace_digest.digest(self.trace([(0, 10000), (5000, 10000)], thread="worker"))
+        self.assertEqual(result["threads"][0]["busy_ms_per_frame"], 10)
+
+    def test_cli_reports_overlapping_gpu_batches_in_json_and_markdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capture.json"
+            events = [{"name": "thread_name", "ph": "M", "tid": 1, "args": {"name": "gpu"}},
+                      complete(1, "batch", 0, 10000), complete(1, "batch", 5000, 10000),
+                      {"name": "present", "ph": "i", "ts": 0, "args": {"present": 1}},
+                      {"name": "present", "ph": "i", "ts": 15000, "args": {"present": 2}}]
+            path.write_text(json.dumps(events), encoding="utf-8")
+            for output in ([], ["--json"]):
+                with self.subTest(output=output):
+                    result = subprocess.run([sys.executable, trace_digest.__file__, str(path), *output],
+                                            capture_output=True, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if output:
+                        gpu = json.loads(result.stdout)["threads"][0]
+                        self.assertEqual(gpu["busy_pct"], 100)
+                        self.assertEqual(gpu["untraced_ms_per_frame"], 0)
+                    else:
+                        self.assertIn("| gpu | 15.0 (100 %) | 0.0 (0 %) | 0.0 |", result.stdout)
+
+
+class TraceEventLossTests(unittest.TestCase):
+    def marker(self, tid=1, lost=8):
+        return {"name": "trace buffer full", "ph": "i", "ts": 1500, "pid": 7, "tid": tid,
+                "s": "t", "args": {"events_lost": lost}}
+
+    def test_cli_reports_loss_without_an_adjacent_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capture.json.gz"
+            path.write_bytes(gzip.compress(json.dumps({"traceEvents": EVENTS + [self.marker()]}).encode()))
+            for output in ([], ["--json"]):
+                with self.subTest(output=output):
+                    result = subprocess.run([sys.executable, trace_digest.__file__, str(path), *output],
+                                            capture_output=True, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if output:
+                        digest = json.loads(result.stdout)
+                        self.assertTrue(digest["trace_incomplete"])
+                        self.assertEqual(digest["event_loss"], [{"thread": "queue worker 0x0", "at_ms": 1.5, "events_lost": 8}])
+                        self.assertIsNone(digest["summary"])
+                    else:
+                        self.assertIn("Incomplete trace", result.stdout)
+                        self.assertIn("8 events lost", result.stdout)
+                        self.assertIn("missing slices are not idle time", result.stdout)
+
+    def test_loss_does_not_change_frame_bounds_or_retained_slice_timings(self):
+        expected = trace_digest.digest(trace_digest.Trace(EVENTS), SUMMARY)
+        result = trace_digest.digest(trace_digest.Trace(EVENTS + [self.marker()]), SUMMARY)
+        self.assertTrue(result.pop("trace_incomplete"))
+        result.pop("event_loss")
+        self.assertEqual(result, expected)
+        self.assertFalse(SUMMARY["trace_dropped"])
+
+    def test_summary_loss_is_reported_without_event_markers(self):
+        summary = dict(SUMMARY, trace_dropped=True)
+        result = trace_digest.digest(trace_digest.Trace(EVENTS), summary)
+        self.assertTrue(result["trace_incomplete"])
+        self.assertEqual(result["event_loss"], [])
+        self.assertIn("Incomplete trace", trace_digest.markdown(result))
+
+    def test_markdown_loss_escapes_thread_names(self):
+        for name, escaped in (("a|b", "a&#124;b"), ("<x>", "&lt;x&gt;")):
+            with self.subTest(name=name):
+                metadata = {"name": "thread_name", "ph": "M", "ts": 0, "pid": 7, "tid": 1, "args": {"name": name}}
+                result = trace_digest.digest(trace_digest.Trace(EVENTS + [metadata, self.marker()]))
+                self.assertEqual(result["event_loss"][0]["thread"], name)
+                markdown = trace_digest.markdown(result)
+                self.assertIn(f"- {escaped}: 8 events lost; buffer full at 1.5 ms", markdown)
+                self.assertNotIn(f"- {name}: 8 events lost", markdown)
+
+    def test_thread_filter_keeps_only_relevant_loss_markers(self):
+        trace = trace_digest.Trace(EVENTS + [self.marker()])
+        trace.select_threads(["presenter"])
+        result = trace_digest.digest(trace)
+        self.assertNotIn("trace_incomplete", result)
+        self.assertNotIn("Incomplete trace", trace_digest.markdown(result))
+        trace = trace_digest.Trace(EVENTS + [self.marker(tid=9)])
+        trace.select_threads(["tid 9"])
+        result = trace_digest.digest(trace)
+        self.assertEqual(result["event_loss"], [{"thread": "tid 9", "at_ms": 1.5, "events_lost": 8}])
+
+    def test_filled_thread_reports_its_recorded_span_beside_the_retained_totals(self):
+        events = [{"name": "thread_name", "ph": "M", "tid": 1, "args": {"name": "draw committer"}},
+                  {"name": "thread_name", "ph": "M", "tid": 2, "args": {"name": "draw finisher"}}]
+        events += [{"name": "present", "ph": "i", "ts": ts, "args": {"present": index}} for index, ts in enumerate(range(0, 50000, 10000))]
+        events += [complete(1, "Graphics.Draw", 0, 6000), complete(1, "Graphics.Draw.wait", 1000, 1000),
+                   complete(1, "Graphics.Draw", 10000, 6000), complete(1, "Graphics.Draw", 20000, 400)]
+        events += [complete(2, "Driver.DrawFinish", start, 2000) for start in range(0, 40000, 10000)]
+        marker = {"name": "trace buffer full", "ph": "i", "ts": 20500, "tid": 1, "args": {"events_lost": 3}}
+        expected = trace_digest.digest(trace_digest.Trace(events))
+        result = trace_digest.digest(trace_digest.Trace(events + [marker]))
+        loss = result.pop("event_loss")
+        self.assertTrue(result.pop("trace_incomplete"))
+        self.assertEqual(result, expected)
+        self.assertAlmostEqual(expected["threads"][0]["busy_ms_per_frame"], 2.85)
+        self.assertEqual(loss, [{"thread": "draw committer", "at_ms": 20.5, "events_lost": 3, "frames_before_full": 2, "recorded_ms": 20.0,
+                                 "busy_ms_per_frame": 5.5, "wait_ms_per_frame": 0.5, "busy_pct": 55.0,
+                                 "top": [{"name": "Graphics.Draw", "ms_per_frame": 6.0}]}])
+        markdown = trace_digest.markdown(dict(result, event_loss=loss, trace_incomplete=True))
+        self.assertIn("- draw committer: 3 events lost; buffer full at 20.5 ms; over the 2 of 4 frames that ended before it: busy 5.5 ms per frame (55 %), "
+                      "wait 0.5, largest Graphics.Draw 6.0 (the thread table divides the retained slices by every frame)", markdown)
+
+    def test_loss_before_any_positive_frame_span_still_reports_lost_events(self):
+        events = [complete(1, "work", 0, 1000), self.marker()]
+        events += [{"name": "present", "ph": "i", "ts": ts, "args": {"present": index}}
+                   for index, ts in enumerate((0, 0, 10000))]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.json"
+            path.write_text(json.dumps(events), encoding="utf-8")
+            for output in ([], ["--json"]):
+                with self.subTest(output=output):
+                    result = subprocess.run([sys.executable, trace_digest.__file__, str(path), *output],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if output:
+                        report = json.loads(result.stdout)
+                        self.assertTrue(report["trace_incomplete"])
+                        self.assertEqual(report["event_loss"], [{"thread": "tid 1", "at_ms": 1.5, "events_lost": 8}])
+                    else:
+                        self.assertIn("tid 1: 8 events lost; buffer full at 1.5 ms", result.stdout)
+                        self.assertNotIn("frames that ended before it", result.stdout)
+
+    def test_gpu_recorded_span_is_the_union_of_clipped_ranges(self):
+        events = [{"name": "thread_name", "ph": "M", "tid": 1, "args": {"name": "gpu"}}]
+        events += [{"name": "present", "ph": "i", "ts": ts, "args": {"present": index}} for index, ts in enumerate(range(0, 40000, 10000))]
+        events += [dict(complete(1, "batch", 0, 6000), args={"batch": 1}), dict(complete(1, "batch", 3000, 6000), args={"batch": 2}),
+                   dict(complete(1, "batch", 9500, 3000), args={"batch": 3})]
+        events.append({"name": "trace buffer full", "ph": "i", "ts": 10000, "tid": 1, "args": {"events_lost": 1}})
+        loss = trace_digest.digest(trace_digest.Trace(events))["event_loss"][0]
+        self.assertEqual((loss["frames_before_full"], loss["recorded_ms"], loss["busy_ms_per_frame"], loss["busy_pct"]), (1, 10.0, 9.5, 95.0))
+
+    def test_loss_counters_are_validated(self):
+        for lost in (None, True, -1, 1.5, "8"):
+            with self.subTest(lost=lost):
+                with self.assertRaisesRegex(ValueError, "args.events_lost must be a nonnegative integer"):
+                    trace_digest.Trace(EVENTS + [self.marker(lost=lost)])
+
+    def test_zero_loss_does_not_change_the_digest(self):
+        expected = trace_digest.digest(trace_digest.Trace(EVENTS))
+        result = trace_digest.digest(trace_digest.Trace(EVENTS + [self.marker(lost=0)]))
+        self.assertEqual(result, expected)
+
+
+class TraceJsonNestingTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.trace = Path(self.directory.name) / "baseline.json"
+        self.trace.write_text(json.dumps({"traceEvents": EVENTS}), encoding="utf-8")
+
+    def test_excessive_trace_json_nesting_has_a_path_qualified_error(self):
+        for opening, closing in (("[", "]"), ('{"nested":', "}")):
+            data = ('{"traceEvents": [], "extra": ' + excessive_trace_json(opening, closing) + "}").encode("utf-8")
+            for compressed in (False, True):
+                with self.subTest(opening=opening, compressed=compressed):
+                    path = Path(self.directory.name) / ("deep-\u00e9.json.gz" if compressed else "deep-\u00e9.json")
+                    original = gzip.compress(data) if compressed else data
+                    path.write_bytes(original)
+                    with self.assertRaisesRegex(ValueError, "trace JSON nesting is too deep") as error:
+                        trace_digest.load_trace(path)
+                    self.assertIn(str(path), str(error.exception))
+                    self.assertIsInstance(error.exception.__cause__, RecursionError)
+                    self.assertEqual(path.read_bytes(), original)
+
+    def test_excessive_trace_json_nesting_produces_only_a_cli_error(self):
+        for opening, closing, compressed, args in (("[", "]", False, ()), ('{"nested":', "}", True, ("--json",)),
+                                                   ("[", "]", True, ()), ('{"nested":', "}", False, ("--json",))):
+            with self.subTest(opening=opening, compressed=compressed, args=args):
+                path = Path(self.directory.name) / ("deep-\u00e9.json.gz" if compressed else "deep-\u00e9.json")
+                data = ('{"traceEvents": [], "extra": ' + excessive_trace_json(opening, closing) + "}").encode("utf-8")
+                original = gzip.compress(data) if compressed else data
+                path.write_bytes(original)
+                result = subprocess.run([sys.executable, trace_digest.__file__, str(path), *args],
+                                        capture_output=True, text=True, encoding="utf-8", timeout=20)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"FAIL: {path}: trace JSON nesting is too deep", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_supported_nested_trace_metadata_preserves_the_digest(self):
+        expected = trace_digest.digest(trace_digest.load_trace(self.trace), SUMMARY, None, 5, 10)
+        metadata = {"value": 7}
+        for _ in range(16):
+            metadata = {"nested": [metadata]}
+        data = json.dumps({"traceEvents": EVENTS, "extra": metadata}).encode("utf-8")
+        for compressed in (False, True):
+            with self.subTest(compressed=compressed):
+                path = Path(self.directory.name) / ("nested.json.gz" if compressed else "nested.json")
+                original = gzip.compress(data) if compressed else data
+                path.write_bytes(original)
+                trace = trace_digest.load_trace(path)
+                self.assertEqual(trace_digest.digest(trace, SUMMARY, None, 5, 10), expected)
+                self.assertEqual(path.read_bytes(), original)
+
 class TraceDigestTests(unittest.TestCase):
+
+    def test_summary_symlink_loop_is_reported_without_traceback(self):
+        loop = Path(self.directory.name) / "loop.jsonl"
+        try:
+            loop.symlink_to(loop.name)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symbolic links unavailable: {error}")
+        with self.assertRaisesRegex(ValueError, r"symbolic link loop"):
+            trace_digest.load_summary(loop, self.trace)
+        default = self.trace.with_name("aps5-summary.jsonl")
+        if default.exists():
+            default.unlink()
+        try:
+            default.symlink_to(default.name)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symbolic links unavailable: {error}")
+        with self.assertRaisesRegex(ValueError, r"symbolic link loop"):
+            trace_digest.load_summary(None, self.trace)
+        for arguments in ([str(self.trace), "--summary", str(loop)], [str(self.trace)]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, trace_digest.__file__, *arguments],
+                                        capture_output=True, text=True, encoding="utf-8", timeout=20)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("symbolic link loop", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_folded_counters_follow_the_selected_frame_window(self):
+        events = [{"name": "present", "ph": "i", "ts": ts, "args": {"present": index}}
+                  for index, ts in enumerate((0, 10000))]
+        events += [{"name": "worker folded", "ph": "C", "ts": ts, "tid": 1, "args": {"ms": value}}
+                   for ts, value in ((-1, 7), (0, 1.5), (9999, 2), (10000, 11), (20000, 5))]
+        result = trace_digest.digest(trace_digest.Trace(events))
+        self.assertEqual(result["threads"][0]["folded_ms_per_frame"], 3.5)
+        result = trace_digest.digest(trace_digest.Trace(events[:1] + events[2:]), {"window": {"ms": 10}})
+        self.assertEqual(result["threads"][0]["folded_ms_per_frame"], 3.5)
+
+    def test_summary_jsonl_excessive_nesting_reports_line_without_traceback(self):
+        path = Path(self.directory.name) / "deep.jsonl"
+        path.write_text('{}\n\n{"extra":' + excessive_trace_json('[', ']') + '}\n', encoding="utf-8")
+        for arguments in ([str(path)], [str(self.trace), "--summary", str(path)]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, trace_digest.__file__, *arguments],
+                                        capture_output=True, text=True, encoding="utf-8", timeout=20)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f"{path}:3: JSON nesting is too deep", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_summary_jsonl_record_shapes_are_validated(self):
+        path = Path(self.directory.name) / "invalid-summary.jsonl"
+        for record in (None, True, False, 7, 1.5, "", "interval_start_s", [], ["interval_start_s"]):
+            for mode in ("capture", "intervals"):
+                with self.subTest(record=record, mode=mode):
+                    path.write_text("{}\n\n" + json.dumps(record) + "\n", encoding="utf-8")
+                    with self.assertRaises(ValueError) as raised:
+                        if mode == "capture":
+                            trace_digest.load_summary(path, self.trace)
+                        else:
+                            trace_digest.load_intervals(path)
+                    self.assertEqual(str(raised.exception), f"{path}:3: summary record must be an object")
+
+    def test_summary_jsonl_syntax_errors_name_the_source_line(self):
+        path = Path(self.directory.name) / "invalid-summary.jsonl"
+        for record in ("{", '{"trace": }', "{} trailing"):
+            for mode in ("capture", "intervals"):
+                with self.subTest(record=record, mode=mode):
+                    path.write_text("{}\n\n" + record + "\n", encoding="utf-8")
+                    with self.assertRaises(ValueError) as raised:
+                        if mode == "capture":
+                            trace_digest.load_summary(path, self.trace)
+                        else:
+                            trace_digest.load_intervals(path)
+                    self.assertTrue(str(raised.exception).startswith(f"{path}:3: invalid JSON: "), str(raised.exception))
+
+    def test_cli_reports_a_summary_line_without_the_window_duration(self):
+        summary = self.trace.with_name("aps5-summary.jsonl")
+        record = dict(SUMMARY, window={"spec": "frames 600:3"})
+        summary.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(self.trace)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertTrue(result.stderr.startswith("FAIL: the summary line has no 'ms' field"), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_cli_reports_a_summary_line_without_a_field_of_the_markdown_header(self):
+        summary = self.trace.with_name("aps5-summary.jsonl")
+        records = [({key: value for key, value in SUMMARY.items() if key != name}, name)
+                   for name in ("frame_ms", "presents", "gpu_busy_ms_per_present", "gpu", "driver", "os", "resolution", "commit", "trace_dropped")]
+        records += [(dict(SUMMARY, window={"first_present": 600, "ms": 40.0}), "spec"),
+                    (dict(SUMMARY, window={"spec": "frames 600:3", "ms": 40.0}), "first_present"),
+                    (dict(SUMMARY, frame_ms={"p50": 10.0, "p90": 20.0, "max": 20.0}), "p99")]
+        for record, name in records:
+            with self.subTest(name=name):
+                summary.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                result = subprocess.run([sys.executable, trace_digest.__file__, str(self.trace)],
+                                        capture_output=True, text=True, encoding="utf-8", timeout=20)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertTrue(result.stderr.startswith(f"FAIL: the summary line has no '{name}' field"), result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_cli_rejects_invalid_summary_windows(self):
+        summary = self.trace.with_name("aps5-summary.jsonl")
+        invalid = [(None, "window must be an object"), ([], "window must be an object")]
+        invalid += [({"ms": value}, "window.ms") for value in (None, True, "40", -1, float("inf"), 1e308)]
+        for window, message in invalid:
+            with self.subTest(window=window):
+                record = dict(SUMMARY, window=window)
+                summary.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                result = subprocess.run([sys.executable, trace_digest.__file__, str(self.trace), "--json"],
+                                        capture_output=True, text=True, encoding="utf-8", timeout=20)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_cli_rejects_invalid_summary_records_without_partial_output(self):
+        summary = self.trace.with_name("aps5-summary.jsonl")
+        explicit = summary.with_name("explicit-\u03a9.jsonl")
+        invalid = [json.dumps(record) for record in (None, True, 7, "interval_start_s", [], ["interval_start_s"])]
+        for record in [*invalid, "{", "{} trailing"]:
+            data = (json.dumps(SUMMARY) + "\n\n" + record + "\n").encode("utf-8")
+            summary.write_bytes(data)
+            explicit.write_bytes(data)
+            for arguments, path in (([str(self.trace)], summary), ([str(self.trace), "--summary", str(explicit)], explicit),
+                                    ([str(summary)], summary)):
+                for output in ([], ["--json"]):
+                    with self.subTest(record=record, arguments=arguments, output=output):
+                        result = subprocess.run([sys.executable, trace_digest.__file__, *arguments, *output],
+                                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertTrue(result.stderr.startswith(f"FAIL: {path}:3: "), result.stderr)
+                        self.assertNotIn("Traceback", result.stderr)
+                        self.assertEqual(result.stdout, "")
+                        self.assertEqual(path.read_bytes(), data)
+
+    def test_summary_jsonl_duplicate_fields_name_the_source_line(self):
+        path = Path(self.directory.name) / "duplicate-summary.jsonl"
+        records = {
+            "commit": '{"commit":"first","commit":"second"}',
+            "p99": '{"frame_ms":{"p99":1,"p99":2}}',
+            "setting": '{"extra":[{"setting":false,"setting":true}]}',
+        }
+        for field, record in records.items():
+            path.write_text("{}\n\n" + record + "\n", encoding="utf-8-sig")
+            for mode in ("capture", "intervals"):
+                with self.subTest(field=field, mode=mode):
+                    with self.assertRaises(ValueError) as raised:
+                        if mode == "capture":
+                            trace_digest.load_summary(path, self.trace)
+                        else:
+                            trace_digest.load_intervals(path)
+                    self.assertEqual(str(raised.exception), f"{path}:3: duplicate JSON field: {field!r}")
+
+    def test_cli_rejects_duplicate_fields_without_partial_output(self):
+        path = self.trace.with_name("aps5-summary.jsonl")
+        encoded = json.dumps(SUMMARY)
+        nested = encoded.replace('"p99": 20.0', '"p99": 1.0, "p99": 20.0')
+        cases = ((encoded[:-1] + ',"commit":"ambiguous"}', [str(self.trace), "--summary", str(path), "--json"]),
+                 (nested, [str(self.trace)]), (nested, [str(path), "--json"]))
+        for record, arguments in cases:
+            original = (record + "\n").encode("utf-8")
+            path.write_bytes(original)
+            with self.subTest(record=record, arguments=arguments):
+                result = subprocess.run([sys.executable, trace_digest.__file__, *arguments],
+                                        capture_output=True, text=True, encoding="utf-8", timeout=20)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"{path}:1: duplicate JSON field:", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_mixed_summary_jsonl_objects_preserve_selection_and_intervals(self):
+        path = self.trace.with_name("aps5-summary.jsonl")
+        expected = self.json_output(self.trace)
+        interval = interval_line(0.0, 30.0, 20.0, 5.0)
+        records = [{}, dict(SUMMARY, trace="other.json.gz"), SUMMARY, interval, {"unrelated": "\u03a9"}]
+        text = "\r\n \t\r\n" + "\r\n\r\n".join(json.dumps(record) for record in records) + "\r\n"
+        path.write_text(text, encoding="utf-8-sig")
+        self.assertEqual(self.json_output(self.trace), expected)
+        self.assertEqual(trace_digest.load_intervals(path), [interval])
+        records.extend([dict(SUMMARY, commit="latest"), dict(SUMMARY, trace=self.trace.with_suffix("").name, commit="alternate")])
+        path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+        self.assertEqual(trace_digest.load_summary(path, self.trace)["commit"], "latest")
+        self.assertEqual(trace_digest.load_summary(path, self.trace.with_suffix(""))["commit"], "alternate")
+
+    def test_owned_draw_interval_counts_are_preserved(self):
+        first = interval_line(0.0, 30.0, 20.0, 5.0)
+        second = interval_line(30.0, 60.0, 20.0, 5.0)
+        first["owned_draw_counts"] = {"OwnedDraw.arm_attempt": 4, "OwnedDraw.reused": 2}
+        second["owned_draw_counts"] = {"OwnedDraw.arm_attempt": 1}
+        for line in (first, second):
+            trace_digest.validate_interval(line)
+        result = trace_digest.digest_intervals([first, second])
+        self.assertEqual(result["intervals"][0]["owned_draw_counts"], first["owned_draw_counts"])
+        missing = trace_digest.digest_intervals([first, interval_line(30.0, 60.0, 20.0, 5.0)])
+        self.assertIn("| 2 | - | - |", trace_digest.markdown_intervals(missing))
+        text = trace_digest.markdown_intervals(result)
+        self.assertIn("OwnedDraw.arm_attempt", text)
+        self.assertIn("| 2 | 1 | 0 |", text)
+        first["owned_draw_counts"] = {"bad": -1}
+        with self.assertRaises(ValueError):
+            trace_digest.validate_interval(first)
+
+    def test_graphics_track_interval_counts_are_preserved(self):
+        first = interval_line(0.0, 30.0, 20.0, 5.0)
+        second = interval_line(30.0, 60.0, 20.0, 5.0)
+        first["graphics_track"] = {
+            "Graphics.RenderPass": 12, "Graphics.RenderPass.Continued": 120,
+            "Graphics.RenderPass.Close.label": 3, "Graphics.RenderPass.Close.raw": 9,
+            "Graphics.Barrier.draw": 240, "Graphics.BarrierMerged.draw": 60,
+            "Graphics.Copy": 4, "Graphics.Copy.bytes": 2 * 1024 * 1024,
+        }
+        second["graphics_track"] = {"Graphics.RenderPass": 6, "Graphics.Copy.bytes": 512 * 1024}
+        for line in (first, second):
+            trace_digest.validate_interval(line)
+        result = trace_digest.digest_intervals([first, second])
+        self.assertEqual(result["intervals"][0]["graphics_track"], first["graphics_track"])
+        text = trace_digest.markdown_intervals(result)
+        self.assertIn("top close reason", text)
+        self.assertIn("| 1 | 12 | 120 | 12 | raw | 240 | 60 | 4 | 2.0 |", text)
+        self.assertIn("| 2 | 6 | 0 | 0 | - | 0 | 0 | 0 | 0.5 |", text)
+        first["graphics_track"] = {"bad": -1}
+        with self.assertRaises(ValueError):
+            trace_digest.validate_interval(first)
+
+    def test_empty_summary_jsonl_files_remain_valid(self):
+        path = self.trace.with_name("aps5-summary.jsonl")
+        for text in ("", "\n \t\r\n"):
+            for encoding in ("utf-8", "utf-8-sig"):
+                with self.subTest(text=text, encoding=encoding):
+                    path.write_text(text, encoding=encoding)
+                    self.assertIsNone(trace_digest.load_summary(path, self.trace))
+                    self.assertEqual(trace_digest.load_intervals(path), [])
+
+    def test_unicode_separators_inside_summary_strings_are_not_record_boundaries(self):
+        path = self.trace.with_name("aps5-summary.jsonl")
+        for separator in ("\u0085", "\u2028", "\u2029"):
+            with self.subTest(separator=separator):
+                gpu = f"GPU{separator}name"
+                summary = dict(SUMMARY, gpu=gpu)
+                interval = interval_line(0.0, 30.0, 20.0, 5.0, gpu=gpu)
+                path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in (summary, interval)), encoding="utf-8")
+                self.assertEqual(trace_digest.load_summary(path, self.trace), summary)
+                self.assertEqual(trace_digest.load_intervals(path), [interval])
+
+    def test_cli_rejects_duplicate_trace_keys_without_partial_output(self):
+        cases = ((b'{"traceEvents":[{}],"traceEvents":[]}', "traceEvents"),
+                 (b'[{"ph":"X","tid":1,"name":"work","ts":0,"dur":20,"dur":5}]', "dur"))
+        for data, field in cases:
+            for compressed in (False, True):
+                with self.subTest(field=field, compressed=compressed):
+                    path = Path(self.directory.name) / ("duplicate.json.gz" if compressed else "duplicate.json")
+                    path.write_bytes(gzip.compress(data) if compressed else data)
+                    result = subprocess.run([sys.executable, trace_digest.__file__, str(path), "--json"],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=20)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn(f"duplicate JSON field: {field!r}", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
+    def test_cli_rejects_invalid_event_container_shapes_without_partial_output(self):
+        cases = [(value, "trace must be an event array or object") for value in (None, True, 7, "trace")]
+        cases += [({"traceEvents": value}, "traceEvents must be an array")
+                  for value in (None, False, 0, "", {}, "events")]
+        cases += [([value], "trace event 0 must be an object") for value in (None, True, 7, "event", [])]
+        cases.append(({"traceEvents": [{}, None]}, "trace event 1 must be an object"))
+        for document, message in cases:
+            for compressed in (False, True):
+                with self.subTest(document=document, compressed=compressed):
+                    path = Path(self.directory.name) / ("invalid.json.gz" if compressed else "invalid.json")
+                    data = json.dumps(document).encode("utf-8")
+                    path.write_bytes(gzip.compress(data) if compressed else data)
+                    result = subprocess.run([sys.executable, trace_digest.__file__, str(path), "--json"],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=20)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("FAIL: " + message, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
+    def test_cli_rejects_invalid_event_fields_without_partial_output(self):
+        slice_event = complete(1, "Driver.Packet", 0, 10)
+        cases = [
+            (dict(slice_event, tid=None), "trace event 0: tid must be an integer"),
+            (dict(slice_event, tid="1"), "trace event 0: tid must be an integer"),
+            (dict(slice_event, tid=True), "trace event 0: tid must be an integer"),
+            ({key: value for key, value in slice_event.items() if key != "tid"}, "trace event 0: tid must be an integer"),
+            ({key: value for key, value in slice_event.items() if key != "dur"}, "trace event 0: dur must be a finite number"),
+            (dict(slice_event, dur=None), "trace event 0: dur must be a finite number"),
+            (dict(slice_event, dur="slow"), "trace event 0: dur must be a finite number"),
+            (dict(slice_event, dur="10"), "trace event 0: dur must be a finite number"),
+            (dict(slice_event, dur=True), "trace event 0: dur must be a finite number"),
+            (dict(slice_event, dur=[1]), "trace event 0: dur must be a finite number"),
+            (dict(slice_event, dur=-1), "trace event 0: dur must be non-negative"),
+            (dict(slice_event, dur=-0.001, args={"batch": 42}), "trace event 0: dur must be non-negative"),
+            (dict(slice_event, ts={}), "trace event 0: ts must be a finite number"),
+            (dict(slice_event, ts="0"), "trace event 0: ts must be a finite number"),
+            (dict(slice_event, ts=float("nan")), "trace event 0: ts must be a finite number"),
+            (dict(slice_event, ts=float("inf")), "trace event 0: ts must be a finite number"),
+            (dict(slice_event, ts=1e308), "trace event 0: ts must be a finite number"),
+            (dict(slice_event, name=7), "trace event 0: name must be a string"),
+            ({key: value for key, value in slice_event.items() if key != "name"}, "trace event 0: name must be a string"),
+            (dict(slice_event, args=[]), "trace event 0: args must be an object"),
+            (dict(slice_event, args={"batch": [1]}), "trace event 0: args.batch must be an integer or a string"),
+            (dict(slice_event, args={"batch": []}), "trace event 0: args.batch must be an integer or a string"),
+            (dict(slice_event, args={"batch": None}), "trace event 0: args.batch must be an integer or a string"),
+            ({"name": "thread_name", "ph": "M", "ts": 0, "pid": 7, "tid": 1}, "trace event 0: args.name must be a string"),
+            ({"name": "thread_name", "ph": "M", "ts": 0, "pid": 7, "tid": 1, "args": {}}, "trace event 0: args.name must be a string"),
+            ({"name": "thread_name", "ph": "M", "ts": 0, "pid": 7, "tid": [1], "args": {"name": "a"}}, "trace event 0: tid must be an integer"),
+            ({"name": "present", "ph": "i", "ts": None, "pid": 7, "tid": 2, "s": "g"}, "trace event 0: ts must be a finite number"),
+            ({"name": "present", "ph": "i", "pid": 7, "tid": 2, "s": "g"}, "trace event 0: ts must be a finite number"),
+            ({"name": "present", "ph": "i", "ts": 0, "pid": 7, "tid": 2, "s": "g", "args": 5}, "trace event 0: args must be an object"),
+            ({"name": "folded", "ph": "C", "ts": 0, "pid": 7, "args": {"ms": 1.5}}, "trace event 0: tid must be an integer"),
+            ({"name": "folded", "ph": "C", "ts": 0, "pid": 7, "tid": 1, "args": []}, "trace event 0: args must be an object"),
+            ({"name": "folded", "ph": "C", "ts": 0, "pid": 7, "tid": 1, "args": {"ms": "x"}}, "trace event 0: args value must be a finite number"),
+            ({"name": "folded", "ph": "C", "ts": 0, "pid": 7, "tid": 1, "args": {"ms": True}}, "trace event 0: args value must be a finite number"),
+        ]
+        for event, message in cases:
+            for compressed in (False, True):
+                with self.subTest(event=event, compressed=compressed):
+                    path = Path(self.directory.name) / ("fields.json.gz" if compressed else "fields.json")
+                    data = json.dumps({"traceEvents": [event]}).encode("utf-8")
+                    path.write_bytes(gzip.compress(data) if compressed else data)
+                    result = subprocess.run([sys.executable, trace_digest.__file__, str(path), "--json"],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=20)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("FAIL: " + message, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
     def test_cli_reports_unreadable_inputs_without_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -116,6 +767,14 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual(thread["folded_ms_per_frame"], 1.5)
         self.assertEqual(thread["untraced_ms_per_frame"], 0)
 
+    def test_presents_sharing_a_timestamp_keep_their_order_even_without_a_present_number(self):
+        trace = trace_digest.Trace([
+            {"name": "present", "ph": "i", "ts": 100, "pid": 7, "tid": 2, "s": "g", "args": {"present": 1}},
+            {"name": "present", "ph": "i", "ts": 100, "pid": 7, "tid": 2, "s": "g", "args": {}},
+            {"name": "present", "ph": "i", "ts": 50, "pid": 7, "tid": 2, "s": "g", "args": {"present": 3}},
+        ])
+        self.assertEqual(trace.presents, [(50, 3), (100, 1), (100, None)])
+
     def test_trace_accepts_event_array_and_empty_document(self):
         trace_from_array = trace_digest.Trace(EVENTS)
         self.assertEqual(len(trace_from_array.presents), 3)
@@ -123,10 +782,68 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual(empty_dict.presents, [])
         empty_list = trace_digest.Trace([])
         self.assertEqual(empty_list.presents, [])
+        empty_events = trace_digest.Trace({"traceEvents": []})
+        self.assertEqual(empty_events.presents, [])
+
+    def test_trace_tools_reject_a_run_report_as_an_event_trace(self):
+        fixture = Path(__file__).resolve().parents[2] / "docs/run-report-fixtures/stop-none.json"
+        data = fixture.read_bytes()
+        timeline = Path(trace_digest.__file__).with_name("trace_timeline.py")
+        output = Path(self.directory.name) / "timeline.html"
+        for compressed in (False, True):
+            path = output.with_name("anyps5-report.json.gz" if compressed else "anyps5-report.json")
+            path.write_bytes(gzip.compress(data) if compressed else data)
+            for tool, options in ((trace_digest.__file__, ["--json"]), (timeline, ["--output", str(output)])):
+                with self.subTest(tool=tool, compressed=compressed):
+                    result = subprocess.run([sys.executable, str(tool), str(path), *options],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=20)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("trace object must contain a traceEvents array", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertFalse(output.exists())
 
     def result(self):
         return trace_digest.digest(trace_digest.load_trace(self.trace), trace_digest.load_summary(None, self.trace),
                                    trace_digest.load_stacks(self.stacks), worst=2, top=3)
+
+    def json_output(self, trace, *arguments):
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(trace), "--json", *arguments],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_utf8_bom_plain_and_compressed_traces_preserve_the_digest(self):
+        events = [dict(event, args={"name": "worker \u03a9"}) if event["name"] == "thread_name" and event["tid"] == 1
+                  else event for event in EVENTS]
+        text = json.dumps({"traceEvents": events}, ensure_ascii=False)
+        self.trace.write_bytes(gzip.compress(text.encode("utf-8")))
+        expected = self.json_output(self.trace)
+        for trace in (self.trace, self.trace.with_suffix("")):
+            for encoding in ("utf-8", "utf-8-sig"):
+                with self.subTest(trace=trace.name, encoding=encoding):
+                    data = text.encode(encoding)
+                    trace.write_bytes(gzip.compress(data) if trace.suffix == ".gz" else data)
+                    self.assertEqual(self.json_output(trace), expected)
+
+    def test_utf8_bom_summary_preserves_the_digest(self):
+        expected = self.json_output(self.trace)
+        summary = self.trace.with_name("aps5-summary.jsonl")
+        summary.write_text(summary.read_text(encoding="utf-8"), encoding="utf-8-sig")
+        self.assertEqual(self.json_output(self.trace), expected)
+
+    def test_utf8_bom_stacks_preserve_comments_and_frame_names(self):
+        for text in (STACKS, "root;module\u03a9+0x1 2\n"):
+            with self.subTest(comments=text.startswith("#")):
+                self.stacks.write_text(text, encoding="utf-8")
+                expected = self.json_output(self.trace, "--stacks", str(self.stacks))
+                expected_stacks = trace_digest.load_stacks(self.stacks)
+                self.stacks.write_text(text, encoding="utf-8-sig")
+                self.assertEqual(self.json_output(self.trace, "--stacks", str(self.stacks)), expected)
+                self.assertEqual(trace_digest.load_stacks(self.stacks), expected_stacks)
+
+    def test_unicode_line_separator_is_part_of_a_stack_frame_name(self):
+        self.stacks.write_text("root;module\u2028name+0x1 2\r\n", encoding="utf-8")
+        self.assertEqual(trace_digest.load_stacks(self.stacks), [(["root", "module\u2028name+0x1"], 2)])
 
     def test_summary_is_the_line_of_this_trace(self):
         self.assertEqual(self.result()["summary"]["trace"], "aps5-trace-abc-7.json.gz")
@@ -203,6 +920,29 @@ class TraceDigestTests(unittest.TestCase):
         self.assertAlmostEqual(largest[("Driver.Present", "presenter")], 16.0)
         self.assertAlmostEqual(largest[("Driver.Present.inflight_wait", "presenter")], 14.5)
 
+    def test_persistent_peaks_merge_a_plateau_into_one_stall(self):
+        peaks = trace_digest.persistent_peaks([10, 10, 40, 41, 40, 10, 30, 10, 10, 25, 10])
+        self.assertEqual(peaks, [(3, 31), (6, 20), (9, 15)])
+
+    def test_persistent_peaks_measure_a_shoulder_against_the_saddle(self):
+        self.assertEqual(trace_digest.persistent_peaks([10, 50, 30, 45, 10]), [(1, 40), (3, 15)])
+
+    def test_persistent_peaks_ignore_flat_and_empty_series(self):
+        self.assertEqual(trace_digest.persistent_peaks([]), [])
+        self.assertEqual(trace_digest.persistent_peaks([5]), [])
+        self.assertEqual(trace_digest.persistent_peaks([5, 5, 5]), [])
+        self.assertEqual(trace_digest.persistent_peaks([1, 2, 3]), [(2, 2)])
+
+    def test_persistent_peaks_of_equal_peaks_are_both_reported(self):
+        self.assertEqual(trace_digest.persistent_peaks([9, 20, 9, 20, 9]), [(1, 11), (3, 11)])
+
+    def test_persistent_spikes_in_digest(self):
+        spikes = self.result()["persistent_spikes"]
+        self.assertEqual([spike["present"] for spike in spikes], [601])
+        self.assertAlmostEqual(spikes[0]["ms"], 20.0)
+        self.assertAlmostEqual(spikes[0]["at_ms"], 10.0)
+        self.assertAlmostEqual(spikes[0]["persistence_ms"], 10.0)
+
     def test_markdown_thread_names_cannot_split_table_cells_or_rows(self):
         name = "worker|<gpu>\nrow & more"
         phase = "phase|<tag>\r\nnext"
@@ -219,6 +959,30 @@ class TraceDigestTests(unittest.TestCase):
         self.assertIn("worker&#124;&lt;gpu&gt;<br>row &amp; more", rows[2])
         self.assertIn("phase&#124;&lt;tag&gt;<br>next", rows[2])
 
+    def test_markdown_names_and_metadata_cannot_create_report_sections(self):
+        name = "phase\n**Fake section** <tag> [link](https://example.invalid)"
+        result = self.result()
+        result["summary"]["window"]["spec"] = name
+        result["summary"]["gpu"] = name
+        result["slowest_frames"][0]["slices"][0]["name"] = name
+        result["threads"][0]["top"][0]["name"] = name
+        result["top_slices_ms_per_frame"][0]["name"] = name
+        result["longest_waits"][0]["name"] = name
+        result["stacks"]["self"][0]["frame"] = name
+        report = trace_digest.markdown(result)
+        escaped = "phase<br>&#42;&#42;Fake section&#42;&#42; &lt;tag&gt; &#91;link&#93;(https://example.invalid)"
+        self.assertNotIn("\n**Fake section**", report)
+        self.assertGreaterEqual(report.count(escaped), 7)
+
+    def test_markdown_identity_cannot_start_a_heading_or_list(self):
+        result = self.result()
+        for name, escaped in (("# Heading", "&#35; Heading"), ("- item", "&#45; item"),
+                              ("+ item", "&#43; item"), ("1. item", "&#49;. item"),
+                              ("_emphasis_", "&#95;emphasis&#95;"),
+                              ("OwnedDraw.arm_attempt", "OwnedDraw.arm_attempt"), ("GPU-1", "GPU-1")):
+            with self.subTest(name=name):
+                result["summary"]["gpu"] = name
+                self.assertTrue(trace_digest.markdown(result).splitlines()[1].startswith(escaped + ","))
 
     def test_threads_split_busy_and_wait(self):
         threads = {thread["thread"]: thread for thread in self.result()["threads"]}
@@ -279,6 +1043,63 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual((waits[0]["name"], waits[0]["thread"], waits[0]["present"]), ("Driver.Present.inflight_wait", "presenter", 601))
         self.assertAlmostEqual(waits[0]["ms"], 14.5)
         self.assertEqual(waits[1]["name"], "Driver.WorkerWait")
+
+    def test_longest_waits_omit_slices_outside_capture_in_cli(self):
+        events = [EVENTS[1], *EVENTS[-3:],
+                  complete(1, "Inside.wait", 1000, 2000),
+                  complete(3, "Before.wait", -100000, 90000),
+                  complete(4, "After.wait", 40000, 90000),
+                  complete(5, "EndsAtStart.wait", -1000, 1000),
+                  complete(6, "StartsAtEnd.wait", 40000, 1000)]
+        plain = self.trace.with_suffix("")
+        plain.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+        self.trace.write_bytes(gzip.compress(plain.read_bytes()))
+        for path in (self.trace, plain):
+            for output in ([], ["--json"]):
+                with self.subTest(path=path.name, output=output):
+                    result = subprocess.run([sys.executable, trace_digest.__file__, str(path), "--top", "1", *output],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=20)
+                    self.assertEqual((result.returncode, result.stderr), (0, ""))
+                    if output:
+                        report = json.loads(result.stdout)
+                        self.assertEqual(report["longest_waits"], [
+                            {"name": "Inside.wait", "thread": "queue worker 0x0", "ms": 2.0, "at_ms": 1.0, "present": 600}])
+                    else:
+                        self.assertIn("- Inside.wait (queue worker 0x0) 2.0 ms at 1 ms, present 600", result.stdout)
+                        for name in ("Before.wait", "After.wait", "EndsAtStart.wait", "StartsAtEnd.wait"):
+                            self.assertNotIn(name, result.stdout)
+
+    def test_longest_waits_rank_only_the_overlap_with_capture(self):
+        events = [dict(EVENTS[-3], ts=10000), dict(EVENTS[-2], ts=30000),
+                  complete(1, "Leading.wait", -100000, 111000),
+                  complete(2, "Inside.wait", 12000, 4000),
+                  complete(3, "Trailing.wait", 28000, 90000),
+                  complete(4, "Spanning.wait", -100000, 230000),
+                  complete(4, "Nested.wait", 11000, 1000)]
+        report = trace_digest.digest(trace_digest.Trace(events), top=4)
+        self.assertEqual(report["longest_waits"], [
+            {"name": "Spanning.wait", "thread": "tid 4", "ms": 20.0, "at_ms": 10.0, "present": 600},
+            {"name": "Inside.wait", "thread": "tid 2", "ms": 4.0, "at_ms": 12.0, "present": 600},
+            {"name": "Trailing.wait", "thread": "tid 3", "ms": 2.0, "at_ms": 28.0, "present": 600},
+            {"name": "Leading.wait", "thread": "tid 1", "ms": 1.0, "at_ms": 10.0, "present": 600}])
+        threads = {thread["thread"]: thread for thread in report["threads"]}
+        for wait in report["longest_waits"]:
+            self.assertEqual(wait["ms"], threads[wait["thread"]]["wait_ms_per_frame"])
+
+    def test_longest_waits_clip_to_summary_end(self):
+        trace = trace_digest.Trace([EVENTS[-3],
+                                    complete(1, "Trailing.wait", 8000, 20000),
+                                    complete(2, "Inside.wait", 1000, 3000)])
+        report = trace_digest.digest(trace, {"window": {"ms": 10.0}}, top=1)
+        self.assertEqual(report["longest_waits"], [
+            {"name": "Inside.wait", "thread": "tid 2", "ms": 3.0, "at_ms": 1.0, "present": 600}])
+
+    def test_longest_waits_without_frames_keep_the_full_slices(self):
+        for duration in (0, 3000):
+            with self.subTest(duration=duration):
+                trace = trace_digest.Trace([complete(1, "Worker.wait", -1000, duration)])
+                self.assertEqual(trace_digest.digest(trace)["longest_waits"], [
+                    {"name": "Worker.wait", "thread": "tid 1", "ms": duration / 1000.0, "at_ms": -1.0, "present": None}])
 
     def test_wait_subscope_without_parent_is_not_busy(self):
         events = [EVENTS[1], complete(1, "Driver.WorkerWait.dequeue_order", 0, 4000),
@@ -348,6 +1169,15 @@ class TraceDigestTests(unittest.TestCase):
                 self.assertIn(str(self.stacks) + ":2:", errors.getvalue())
                 self.assertNotIn("Traceback", errors.getvalue())
 
+    def test_stack_weights_are_plain_decimal_digits(self):
+        for count in ("1_0", "+5", "٥"):
+            with self.subTest(count=count):
+                self.stacks.write_text("# header\nworker;draw " + count + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, ":2: sample count must be a positive integer"):
+                    trace_digest.load_stacks(self.stacks)
+        self.stacks.write_text("# header\nworker;draw 010\n", encoding="utf-8")
+        self.assertEqual(trace_digest.load_stacks(self.stacks), [(["worker", "draw"], 10)])
+
 
     def test_stacks_self_and_total(self):
         stacks = self.result()["stacks"]
@@ -358,6 +1188,14 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual(stacks["common_frames"], 2)
         self.assertNotIn("a.prx+0x10", total)
         self.assertEqual(total, {"a.prx+0x20": 60.0, "a.prx+0x30": 40.0, "a.prx+0x40": 20.0})
+
+    def test_tied_stack_leaders_are_stable_when_sample_rows_are_reordered(self):
+        stacks = [(["root", "leaf-z"], 2), (["root", "leaf-a"], 2)]
+        for entries in (stacks, list(reversed(stacks))):
+            result = trace_digest.digest(trace_digest.Trace([]), stacks=entries, top=1)["stacks"]
+            for field in ("self", "total"):
+                with self.subTest(field=field, entries=entries):
+                    self.assertEqual(result[field], [{"frame": "leaf-a", "pct": 50.0}])
 
     def test_largest_gpu_batches_with_their_recording(self):
         def tagged(tid, name, ts, dur, batch):
@@ -405,6 +1243,7 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual(result["slowest_frames"], [])
         self.assertEqual(result["top_slices_ms_per_frame"], [])
         self.assertEqual(result["longest_waits"], [])
+        self.assertEqual(result["persistent_spikes"], [])
 
 
     def test_command_line_markdown_and_json(self):
@@ -412,7 +1251,7 @@ class TraceDigestTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             self.assertEqual(trace_digest.main([str(self.trace), "--stacks", str(self.stacks)]), 0)
         text = output.getvalue()
-        for heading in ("**Slowest frames**", "**Threads**", "**Largest slices**", "**Longest waits**", "**Worker stacks**"):
+        for heading in ("**Slowest frames**", "**Persistent spikes**", "**Threads**", "**Largest slices**", "**Longest waits**", "**Worker stacks**"):
             self.assertIn(heading, text)
         self.assertLess(len(text.encode("utf-8")), 5000)
         output = io.StringIO()
@@ -453,6 +1292,19 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual([(entry[3], entry[4]) for entry in trace.slices[1]],
                          [(0, False), (1, True), (0, False)])
 
+    def test_interval_input_rejects_stack_samples(self):
+        path = Path(self.directory.name) / "intervals.jsonl"
+        path.write_text("", encoding="utf-8")
+        for output in ([], ["--json"]):
+            with self.subTest(output=output):
+                result = subprocess.run(
+                    [sys.executable, trace_digest.__file__, str(path), "--stacks", str(self.stacks), *output],
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn("--stacks requires an event trace, not interval summaries", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_missing_summary_file_is_an_error(self):
         missing = Path(self.directory.name) / "missing.jsonl"
         error = io.StringIO()
@@ -462,10 +1314,55 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("summary file not found", error.getvalue())
 
+    def test_interval_input_rejects_capture_summary(self):
+        path = Path(self.directory.name) / "intervals.jsonl"
+        path.write_text("invalid interval input", encoding="utf-8")
+        summary = Path(self.directory.name) / "capture.jsonl"
+        summary.write_text(json.dumps(SUMMARY) + "\n", encoding="utf-8")
+        for output in ([], ["--json"]):
+            with self.subTest(output=output):
+                result = subprocess.run(
+                    [sys.executable, trace_digest.__file__, str(path), "--summary", str(summary), *output],
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn("--summary requires an event trace, not interval summaries", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_thread_filter_keeps_frame_bounds_and_capture_summary(self):
+        command = [sys.executable, trace_digest.__file__, str(self.trace)]
+        result = subprocess.run([*command, "--thread", "queue worker 0x0", "--json"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["frames"], 3)
+        self.assertEqual(report["summary"], SUMMARY)
+        self.assertEqual(report["thread_filter"], ["queue worker 0x0"])
+        self.assertEqual([thread["thread"] for thread in report["threads"]], ["queue worker 0x0"])
+        self.assertTrue(all("Present" not in entry["name"] for entry in report["top_slices_ms_per_frame"]))
+        self.assertTrue(all(wait["thread"] == "queue worker 0x0" for wait in report["longest_waits"]))
+        result = subprocess.run([*command, "--thread", "presenter", "--thread", "queue worker 0x0", "--json"],
+                                capture_output=True, text=True)
+        unfiltered = trace_digest.digest(trace_digest.load_trace(self.trace), SUMMARY)
+        report = json.loads(result.stdout)
+        del report["thread_filter"]
+        self.assertEqual(report, unfiltered)
+        result = subprocess.run([*command, "--thread", "presenter"], capture_output=True, text=True)
+        self.assertIn("Thread filter:", result.stdout)
+        self.assertIn("capture-wide", result.stdout)
+        result = subprocess.run([*command, "--thread", "misspelled"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown thread", result.stderr)
+        self.assertEqual(result.stdout, "")
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(self.trace.with_suffix(".jsonl")),
+                                 "--thread", "presenter"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("event trace", result.stderr)
+
+
 
 def interval_line(start, end, p99, gpu_ms, **changes):
     line = dict(SUMMARY, window={"spec": "summary_every 30", "first_present": 0, "ms": (end - start) * 1000.0}, interval_start_s=start, interval_end_s=end,
-                presents=1800, frame_ms={"p50": 16.6, "p90": 18.0, "p99": p99, "max": p99 + 5.0}, gpu_busy_ms_per_present=gpu_ms, trace="")
+                presents=1800, frame_ms={"p50": min(16.6, p99), "p90": min(18.0, p99), "p99": p99, "max": p99 + 5.0}, gpu_busy_ms_per_present=gpu_ms, trace="")
     line.update(changes)
     return line
 
@@ -484,6 +1381,31 @@ class IntervalDigestTests(unittest.TestCase):
     def test_window_lines_are_skipped(self):
         self.assertEqual(len(trace_digest.load_intervals(self.path)), 4)
 
+    def test_intervals_symlink_loop_is_reported_without_traceback(self):
+        loop = Path(self.directory.name) / "loop.jsonl"
+        try:
+            loop.symlink_to(loop.name)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symbolic links unavailable: {error}")
+        with self.assertRaisesRegex(ValueError, r"symbolic link loop"):
+            trace_digest.load_intervals(loop)
+        for output in ([], ["--json"]):
+            with self.subTest(output=output):
+                result = subprocess.run([sys.executable, trace_digest.__file__, str(loop), *output],
+                                        capture_output=True, text=True, encoding="utf-8", timeout=20)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("symbolic link loop", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_utf8_bom_intervals_preserve_the_command_line_digest(self):
+        expected = trace_digest.digest_intervals(trace_digest.load_intervals(self.path))
+        self.path.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8-sig")
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(self.path), "--json"],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), expected)
+
     def test_rows(self):
         result = trace_digest.digest_intervals(trace_digest.load_intervals(self.path))
         first, second, third, _ = result["intervals"]
@@ -494,6 +1416,77 @@ class IntervalDigestTests(unittest.TestCase):
         self.assertIsNone(third["busiest_worker"])
         self.assertIsNone(third["top_phase"])
         self.assertEqual(result["identity_changed_at"], [3])
+
+    def test_identity_changes_are_reported_where_they_happen(self):
+        lines = [interval_line(30.0 * index, 30.0 * (index + 1), 20.0, 5.0, commit=commit)
+                 for index, commit in enumerate(("a", "a", "b", "b", "a"))]
+        result = trace_digest.digest_intervals(lines)
+        self.assertEqual(result["identity_changed_at"], [2, 4])
+        self.assertIn("build, environment, host, resolution or title metadata changed at interval 3, 5", trace_digest.markdown_intervals(result).splitlines())
+
+    def test_machine_and_title_identity_fields_are_retained_and_compared(self):
+        metadata = {"cpu": "CPU A", "cpu_threads": 16, "memory_mib": 32768,
+                    "title_id": "PPSA00001", "title": "Title One", "content_version": "01.000.000"}
+        first = interval_line(0.0, 30.0, 20.0, 5.0, **metadata)
+        for key, value in (("cpu", "CPU B"), ("cpu_threads", 32), ("memory_mib", 65536),
+                           ("title_id", "PPSA00002"), ("title", "Title Two"), ("content_version", "02.000.000")):
+            with self.subTest(key=key):
+                changed = dict(first, **{key: value})
+                result = trace_digest.digest_intervals([first, first, changed, changed, first])
+                self.assertEqual({key: result["identity"].get(key) for key in metadata}, metadata)
+                self.assertEqual(result["identity_changed_at"], [2, 4])
+                self.assertIn("changed at interval 3, 5", trace_digest.markdown_intervals(result))
+
+    def test_optional_identity_appearance_disappearance_and_return(self):
+        absent = interval_line(0.0, 30.0, 20.0, 5.0)
+        for key, value in (("cpu", "CPU A"), ("cpu_threads", 0), ("memory_mib", 0),
+                           ("title_id", "PPSA00001"), ("title", "Title One"), ("content_version", "")):
+            with self.subTest(key=key, value=value):
+                present = dict(absent, **{key: value})
+                result = trace_digest.digest_intervals([absent, present, present, absent, present])
+                self.assertEqual(result["identity_changed_at"], [1, 3, 4])
+                self.assertIn(key, result["identity"])
+                self.assertIsNone(result["identity"][key])
+                self.assertIn("changed at interval 2, 4, 5", trace_digest.markdown_intervals(result))
+
+    def test_stable_or_absent_optional_identity_does_not_report_changes(self):
+        absent = interval_line(0.0, 30.0, 20.0, 5.0)
+        metadata = {"cpu": "CPU A", "cpu_threads": 0, "memory_mib": 0,
+                    "title_id": "PPSA00001", "title": "Title One", "content_version": ""}
+        for line in (absent, dict(absent, **metadata)):
+            with self.subTest(line=line):
+                result = trace_digest.digest_intervals([line, line])
+                self.assertEqual(result["identity_changed_at"], [])
+                self.assertNotIn("changed at interval", trace_digest.markdown_intervals(result))
+
+    def test_resolution_changes_are_reported(self):
+        first = interval_line(0.0, 30.0, 20.0, 5.0)
+        result = trace_digest.digest_intervals([first, dict(first, resolution="1280x720")])
+        self.assertEqual(result["identity_changed_at"], [1])
+        self.assertIn("build, environment, host, resolution or title metadata changed at interval 2",
+                      trace_digest.markdown_intervals(result))
+
+    def test_cli_retains_machine_and_title_identity_and_reports_changes(self):
+        metadata = {"cpu": "CPU A", "cpu_threads": 16, "memory_mib": 32768,
+                    "title_id": "PPSA00001", "title": "Title One", "content_version": "01.000.000"}
+        first = interval_line(0.0, 30.0, 20.0, 5.0, **metadata)
+        second = interval_line(30.0, 60.0, 40.0, 10.0, **dict(metadata, content_version="02.000.000"))
+        self.path.write_text("\n".join(json.dumps(line) for line in (first, second)) + "\n", encoding="utf-8")
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(self.path), "--json"],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual({key: report["identity"].get(key) for key in metadata}, metadata)
+        self.assertEqual(report["identity_changed_at"], [1])
+        without_metadata = [{key: value for key, value in line.items() if key not in metadata} for line in (first, second)]
+        unchanged_metrics = trace_digest.digest_intervals(without_metadata)
+        self.assertEqual(report["intervals"], unchanged_metrics["intervals"])
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(self.path)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("build, environment, host, resolution or title metadata changed at interval 2", result.stdout)
+        expected = trace_digest.markdown_intervals(unchanged_metrics)
+        self.assertEqual(result.stdout[result.stdout.index("| # |"):], expected[expected.index("| # |"):])
 
     def test_sparkline_scales_to_the_largest_value(self):
         self.assertEqual(trace_digest.sparkline([0.0, 5.0, 10.0]), ".+@")
@@ -519,19 +1512,46 @@ class IntervalDigestTests(unittest.TestCase):
                         self.assertEqual(trace_digest.main([str(self.path)]), 0)
                     self.assertIn("| Driver.Packet 7.0 |", output.getvalue())
 
+    def test_tied_interval_leaders_are_stable_when_json_keys_are_reordered(self):
+        fields = {
+            "worker_busy_pct": [("worker-z", 20), ("worker-a", 20)],
+            "top_phases_ms_per_frame": [("phase-z", 10), ("phase-a", 10)],
+            "graphics_track": [("Graphics.RenderPass.Close.z", 5), ("Graphics.RenderPass.Close.a", 5)],
+        }
+        for reverse in (False, True):
+            record = interval_line(0, 1, 20, 1, **{
+                key: dict(values[::-1] if reverse else values) for key, values in fields.items()
+            })
+            report = trace_digest.digest_intervals([record])
+            with self.subTest(field="busiest_worker", reverse=reverse):
+                self.assertEqual(report["intervals"][0]["busiest_worker"]["thread"], "worker-a")
+            with self.subTest(field="top_phase", reverse=reverse):
+                self.assertEqual(report["intervals"][0]["top_phase"]["name"], "phase-a")
+            with self.subTest(field="top_close", reverse=reverse):
+                self.assertIn("| 1 | 0 | 0 | 10 | a |", trace_digest.markdown_intervals(report))
+
     def test_command_line_table_and_json(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(trace_digest.main([str(self.path)]), 0)
         text = output.getvalue()
-        self.assertIn("**4 intervals**, 0.0 to 120.5 s, 7200 presents", text)
-        self.assertIn("| 2 | 30-60 (dropped) | 1800 | 16.6 | 18.0 | 40.0 | 45.0 | 10.0 | 50 % | Driver.Packet 7.0 |", text)
+        self.assertIn("**4 intervals**, 0.000 to 120.500 s, 7200 presents", text)
+        self.assertIn("| 2 | 30.000-60.500 (dropped) | 1800 | 16.6 | 18.0 | 40.0 | 45.0 | 10.0 | 50 % | Driver.Packet 7.0 |", text)
         self.assertIn("p99 ms  +@.+  0-40.0", text)
         self.assertIn("changed at interval 4", text)
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            trace_digest.main([str(self.path), "--json"])
+            self.assertEqual(trace_digest.main([str(self.path), "--json"]), 0)
         self.assertEqual(len(json.loads(output.getvalue())["intervals"]), 4)
+
+    def test_markdown_preserves_subsecond_interval_bounds(self):
+        line = interval_line(0.123, 0.456, 20.0, 5.0)
+        self.path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(self.path)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("0.123 to 0.456 s", result.stdout)
+        self.assertIn("| 1 | 0.123-0.456 |", result.stdout)
 
     def test_file_without_intervals(self):
         self.path.write_text(json.dumps(SUMMARY) + "\n", encoding="utf-8")
@@ -562,7 +1582,252 @@ class IntervalDigestTests(unittest.TestCase):
                 self.assertEqual(len(rows), 3)
                 self.assertTrue(all(line.count("|") == 11 for line in rows), rows)
                 cells = [cell.strip() for cell in rows[2].split("|")[1:-1]]
-                self.assertEqual(cells, ["1", "0-30", "1800", "16.6", "18.0", "20.0", "25.0", "5.0", "50 %", escaped + " 7.5"])
+                self.assertEqual(cells, ["1", "0.000-30.000", "1800", "16.6", "18.0", "20.0", "25.0", "5.0", "50 %", escaped + " 7.5"])
+
+    def test_interval_identity_cannot_create_markdown_sections(self):
+        line = interval_line(0.0, 30.0, 20.0, 5.0)
+        name = "GPU\n**Fake section** <tag> [link](https://example.invalid)"
+        line["gpu"] = name
+        result = trace_digest.digest_intervals([line])
+        self.assertEqual(result["identity"]["gpu"], name)
+        report = trace_digest.markdown_intervals(result)
+        self.assertNotIn("\n**Fake section**", report)
+        self.assertIn("GPU<br>&#42;&#42;Fake section&#42;&#42; &lt;tag&gt; &#91;link&#93;(https://example.invalid)", report)
+        line["gpu"] = "  # Heading"
+        self.assertTrue(trace_digest.markdown_intervals(trace_digest.digest_intervals([line])).splitlines()[1]
+                        .startswith("  &#35; Heading,"))
+
+    def test_bom_encoded_stacks_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stacks_file = Path(directory) / "stacks.txt"
+            stacks_file.write_bytes(b"\xef\xbb\xbf# samples=1 depth=1 truncated=0\nmodule.prx+0x10 1\n")
+            loaded = trace_digest.load_stacks(stacks_file)
+            self.assertEqual(loaded, [(["module.prx+0x10"], 1)])
+
+    def test_bom_encoded_intervals_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            intervals_file = Path(directory) / "intervals.jsonl"
+            intervals_file.write_bytes(b"\xef\xbb\xbf" + json.dumps(interval_line(0.0, 10.0, 20.0, 5.0, presents=600)).encode("utf-8") + b"\n")
+            loaded = trace_digest.load_intervals(intervals_file)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0]["interval_start_s"], 0.0)
+
+    def test_bom_encoded_summary_loads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary_file = Path(directory) / "aps5-summary.jsonl"
+            summary_file.write_bytes(b"\xef\xbb\xbf" + json.dumps(SUMMARY).encode("utf-8") + b"\n")
+            loaded = trace_digest.load_summary(str(summary_file), SUMMARY["trace"])
+            self.assertEqual(loaded["commit"], SUMMARY["commit"])
+
+    def test_main_reconfigures_streams(self):
+        class Stream:
+            def __init__(self):
+                self.encoding = None
+                self.errors = None
+
+            def reconfigure(self, encoding=None, errors=None):
+                self.encoding = encoding
+                self.errors = errors
+
+            def write(self, text):
+                pass
+
+            def flush(self):
+                pass
+
+        out, err = Stream(), Stream()
+        with mock.patch.object(trace_digest.sys, "stdout", out), mock.patch.object(trace_digest.sys, "stderr", err):
+            try:
+                trace_digest.main([])
+            except SystemExit:
+                pass
+        self.assertEqual(out.encoding, "utf-8")
+        self.assertEqual(out.errors, "backslashreplace")
+        self.assertEqual(err.encoding, "utf-8")
+        self.assertEqual(err.errors, "backslashreplace")
+
+
+class IntervalSchemaTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "summary.jsonl"
+
+    def write(self, record):
+        self.path.write_text("\n" + json.dumps(SUMMARY) + "\n\n" + json.dumps(record) + "\n", encoding="utf-8")
+
+    def test_invalid_interval_fields_report_physical_line_numbers(self):
+        baseline = interval_line(0, 1, 20, 1)
+        changes = [("interval_start_s", value) for value in (-1, True, "0", None, float("nan"), float("inf"), 10**400)]
+        changes += [("interval_end_s", -1), ("interval_start_s", 2)]
+        changes += [("presents", value) for value in (-1, True, 1.5, "1", None)]
+        changes += [("frame_ms", value) for value in (None, [], {"p50": 1})]
+        changes += [("gpu_busy_ms_per_present", value) for value in (-1, False, "1", float("inf"))]
+        changes += [("worker_busy_pct", value) for value in ([], None, {"worker": "busy"}, {"worker": -1})]
+        changes += [("top_phases_ms_per_frame", value) for value in ([], {"phase": True}, {"phase": float("nan")})]
+        changes += [("trace_dropped", value) for value in (None, 0, "false")]
+        for field, value in changes:
+            with self.subTest(field=field, value=value):
+                self.write({**baseline, field: value})
+                with self.assertRaisesRegex(ValueError, r"summary\.jsonl:4:"):
+                    trace_digest.load_intervals(self.path)
+
+    def test_invalid_percentile_values_are_rejected(self):
+        for field in ("p50", "p90", "p99", "max"):
+            for value in (True, -1, "bad", float("nan")):
+                with self.subTest(field=field, value=value):
+                    record = interval_line(0, 1, 20, 1)
+                    record["frame_ms"][field] = value
+                    self.write(record)
+                    with self.assertRaisesRegex(ValueError, r"summary\.jsonl:4:"):
+                        trace_digest.load_intervals(self.path)
+
+    def test_invalid_identity_fields_are_rejected_before_interval_export(self):
+        baseline = interval_line(0, 1, 20, 1)
+        invalid = {
+            "commit": 123,
+            "gpu": ["GPU"],
+            "driver": {},
+            "os": False,
+            "resolution": [1920, 1080],
+            "cpu": 3,
+            "title_id": [],
+            "title": True,
+            "content_version": 1.0,
+            "cpu_threads": True,
+            "memory_mib": -1,
+            "dirty": 1,
+            "env": {"APS5_TRACE_SUMMARY_EVERY": 30},
+        }
+        for field, value in invalid.items():
+            with self.subTest(field=field):
+                self.write(dict(baseline, **{field: value}))
+                with self.assertRaisesRegex(ValueError, rf"summary\.jsonl:4: {field}\b"):
+                    trace_digest.load_intervals(self.path)
+
+    def test_null_dirty_and_omitted_identity_are_valid(self):
+        record = interval_line(0, 1, 20, 1, dirty=None)
+        for field in ("commit", "gpu", "driver", "os", "resolution", "env"):
+            del record[field]
+        self.write(record)
+        self.assertEqual(trace_digest.load_intervals(self.path), [record])
+
+    def test_complete_csv_rejects_boolean_core_counts_that_compare_equal_to_one(self):
+        first = interval_line(0, 1, 20, 1, cpu_threads=1)
+        second = interval_line(1, 2, 20, 1, cpu_threads=True)
+        self.path.write_text("\n".join(json.dumps(row) for row in (first, second)) + "\n", encoding="utf-8")
+        script = Path(trace_digest.__file__).with_name("trace_intervals_csv.py")
+        result = subprocess.run([sys.executable, str(script), str(self.path), "--require-complete"],
+                                capture_output=True, text=True, encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("summary.jsonl:2: cpu_threads", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_missing_interval_bound_is_rejected_by_both_cli_reports(self):
+        for field in ("interval_start_s", "interval_end_s"):
+            record = interval_line(0, 1, 20, 1)
+            del record[field]
+            self.write(record)
+            for script in (trace_digest.__file__, Path(trace_digest.__file__).with_name("trace_intervals_csv.py")):
+                with self.subTest(field=field, script=script):
+                    result = subprocess.run([sys.executable, str(script), str(self.path)],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=10)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn(f"summary.jsonl:4: {field} must be", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
+    def test_out_of_order_percentiles_are_rejected_by_both_cli_reports(self):
+        for frames in (dict(p50=2, p90=1, p99=3, max=4), dict(p50=1, p90=3, p99=2, max=4),
+                       dict(p50=1, p90=2, p99=4, max=3)):
+            self.write(interval_line(0, 1, 20, 1, frame_ms=frames))
+            for script in (trace_digest.__file__, Path(trace_digest.__file__).with_name("trace_intervals_csv.py")):
+                with self.subTest(frames=frames, script=script):
+                    result = subprocess.run([sys.executable, str(script), str(self.path)],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=10)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("summary.jsonl:4:", result.stderr)
+                    self.assertIn("p50 <= p90 <= p99 <= max", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_json_and_markdown_reject_bad_intervals_without_tracebacks(self):
+        self.write(interval_line(0, 1, 20, 1, presents=-1))
+        for options in ([], ["--json"]):
+            result = subprocess.run([sys.executable, trace_digest.__file__, str(self.path), *options],
+                                    capture_output=True, text=True, encoding="utf-8", timeout=10)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("summary.jsonl:4:", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(result.stdout, "")
+
+    def test_zero_frame_intervals_optional_maps_and_large_worker_percentages_remain_valid(self):
+        record = interval_line(0, 0, 0, 0, presents=0, frame_ms=dict(p50=0, p90=0, p99=0, max=0), worker_busy_pct={"worker": 125.0})
+        record.pop("top_phases_ms_per_frame", None)
+        record.pop("trace_dropped", None)
+        self.write(record)
+        loaded = trace_digest.load_intervals(self.path)
+        self.assertEqual(loaded, [record])
+        digest = trace_digest.digest_intervals(loaded)
+        self.assertEqual(digest["intervals"][0]["busiest_worker"]["pct"], 125)
+        self.assertIn("0-0", trace_digest.markdown_intervals(digest))
+
+
+class MarkdownTextTests(unittest.TestCase):
+    def test_markdown_text_escapes_a_leading_heading_or_list_marker(self):
+        self.assertEqual(trace_digest.markdown_text("# heading"), "&#35; heading")
+        self.assertEqual(trace_digest.markdown_text("- item"), "&#45; item")
+        self.assertEqual(trace_digest.markdown_text("1. item"), "&#49;. item")
+
+    def test_markdown_text_escapes_html_and_keeps_inner_underscores(self):
+        self.assertEqual(trace_digest.markdown_text("<b>"), "&lt;b&gt;")
+        self.assertEqual(trace_digest.markdown_text("a_b"), "a_b")
+        self.assertEqual(trace_digest.markdown_text("_x"), "&#95;x")
+
+    def test_interval_number_accepts_finite_non_negative_numbers(self):
+        self.assertEqual(trace_digest.interval_number(0, "start"), 0)
+        self.assertEqual(trace_digest.interval_number(1.5, "start"), 1.5)
+
+    def test_interval_number_refuses_strings_booleans_and_non_finite_values(self):
+        for value in ("3", True, -1, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "finite non-negative"):
+                trace_digest.interval_number(value, "start")
+
+    def test_nonnegative_integer_accepts_zero_and_positive_values(self):
+        self.assertEqual(trace_digest.nonnegative_integer("0"), 0)
+        self.assertEqual(trace_digest.nonnegative_integer("7"), 7)
+
+    def test_nonnegative_integer_refuses_negative_values(self):
+        import argparse
+        with self.assertRaises(argparse.ArgumentTypeError):
+            trace_digest.nonnegative_integer("-1")
+class SummaryFileTests(unittest.TestCase):
+    def write(self, text):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "summary.jsonl"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_load_summary_lines_skips_blank_lines_and_numbers_records_on_request(self):
+        path = self.write('{"a": 1}\n\n{"b": 2}\n')
+        self.assertEqual(trace_digest.load_summary_lines(path), [{"a": 1}, {"b": 2}])
+        self.assertEqual(trace_digest.load_summary_lines(path, numbered=True), [(1, {"a": 1}), (3, {"b": 2})])
+
+    def test_load_summary_lines_names_the_bad_line_by_label(self):
+        with self.assertRaisesRegex(ValueError, "run.jsonl:2: invalid JSON"):
+            trace_digest.load_summary_lines(self.write('{"a": 1}\n{bad\n'), label="run.jsonl")
+        with self.assertRaisesRegex(ValueError, "summary record must be an object"):
+            trace_digest.load_summary_lines(self.write("[1]\n"))
+
+    @unittest.skipIf(os.name == "nt", "symbolic link loops need POSIX symlinks here")
+    def test_resolve_summary_path_returns_a_regular_file_and_refuses_a_loop(self):
+        path = self.write("{}\n")
+        self.assertEqual(trace_digest.resolve_summary_path(path), path.resolve())
+        loop = path.with_name("loop.jsonl")
+        os.symlink(loop, loop)
+        with self.assertRaisesRegex(ValueError, "symbolic link loop"):
+            trace_digest.resolve_summary_path(loop)
+
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(defaultTest=os.environ.get("TRACE_DIGEST_TEST"))

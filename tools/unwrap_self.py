@@ -11,24 +11,38 @@ differ inside a container:
     bytes holding flags, data offset, size and the size again. A record with flag
     0x800 holds the data of the program header whose index is in flags bits 20
     and up. Segments the table does not cover are placed by the vaddr to file
-    mapping of the PT_LOAD that contains them. Segments without a vaddr that
-    follow the last recorded one in the ELF are stored right after it, back to
-    back in ELF order, except a PT_NOTE, which the container leaves out and which
-    is emitted without file bytes. Other segments without a vaddr carry the shift
-    of the last placed one.
+    mapping of the PT_LOAD that contains them, including a PT_PHDR at vaddr zero.
+    A PT_TLS image that runs past the file bytes of its PT_LOAD gets the zeros
+    the load maps there, the bytes a loader reads from p_vaddr.
+    A PT_DYNAMIC without a vaddr whose stale range lies inside a recorded
+    segment without a vaddr, as in a PS4 executable that keeps it in
+    PT_SCE_DYNLIBDATA, is read from that segment instead.
+    Other segments without a vaddr that follow the last recorded one in the ELF
+    are stored right after it, back to back in ELF order, except a PT_NOTE, which
+    the container leaves out and which is emitted without file bytes. Some dumps
+    end right after the recorded ones and leave out the version segment as well,
+    so one that would run past the end of the file is emitted without file bytes
+    too. Other segments without a vaddr carry the shift of the last placed one.
   - The segments are packed without honouring p_align, while ELF requires
     p_offset % p_align == p_vaddr % p_align. Every region is copied to an offset
-    that satisfies it, which the relinker enforces on guest modules.
+    that satisfies it, which the relinker enforces on guest modules. The ELF
+    header points to the rewritten table at the mapped PT_PHDR offset, when
+    present. A PT_PHDR mapping different bytes from the input table is refused.
 
 Only decrypted containers are handled. A container whose load segments all look
-encrypted is refused instead of copied: the entropy of each load segment is
-measured and a run of segments near eight bits per byte is reported.
+encrypted, or whose segments of 0x1000 bytes or more near eight bits per byte
+hold more than half of the load bytes, is refused instead of copied: the entropy
+of each load segment is measured at its start, middle and end, and the segments
+near eight bits per byte at all three are reported.
 
 usage: unwrap_self.py <input.self> <output.elf> [--verbose]
 """
 
 import argparse
+import io
 import math
+import os
+import secrets
 import struct
 import sys
 from collections import Counter
@@ -41,17 +55,25 @@ RECORD_SIZE = 0x20
 RECORD_HAS_SEGMENT = 0x800
 RECORD_SEGMENT_SHIFT = 20
 FIRST_REGION = 0x400
+MAX_ALIGNMENT_PADDING = 64 * 1024 * 1024
+MAX_OUTPUT_FACTOR = 4
+MIN_OUTPUT_LIMIT = 256 * 1024 * 1024
+PT_NULL = 0
 PT_LOAD = 1
+PT_DYNAMIC = 2
+PT_INTERP = 3
 PT_NOTE = 4
+PT_PHDR = 6
 ENTROPY_LIMIT = 7.5
 ENTROPY_SAMPLE = 0x10000
+ENTROPY_LARGE = 0x1000
 
 PHDR_NAMES = {
     PT_LOAD: "PT_LOAD",
     2: "PT_DYNAMIC",
-    3: "PT_INTERP",
+    PT_INTERP: "PT_INTERP",
     4: "PT_NOTE",
-    6: "PT_PHDR",
+    PT_PHDR: "PT_PHDR",
     7: "PT_TLS",
     0x6474E550: "PT_GNU_EH_FRAME",
     0x6474E551: "PT_GNU_STACK",
@@ -62,6 +84,8 @@ PHDR_NAMES = {
     0x6FFFFF00: "PT_OS_0x6fffff00",
     0x6FFFFF01: "PT_OS_0x6fffff01",
 }
+
+PT_TLS = 7
 
 
 class Refused(Exception):
@@ -92,24 +116,28 @@ def read_records(data):
     return records
 
 
-def align_up(value, alignment):
-    if alignment <= 1:
-        return value
-    return (value + alignment - 1) // alignment * alignment
-
-
-def parse_elf(data):
-    inner = data.find(b"\x7fELF")
-    if inner < 0:
-        raise Refused("no inner ELF header")
+def parse_elf_at(data, inner):
     if inner + 0x40 > len(data):
         raise Refused("inner ELF header is truncated")
     header = bytearray(data[inner:inner + 0x40])
+    if header[4] != 2 or header[5] != 1:
+        raise Refused("inner ELF is not 64-bit little-endian")
+    version = struct.unpack_from("<I", header, 0x14)[0]
+    if header[6] != 1 or version != 1:
+        raise Refused("unsupported inner ELF version (identification %d, object %d)" % (header[6], version))
     program_offset = struct.unpack_from("<Q", header, 0x20)[0]
+    machine = struct.unpack_from("<H", header, 0x12)[0]
+    if machine != 62:
+        raise Refused("unsupported inner ELF machine %d (expected 62)" % machine)
+    header_size = struct.unpack_from("<H", header, 0x34)[0]
+    if header_size != 64:
+        raise Refused("invalid inner ELF header size %d (expected 64)" % header_size)
     entry_size = struct.unpack_from("<H", header, 0x36)[0]
     count = struct.unpack_from("<H", header, 0x38)[0]
     if entry_size != 56 or count == 0:
         raise Refused("program header table is %d entries of %d bytes" % (count, entry_size))
+    if program_offset < len(header):
+        raise Refused("ELF program header table overlaps the ELF header")
     if inner + program_offset + count * entry_size > len(data):
         raise Refused("ELF program header table does not fit the file")
     headers = []
@@ -117,32 +145,75 @@ def parse_elf(data):
         offset = inner + program_offset + index * 56
         kind, flags, file_offset, vaddr, _, file_size, memory_size, alignment = struct.unpack_from(
             "<IIQQQQQQ", data, offset)
-        if kind == PT_LOAD:
+        if kind != PT_NULL and alignment and alignment & (alignment - 1):
+            raise Refused("segment %d alignment is not a power of two" % index)
+        if kind in (PT_LOAD, PT_TLS):
             if file_size > memory_size:
                 raise Refused("segment %d file size exceeds memory size" % index)
-            if alignment and alignment & (alignment - 1):
-                raise Refused("segment %d alignment is not a power of two" % index)
-            if memory_size > (1 << 64) - vaddr:
-                raise Refused("segment %d memory range exceeds ELF64" % index)
+        if kind == PT_TLS:
+            if alignment > 8192:
+                raise Refused("segment %d TLS alignment exceeds 8192" % index)
+            if memory_size > 0x7FFF0000:
+                raise Refused("segment %d TLS memory size exceeds 0x7fff0000" % index)
+        if kind in (PT_LOAD, PT_TLS) and memory_size > (1 << 64) - vaddr:
+            raise Refused("segment %d memory range exceeds ELF64" % index)
         headers.append({
             "index": index, "type": kind, "flags": flags, "offset": file_offset,
             "vaddr": vaddr, "size": file_size, "memory": memory_size,
-            "align": alignment, "source": file_offset, "host": None,
+            "align": alignment, "source": file_offset, "host": None, "container": None,
         })
     return inner, header, headers
 
 
+
+def parse_elf(data):
+    inner = data.find(b"\x7fELF")
+    if inner < 0:
+        raise Refused("no inner ELF header")
+    first_error = None
+    while inner >= 0:
+        try:
+            return parse_elf_at(data, inner)
+        except Refused as error:
+            if first_error is None:
+                first_error = error
+        inner = data.find(b"\x7fELF", inner + 1)
+    raise first_error
+
+
 def place_segments(data, headers, records):
+    for header in headers:
+        if header["type"] == PT_NULL:
+            header.update(flags=0, offset=0, vaddr=0, size=0, memory=0, align=0, source=0)
     loads = [header for header in headers if header["type"] == PT_LOAD]
+    zero_filled = b""
     used = set()
     placed = set()
-    for index, (flags, segment, size) in enumerate(records):
+    for flags, segment, size in records:
         target = flags >> RECORD_SEGMENT_SHIFT
         if flags & RECORD_HAS_SEGMENT and target < len(headers) and target not in placed and headers[target]["size"] == size:
             headers[target]["source"] = segment
             placed.add(target)
-            used.add(index)
     recorded = [header for header in headers if header["index"] in placed and header["vaddr"] == 0 and header["type"] != PT_LOAD]
+    for header in headers:
+        if header["type"] != PT_INTERP or header["vaddr"] != 0 or not header["size"] or header["index"] in placed:
+            continue
+        containers = [load for load in loads if load["offset"] <= header["offset"]
+                      and header["offset"] + header["size"] <= load["offset"] + load["size"]]
+        if containers:
+            host = min(containers, key=lambda load: load["size"])
+            header["host"] = host
+            placed.add(header["index"])
+    for header in headers:
+        if header["type"] != PT_DYNAMIC or header["vaddr"] != 0 or not header["size"] or header["index"] in placed:
+            continue
+        containers = [other for other in recorded if other["offset"] <= header["offset"]
+                      and header["offset"] + header["size"] <= other["offset"] + other["size"]]
+        if containers:
+            container = min(containers, key=lambda other: other["size"])
+            header["source"] = container["source"] + header["offset"] - container["offset"]
+            header["container"] = container
+            placed.add(header["index"])
     if recorded:
         last = max(recorded, key=lambda header: header["offset"])
         cursor = last["source"] + last["size"]
@@ -156,16 +227,24 @@ def place_segments(data, headers, records):
                 continue
             header["source"] = cursor
             cursor += header["size"]
+            if cursor > len(data):
+                header["source"] = 0
+                header["size"] = 0
     for header in loads:
         if header["size"] == 0 or header["index"] in placed:
             continue
-        for index, (_, segment, size) in enumerate(records):
-            if index in used:
+        for index, (flags, segment, size) in enumerate(records):
+            if flags & RECORD_HAS_SEGMENT or index in used:
                 continue
             if size == header["size"]:
                 used.add(index)
                 header["source"] = segment
                 break
+
+    for header in loads:
+        if header["size"] and (header["source"] < 0 or header["source"] > len(data)
+                               or header["size"] > len(data) - header["source"]):
+            raise Refused("segment %d does not fit the file" % header["index"])
 
     def load_for(vaddr, size):
         found = None
@@ -179,19 +258,44 @@ def place_segments(data, headers, records):
     for header in headers:
         if header["type"] == PT_LOAD:
             continue
+        if header["host"] is not None:
+            host = header["host"]
+            header["source"] = host["source"] + header["offset"] - host["offset"]
         if header["index"] in placed:
+            host = load_for(header["vaddr"], header["size"])
+            if host is not None:
+                offset = header["vaddr"] - host["vaddr"]
+                if (host["size"] and offset <= host["size"] and header["size"] <= host["size"] - offset
+                        and header["source"] == host["source"] + offset):
+                    header["host"] = host
             if header["size"] and (tail is None or header["offset"] > tail[0]):
                 tail = (header["offset"], header["source"] - header["offset"])
             continue
-        if header["vaddr"] != 0:
+        if header["vaddr"] != 0 or header["type"] in (PT_PHDR, PT_DYNAMIC, PT_TLS):
             host = load_for(header["vaddr"], header["size"])
             if host is None:
                 if header["size"] == 0:
                     header["source"] = 0
                     continue
                 raise Refused("segment %d vaddr %#x is in no PT_LOAD" % (header["index"], header["vaddr"]))
+            offset = header["vaddr"] - host["vaddr"]
+            if header["size"] and (offset > host["size"] or header["size"] > host["size"] - offset):
+                if header["type"] != PT_TLS or header["size"] > host["memory"] - offset:
+                    raise Refused("segment %d does not fit the file-backed range of PT_LOAD %d"
+                                  % (header["index"], host["index"]))
+                if len(zero_filled) + header["size"] > max(MAX_OUTPUT_FACTOR * len(data), MIN_OUTPUT_LIMIT):
+                    raise Refused("segment %d needs %d bytes of output, more than the %d allowed for a %d byte container"
+                                  % (header["index"], header["size"], max(MAX_OUTPUT_FACTOR * len(data), MIN_OUTPUT_LIMIT),
+                                     len(data)))
+                backed = data[host["source"] + offset:host["source"] + host["size"]] if offset < host["size"] else b""
+                header["source"] = len(data) + len(zero_filled)
+                zero_filled += backed + bytes(header["size"] - len(backed))
+                continue
+            if host["size"] == 0 or offset > host["size"]:
+                header["source"] = 0
+                continue
             header["host"] = host
-            header["source"] = host["source"] + (header["vaddr"] - host["vaddr"])
+            header["source"] = host["source"] + offset
             if tail is None or header["offset"] > tail[0]:
                 tail = (header["offset"], header["source"] - header["offset"])
         elif header["size"]:
@@ -202,30 +306,51 @@ def place_segments(data, headers, records):
             header["size"] = min(header["size"], keep)
             header["memory"] = min(header["memory"], keep)
 
+    end = len(data) + len(zero_filled)
     for header in headers:
         if header["type"] == PT_LOAD and header["size"] == 0:
             continue
-        if header["source"] > len(data) or header["size"] > len(data) - header["source"]:
+        if header["source"] < 0 or header["source"] > end or header["size"] > end - header["source"]:
             raise Refused("segment %d does not fit the file" % header["index"])
+    return zero_filled
+
+
+def segment_entropy(data, header):
+    start, size = header["source"], header["size"]
+    if size <= ENTROPY_SAMPLE:
+        return entropy(data[start:start + size])
+    offsets = (0, (size - ENTROPY_SAMPLE) // 2, size - ENTROPY_SAMPLE)
+    return min(entropy(data[start + offset:start + offset + ENTROPY_SAMPLE]) for offset in offsets)
 
 
 def check_decrypted(data, headers):
     encrypted = []
+    encrypted_large = 0
+    total = 0
     for header in headers:
         if header["type"] != PT_LOAD or header["size"] == 0:
             continue
-        sample = data[header["source"]:header["source"] + min(header["size"], ENTROPY_SAMPLE)]
-        value = entropy(sample)
+        total += header["size"]
+        value = segment_entropy(data, header)
         if value >= ENTROPY_LIMIT:
             encrypted.append((header["index"], header["source"], value))
-    if encrypted and len(encrypted) == len([h for h in headers if h["type"] == PT_LOAD and h["size"]]):
+            if header["size"] >= ENTROPY_LARGE:
+                encrypted_large += header["size"]
+    every = len(encrypted) == len([h for h in headers if h["type"] == PT_LOAD and h["size"]])
+    if encrypted and (every or encrypted_large * 2 > total):
         listed = ", ".join("segment %d at %#x (%.2f bits per byte)" % item for item in encrypted)
-        raise Refused("every load segment looks encrypted: " + listed)
+        if every:
+            raise Refused("every load segment looks encrypted: " + listed)
+        raise Refused("most load bytes look encrypted: " + listed)
 
 
 def unwrap(path, output, verbose=False):
-    source, destination = Path(path), Path(output)
-    if source.resolve() == destination.resolve() or (destination.exists() and source.samefile(destination)):
+    source, destination = Path(path), Path(os.path.realpath(output))
+    try:
+        aliased = source.samefile(destination)
+    except FileNotFoundError:
+        aliased = False
+    if os.path.realpath(source) == str(destination) or aliased:
         raise Refused("output aliases the input container")
     data = bytes(source.read_bytes())
     if len(data) < FIRST_REGION:
@@ -236,14 +361,33 @@ def unwrap(path, output, verbose=False):
 
     records = read_records(data)
     inner, elf_header, headers = parse_elf(data)
-    place_segments(data, headers, records)
+    phdrs = [header for header in headers if header["type"] == PT_PHDR]
+    if len(phdrs) > 1:
+        raise Refused("more than one PT_PHDR segment")
+    phdr = phdrs[0] if phdrs else None
+    if phdr is not None:
+        if phdr["size"] < len(headers) * 56 or phdr["memory"] < len(headers) * 56:
+            raise Refused("PT_PHDR does not cover the program header table")
+        if any(header["type"] == PT_LOAD and header["index"] < phdr["index"] for header in headers):
+            raise Refused("PT_PHDR must precede the load segments")
+    zero_filled = place_segments(data, headers, records)
+    if phdr is not None:
+        if phdr["host"] is None:
+            raise Refused("PT_PHDR is not in a file-backed load segment")
+        table = inner + struct.unpack_from("<Q", elf_header, 0x20)[0]
+        table_size = len(headers) * 56
+        if data[phdr["source"]:phdr["source"] + table_size] != data[table:table + table_size]:
+            raise Refused("PT_PHDR does not map the program header table")
     check_decrypted(data, headers)
 
     regions = []
+    load_regions = {}
     for header in headers:
         if header["type"] == PT_LOAD and header["size"]:
-            regions.append({"old": header["source"], "size": header["size"],
-                            "vaddr": header["vaddr"], "align": header["align"]})
+            region = {"old": header["source"], "size": header["size"],
+                      "vaddr": header["vaddr"], "align": header["align"]}
+            regions.append(region)
+            load_regions[header["index"]] = region
 
     def region_for(offset, size):
         for region in regions:
@@ -252,35 +396,85 @@ def unwrap(path, output, verbose=False):
         return None
 
     for header in headers:
-        if header["type"] == PT_LOAD or header["size"] == 0:
+        if header["type"] == PT_LOAD or header["size"] == 0 or header["container"] is not None:
             continue
         if region_for(header["source"], header["size"]) is None:
-            regions.append({"old": header["source"], "size": header["size"], "vaddr": 0, "align": 1})
+            regions.append({"old": header["source"], "size": header["size"],
+                            "vaddr": header["vaddr"], "align": header["align"]})
 
     regions.sort(key=lambda region: region["old"])
-    program_offset = struct.unpack_from("<Q", elf_header, 0x20)[0]
-    cursor = max(FIRST_REGION, program_offset + len(headers) * 56)
-    for region in regions:
-        alignment = region["align"] if region["align"] and (region["align"] & (region["align"] - 1)) == 0 else 1
-        placed = align_up(cursor, alignment)
-        if region["vaddr"] % alignment != placed % alignment:
-            placed += (region["vaddr"] % alignment - placed % alignment) % alignment
-        region["new"] = placed
-        cursor = placed + region["size"]
 
-    result = bytearray(cursor)
-    for region in regions:
-        result[region["new"]:region["new"] + region["size"]] = data[region["old"]:region["old"] + region["size"]]
+    def output_region(header):
+        host = header if header["type"] == PT_LOAD else header["host"]
+        region = load_regions.get(host["index"]) if host is not None else None
+        return region if region is not None else region_for(header["source"], header["size"])
 
     for header in headers:
         if header["size"] == 0 and (header["type"] == PT_LOAD or header["source"] == 0):
-            header["new"] = 0
             continue
-        region = region_for(header["source"], header["size"])
+        region = output_region(header)
+        alignment = header["align"]
+        if region is None or alignment <= 1 or alignment & (alignment - 1):
+            continue
+        current = region["align"]
+        current = current if current and (current & (current - 1)) == 0 else 1
+        address = header["vaddr"] - (header["source"] - region["old"])
+        if (address - region["vaddr"]) % min(current, alignment):
+            raise Refused("segment %d has incompatible alignment within its output region" % header["index"])
+        if alignment > current:
+            region["align"] = alignment
+            region["vaddr"] = address
+
+    program_offset = struct.unpack_from("<Q", elf_header, 0x20)[0]
+    cursor = max(FIRST_REGION, program_offset + len(headers) * 56)
+    padding = 0
+    for region in regions:
+        alignment = region["align"] if region["align"] and (region["align"] & (region["align"] - 1)) == 0 else 1
+        placed = cursor + (region["vaddr"] - cursor) % alignment
+        padding += placed - cursor
+        region["new"] = placed
+        cursor = placed + region["size"]
+
+    empty_end = cursor
+    for header in headers:
+        if header["type"] == PT_LOAD and header["size"] == 0:
+            empty_end = max(empty_end, header["vaddr"] % max(header["align"], 1))
+    padding += empty_end - cursor
+    if padding > MAX_ALIGNMENT_PADDING:
+        raise Refused("segment alignment requires more than %d bytes of output padding" % MAX_ALIGNMENT_PADDING)
+    cursor = empty_end
+    output_limit = max(MAX_OUTPUT_FACTOR * len(data), MIN_OUTPUT_LIMIT)
+    if cursor > output_limit:
+        raise Refused("the load segments need %d bytes of output, more than the %d allowed for a %d byte container"
+                      % (cursor, output_limit, len(data)))
+
+    result = bytearray(cursor)
+    output_bytes = memoryview(result)
+    input_bytes = memoryview(data)
+    tail_bytes = memoryview(zero_filled)
+    for region in regions:
+        start = region["old"]
+        end = start + region["size"]
+        target = region["new"]
+        destination_bytes = output_bytes[target:target + region["size"]]
+        file_part = input_bytes[start:end]
+        destination_bytes[:len(file_part)] = file_part
+        if len(file_part) < len(destination_bytes):
+            tail_start = max(0, start - len(data))
+            destination_bytes[len(file_part):] = tail_bytes[tail_start:end - len(data)]
+
+    for header in headers:
+        if header["size"] == 0 and (header["type"] == PT_LOAD or header["source"] == 0):
+            header["new"] = header["vaddr"] % max(header["align"], 1) if header["type"] == PT_LOAD else 0
+            continue
+        region = output_region(header)
         header["new"] = header["source"] if region is None else region["new"] + (header["source"] - region["old"])
         if header["new"] + header["size"] > len(result):
             raise Refused("segment %d escaped the output" % header["index"])
 
+    if phdr is not None:
+        program_offset = phdr["new"]
+        struct.pack_into("<Q", elf_header, 0x20, program_offset)
     result[0:0x40] = elf_header
     struct.pack_into("<Q", result, 0x28, 0)
     struct.pack_into("<H", result, 0x3C, 0)
@@ -299,19 +493,29 @@ def unwrap(path, output, verbose=False):
             print("  [%2d] %-18s vaddr=%#011x filesz=%#010x offset=%#010x%s"
                   % (item["index"], name, item["vaddr"], item["size"], item["new"], moved))
 
-    destination = Path(output)
-    if destination.parent != Path(""):
-        destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(result)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = destination.parent / (".unwrap-self-" + secrets.token_hex(16))
+    temporary = io.open(temporary_path, "xb")
+    try:
+        with temporary:
+            temporary.write(result)
+        if sys.platform != "win32" and destination.exists():
+            temporary_path.chmod(destination.stat().st_mode)
+        temporary_path.replace(destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return len(result)
 
 
-def main():
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(description="unwrap a decrypted SELF or fSELF container into a clean ELF")
     parser.add_argument("input", help="SELF container to read")
     parser.add_argument("output", help="ELF executable to write")
     parser.add_argument("--verbose", action="store_true", help="print the program header mapping")
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     try:
         size = unwrap(arguments.input, arguments.output, arguments.verbose)
     except Refused as error:

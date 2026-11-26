@@ -1,4 +1,7 @@
+#include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/General.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libc/include/HostEntropy.hpp"
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -17,15 +20,7 @@ constexpr std::array<std::int64_t, MaxTypes> MinimumStateBytes {8, 32, 64, 128, 
 constexpr std::array<int, MaxTypes> Degrees {0, 7, 15, 31, 63};
 constexpr std::array<int, MaxTypes> Separations {0, 3, 1, 3, 1};
 
-std::uint32_t g_defaultTable[] {
-    3,
-    0x2cf41758, 0x27bb3711, 0x4916d4d1, 0x7b02f59f, 0x9b8e28eb, 0xc0e80269,
-    0x696f5c16, 0x878f1ff5, 0x52d9c07f, 0x916a06cd, 0xb50b3a20, 0x2776970a,
-    0xee4eb2a6, 0xe94640ec, 0xb1d65612, 0x9d1ed968, 0x1043f6b7, 0xa3432a76,
-    0x17eacbb9, 0x3c09e2eb, 0x04f8c2b3, 0x708a1f57, 0xee341814, 0x95d0e4d2,
-    0xb06f216c, 0x8bd2e72e, 0x8f7c38d7, 0xcfc6a8fc, 0x02a59495, 0xa20d2a69,
-    0xe29d12d1
-};
+std::uint32_t g_defaultTable[32]{};
 
 struct AdditiveFeedbackState {
     char* table;
@@ -50,12 +45,13 @@ void StoreWord(char* table, int index, std::uint32_t value) {
 }
 
 std::uint32_t GoodRand(std::uint32_t context) {
-    std::int32_t x = static_cast<std::int32_t>(context % 0x7ffffffeu) + 1;
-    const std::int32_t high = x / 127773;
-    const std::int32_t low = x % 127773;
+    std::int64_t x = static_cast<std::int32_t>(context);
+    if (x == 0) x = 123459876;
+    const std::int64_t high = x / 127773;
+    const std::int64_t low = x % 127773;
     x = 16807 * low - 2836 * high;
     if (x < 0) x += 0x7fffffff;
-    return static_cast<std::uint32_t>(x - 1);
+    return static_cast<std::uint32_t>(x);
 }
 
 std::uint32_t NextLocked() {
@@ -95,7 +91,15 @@ void SaveTypeWordLocked() {
     StoreWord(state.table, 0, static_cast<std::uint32_t>(word));
 }
 
-std::uint16_t g_rand48Seed[3]{0x330e, 0xabcd, 0x1234};
+bool SeedDefaultState() {
+    SeedLocked(1);
+    SaveTypeWordLocked();
+    return true;
+}
+
+[[maybe_unused]] const bool g_defaultStateSeeded = SeedDefaultState();
+
+std::uint16_t g_rand48Seed[3]{0x330e, 0, 0};
 constexpr std::uint64_t DefaultRand48Multiplier = 0x5deece66dull;
 constexpr std::uint16_t DefaultRand48Addend = 0xb;
 std::uint64_t g_rand48Multiplier = DefaultRand48Multiplier;
@@ -118,7 +122,7 @@ std::uint64_t NextRand48(std::uint16_t* seed, const char* function) {
 extern "C" {
 
 double APS5_VABI erand48_nid_postfix(std::uint16_t* seed) {
-    return std::ldexp(static_cast<double>(NextRand48(seed, __func__)), -48);
+    return std::ldexp(static_cast<double>(NextRand48(seed, __func__) >> 16), -32);
 }
 
 std::int64_t APS5_VABI nrand48_nid_postfix(std::uint16_t* seed) {
@@ -126,12 +130,12 @@ std::int64_t APS5_VABI nrand48_nid_postfix(std::uint16_t* seed) {
 }
 
 std::int64_t APS5_VABI jrand48_nid_postfix(std::uint16_t* seed) {
-    return static_cast<std::int32_t>(static_cast<std::uint32_t>(NextRand48(seed, __func__) >> 16));
+    return static_cast<std::int64_t>(NextRand48(seed, __func__) >> 16);
 }
 
 double APS5_VABI drand48_nid_postfix() {
     std::lock_guard lock(g_randomLock);
-    return std::ldexp(static_cast<double>(NextRand48(g_rand48Seed, __func__)), -48);
+    return std::ldexp(static_cast<double>(NextRand48(g_rand48Seed, __func__) >> 16), -32);
 }
 
 std::int64_t APS5_VABI lrand48_nid_postfix() {
@@ -141,7 +145,7 @@ std::int64_t APS5_VABI lrand48_nid_postfix() {
 
 std::int64_t APS5_VABI mrand48_nid_postfix() {
     std::lock_guard lock(g_randomLock);
-    return static_cast<std::int32_t>(static_cast<std::uint32_t>(NextRand48(g_rand48Seed, __func__) >> 16));
+    return static_cast<std::int64_t>(NextRand48(g_rand48Seed, __func__) >> 16);
 }
 
 void APS5_VABI srand48_nid_postfix(std::int64_t seedval) {
@@ -155,8 +159,10 @@ void APS5_VABI srand48_nid_postfix(std::int64_t seedval) {
 
 std::uint16_t* APS5_VABI seed48_nid_postfix(const std::uint16_t* seed) {
     if (seed == nullptr) throw std::invalid_argument("seed48: null seed");
+    std::array<std::uint16_t, 3> words{};
+    if (!GuestCopyIn_nid_no_patch(words.data(), seed, sizeof(words))) throw std::invalid_argument("seed48: unreadable seed");
     std::lock_guard lock(g_randomLock);
-    for (int index = 0; index < 3; ++index) g_rand48Seed[index] = g_seed48Result[index] = seed[index];
+    for (int index = 0; index < 3; ++index) g_rand48Seed[index] = g_seed48Result[index] = words[index];
     g_rand48Multiplier = DefaultRand48Multiplier;
     g_rand48Addend = DefaultRand48Addend;
     return g_seed48Result;
@@ -164,10 +170,12 @@ std::uint16_t* APS5_VABI seed48_nid_postfix(const std::uint16_t* seed) {
 
 void APS5_VABI lcong48_nid_postfix(const std::uint16_t* parameters) {
     if (parameters == nullptr) throw std::invalid_argument("lcong48: null parameters");
+    std::array<std::uint16_t, 7> words{};
+    if (!GuestCopyIn_nid_no_patch(words.data(), parameters, sizeof(words))) throw std::invalid_argument("lcong48: unreadable parameters");
     std::lock_guard lock(g_randomLock);
-    for (int index = 0; index < 3; ++index) g_rand48Seed[index] = parameters[index];
-    g_rand48Multiplier = parameters[3] | (static_cast<std::uint64_t>(parameters[4]) << 16) | (static_cast<std::uint64_t>(parameters[5]) << 32);
-    g_rand48Addend = parameters[6];
+    for (int index = 0; index < 3; ++index) g_rand48Seed[index] = words[index];
+    g_rand48Multiplier = words[3] | (static_cast<std::uint64_t>(words[4]) << 16) | (static_cast<std::uint64_t>(words[5]) << 32);
+    g_rand48Addend = words[6];
 }
 
 std::int64_t APS5_VABI random_nid_postfix() {
@@ -180,12 +188,22 @@ void APS5_VABI srandom_nid_postfix(std::uint64_t seed) {
     SeedLocked(static_cast<std::uint32_t>(seed));
 }
 
+void APS5_VABI srandomdev_nid_postfix() {
+    std::lock_guard lock(g_randomLock);
+    const auto words = g_random.type == LinearCongruentialType ? 1 : g_random.degree;
+    HostEntropy_nid_no_patch(g_random.table + sizeof(std::uint32_t), static_cast<std::size_t>(words) * sizeof(std::uint32_t));
+    if (g_random.type != LinearCongruentialType) {
+        g_random.front = g_random.separation;
+        g_random.rear = 0;
+    }
+}
+
 char* APS5_VABI initstate_nid_postfix(std::uint64_t seed, char* state, std::int64_t size) {
+    std::lock_guard lock(g_randomLock);
+    SaveTypeWordLocked();
     if (size < MinimumStateBytes[0]) return nullptr;
     if (state == nullptr) throw std::invalid_argument("initstate: null state");
-    std::lock_guard lock(g_randomLock);
     char* previous = g_random.table;
-    SaveTypeWordLocked();
     int type = MaxTypes - 1;
     while (size < MinimumStateBytes[static_cast<std::size_t>(type)]) --type;
     g_random = {state, type, Degrees[static_cast<std::size_t>(type)], Separations[static_cast<std::size_t>(type)], 0, 0};
@@ -201,7 +219,6 @@ char* APS5_VABI setstate_nid_postfix(char* state) {
     const int type = static_cast<int>(word % MaxTypes);
     const std::uint32_t rear = word / MaxTypes;
     const int degree = Degrees[static_cast<std::size_t>(type)];
-    if (type != LinearCongruentialType && rear >= static_cast<std::uint32_t>(degree)) return nullptr;
     char* previous = g_random.table;
     SaveTypeWordLocked();
     const int separation = Separations[static_cast<std::size_t>(type)];
@@ -214,6 +231,16 @@ char* APS5_VABI setstate_nid_postfix(char* state) {
         g_random.front = (static_cast<int>(rear) + separation) % degree;
     }
     return previous;
+}
+
+void APS5_VABI _ZNSt3__113random_deviceC2ERKNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE_nid_postfix(void*, const void*) {}
+
+void APS5_VABI _ZNSt3__113random_deviceD1Ev_nid_postfix(void*) {}
+
+std::uint32_t APS5_VABI _ZNSt3__113random_deviceclEv_nid_postfix(void*) {
+    std::uint32_t value = 0;
+    HostEntropy_nid_no_patch(&value, sizeof(value));
+    return value;
 }
 
 }

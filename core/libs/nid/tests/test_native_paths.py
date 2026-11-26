@@ -1,14 +1,21 @@
 import subprocess
+import os
+import stat
+import signal
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from test_macho_nids import build_dylib, exports_of, nid
+from test_macho_nids import build_dylib, exports_of, nid, PATCHER
 
-PATCHER = Path(sys.argv.pop(1)).resolve()
+try:
+    import resource
+except ImportError:
+    resource = None
 
-
+@unittest.skipUnless(PATCHER is not None and PATCHER.is_file(), "nid_patcher executable required")
 class NativePathTests(unittest.TestCase):
     def invoke(self, *arguments):
         return subprocess.run([str(PATCHER), "libtest", *map(str, arguments)],
@@ -50,6 +57,73 @@ class NativePathTests(unittest.TestCase):
             self.assertIn(str(missing), result.stderr)
             self.assertFalse(missing.exists())
             self.assertEqual(existing.read_bytes(), b"unchanged")
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows sharing modes")
+    def test_transiently_held_target_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            file = Path(temporary) / "library.prx"
+            file.write_bytes(build_dylib([("_puts_nid_postfix", 0, 0x100)], []))
+            handle = open(file, "rb")
+            try:
+                process = subprocess.Popen([str(PATCHER), "libtest", str(file)], stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+                time.sleep(0.75)
+            finally:
+                handle.close()
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+            self.assertEqual(exports_of(file.read_bytes()), {"_" + nid("puts"): (0, 0x100)})
+            self.assertEqual(list(Path(temporary).iterdir()), [file])
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows sharing modes")
+    def test_permanently_held_target_reports_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            file = Path(temporary) / "library.prx"
+            original = build_dylib([("_puts_nid_postfix", 0, 0x100)], [])
+            file.write_bytes(original)
+            with open(file, "rb"):
+                result = self.invoke(file)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("cannot write", result.stderr)
+            self.assertIn(str(file), result.stderr)
+            self.assertNotIn("OK:", result.stdout)
+            self.assertEqual(file.read_bytes(), original)
+            self.assertEqual(sorted(entry.name for entry in file.parent.iterdir()), [file.name])
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX file permissions")
+    def test_patching_preserves_the_input_permissions(self):
+        for mode in (0o700, 0o750, 0o640):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as temporary:
+                file = Path(temporary) / "library.prx"
+                file.write_bytes(build_dylib([("_puts_nid_postfix", 0, 0x100)], []))
+                file.chmod(mode)
+                result = self.invoke(file)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(exports_of(file.read_bytes()), {"_" + nid("puts"): (0, 0x100)})
+                self.assertEqual(stat.S_IMODE(file.stat().st_mode), mode)
+                self.assertEqual(list(Path(temporary).iterdir()), [file])
+
+    @unittest.skipUnless(resource is not None and hasattr(signal, "SIGXFSZ"), "requires POSIX file size limits")
+    def test_failed_file_write_is_reported_without_success(self):
+        for limit in (0, 1024):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as temporary:
+                file = Path(temporary) / "library.prx"
+                original = build_dylib([("_puts_nid_postfix", 0, 0x100)], [])
+                file.write_bytes(original)
+
+                def restrict_output():
+                    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+                result = subprocess.run([str(PATCHER), "libtest", str(file)], capture_output=True,
+                                        encoding="utf-8", errors="replace", timeout=10,
+                                        preexec_fn=restrict_output)
+                self.assertEqual(file.read_bytes(), original)
+                self.assertEqual(sorted(entry.name for entry in file.parent.iterdir()), [file.name])
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("cannot write", result.stderr)
+                self.assertIn(str(file), result.stderr)
+                self.assertNotIn("OK:", result.stdout)
 
 
 if __name__ == "__main__":

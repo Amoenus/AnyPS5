@@ -1,0 +1,46 @@
+#include "prx/libc/include/Api.hpp"
+#include "tests/GuardedBuffer.hpp"
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+static void Require(bool condition) {
+    if (!condition) {
+        std::fputs("GuestCharSearchBoundary check failed\n", stderr);
+        std::abort();
+    }
+}
+
+template<class T>
+static void Prefix(const T* data) {
+    for (int index = 1; index <= 8; ++index) Require(data[-index] == static_cast<T>(sizeof(T) == 1 ? 0xa5 : 0xa5a5));
+}
+
+int main() {
+    GuardedBuffer input;
+    for (std::size_t count = 0; count <= 128; ++count) {
+        auto* source = input.At<char>(count + 1);
+        for (std::size_t index = 0; index < count; ++index) source[index] = static_cast<char>(std::array<unsigned char, 5>{1, 0x7f, 0x80, 0xe9, 0xff}[(index + count) % 5]);
+        source[count] = 0;
+        const std::string saved(source, count + 1);
+        for (int value : {-256, -23, -1, 0, 1, 127, 128, 233, 255, 256, 489, 511, (-2147483647 - 1), 2147483647}) {
+            const char* first = nullptr;
+            const char* last = nullptr;
+            for (std::size_t index = 0; index <= count; ++index) {
+                if (static_cast<unsigned char>(source[index]) == static_cast<unsigned char>(value)) {
+                    if (first == nullptr) first = source + index;
+                    last = source + index;
+                }
+            }
+            Require(strchr_nid_postfix(source, value) == first);
+            Require(strrchr_nid_postfix(source, value) == last);
+            Require(std::equal(saved.begin(), saved.end(), source));
+        }
+    }
+}

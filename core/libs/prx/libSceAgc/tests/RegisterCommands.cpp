@@ -1,36 +1,13 @@
+#include "prx/libSceAgc/Patch/include/IndirectRegisters.hpp"
+#include "prx/libSceAgc/DcbState/include/Registers.hpp"
+#include "prx/libSceAgc/Cb/include/Registers.hpp"
 #include "prx/libSceAgc/Command/include/Packet.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
-
-extern "C" {
-std::uint32_t* APS5_VABI sceAgcDcbSetCfRegisterDirect(CommandBuffer*, ShaderRegister);
-std::uint32_t* APS5_VABI sceAgcDcbSetCfRegisterRangeDirect(CommandBuffer*, std::uint32_t, const std::uint32_t*, std::uint32_t);
-std::uint32_t* APS5_VABI sceAgcDcbSetCxRegisterDirect(CommandBuffer*, ShaderRegister);
-std::uint32_t* APS5_VABI sceAgcDcbSetShRegisterDirect(CommandBuffer*, ShaderRegister);
-std::uint32_t* APS5_VABI sceAgcDcbSetUcRegisterDirect(CommandBuffer*, ShaderRegister);
-std::uint32_t APS5_VABI sceAgcDcbSetCxRegisterDirectGetSize();
-std::uint32_t APS5_VABI sceAgcDcbSetShRegisterDirectGetSize();
-std::uint32_t APS5_VABI sceAgcDcbSetUcRegisterDirectGetSize();
-std::uint32_t* APS5_VABI sceAgcDcbSetCxRegistersIndirect(CommandBuffer*, const volatile ShaderRegister*, std::uint32_t);
-std::uint32_t* APS5_VABI sceAgcDcbSetShRegistersIndirect(CommandBuffer*, const volatile ShaderRegister*, std::uint32_t);
-std::uint32_t* APS5_VABI sceAgcDcbSetUcRegistersIndirect(CommandBuffer*, const volatile ShaderRegister*, std::uint32_t);
-std::uint32_t APS5_VABI sceAgcDcbSetCxRegistersIndirectGetSize(std::uint32_t);
-std::uint32_t APS5_VABI sceAgcDcbSetShRegistersIndirectGetSize(std::uint32_t);
-std::uint32_t APS5_VABI sceAgcDcbSetUcRegistersIndirectGetSize(std::uint32_t);
-int APS5_VABI sceAgcSetCxRegIndirectPatchSetNumRegisters(std::uint32_t*, std::uint32_t);
-int APS5_VABI sceAgcSetShRegIndirectPatchSetNumRegisters(std::uint32_t*, std::uint32_t);
-int APS5_VABI sceAgcSetUcRegIndirectPatchSetNumRegisters(std::uint32_t*, std::uint32_t);
-int APS5_VABI sceAgcSetCxRegIndirectPatchSetAddress(std::uint32_t*, const volatile ShaderRegister*);
-int APS5_VABI sceAgcSetShRegIndirectPatchSetAddress(std::uint32_t*, const volatile ShaderRegister*);
-int APS5_VABI sceAgcSetUcRegIndirectPatchSetAddress(std::uint32_t*, const volatile ShaderRegister*);
-std::uint32_t* APS5_VABI sceAgcCbSetShRegistersDirect(CommandBuffer*, const volatile ShaderRegister*, std::uint32_t);
-std::uint32_t* APS5_VABI sceAgcCbSetUcRegistersDirect(CommandBuffer*, const volatile ShaderRegister*, std::uint32_t);
-std::uint32_t APS5_VABI sceAgcCbSetShRegistersDirectGetSize(std::uint32_t);
-std::uint32_t APS5_VABI sceAgcCbSetUcRegistersDirectGetSize(std::uint32_t);
-}
 
 namespace {
 
@@ -66,7 +43,6 @@ void testDirect() {
         check(storage.buffer.cursor_up == packet + 3 && sizes[i]() == 12, "direct size/cursor mismatch");
         check(packet[3] == 0xabcdef01u, "direct command overwrote following word");
         const auto before = storage.words;
-        expectFailure([&] { writers[i](&storage.buffer, {0x10000u, 1}); });
         expectFailure([&] { writers[i](nullptr, {0, 1}); });
         storage.buffer.cursor_down = storage.buffer.cursor_up + 2;
         expectFailure([&] { writers[i](&storage.buffer, {0, 1}); });
@@ -88,13 +64,89 @@ void testConfig() {
     check(reserved == range + 5 && reserved[0] == 0xc0026800u && reserved[1] == 0x200u && reserved[2] == 0xabcdef01u && reserved[3] == 0xabcdef01u, "null config values wrote the payload");
     check(storage.buffer.cursor_up == reserved + 4 && reserved[4] == 0xabcdef01u, "config register cursor mismatch");
     const auto before = storage.words;
-    expectFailure([&] { sceAgcDcbSetCfRegisterDirect(&storage.buffer, {0x10000u, 1}); });
     expectFailure([&] { sceAgcDcbSetCfRegisterDirect(nullptr, {0, 1}); });
     expectFailure([&] { sceAgcDcbSetCfRegisterRangeDirect(&storage.buffer, 0x100u, values.data(), 0); });
     expectFailure([&] { sceAgcDcbSetCfRegisterRangeDirect(&storage.buffer, 0xffffu, values.data(), 2); });
-    const auto* misaligned = reinterpret_cast<const std::uint32_t*>(reinterpret_cast<const unsigned char*>(values.data()) + 1);
-    expectFailure([&] { sceAgcDcbSetCfRegisterRangeDirect(&storage.buffer, 0x100u, misaligned, 1); });
     check(storage.words == before && storage.buffer.cursor_up == reserved + 4, "invalid config register write modified buffer");
+}
+
+void testDirectConsoleArguments() {
+    using DirectWriter = std::uint32_t* (APS5_VABI *)(CommandBuffer*, ShaderRegister);
+    struct Writer {
+        DirectWriter write;
+        std::uint32_t header;
+    };
+    struct Case {
+        ShaderRegister reg;
+        std::uint32_t offset;
+    };
+    const std::array<Writer, 4> writers{{{sceAgcDcbSetCfRegisterDirect, 0xc0016800u}, {sceAgcDcbSetCxRegisterDirect, 0xc0016900u}, {sceAgcDcbSetShRegisterDirect, 0xc0017600u}, {sceAgcDcbSetUcRegisterDirect, 0xc0017900u}}};
+    const std::array<Case, 3> cases{{{{0x11111111u, 0u}, 0x1111u}, {{0x22222222u, 0x11111111u}, 0x2222u}, {{0x10000u, 1u}, 0u}}};
+    for (const auto& writer : writers) {
+        for (const auto& item : cases) {
+            Storage storage;
+            const auto* packet = writer.write(&storage.buffer, item.reg);
+            const std::array expected{writer.header, item.offset, item.reg.value};
+            check(packet == storage.words.data() && std::equal(expected.begin(), expected.end(), packet) && storage.buffer.cursor_up == packet + 3, "direct register packet does not match the console's");
+        }
+    }
+    using RangeWriter = std::uint32_t* (APS5_VABI *)(CommandBuffer*, std::uint32_t, const std::uint32_t*, std::uint32_t);
+    const std::array<std::uint32_t, 2> rangeHeaders{0xc0007600u, 0xc0007900u};
+    const std::array<RangeWriter, 2> rangeWriters{sceAgcCbSetShRegisterRangeDirect, sceAgcCbSetUcRegisterRangeDirect};
+    for (std::size_t i = 0; i < rangeWriters.size(); ++i) {
+        Storage storage;
+        storage.words.fill(0xabcdef01u);
+        const auto* packet = rangeWriters[i](&storage.buffer, 0x22222222u, reinterpret_cast<const std::uint32_t*>(0x3333333344444444ull), 0);
+        check(packet == storage.words.data() && packet[0] == rangeHeaders[i] && packet[1] == 0x2222u && packet[2] == 0xabcdef01u && storage.buffer.cursor_up == packet + 2, "empty register range does not match the console's packet");
+    }
+}
+
+void testRangeFromAnyByte() {
+    const std::array writers{sceAgcCbSetShRegisterRangeDirect, sceAgcCbSetUcRegisterRangeDirect, sceAgcDcbSetCfRegisterRangeDirect};
+    const std::array headers{0xc0047600u, 0xc0047900u, 0xc0046800u};
+    alignas(16) std::array<unsigned char, 32> bytes{};
+    for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<unsigned char>(0x10u + i);
+    struct Case {
+        std::size_t offset;
+        std::array<std::uint32_t, 4> values;
+    };
+    const std::array cases{
+        Case{1, {0x14131211u, 0x18171615u, 0x1c1b1a19u, 0x201f1e1du}},
+        Case{2, {0x15141312u, 0x19181716u, 0x1d1c1b1au, 0x21201f1eu}},
+        Case{3, {0x16151413u, 0x1a191817u, 0x1e1d1c1bu, 0x2221201fu}},
+        Case{13, {0x201f1e1du, 0x24232221u, 0x28272625u, 0x2c2b2a29u}},
+    };
+    for (std::size_t i = 0; i < writers.size(); ++i) {
+        for (const auto& entry : cases) {
+            Storage storage;
+            storage.words.fill(0xabcdef01u);
+            const auto* values = reinterpret_cast<const std::uint32_t*>(bytes.data() + entry.offset);
+            auto* packet = writers[i](&storage.buffer, 0x40u, values, 4);
+            check(packet == storage.words.data() && storage.buffer.cursor_up == packet + 6, "unaligned register range allocation mismatch");
+            check(packet[0] == headers[i] && packet[1] == 0x40u && std::equal(entry.values.begin(), entry.values.end(), packet + 2), "unaligned register values were not read byte for byte");
+            check(packet[6] == 0xabcdef01u, "unaligned register range overwrote the following word");
+        }
+    }
+}
+
+void testListFromAnyByte() {
+    const std::array writers{sceAgcCbSetShRegistersDirect, sceAgcCbSetUcRegistersDirect};
+    const std::array opcodes{0x7600u, 0x7900u};
+    const std::array<ShaderRegister, 3> registers{{{0x10u, 0x11223344u}, {0x11u, 0x55667788u}, {0x30u, 0x99aabbccu}}};
+    for (std::size_t i = 0; i < writers.size(); ++i) {
+        for (const std::size_t offset : {1u, 2u, 3u, 5u}) {
+            alignas(16) std::array<unsigned char, 48> bytes{};
+            std::memcpy(bytes.data() + offset, registers.data(), sizeof(registers));
+            Storage storage;
+            storage.words.fill(0xabcdef01u);
+            const auto* list = reinterpret_cast<const volatile ShaderRegister*>(bytes.data() + offset);
+            auto* packet = writers[i](&storage.buffer, list, static_cast<std::uint32_t>(registers.size()));
+            const std::array<std::uint32_t, 7> expected{0xc0020000u | opcodes[i], 0x10u, 0x11223344u, 0x55667788u, 0xc0010000u | opcodes[i], 0x30u, 0x99aabbccu};
+            check(packet == storage.words.data() && storage.buffer.cursor_up == packet + expected.size(), "unaligned register list allocation mismatch");
+            check(std::equal(expected.begin(), expected.end(), packet), "unaligned register list was not read byte for byte");
+            check(packet[expected.size()] == 0xabcdef01u, "unaligned register list overwrote the following word");
+        }
+    }
 }
 
 void testIndirect() {
@@ -150,6 +202,29 @@ void testIndirectPlaceholder() {
         check(addressSetters[i](packet, registers.data()) == 0 && countSetters[i](packet, 2) == 0, "placeholder was not patched");
         const auto address = reinterpret_cast<std::uintptr_t>(registers.data());
         check(packet[1] == static_cast<std::uint32_t>(address) && packet[2] == static_cast<std::uint32_t>(address >> 32u) && packet[4] == 2, "patched placeholder mismatch");
+    }
+}
+
+void testIndirectConsoleArguments() {
+    const std::array writers{sceAgcDcbSetCxRegistersIndirect, sceAgcDcbSetShRegistersIndirect, sceAgcDcbSetUcRegistersIndirect};
+    const std::array headers{0xc0039f00u, 0xc0036300u, 0xc0036400u};
+    struct Case {
+        std::uintptr_t address;
+        std::uint32_t count;
+        std::array<std::uint32_t, 4> words;
+    };
+    const std::array<Case, 3> cases{{
+        {0x11111111u, 0x22222222u, {0x11111110u, 0u, 0x80000000u, 0x2222u}},
+        {1u, 2u, {0u, 0u, 0x80000000u, 2u}},
+        {0x1111111122222222ull, 0x44444444u, {0x22222220u, 0x11111111u, 0x80000000u, 0x444u}},
+    }};
+    for (std::size_t i = 0; i < writers.size(); ++i) {
+        for (const auto& item : cases) {
+            Storage storage;
+            const auto* packet = writers[i](&storage.buffer, reinterpret_cast<const volatile ShaderRegister*>(item.address), item.count);
+            check(packet == storage.words.data() && packet[0] == headers[i] && std::equal(item.words.begin(), item.words.end(), packet + 1), "indirect register packet does not match the console's");
+            check(storage.buffer.cursor_up == storage.words.data() + 5, "indirect register cursor mismatch");
+        }
     }
 }
 
@@ -210,8 +285,12 @@ int main() {
     try {
         testDirect();
         testConfig();
+        testDirectConsoleArguments();
+        testRangeFromAnyByte();
+        testListFromAnyByte();
         testIndirect();
         testIndirectPlaceholder();
+        testIndirectConsoleArguments();
         testDirectList();
         std::puts("AGC register command tests passed");
         return 0;

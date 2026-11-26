@@ -1,3 +1,5 @@
+#include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/Api.hpp"
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -12,7 +14,9 @@
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <stdexcept>
@@ -26,9 +30,11 @@
 namespace {
 
 constexpr int GuestEbadf = 9;
+constexpr int GuestEfault = 14;
 constexpr int GuestEinval = 22;
 constexpr int SelectDescriptorLimit = 1024;
 constexpr int SelectPollSliceMilliseconds = 10;
+constexpr std::size_t SelectScanBytes = 4096;
 
 struct GuestTimeval {
     std::int64_t seconds;
@@ -38,7 +44,9 @@ struct GuestTimeval {
 std::atomic<KernelSocketPoll::Poller> g_socketPoller{nullptr};
 std::atomic<KernelSocketPoll::Closer> g_socketCloser{nullptr};
 std::atomic<KernelSocketPoll::OptionSetter> g_socketOptionSetter{nullptr};
+std::atomic<KernelSocketPoll::OptionGetter> g_socketOptionGetter{nullptr};
 std::atomic<KernelSocketPoll::StatusControl> g_socketStatusControl{nullptr};
+std::atomic<KernelSocketPoll::IoctlControl> g_socketIoctlControl{nullptr};
 std::atomic<KernelSocketPoll::NativeLookup> g_socketNativeLookup{nullptr};
 
 bool DescriptorSet(const void* set, int descriptor) {
@@ -47,6 +55,18 @@ bool DescriptorSet(const void* set, int descriptor) {
 
 void ClearDescriptor(void* set, int descriptor) {
     if (set != nullptr) static_cast<std::uint64_t*>(set)[descriptor / 64] &= ~(std::uint64_t{1} << (descriptor % 64));
+}
+
+bool SelectDescriptorOpen(int descriptor) {
+    return GuestSockets::IsOpen(descriptor) || IsKqueueDescriptor_nid_no_patch(descriptor) || DescriptorIsOpen_nid_no_patch(descriptor);
+}
+
+void ClearDescriptorsFrom(int nfds, void* readfds, void* writefds, void* exceptfds) {
+    if (nfds % 64 == 0) return;
+    const std::uint64_t kept = (std::uint64_t{1} << (nfds % 64)) - 1;
+    for (void* set : {readfds, writefds, exceptfds}) {
+        if (set != nullptr) static_cast<std::uint64_t*>(set)[nfds / 64] &= kept;
+    }
 }
 
 struct PollGroup {
@@ -131,9 +151,6 @@ int HostPoll(KernelSocketPoll::Entry* descriptors, int count, int timeoutMillise
 
 extern "C" {
 
-const char* APS5_VABI __inet_ntop_nid_postfix(int family, const void* source, char* destination, std::uint32_t capacity);
-int APS5_VABI __inet_pton_nid_postfix(int family, const char* text, void* destination);
-
 const char* APS5_VABI inet_ntop_nid_postfix(int af, const void* src, char* dst, uint32_t size) {
     return __inet_ntop_nid_postfix(af, src, dst, size);
 }
@@ -141,8 +158,6 @@ const char* APS5_VABI inet_ntop_nid_postfix(int af, const void* src, char* dst, 
 int APS5_VABI inet_pton_nid_postfix(int af, const char* src, void* dst) {
     return __inet_pton_nid_postfix(af, src, dst);
 }
-
-int* APS5_VABI __error_nid_postfix();
 
 void KernelSetSocketPoller_nid_no_patch(KernelSocketPoll::Poller poller) {
     g_socketPoller.store(poller);
@@ -161,6 +176,15 @@ void KernelSetSocketOptionSetter_nid_no_patch(KernelSocketPoll::OptionSetter set
     g_socketOptionSetter.store(setter);
 }
 
+void KernelSetSocketOptionGetter_nid_no_patch(KernelSocketPoll::OptionGetter getter) {
+    g_socketOptionGetter.store(getter);
+}
+
+bool KernelGetSocketOption_nid_no_patch(int descriptor, int level, int option, void* value, std::uint32_t* length, int* error) {
+    const auto getter = g_socketOptionGetter.load();
+    return getter != nullptr && getter(descriptor, level, option, value, length, error);
+}
+
 bool KernelSetSocketOption_nid_no_patch(int descriptor, int level, int option, const void* value, std::uint32_t length, int* error) {
     const auto setter = g_socketOptionSetter.load();
     return setter != nullptr && setter(descriptor, level, option, value, length, error);
@@ -175,6 +199,15 @@ bool KernelControlSocketStatus_nid_no_patch(int descriptor, int command, int fla
     return control != nullptr && control(descriptor, command, flags, result, error);
 }
 
+void KernelSetSocketIoctlControl_nid_no_patch(KernelSocketPoll::IoctlControl control) {
+    g_socketIoctlControl.store(control);
+}
+
+bool KernelControlSocketIoctl_nid_no_patch(int descriptor, std::uint32_t request, void* argument, int* error) {
+    const auto control = g_socketIoctlControl.load();
+    return control != nullptr && control(descriptor, request, argument, error);
+}
+
 void KernelSetSocketNativeLookup_nid_no_patch(KernelSocketPoll::NativeLookup lookup) {
     g_socketNativeLookup.store(lookup);
 }
@@ -184,9 +217,9 @@ bool KernelFindSocketNative_nid_no_patch(int descriptor, std::shared_ptr<void>* 
     return lookup != nullptr && lookup(descriptor, owner, native);
 }
 
-int APS5_VABI select_nid_postfix(int nfds, void* readfds, void* writefds, void* exceptfds, const void* timeout) {
+static int SelectDescriptors(int nfds, void* readfds, void* writefds, void* exceptfds, const void* timeout) {
     const auto* limit = static_cast<const GuestTimeval*>(timeout);
-    if (nfds < 0 || nfds > SelectDescriptorLimit || (limit != nullptr && (limit->seconds < 0 || limit->microseconds < 0 || limit->microseconds >= 1000000))) {
+    if (nfds < 0 || (limit != nullptr && (limit->seconds < 0 || limit->microseconds < 0 || limit->microseconds >= 1000000))) {
         *__error_nid_postfix() = GuestEinval;
         return -1;
     }
@@ -205,13 +238,13 @@ int APS5_VABI select_nid_postfix(int nfds, void* readfds, void* writefds, void* 
             kernel.entries.push_back({descriptor, events, 0});
             kernel.slots.push_back(requested.size());
             requested.push_back({descriptor, events, 0});
-        } else if (IsKqueueDescriptor(descriptor)) {
+        } else if (IsKqueueDescriptor_nid_no_patch(descriptor)) {
             kqueues.entries.push_back({descriptor, events, 0});
             kqueues.slots.push_back(requested.size());
             requested.push_back({descriptor, events, 0});
         } else if (File::IsRandomDevice(descriptor)) devices.push_back({descriptor, events, static_cast<short>((events & KernelSocketPoll::Readable) != 0 ? KernelSocketPoll::Readable : events)});
-        else if (descriptor <= 2) devices.push_back({descriptor, events, static_cast<short>(descriptor == 0 ? 0 : events & KernelSocketPoll::Writable)});
         else if (File::IsVnode(descriptor)) devices.push_back({descriptor, events, static_cast<short>(events & (KernelSocketPoll::Readable | KernelSocketPoll::Writable))});
+        else if (descriptor <= 2) devices.push_back({descriptor, events, static_cast<short>(descriptor == 0 ? 0 : events & KernelSocketPoll::Writable)});
         else {
             net.entries.push_back({descriptor, events, 0});
             net.slots.push_back(requested.size());
@@ -253,8 +286,12 @@ int APS5_VABI select_nid_postfix(int nfds, void* readfds, void* writefds, void* 
                 return -1;
             }
             for (const auto& entry : hosts.entries) {
-                if ((entry.revents & KernelSocketPoll::Unknown) != 0)
-                    throw std::runtime_error("select: descriptor " + std::to_string(entry.descriptor) + " is neither a socket, a pipe, a file, a directory nor a kqueue");
+                if ((entry.revents & KernelSocketPoll::Unknown) == 0) continue;
+                if (!DescriptorIsOpen_nid_no_patch(entry.descriptor)) {
+                    *__error_nid_postfix() = GuestEbadf;
+                    return -1;
+                }
+                throw std::runtime_error("select: descriptor " + std::to_string(entry.descriptor) + " is neither a socket, a pipe, a file, a directory nor a kqueue");
             }
             groups.push_back(std::move(hosts));
         }
@@ -296,10 +333,10 @@ int APS5_VABI select_nid_postfix(int nfds, void* readfds, void* writefds, void* 
                 *__error_nid_postfix() = GuestEbadf;
                 return -1;
             }
-            if (limit == nullptr) return select_nid_postfix(nfds, readfds, writefds, exceptfds, nullptr);
+            if (limit == nullptr) return SelectDescriptors(nfds, readfds, writefds, exceptfds, nullptr);
             const auto remaining = std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count());
             const GuestTimeval rest{remaining / 1000000, remaining % 1000000};
-            return select_nid_postfix(nfds, readfds, writefds, exceptfds, &rest);
+            return SelectDescriptors(nfds, readfds, writefds, exceptfds, &rest);
         }
         int ready = 0;
         for (const auto& entry : requested) {
@@ -314,6 +351,7 @@ int APS5_VABI select_nid_postfix(int nfds, void* readfds, void* writefds, void* 
                 if ((entry.revents & (KernelSocketPoll::Writable | KernelSocketPoll::Error)) == 0) ClearDescriptor(writefds, entry.descriptor);
                 if ((entry.revents & KernelSocketPoll::Urgent) == 0) ClearDescriptor(exceptfds, entry.descriptor);
             }
+            ClearDescriptorsFrom(nfds, readfds, writefds, exceptfds);
             return ready;
         }
         if (limit != nullptr && std::chrono::steady_clock::now() >= deadline) {
@@ -322,9 +360,92 @@ int APS5_VABI select_nid_postfix(int nfds, void* readfds, void* writefds, void* 
                 ClearDescriptor(writefds, entry.descriptor);
                 ClearDescriptor(exceptfds, entry.descriptor);
             }
+            ClearDescriptorsFrom(nfds, readfds, writefds, exceptfds);
             return 0;
         }
     }
+}
+
+bool KernelSelectCheckSets_nid_no_patch(int nfds, const void* readfds, const void* writefds, const void* exceptfds, int* scanned, int* error) {
+    *scanned = std::min(nfds, SelectDescriptorLimit);
+    if (nfds <= SelectDescriptorLimit) return true;
+    const auto bytes = static_cast<std::size_t>(nfds / 8 + (nfds % 8 != 0));
+    std::array<std::uint8_t, SelectScanBytes> chunk{};
+    for (const void* set : {readfds, writefds, exceptfds}) {
+        if (set == nullptr) continue;
+        for (std::size_t offset = SelectDescriptorLimit / 8; offset < bytes; offset += SelectScanBytes) {
+            const auto count = std::min(SelectScanBytes, bytes - offset);
+            const auto* source = static_cast<const std::uint8_t*>(set) + offset;
+            const bool chunkRead = GuestCopyIn_nid_no_patch(chunk.data(), source, count);
+            for (std::size_t index = 0; index < count; ++index) {
+                if (!chunkRead && !GuestCopyIn_nid_no_patch(&chunk[index], source + index, 1)) {
+                    *error = GuestEfault;
+                    return false;
+                }
+                const auto firstDescriptor = static_cast<int>((offset + index) * 8);
+                unsigned bits = chunk[index];
+                if (nfds - firstDescriptor < 8) bits &= (1u << (nfds - firstDescriptor)) - 1;
+                for (; bits != 0; bits &= bits - 1) {
+                    const int descriptor = firstDescriptor + std::countr_zero(bits);
+                    if (!SelectDescriptorOpen(descriptor)) {
+                        *error = GuestEbadf;
+                        return false;
+                    }
+                    *scanned = std::max(*scanned, descriptor + 1);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+int KernelSelectCheckedSets_nid_no_patch(int scanned, void* readfds, void* writefds, void* exceptfds, const void* limit) {
+    const std::size_t bytes = KernelSocketPoll::SelectSetBytes(scanned);
+    std::array<std::uint64_t, SelectDescriptorLimit / 64> fixed[3]{};
+    std::vector<std::uint64_t> grown[3];
+    void* guest[3] = {readfds, writefds, exceptfds};
+    void* local[3] = {};
+    for (int index = 0; index < 3; ++index) {
+        if (guest[index] == nullptr) continue;
+        std::uint64_t* buffer = fixed[index].data();
+        if (bytes > sizeof(fixed[index])) {
+            grown[index].resize(bytes / sizeof(std::uint64_t));
+            buffer = grown[index].data();
+        }
+        if (!GuestCopyIn_nid_no_patch(buffer, guest[index], bytes)) {
+            *__error_nid_postfix() = GuestEfault;
+            return -1;
+        }
+        local[index] = buffer;
+    }
+    const int result = SelectDescriptors(scanned, local[0], local[1], local[2], limit);
+    if (result < 0) return result;
+    for (int index = 0; index < 3; ++index) {
+        if (local[index] != nullptr && !GuestCopyOut_nid_no_patch(guest[index], local[index], bytes)) {
+            *__error_nid_postfix() = GuestEfault;
+            return -1;
+        }
+    }
+    return result;
+}
+
+int APS5_VABI select_nid_postfix(int nfds, void* readfds, void* writefds, void* exceptfds, const void* timeout) {
+    GuestTimeval limit{};
+    if (timeout != nullptr && !GuestCopyIn_nid_no_patch(&limit, timeout, sizeof(limit))) {
+        *__error_nid_postfix() = GuestEfault;
+        return -1;
+    }
+    if (nfds < 0) {
+        *__error_nid_postfix() = GuestEinval;
+        return -1;
+    }
+    int scanned = 0;
+    int error = 0;
+    if (!KernelSelectCheckSets_nid_no_patch(nfds, readfds, writefds, exceptfds, &scanned, &error)) {
+        *__error_nid_postfix() = error;
+        return -1;
+    }
+    return KernelSelectCheckedSets_nid_no_patch(scanned, readfds, writefds, exceptfds, timeout != nullptr ? &limit : nullptr);
 }
 
 }

@@ -1,8 +1,11 @@
+#include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "nid/Sha1.hpp"
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
@@ -10,13 +13,20 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-extern "C" int APS5_VABI shm_open_nid_postfix(const char*, int, int);
-extern "C" int* APS5_VABI __error_nid_postfix();
-
 static void Require(bool value, const char* message) {
     if (!value) {
         throw std::runtime_error(std::string(message) + " (guest errno=" + std::to_string(*__error_nid_postfix()) + ")");
     }
+}
+
+static void RemoveHostObject(const std::string& hostName) {
+#ifdef __APPLE__
+    std::error_code error;
+    const auto directory = std::filesystem::canonical(std::filesystem::temp_directory_path(error), error);
+    ::unlink((directory.string() + hostName).c_str());
+#else
+    ::shm_unlink(hostName.c_str());
+#endif
 }
 
 struct Object {
@@ -28,15 +38,21 @@ struct Object {
             hostName += "0123456789abcdef"[byte >> 4];
             hostName += "0123456789abcdef"[byte & 15];
         }
-        ::shm_unlink(hostName.c_str());
+        RemoveHostObject(hostName);
     }
-    ~Object() { ::shm_unlink(hostName.c_str()); }
+    ~Object() { RemoveHostObject(hostName); }
     int Open(int flags, int mode = 0600) const { return shm_open_nid_postfix(name.c_str(), flags, mode); }
 };
 
 static void RequireError(const char* name, int flags, int error) {
     *__error_nid_postfix() = 0;
     Require(shm_open_nid_postfix(name, flags, 0600) == -1, "expected open failure");
+    Require(*__error_nid_postfix() == error, "incorrect guest errno");
+}
+
+static void RequireUnlinkError(const char* name, int error) {
+    *__error_nid_postfix() = 0;
+    Require(shm_unlink_nid_postfix(name) == -1, "expected unlink failure");
     Require(*__error_nid_postfix() == error, "incorrect guest errno");
 }
 
@@ -88,6 +104,10 @@ static void Run() {
     RequireError(nullptr, readWrite, 14);
     RequireError("", readWrite, 22);
     RequireError("relative", readWrite, 22);
+    RequireUnlinkError(nullptr, 14);
+    RequireUnlinkError("", 22);
+    RequireUnlinkError("non_slash_shm", 22);
+    RequireUnlinkError("foo/bar", 22);
     RequireError(object.name.c_str(), 1, 22);
     RequireError(object.name.c_str(), readWrite | 8, 22);
     const std::string tooLong(1024, '/');

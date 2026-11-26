@@ -1,3 +1,5 @@
+#include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <array>
 #include <cstddef>
@@ -10,19 +12,6 @@ using CopyCallback = void (APS5_VABI *)(void*, void*);
 using AllocateCallback = void* (APS5_VABI *)(std::size_t);
 using FreeCallback = void (APS5_VABI *)(void*);
 using SizedFreeCallback = void (APS5_VABI *)(void*, std::size_t);
-
-extern "C" {
-void APS5_VABI __cxa_vec_ctor_nid_postfix(void*, std::size_t, std::size_t, ElementCallback, ElementCallback);
-void APS5_VABI __cxa_vec_cctor_nid_postfix(void*, void*, std::size_t, std::size_t, CopyCallback, ElementCallback);
-void APS5_VABI __cxa_vec_dtor_nid_postfix(void*, std::size_t, std::size_t, ElementCallback);
-void APS5_VABI __cxa_vec_cleanup_nid_postfix(void*, std::size_t, std::size_t, ElementCallback);
-void* APS5_VABI __cxa_vec_new_nid_postfix(std::size_t, std::size_t, std::size_t, ElementCallback, ElementCallback);
-void* APS5_VABI __cxa_vec_new2_nid_postfix(std::size_t, std::size_t, std::size_t, ElementCallback, ElementCallback, AllocateCallback, FreeCallback);
-void* APS5_VABI __cxa_vec_new3_nid_postfix(std::size_t, std::size_t, std::size_t, ElementCallback, ElementCallback, AllocateCallback, SizedFreeCallback);
-void APS5_VABI __cxa_vec_delete_nid_postfix(void*, std::size_t, std::size_t, ElementCallback);
-void APS5_VABI __cxa_vec_delete2_nid_postfix(void*, std::size_t, std::size_t, ElementCallback, FreeCallback);
-void APS5_VABI __cxa_vec_delete3_nid_postfix(void*, std::size_t, std::size_t, ElementCallback, SizedFreeCallback);
-}
 
 namespace {
 
@@ -42,6 +31,61 @@ bool failAllocation = false;
 bool failConstruct = false;
 bool failCopy = false;
 bool failDestroy = false;
+
+unsigned heapAllocations = 0;
+unsigned heapReleases = 0;
+unsigned heapHandlerCalls = 0;
+bool heapFailNext = false;
+std::size_t heapLastBytes = 0;
+void* heapLastAllocation = nullptr;
+void* heapLastRelease = nullptr;
+
+void* APS5_VABI HeapAllocate(std::size_t bytes) {
+    ++heapAllocations;
+    heapLastBytes = bytes;
+    if (heapFailNext) {
+        heapFailNext = false;
+        return nullptr;
+    }
+    heapLastAllocation = std::malloc(bytes);
+    return heapLastAllocation;
+}
+
+void APS5_VABI HeapRelease(void* pointer) {
+    ++heapReleases;
+    heapLastRelease = pointer;
+    std::free(pointer);
+}
+
+void* APS5_VABI HeapCalloc(std::size_t count, std::size_t bytes) { return std::calloc(count, bytes); }
+void* APS5_VABI HeapReallocate(void* pointer, std::size_t bytes) { return std::realloc(pointer, bytes); }
+void* APS5_VABI HeapAlign(std::size_t, std::size_t bytes) { return std::malloc(bytes); }
+void* APS5_VABI HeapRealign(void* pointer, std::size_t bytes, std::size_t) { return std::realloc(pointer, bytes); }
+int APS5_VABI HeapPosixAlign(void** pointer, std::size_t, std::size_t bytes) {
+    *pointer = std::malloc(bytes);
+    return *pointer != nullptr ? 0 : 12;
+}
+
+void APS5_VABI HeapNewHandler() { ++heapHandlerCalls; }
+
+void ResetHeap() {
+    heapAllocations = heapReleases = heapHandlerCalls = 0;
+    heapLastBytes = 0;
+    heapLastAllocation = heapLastRelease = nullptr;
+    heapFailNext = false;
+}
+
+void InitializeHeap() {
+    std::array<void*, 10> api{};
+    api[0] = reinterpret_cast<void*>(&HeapAllocate);
+    api[1] = reinterpret_cast<void*>(&HeapRelease);
+    api[2] = reinterpret_cast<void*>(&HeapCalloc);
+    api[3] = reinterpret_cast<void*>(&HeapReallocate);
+    api[4] = reinterpret_cast<void*>(&HeapAlign);
+    api[5] = reinterpret_cast<void*>(&HeapRealign);
+    api[6] = reinterpret_cast<void*>(&HeapPosixAlign);
+    ApplicationHeapRegister_nid_no_patch(api.data());
+}
 
 void require(bool condition, const char* message) {
     if (condition) return;
@@ -104,18 +148,23 @@ void checkCookie(const void* array) {
 void checkElements() {
     reset(source.data());
     __cxa_vec_ctor_nid_postfix(source.data(), Count, ElementBytes, construct, destroy);
+
     require(constructed == Count, "constructor count is wrong");
     __cxa_vec_dtor_nid_postfix(source.data(), Count, ElementBytes, destroy);
+
     require(destroyed == Count, "destructor count is wrong");
     reset(storage.data());
     __cxa_vec_cctor_nid_postfix(storage.data(), source.data(), Count, ElementBytes, copy, destroy);
+
     require(copied == Count && std::memcmp(storage.data(), source.data(), source.size()) == 0, "copy construction failed");
     __cxa_vec_cleanup_nid_postfix(storage.data(), Count, ElementBytes, destroy);
+
     require(destroyed == Count, "cleanup count is wrong");
     __cxa_vec_ctor_nid_postfix(nullptr, Count, ElementBytes, nullptr, nullptr);
     __cxa_vec_cctor_nid_postfix(nullptr, nullptr, Count, ElementBytes, nullptr, nullptr);
     __cxa_vec_dtor_nid_postfix(nullptr, Count, ElementBytes, nullptr);
     __cxa_vec_cleanup_nid_postfix(nullptr, Count, ElementBytes, nullptr);
+
 }
 
 void checkAllocation(bool sized) {
@@ -123,6 +172,7 @@ void checkAllocation(bool sized) {
     void* array = sized
         ? __cxa_vec_new3_nid_postfix(Count, ElementBytes, Padding, construct, destroy, allocate, releaseSized)
         : __cxa_vec_new2_nid_postfix(Count, ElementBytes, Padding, construct, destroy, allocate, release);
+
     require(array == destination && constructed == Count && allocated == 1, "array allocation failed");
     checkCookie(array);
     if (sized) __cxa_vec_delete3_nid_postfix(array, ElementBytes, Padding, destroy, releaseSized);
@@ -133,6 +183,7 @@ void checkAllocation(bool sized) {
     array = sized
         ? __cxa_vec_new3_nid_postfix(Count, ElementBytes, Padding, construct, destroy, allocate, releaseSized)
         : __cxa_vec_new2_nid_postfix(Count, ElementBytes, Padding, construct, destroy, allocate, release);
+
     require(array == nullptr && allocated == 1 && constructed == 0 && freed == 0, "failed allocation invoked element callbacks");
     if (sized) __cxa_vec_delete3_nid_postfix(nullptr, ElementBytes, Padding, destroy, releaseSized);
     else __cxa_vec_delete2_nid_postfix(nullptr, ElementBytes, Padding, destroy, release);
@@ -140,14 +191,41 @@ void checkAllocation(bool sized) {
 }
 
 void checkDefaultAllocation() {
+    ResetHeap();
+    void* control = _Znam_nid_postfix(TotalBytes);
+    require(control == heapLastAllocation && heapAllocations == 1 && heapLastBytes == TotalBytes, "guest operator new control reaches replacement allocator");
+    _ZdaPv_nid_postfix(control);
+    require(heapReleases == 1 && heapLastRelease == control, "guest operator delete control reaches replacement deallocator");
+    ResetHeap();
     void* array = __cxa_vec_new_nid_postfix(Count, ElementBytes, Padding, nullptr, nullptr);
-    require(array != nullptr, "default array allocation failed");
+    require(array != nullptr, "default array returned a nonnull block");
+    checkCookie(array);
+    std::fprintf(stderr, "array guest heap stage=default_new qualified=1 heapAllocations=%u expectedBytes=%zu actualBytes=%zu\n", heapAllocations, TotalBytes, heapLastBytes);
+    require(heapAllocations == 1 && heapLastBytes == TotalBytes, "default array uses the application allocator");
+    require(array == static_cast<std::byte*>(heapLastAllocation) + Padding, "default array returns guest allocation after cookie");
     checkCookie(array);
     reset(static_cast<std::byte*>(array));
     __cxa_vec_ctor_nid_postfix(array, Count, ElementBytes, construct, destroy);
     __cxa_vec_delete_nid_postfix(array, ElementBytes, Padding, destroy);
     require(constructed == Count && destroyed == Count, "default array deletion failed");
+    require(heapReleases == 1 && heapLastRelease == heapLastAllocation, "default array uses the application deallocator");
     __cxa_vec_delete_nid_postfix(nullptr, ElementBytes, Padding, destroy);
+    require(heapReleases == 1, "null default array does not deallocate");
+
+    ResetHeap();
+    array = __cxa_vec_new_nid_postfix(0, ElementBytes, 0, nullptr, nullptr);
+    require(array == heapLastAllocation && heapAllocations == 1 && heapLastBytes == 1, "empty default array uses operator new zero normalization");
+    __cxa_vec_delete_nid_postfix(array, ElementBytes, 0, nullptr);
+    require(heapReleases == 1 && heapLastRelease == heapLastAllocation, "empty default array uses application deallocation");
+
+    ResetHeap();
+    heapFailNext = true;
+    const auto oldHandler = _ZSt15set_new_handlerPFvvE_nid_postfix(HeapNewHandler);
+    array = __cxa_vec_new_nid_postfix(Count, ElementBytes, Padding, nullptr, nullptr);
+    _ZSt15set_new_handlerPFvvE_nid_postfix(oldHandler);
+    require(heapAllocations == 2 && heapHandlerCalls == 1, "default array retries through the guest new handler");
+    __cxa_vec_delete_nid_postfix(array, ElementBytes, Padding, nullptr);
+    require(heapReleases == 1, "retried default array is released once");
 }
 
 template<typename TAction>
@@ -170,6 +248,7 @@ void checkRollback(bool sized) {
     void* array = sized
         ? __cxa_vec_new3_nid_postfix(Count, ElementBytes, Padding, construct, destroy, allocate, releaseSized)
         : __cxa_vec_new2_nid_postfix(Count, ElementBytes, Padding, construct, destroy, allocate, release);
+
     failDestroy = true;
     expectException([&] {
         if (sized) __cxa_vec_delete3_nid_postfix(array, ElementBytes, Padding, destroy, releaseSized);
@@ -178,11 +257,36 @@ void checkRollback(bool sized) {
     require(constructed == Count && destroyed == Count && allocated == 1 && freed == 1, "destructor rollback failed");
 }
 
+void APS5_VABI ConstructDefault(void* pointer) {
+    if (constructed == 0) destination = static_cast<std::byte*>(pointer);
+    construct(pointer);
+}
+
+void checkDefaultRollback() {
+    ResetHeap();
+    reset(nullptr);
+    failConstruct = true;
+    expectException([] {
+        __cxa_vec_new_nid_postfix(Count, ElementBytes, Padding,
+            ConstructDefault, destroy);
+    });
+    require(constructed == 2 && destroyed == 2 && heapAllocations == 1 && heapReleases == 1, "default constructor failure frees the guest block");
+
+    ResetHeap();
+    void* array = __cxa_vec_new_nid_postfix(Count, ElementBytes, Padding, nullptr, nullptr);
+    reset(static_cast<std::byte*>(array));
+    __cxa_vec_ctor_nid_postfix(array, Count, ElementBytes, construct, destroy);
+    failDestroy = true;
+    expectException([&] { __cxa_vec_delete_nid_postfix(array, ElementBytes, Padding, destroy); });
+    require(destroyed == Count && heapAllocations == 1 && heapReleases == 1, "default destructor failure frees the guest block");
+}
+
 void checkCopyRollback() {
     reset(storage.data());
     failCopy = true;
     expectException([] {
         __cxa_vec_cctor_nid_postfix(storage.data(), source.data(), Count, ElementBytes, copy, destroy);
+
     });
     require(copied == 2 && destroyed == 2, "copy constructor rollback failed");
 }
@@ -190,6 +294,7 @@ void checkCopyRollback() {
 }
 
 int main() {
+    InitializeHeap();
     checkElements();
     checkAllocation(false);
     checkAllocation(true);
@@ -197,5 +302,6 @@ int main() {
     checkRollback(false);
     checkRollback(true);
     checkCopyRollback();
+    checkDefaultRollback();
     std::puts("guest array callback arguments and lifecycle: PASS");
 }

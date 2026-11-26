@@ -153,6 +153,37 @@ void HeaderSelection() {
     Reject([&] { static_cast<void>(RegisteredProgram(*registry, 0x10000, {2, 4})); });
 }
 
+void FailedRegistrationPublication() {
+    const auto makeSnapshot = [] {
+        auto snapshot = std::make_shared<ShaderSnapshot>();
+        snapshot->codeAddress = 0x10000;
+        snapshot->headerAddress = 0x20000;
+        snapshot->code = {0xbf810000u};
+        return snapshot;
+    };
+    auto failed = makeSnapshot();
+    failed->prepared->failure = std::make_exception_ptr(std::runtime_error("temporary preparation failure"));
+    std::shared_ptr<ShaderRegistry> registry;
+    PublishRegisteredShader(registry, failed);
+    const auto previous = registry;
+    const auto retry = makeSnapshot();
+    PublishRegisteredShader(registry, retry);
+    Require(RegisteredProgram(*registry, retry->codeAddress, {0}) == retry, "registration retry reused a failed preparation");
+    Require(RegisteredProgram(*previous, failed->codeAddress, {0}) == failed && failed->prepared->failure != nullptr, "registration retry changed an earlier registry snapshot");
+    PublishRegisteredShader(registry, makeSnapshot());
+    Require(RegisteredProgram(*registry, retry->codeAddress, {0}) == retry, "successful registration stopped reusing its preparation");
+    {
+        std::lock_guard lock(retry->prepared->mutex);
+        retry->prepared->pending = true;
+    }
+    PublishRegisteredShader(registry, makeSnapshot());
+    Require(RegisteredProgram(*registry, retry->codeAddress, {0}) == retry, "registration duplicated pending preparation");
+    {
+        std::lock_guard lock(retry->prepared->mutex);
+        retry->prepared->pending = false;
+    }
+}
+
 void RegistryVersions() {
     using Expected = std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>;
     const auto matches = [](const ShaderRegistry& current, const Expected& expected) {
@@ -338,7 +369,7 @@ void Registration(AgcDriver::VulkanDevice& device) {
     Require(invocation.Materialize(*capture)->spirv.data() == result->spirv.data(), "prepared handle did not retain its artifact");
     auto changed = makeSnapshot();
     changed->headerAddress = replacement->headerAddress;
-    changed->code[0] ^= 1;
+    changed->code.Mutable()[0] ^= 1;
     PublishRegisteredShader(registry, changed);
     Require(registry->at(0x10000).back() == changed && registry->at(0x10000).size() == 1 && old.expired(), "changed shader code retained obsolete headers");
     auto metadata = makeSnapshot();
@@ -369,6 +400,34 @@ void TransactionLock() {
     open.reset();
     waiting.get();
     Require(excluded, "a transaction ran beside one that had read prepared state");
+}
+
+void CommittedLinks() {
+    ShaderSnapshot front{};
+    auto pixel = std::make_shared<ShaderSnapshot>();
+    ResolvePreparedGraphics(front, pixel, 0, {});
+    Require(front.prepared->fragments.size() == 1 && front.prepared->fragments.front().lock() == pixel, "a resolved link was not published");
+    ShaderSnapshot unrelated{};
+    auto other = std::make_shared<ShaderSnapshot>();
+    std::optional<ShaderPreparationTransaction> open(std::in_place);
+    static_cast<void>(open->Read(unrelated));
+    auto repeated = std::async(std::launch::async, [&] { ResolvePreparedGraphics(front, pixel, 0, {}); });
+    const bool unblocked = repeated.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+    auto linking = std::async(std::launch::async, [&] { ResolvePreparedGraphics(front, other, 0, {}); });
+    const bool excluded = linking.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+    open->Commit();
+    open.reset();
+    repeated.get();
+    linking.get();
+    Require(unblocked, "resolving a link the shader already had waited for another thread's transaction");
+    Require(excluded && front.prepared->fragments.size() == 2, "a new link was published beside a transaction that had read prepared state");
+    {
+        ShaderPreparationTransaction transaction;
+        transaction.Edit(front).fragments.clear();
+        ResolvePreparedGraphics(front, pixel, 0, {});
+        transaction.Commit();
+    }
+    Require(front.prepared->fragments.size() == 1 && front.prepared->fragments.front().lock() == pixel, "a link resolved in a transaction that had changed the shader was checked against the published links");
 }
 
 void PreparationPriority(bool beforeSubmit) {
@@ -412,9 +471,11 @@ int main() {
     try {
         Transactions();
         HeaderSelection();
+        FailedRegistrationPublication();
         RegistryVersions();
         FusedHullHeaderSelection();
         TransactionLock();
+        CommittedLinks();
         PreparationPriority(false);
         PreparationPriority(true);
         auto device = OpenVulkanTestDevice();

@@ -33,9 +33,7 @@ def resources(pe):
         virtual_size, address, raw_size, raw = struct.unpack_from("<IIII", pe, offset + 8)
         flags = struct.unpack_from("<I", pe, offset + 36)[0]
         sections.append((name, virtual_size, address, raw_size, raw, flags))
-    if rva == 0:
-        assert size == 0 and all(section[0] != b".rsrc" for section in sections)
-        return None
+    assert rva != 0
     matches = [section for section in sections if section[0] == b".rsrc"]
     assert len(matches) == 1, sections
     _, virtual_size, address, raw_size, raw, flags = matches[0]
@@ -54,7 +52,7 @@ def resources(pe):
         return entries
 
     root = directory(0)
-    assert set(root) == {3, 14}, root
+    assert set(root) in ({24}, {3, 14, 24}), root
     result = {}
     for kind, target in root.items():
         assert target & 0x80000000
@@ -70,6 +68,12 @@ def resources(pe):
         assert 0 <= offset <= size and length <= size - offset
         result[kind] = data[offset:offset + length]
     return result
+
+
+def check_manifest(embedded, icon):
+    assert set(embedded) == icon | {24}, embedded
+    heap = b'<heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>'
+    assert heap in embedded[24], embedded[24]
 
 
 def check_extraction(path):
@@ -95,7 +99,7 @@ def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="anyps5-icon-") as directory:
         work = Path(directory)
-        app = work / "app with spaces"
+        app = work / "app with spaces \u65e5\u672c"
         app.mkdir()
         source = app / "eboot.bin"
         source.write_bytes(fixture())
@@ -104,12 +108,12 @@ def main():
         def relink(name):
             output = work / f"{name}.exe"
             result = subprocess.run([str(relinker), "--skip-sce-module", "--windows", str(source), str(output)],
-                                    cwd=work, capture_output=True, text=True, timeout=20)
+                                    cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
             return result, output
 
         result, output = relink("missing-initial")
         assert result.returncode == 0, (result.stdout, result.stderr)
-        assert resources(output.read_bytes()) is None
+        check_manifest(resources(output.read_bytes()), set())
         icon.parent.mkdir()
         for width, height in ((32, 32), (128, 64), (256, 256), (512, 512), (1024, 1024)):
             image = png(width, height)
@@ -117,7 +121,7 @@ def main():
             result, output = relink(f"icon-{width}x{height}")
             assert result.returncode == 0, (result.stdout, result.stderr)
             embedded = resources(output.read_bytes())
-            assert embedded is not None, "missing Windows icon resources"
+            check_manifest(embedded, {3, 14})
             assert embedded[3] == image, "PNG resource differs from icon0.png"
             group = struct.unpack("<HHHBBBBHHIH", embedded[14])
             assert group == (0, 1, 1, width if width < 256 else 0, height if height < 256 else 0,
@@ -140,7 +144,8 @@ def main():
             assert "Invalid Windows icon PNG" in result.stderr and str(icon) in result.stderr, result.stderr
         icon.unlink()
         result, output = relink("missing-final")
-        assert result.returncode == 0 and resources(output.read_bytes()) is None
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        check_manifest(resources(output.read_bytes()), set())
     print("Windows icon integration tests passed (5 images, 11 malformed files, missing icon)")
 
 

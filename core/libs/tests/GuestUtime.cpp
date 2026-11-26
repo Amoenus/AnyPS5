@@ -1,3 +1,5 @@
+#include "prx/libc/include/Api.hpp"
+#include "prx/libSceLibcInternal/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <chrono>
 #include <cstdint>
@@ -12,16 +14,7 @@
 #include <sys/stat.h>
 #endif
 
-struct LibcUtimbuf {
-    std::int64_t actime;
-    std::int64_t modtime;
-};
 static_assert(sizeof(LibcUtimbuf) == 16);
-
-extern "C" {
-int APS5_VABI utime_nid_postfix(const char*, const LibcUtimbuf*);
-int* APS5_VABI __error_nid_postfix();
-}
 
 static void Require(bool condition, int line) {
     if (!condition) {
@@ -81,6 +74,8 @@ int main() {
     Check(utime_nid_postfix(nullptr, &times) == -1 && *__error_nid_postfix() == 14);
     *__error_nid_postfix() = 71;
     Check(utime_nid_postfix(nullptr, nullptr) == -1 && *__error_nid_postfix() == 14);
+    *__error_nid_postfix() = 71;
+    Check(utime_nid_postfix(path.c_str(), reinterpret_cast<const LibcUtimbuf*>(0x10)) == -1 && *__error_nid_postfix() == 14);
     const auto unchanged = ReadTimes(file, true);
     Check(unchanged.actime == times.actime && unchanged.modtime == times.modtime);
     const auto before = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());

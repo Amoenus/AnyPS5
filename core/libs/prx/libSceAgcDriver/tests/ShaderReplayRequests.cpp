@@ -10,6 +10,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 int main(int argc, char** argv) try {
@@ -47,6 +48,64 @@ int main(int argc, char** argv) try {
         srt[20] = mode;
         std::ofstream file(directory / (mode == 0u ? "inactive.req" : "invalid.req"), std::ios::binary);
         file << RequestSerializer{}.Serialize(request);
+        if (!file) throw std::runtime_error("cannot write synthetic replay request");
+    }
+    const std::array<std::uint32_t, 19> ldsCode{
+        0x34040082u, 0x4a020081u, 0xd8340000u, 0x00000102u, 0xbf8cc07fu, 0xbf8a0000u, 0x7da800ffu, 0x00000080u,
+        0xbf880006u, 0xd8d80200u, 0x03000002u, 0xbf8cc07fu, 0x4a020701u, 0xd8340000u, 0x00000102u, 0xbefe03c1u,
+        0xbf8cc07fu, 0xbf8a0000u, 0xbf810000u,
+    };
+    const std::array<std::uint32_t, 2> ldsCapabilities{spv::CapabilityShader, spv::CapabilityGroupNonUniform};
+    const std::array<std::string_view, 1> ldsExtensions{"SPV_KHR_storage_buffer_storage_class"};
+    RecompileRequest lds{};
+    lds.shader = {ShaderStage::Compute, 0x20000u, ldsCode, 0, {}};
+    lds.context.waveSize = 32u;
+    lds.context.compute = ShaderComputeStageInfo{{256u, 1u, 1u}, 512u, {false, false, false}, false, 1u};
+    lds.target.vulkanVersion = 0x00403000u;
+    lds.target.spirvVersion = 0x00010600u;
+    lds.target.subgroupSize = 32u;
+    lds.target.bdaAbiVersion = 1u;
+    lds.target.supportedCapabilities = ldsCapabilities;
+    lds.target.supportedExtensions = ldsExtensions;
+    lds.target.maxWorkgroupSize = {1024u, 1024u, 64u};
+    lds.target.maxWorkgroupInvocations = 1024u;
+    lds.target.maxWorkgroupSharedMemoryBytes = 49152u;
+    lds.layout = {0, 0, 0, 128};
+    {
+        std::ofstream file(directory / "lds.req", std::ios::binary);
+        file << RequestSerializer{}.Serialize(lds);
+        if (!file) throw std::runtime_error("cannot write synthetic replay request");
+    }
+    const std::array<std::uint32_t, 1> endProgram{0xbf810000u};
+    RecompileRequest pixel{};
+    pixel.shader = {ShaderStage::Fragment, 0x24000u, endProgram, 0, {}};
+    pixel.context.waveSize = 64u;
+    pixel.context.pixel = ShaderPixelStageInfo{};
+    pixel.context.pixel->interpolatorCount = 3u;
+    pixel.context.pixel->interpolatorSettings[0] = 0x0u;
+    pixel.context.pixel->interpolatorSettings[1] = 0x401u;
+    pixel.context.pixel->interpolatorSettings[2] = 0x423u;
+    pixel.context.pixel->inputAddr = 0x1002u;
+    pixel.target = lds.target;
+    for (const auto& [name, frontFace, allBits] : {std::tuple{"pixel_unused.req", false, false}, std::tuple{"pixel_float.req", true, false}, std::tuple{"pixel_all_bits.req", true, true}}) {
+        pixel.context.pixel->frontFace = frontFace;
+        pixel.context.pixel->frontFaceAllBits = allBits;
+        std::ofstream file(directory / name, std::ios::binary);
+        file << RequestSerializer{}.Serialize(pixel);
+        if (!file) throw std::runtime_error("cannot write synthetic replay request");
+    }
+    RecompileRequest vertex{};
+    vertex.shader = {ShaderStage::Vertex, 0x26000u, endProgram, 0, {}};
+    vertex.context.waveSize = 64u;
+    vertex.context.vertex = ShaderVertexStageInfo{};
+    vertex.context.vertex->resourcesNum = 1u;
+    vertex.context.vertex->resources[0].fields = {0x22f7e3f8u, 0x00280010u, 0x6b7u, 0x32facu};
+    vertex.context.vertex->resourcesDst[0] = {12, 3, 5, 1u};
+    vertex.context.vertex->fetchEmbedded = true;
+    vertex.target = lds.target;
+    {
+        std::ofstream file(directory / "vertex.req", std::ios::binary);
+        file << RequestSerializer{}.Serialize(vertex);
         if (!file) throw std::runtime_error("cannot write synthetic replay request");
     }
     std::puts("synthetic guarded replay requests written");

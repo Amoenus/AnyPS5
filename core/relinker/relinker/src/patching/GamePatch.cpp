@@ -1,9 +1,11 @@
 #include <relinker/patching/GamePatch.hpp>
 #include <domain/Types.hpp>
 #include <elfpatcher/general/ElfConstants.hpp>
+#include <io/BufferUtils.hpp>
 #include <io/NativePath.hpp>
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <sstream>
@@ -33,9 +35,9 @@ constexpr std::array<IntegerType, 8> kIntegerTypes{{
     {"i8", 8, true}, {"i16", 16, true}, {"i32", 32, true}, {"i64", 64, true},
 }};
 
-constexpr std::array<std::string_view, 7> kIgnoredTopLevelKeys{"relinker_version", "relinker_commit", "config", "config_sha256", "main_target", "settings", "settings_sha256"};
-constexpr std::array<std::string_view, 8> kReservedNames{"format", "relinker_version", "relinker_commit", "config", "config_sha256", "main_target", "settings", "settings_sha256"};
-constexpr std::array<std::string_view, 10> kEntryKeys{"name", "target", "va", "type", "expected", "value", "min", "max", "align", "description"};
+constexpr std::array<std::string_view, 8> kIgnoredTopLevelKeys{"relinker_version", "relinker_commit", "config", "config_sha256", "main_target", "linux_base", "settings", "settings_sha256"};
+constexpr std::array<std::string_view, 9> kReservedNames{"format", "relinker_version", "relinker_commit", "config", "config_sha256", "main_target", "linux_base", "settings", "settings_sha256"};
+constexpr std::array<std::string_view, 11> kEntryKeys{"name", "target", "va", "output_rva", "type", "expected", "value", "min", "max", "align", "description"};
 
 std::string HexValue(const std::uint64_t value) {
     std::ostringstream stream;
@@ -58,11 +60,58 @@ std::string_view Trim(std::string_view text) {
     return text.substr(first, text.find_last_not_of(whitespace) - first + 1);
 }
 
-std::string_view StripComment(const std::string_view line) {
+bool IsControlCharacter(const char character) {
+    return (static_cast<unsigned char>(character) < 0x20 && character != '\t') || character == 0x7f;
+}
+
+void ValidateUtf8(const std::string_view text) {
+    std::size_t line = 1;
+    for (std::size_t position = 0; position < text.size();) {
+        const auto lead = static_cast<unsigned char>(text[position]);
+        if (lead < 0x80) {
+            if (lead == '\n') ++line;
+            ++position;
+            continue;
+        }
+        unsigned continuationCount;
+        std::uint32_t codepoint;
+        std::uint32_t minimum;
+        if (lead >= 0xc2 && lead <= 0xdf) {
+            continuationCount = 1;
+            codepoint = lead & 0x1f;
+            minimum = 0x80;
+        } else if (lead >= 0xe0 && lead <= 0xef) {
+            continuationCount = 2;
+            codepoint = lead & 0x0f;
+            minimum = 0x800;
+        } else if (lead >= 0xf0 && lead <= 0xf4) {
+            continuationCount = 3;
+            codepoint = lead & 0x07;
+            minimum = 0x10000;
+        } else {
+            FailLine(line, "invalid UTF-8", "patch file");
+        }
+        if (continuationCount > text.size() - position - 1) FailLine(line, "invalid UTF-8", "patch file");
+        for (unsigned index = 0; index < continuationCount; ++index) {
+            const auto byte = static_cast<unsigned char>(text[position + 1 + index]);
+            if ((byte & 0xc0) != 0x80) FailLine(line, "invalid UTF-8", "patch file");
+            codepoint = (codepoint << 6) | (byte & 0x3f);
+        }
+        if (codepoint < minimum || codepoint > 0x10ffff || (codepoint >= 0xd800 && codepoint <= 0xdfff))
+            FailLine(line, "invalid UTF-8", "patch file");
+        position += continuationCount + 1;
+    }
+}
+
+std::string_view StripComment(const std::string_view line, const std::size_t lineNumber) {
     bool inString = false;
     for (std::size_t index = 0; index < line.size(); ++index) {
         if (line[index] == '"') inString = !inString;
-        else if (line[index] == '#' && !inString) return line.substr(0, index);
+        else if (line[index] == '#' && !inString) {
+            for (const char character : line.substr(index + 1))
+                if (IsControlCharacter(character)) FailLine(lineNumber, "control characters are not supported in comments", line);
+            return line.substr(0, index);
+        }
     }
     return line;
 }
@@ -123,7 +172,7 @@ RawValue ParseValue(const std::string_view text, const std::size_t line, const s
         const auto content = text.substr(1, end - 1);
         if (content.find('\\') != std::string_view::npos) FailLine(line, "escapes are not supported in strings", whole);
         for (const char character : content)
-            if (static_cast<unsigned char>(character) < 0x20 && character != '\t') FailLine(line, "control characters are not supported in strings", whole);
+            if (IsControlCharacter(character)) FailLine(line, "control characters are not supported in strings", whole);
         value.IsString = true;
         value.Text = std::string(content);
         return value;
@@ -196,6 +245,11 @@ PatchEntry BuildEntry(const Table& table, const std::size_t headerLine, std::set
     const auto& address = require("va");
     if (address.IsString || address.Number.Negative) FailLine(address.Line, "va must be a nonnegative integer", address.Text);
     entry.VirtualAddress = address.Number.Magnitude;
+    if (const auto* outputRva = Find(table, "output_rva")) {
+        if (outputRva->IsString || outputRva->Number.Negative || outputRva->Number.Magnitude > std::numeric_limits<std::uint32_t>::max())
+            FailLine(outputRva->Line, "output_rva must be an integer from 0 to 0xffffffff", outputRva->Text);
+        entry.OutputRva = static_cast<std::uint32_t>(outputRva->Number.Magnitude);
+    }
     const auto& expected = require("expected");
     const auto& replacement = require("value");
     if (const auto* description = Find(table, "description")) {
@@ -240,17 +294,32 @@ PatchEntry BuildEntry(const Table& table, const std::size_t headerLine, std::set
     return entry;
 }
 
+std::string Describe(const PatchEntry& entry) {
+    return "patch " + entry.Target + " va=" + HexValue(entry.VirtualAddress) + " (line " + std::to_string(entry.Line) + ")";
+}
+
+void ValidateWidth(const PatchEntry& entry) {
+    if (entry.Expected.empty() || entry.Expected.size() != entry.Value.size())
+        throw Domain::RelinkerException(Describe(entry) + ": expected and value must have the same nonzero width");
+}
+
 struct EntryRange {
     std::optional<PatchedRange> Range;
     std::string Reason;
 };
 
-std::uint64_t HeaderTableEnd(const ElfHeader& header) {
-    const std::uint64_t table = header.ProgramHeaderOffset + static_cast<std::uint64_t>(header.ProgramHeaderCount) * header.ProgramHeaderEntrySize;
-    return std::max<std::uint64_t>(64, table);
+bool TouchesHeaderArea(const ElfHeader& header, const std::uint64_t offset, const std::uint64_t length) {
+    const auto overlaps = [offset, length](const std::uint64_t start, const std::uint64_t size) {
+        return offset < start + size && start < offset + length;
+    };
+    if (overlaps(0, Elfpatcher::kElfHeaderSize)) return true;
+    if (header.ProgramHeaderCount == 0 || header.ProgramHeaderEntrySize == 0) return false;
+    const std::uint64_t tableSize = static_cast<std::uint64_t>(header.ProgramHeaderCount) * header.ProgramHeaderEntrySize;
+    if (tableSize > std::numeric_limits<std::uint64_t>::max() - header.ProgramHeaderOffset) return true;
+    return overlaps(header.ProgramHeaderOffset, tableSize);
 }
 
-EntryRange ResolveEntry(const std::vector<ProgramHeader>& segments, const std::uint64_t fileSize, const std::uint64_t headerEnd, const PatchEntry& entry) {
+EntryRange ResolveEntry(const std::vector<ProgramHeader>& segments, const std::uint64_t fileSize, const ElfHeader& header, const PatchEntry& entry) {
     const std::uint64_t length = entry.Expected.size();
     for (const auto& segment : segments) {
         if (segment.Type != Elfpatcher::PT_LOAD) continue;
@@ -259,7 +328,7 @@ EntryRange ResolveEntry(const std::vector<ProgramHeader>& segments, const std::u
         if (delta >= segment.FileSize || length > segment.FileSize - delta) continue;
         if (segment.Offset > fileSize || segment.FileSize > fileSize - segment.Offset) return {std::nullopt, "PT_LOAD file mapping is out of bounds"};
         const PatchedRange range{segment.Offset + delta, length, entry.VirtualAddress};
-        if (range.Offset < headerEnd) return {std::nullopt, "range overlaps the ELF header or program header table"};
+        if (TouchesHeaderArea(header, range.Offset, length)) return {std::nullopt, "range overlaps the ELF header or program header table"};
         return {range, {}};
     }
     return {std::nullopt, "range is not inside the file bytes of one PT_LOAD"};
@@ -267,14 +336,13 @@ EntryRange ResolveEntry(const std::vector<ProgramHeader>& segments, const std::u
 
 std::vector<EntryRange> ResolveEach(const ElfReader& reader, const std::vector<PatchEntry>& entries) {
     const auto segments = reader.ReadProgramHeaders();
-    const auto headerEnd = HeaderTableEnd(reader.ReadHeader());
+    const auto header = reader.ReadHeader();
     std::vector<EntryRange> resolved;
-    for (const auto& entry : entries) resolved.push_back(ResolveEntry(segments, reader.GetFileSize(), headerEnd, entry));
+    for (const auto& entry : entries) {
+        ValidateWidth(entry);
+        resolved.push_back(ResolveEntry(segments, reader.GetFileSize(), header, entry));
+    }
     return resolved;
-}
-
-std::string Describe(const PatchEntry& entry) {
-    return "patch " + entry.Target + " va=" + HexValue(entry.VirtualAddress) + " (line " + std::to_string(entry.Line) + ")";
 }
 
 bool Overlaps(const std::uint64_t firstOffset, const std::uint64_t firstLength, const std::uint64_t secondOffset, const std::uint64_t secondLength) {
@@ -294,8 +362,21 @@ void RejectEntryOverlaps(const std::vector<PatchEntry>& entries, const std::vect
     }
 }
 
-bool IsElfDyn(const std::vector<std::uint8_t>& bytes) {
-    return bytes.size() >= 18 && bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' && bytes[3] == 'F' && bytes[16] == Elfpatcher::ET_DYN && bytes[17] == 0;
+bool IsElfOfType(const std::vector<std::uint8_t>& bytes, const std::uint16_t type) {
+    return bytes.size() >= 18 && bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' && bytes[3] == 'F' && bytes[16] == (type & 0xff) && bytes[17] == (type >> 8);
+}
+
+void Compare(VerifyResult& result, const PatchEntry& entry, const std::vector<std::uint8_t>& found, const bool outputMode) {
+    const auto& wanted = outputMode ? entry.Value : entry.Expected;
+    const auto& other = outputMode ? entry.Expected : entry.Value;
+    if (found == wanted) {
+        result.Status = outputMode ? VerifyStatus::Applied : VerifyStatus::Applicable;
+        result.Detail = Hex(found);
+    } else if (found == other) {
+        result.Detail = outputMode ? "patch is not applied: found " + Hex(found) : "input already holds the patched value " + Hex(found);
+    } else {
+        result.Detail = "expected " + Hex(wanted) + " found " + Hex(found);
+    }
 }
 
 VerifyResult VerifyOne(const PatchEntry& entry, const EntryRange& resolved, const std::vector<std::uint8_t>& bytes, const bool outputMode) {
@@ -309,17 +390,62 @@ VerifyResult VerifyOne(const PatchEntry& entry, const EntryRange& resolved, cons
     }
     result.Offset = resolved.Range->Offset;
     const auto first = bytes.begin() + static_cast<std::ptrdiff_t>(resolved.Range->Offset);
-    const std::vector<std::uint8_t> found(first, first + static_cast<std::ptrdiff_t>(resolved.Range->Length));
-    const auto& wanted = outputMode ? entry.Value : entry.Expected;
-    const auto& other = outputMode ? entry.Expected : entry.Value;
-    if (found == wanted) {
-        result.Status = outputMode ? VerifyStatus::Applied : VerifyStatus::Applicable;
-        result.Detail = Hex(found);
-    } else if (found == other) {
-        result.Detail = outputMode ? "patch is not applied: found " + Hex(found) : "input already holds the patched value " + Hex(found);
-    } else {
-        result.Detail = "expected " + Hex(wanted) + " found " + Hex(found);
+    Compare(result, entry, std::vector<std::uint8_t>(first, first + static_cast<std::ptrdiff_t>(resolved.Range->Length)), outputMode);
+    return result;
+}
+
+struct PeSectionRange {
+    std::uint64_t Rva = 0;
+    std::uint64_t VirtualSize = 0;
+    std::uint64_t RawSize = 0;
+    std::uint64_t RawOffset = 0;
+};
+
+std::optional<std::vector<PeSectionRange>> ReadPeSections(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() < 0x40 || bytes[0] != 'M' || bytes[1] != 'Z') return std::nullopt;
+    const std::uint64_t header = Io::ReadU32(bytes, 0x3c);
+    if (header > bytes.size() || bytes.size() - header < 26 || Io::ReadU32(bytes, header) != 0x4550 || Io::ReadU16(bytes, header + 24) != 0x20b) return std::nullopt;
+    const std::uint64_t table = header + 24 + Io::ReadU16(bytes, header + 20);
+    const std::uint64_t count = Io::ReadU16(bytes, header + 6);
+    if (table > bytes.size() || count * 40 > bytes.size() - table) return std::nullopt;
+    std::vector<PeSectionRange> sections;
+    for (std::uint64_t index = 0; index < count; ++index) {
+        const auto at = static_cast<std::size_t>(table + index * 40);
+        sections.push_back({Io::ReadU32(bytes, at + 12), Io::ReadU32(bytes, at + 8), Io::ReadU32(bytes, at + 16), Io::ReadU32(bytes, at + 20)});
     }
+    return sections;
+}
+
+VerifyResult VerifyPeEntry(const PatchEntry& entry, const std::vector<PeSectionRange>& sections, const std::vector<std::uint8_t>& bytes) {
+    VerifyResult result;
+    result.Name = entry.Name;
+    result.Target = entry.Target;
+    result.VirtualAddress = entry.VirtualAddress;
+    std::vector<std::uint8_t> found(entry.Value.size());
+    std::vector<bool> mapped(found.size());
+    bool stored = false;
+    for (const auto& section : sections) {
+        for (std::size_t index = 0; index < found.size(); ++index) {
+            const std::uint64_t rva = std::uint64_t{*entry.OutputRva} + index;
+            if (rva < section.Rva || rva - section.Rva >= section.VirtualSize) continue;
+            mapped[index] = true;
+            const std::uint64_t delta = rva - section.Rva;
+            if (delta >= section.RawSize) continue;
+            if (section.RawOffset > bytes.size() || delta >= bytes.size() - section.RawOffset) {
+                result.Detail = "section file data is out of bounds";
+                return result;
+            }
+            found[index] = bytes[static_cast<std::size_t>(section.RawOffset + delta)];
+            if (index == 0) result.Offset = section.RawOffset + delta;
+            stored = true;
+        }
+    }
+    if (std::find(mapped.begin(), mapped.end(), false) != mapped.end()) {
+        result.Detail = "range is not inside the sections of the PE output";
+        return result;
+    }
+    Compare(result, entry, found, true);
+    if (!stored) result.Detail += " (zero fill, not stored in the file)";
     return result;
 }
 
@@ -353,6 +479,7 @@ std::string ModuleTargetName(const std::filesystem::path& modulePath, const std:
 }
 
 PatchFile ParsePatchFile(const std::string_view text) {
+    ValidateUtf8(text);
     PatchFile file;
     Table top;
     Table current;
@@ -368,10 +495,11 @@ PatchFile ParsePatchFile(const std::string_view text) {
     while (position <= text.size()) {
         auto end = text.find('\n', position);
         if (end == std::string_view::npos) end = text.size();
-        const auto whole = text.substr(position, end - position);
+        auto whole = text.substr(position, end - position);
+        if (end < text.size() && whole.ends_with('\r')) whole.remove_suffix(1);
         position = end + 1;
         ++lineNumber;
-        const auto line = Trim(StripComment(whole));
+        const auto line = Trim(StripComment(whole, lineNumber));
         if (line.empty()) continue;
         if (line.front() == '[') {
             if (line != "[[patch]]") FailLine(lineNumber, "unsupported table header", Trim(whole));
@@ -404,6 +532,10 @@ PatchFile ParsePatchFile(const std::string_view text) {
         if (!mainTarget->IsString || mainTarget->Text.empty()) FailLine(mainTarget->Line, "main_target must be a nonempty string", "main_target");
         file.MainTarget = mainTarget->Text;
     }
+    if (const auto* linuxBase = Find(top, "linux_base")) {
+        if (linuxBase->IsString || linuxBase->Number.Negative) FailLine(linuxBase->Line, "linux_base must be a non-negative integer", "linux_base");
+        file.LinuxBase = linuxBase->Number.Magnitude;
+    }
     return file;
 }
 
@@ -421,7 +553,10 @@ std::vector<PatchedRange> ResolveRanges(const ElfReader& reader, const std::vect
 std::vector<AppliedPatch> ApplyPatches(std::vector<std::uint8_t>& bytes, const std::string& target, const std::vector<PatchEntry>& entries, const std::vector<PatchedRange>& ranges) {
     if (entries.size() != ranges.size()) throw Domain::RelinkerException("Patch ranges do not match patch entries");
     for (std::size_t index = 0; index < entries.size(); ++index) {
+        ValidateWidth(entries[index]);
         const auto& range = ranges[index];
+        if (range.Length != entries[index].Expected.size())
+            throw Domain::RelinkerException(Describe(entries[index]) + ": range length does not match the patch width", range.Offset);
         if (range.Offset > bytes.size() || range.Length > bytes.size() - range.Offset) throw Domain::RelinkerException(Describe(entries[index]) + ": range exceeds the image", range.Offset);
         const auto first = bytes.begin() + static_cast<std::ptrdiff_t>(range.Offset);
         if (!std::equal(entries[index].Expected.begin(), entries[index].Expected.end(), first))
@@ -460,6 +595,8 @@ void CheckOverlaps(const std::string& target, const std::vector<PatchedRange>& p
     for (const auto& site : writers.Trampolines) sites.push_back({site.Offset, site.Length, "Intel trampoline site"});
     for (const auto& patch : writers.RelinkPatches) sites.push_back({patch.Offset, patch.Bytes.size(), "relinker patch"});
     sites.insert(sites.end(), writers.Traps.begin(), writers.Traps.end());
+    for (const auto& site : writers.RedZoneSites) sites.push_back({site.Offset, site.Length, "red-zone frame site"});
+    for (const auto& moved : writers.RedZoneDisplacements) sites.push_back({moved.Offset, moved.Bytes.size(), "red-zone moved displacement"});
     const auto relaViolation = [&](const std::span<const std::uint8_t> table, const char* name, const PatchedRange& range) {
         for (std::size_t position = 0; position + 24 <= table.size(); position += 24) {
             std::uint64_t relocation = 0;
@@ -499,10 +636,10 @@ std::vector<AppliedPatch> AggregateManifest(const std::vector<std::vector<Applie
     return merged;
 }
 
-std::string WriteManifest(const std::vector<AppliedPatch>& patches, const std::string& mainTarget, const std::string& configPath) {
+std::string WriteManifest(const std::vector<AppliedPatch>& patches, const std::string& mainTarget, const std::string& configPath, const std::optional<std::uint64_t> linuxBase) {
     const auto holdable = [](const std::string& text) {
         return std::none_of(text.begin(), text.end(), [](const char character) {
-            return character == '"' || character == '\\' || (static_cast<unsigned char>(character) < 0x20 && character != '\t') || character == 0x7f;
+            return character == '"' || character == '\\' || IsControlCharacter(character);
         });
     };
     const auto quoted = [&](const std::string& text, const char* field) {
@@ -513,11 +650,13 @@ std::string WriteManifest(const std::vector<AppliedPatch>& patches, const std::s
     if (!config.empty() && !holdable(config)) config = std::filesystem::path(Io::NativePath(configPath)).filename().generic_string();
     std::ostringstream manifest;
     manifest << "format = 1\nmain_target = " << quoted(mainTarget, "main_target") << '\n';
+    if (linuxBase) manifest << "linux_base = " << HexValue(*linuxBase) << '\n';
     if (!config.empty()) manifest << "config = " << quoted(config, "config") << '\n';
     for (const auto& patch : patches) {
         manifest << "\n[[patch]]\n";
         if (!patch.Name.empty()) manifest << "name = " << quoted(patch.Name, "name") << '\n';
         manifest << "target = " << quoted(patch.Target, "target") << "\nva = " << HexValue(patch.VirtualAddress) << '\n';
+        if (patch.OutputRva) manifest << "output_rva = " << HexValue(*patch.OutputRva) << '\n';
         if (patch.Type.empty()) {
             manifest << "expected = \"" << Hex(patch.Expected) << "\"\nvalue = \"" << Hex(patch.Value) << "\"\n";
         } else {
@@ -547,8 +686,16 @@ std::vector<VerifyResult> VerifyPatches(const PatchFile& file, const std::vector
         for (std::size_t index = 0; index < executables.size(); ++index)
             for (std::size_t other = index + 1; other < executables.size(); ++other)
                 if (executables[index].Name == executables[other].Name) throw Domain::RelinkerException("ambiguous patch target: " + executables[index].Name);
-        for (const auto& executable : executables)
-            if (!IsElfDyn(executable.Bytes)) throw Domain::RelinkerException(executable.Name + " is not an ET_DYN Linux ELF output (ET_EXEC from --linux-fixed-base, PE and Mach-O outputs are not supported): verify the input instead");
+        for (const auto& executable : executables) {
+            if (ReadPeSections(executable.Bytes)) {
+                if (file.LinuxBase) throw Domain::RelinkerException(executable.Name + " is a Windows PE output, but the patch file has linux_base = " + HexValue(*file.LinuxBase) + ": verify the output of the conversion that wrote it");
+                continue;
+            }
+            const bool fixed = IsElfOfType(executable.Bytes, Elfpatcher::ET_EXEC);
+            if (!fixed && !IsElfOfType(executable.Bytes, Elfpatcher::ET_DYN)) throw Domain::RelinkerException(executable.Name + " is not a Linux ELF or Windows PE output (Mach-O outputs are not supported): verify the input instead");
+            if (fixed && !file.LinuxBase) throw Domain::RelinkerException(executable.Name + " is an ET_EXEC Linux ELF output, but the patch file has no linux_base: verify the manifest written by its conversion");
+            if (!fixed && file.LinuxBase) throw Domain::RelinkerException(executable.Name + " is an ET_DYN Linux ELF output, but the patch file has linux_base = " + HexValue(*file.LinuxBase) + ": verify the output of the conversion that wrote it");
+        }
     } else {
         std::vector<std::string> names;
         for (const auto& executable : executables) names.push_back(executable.Name);
@@ -577,13 +724,36 @@ std::vector<VerifyResult> VerifyPatches(const PatchFile& file, const std::vector
             }
             continue;
         }
+        if (const auto sections = outputMode ? ReadPeSections(target->Bytes) : std::nullopt) {
+            std::vector<PatchEntry> own;
+            std::vector<EntryRange> ranges;
+            for (const auto other : indices) {
+                const auto& entry = file.Entries[other];
+                ValidateWidth(entry);
+                if (!entry.OutputRva) throw Domain::RelinkerException(Describe(entry) + " has no output_rva, but " + name + " is a Windows PE output: verify the manifest written by its conversion");
+                own.push_back(entry);
+                ranges.push_back({PatchedRange{*entry.OutputRva, entry.Value.size(), entry.VirtualAddress}, {}});
+            }
+            RejectEntryOverlaps(own, ranges);
+            for (const auto other : indices) {
+                results[other] = VerifyPeEntry(file.Entries[other], *sections, target->Bytes);
+                done[other] = true;
+            }
+            continue;
+        }
+        const std::uint64_t base = outputMode && IsElfOfType(target->Bytes, Elfpatcher::ET_EXEC) ? *file.LinuxBase : 0;
         std::vector<PatchEntry> own;
-        for (const auto other : indices) own.push_back(file.Entries[other]);
+        for (const auto other : indices) {
+            own.push_back(file.Entries[other]);
+            if (own.back().VirtualAddress > std::numeric_limits<std::uint64_t>::max() - base) throw Domain::RelinkerException(Describe(own.back()) + " lies outside the address space at linux_base = " + HexValue(base));
+            own.back().VirtualAddress += base;
+        }
         const ElfReader reader(target->Bytes);
         const auto resolved = ResolveEach(reader, own);
         RejectEntryOverlaps(own, resolved);
         for (std::size_t position = 0; position < indices.size(); ++position) {
             results[indices[position]] = VerifyOne(own[position], resolved[position], target->Bytes, outputMode);
+            results[indices[position]].VirtualAddress = file.Entries[indices[position]].VirtualAddress;
             done[indices[position]] = true;
         }
     }

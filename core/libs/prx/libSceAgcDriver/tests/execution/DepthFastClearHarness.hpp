@@ -41,6 +41,7 @@ struct Surface {
     VkFormat format;
     std::uint32_t slice = 0;
     std::uint8_t clearStencil = 0;
+    std::uint32_t swizzle = 0;
 };
 
 struct DrawOptions {
@@ -51,6 +52,8 @@ struct DrawOptions {
     VkStencilOpState stencil{};
     float minDepth = 0.0f;
     float maxDepth = 1.0f;
+    bool depthBias = false;
+    float depthBiasConstant = 0.0f;
 };
 
 inline std::array<std::uint32_t, 4> BufferDescriptor(const void* data, std::uint32_t stride, std::uint32_t count) {
@@ -71,11 +74,11 @@ struct Shaders {
     std::uint32_t vertexPush = 0;
 };
 
-inline Shaders Compile(AgcDriver::VulkanDevice& device) {
+inline Shaders Compile(AgcDriver::VulkanDevice& device, const void* vertices = Triangles().data()) {
     const auto target = device.Target();
     Shaders shaders;
     std::vector<std::uint32_t> vertexUserData(4, 0u);
-    const auto vertexBuffer = BufferDescriptor(Triangles().data(), 16u, static_cast<std::uint32_t>(Triangles().size()));
+    const auto vertexBuffer = BufferDescriptor(vertices, 16u, static_cast<std::uint32_t>(Triangles().size()));
     std::copy(vertexBuffer.begin(), vertexBuffer.end(), vertexUserData.begin());
     const std::array<ShaderRecompiler::MemoryRegion, 1> vertexMemory{{{reinterpret_cast<std::uintptr_t>(VertexCode.data()), std::as_bytes(std::span(VertexCode))}}};
     ShaderRecompiler::RecompileRequest vertex{
@@ -121,12 +124,15 @@ inline std::uint32_t Draw(AgcDriver::VulkanDevice& device, const Shaders& compil
     state.hasColorTarget = true;
     state.depth = AgcDriver::Graphics::DepthTarget{surface.depth, surface.stencil, extent, surface.format, 1.0f, surface.clearStencil, surface.htile, surface.htileStencil};
     state.depth->firstSlice = surface.slice;
+    state.depth->depthSwizzle = surface.swizzle;
     state.depthTest = options.depthTest;
     state.depthWrite = options.depthWrite;
     state.depthCompare = options.depthCompare;
     state.stencilTest = options.stencilTest;
     state.stencilFront = options.stencil;
     state.stencilBack = options.stencil;
+    state.depthBias = options.depthBias;
+    state.depthBiasConstant = options.depthBiasConstant;
     state.renderExtent = extent;
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     state.viewport = {0, static_cast<float>(extent.height), static_cast<float>(extent.width), -static_cast<float>(extent.height), options.minDepth, options.maxDepth};

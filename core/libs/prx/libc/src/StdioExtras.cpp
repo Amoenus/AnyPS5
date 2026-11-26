@@ -1,3 +1,4 @@
+#include "prx/libc/include/Api.hpp"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -6,6 +7,7 @@
 #include <cstring>
 #include <new>
 #include <stdexcept>
+#include <string>
 
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
@@ -17,8 +19,6 @@
 #endif
 
 namespace {
-
-using GuestNewHandler = void (APS5_VABI*)();
 
 std::atomic<GuestNewHandler> g_newHandler{nullptr};
 
@@ -56,36 +56,46 @@ void* AllocateAligned(std::size_t size, std::size_t alignment) {
     }
 }
 
+std::string AssertionText(const char* text) {
+    std::string copied;
+    if (CopyGuestString_nid_no_patch(text, 65536, copied) != 0) return "?";
+    return copied;
+}
+
 }
 
 extern "C" {
 
 #ifdef _WIN32
 
-int APS5_VABI vsprintf_s_nid_postfix(char* buffer, size_t size, const char* format, VaList* args) {
-    return LibcDetail::FormatWindows(buffer, size, format, args);
-}
 
-int APS5_VABI sprintf_s_nid_postfix(char* buffer, size_t size, const char* format, ...) {
-    __builtin_sysv_va_list args;
-    __builtin_sysv_va_start(args, format);
-    const int result = LibcDetail::FormatWindows(buffer, size, format, args);
-    __builtin_sysv_va_end(args);
-    return result;
-}
 
 #endif
 
 [[noreturn]] void APS5_VABI _Assert_nid_postfix(const char* message, const char* location) {
-    std::fprintf(stderr, "[libc] guest assertion failed: %s (%s)\n", message ? message : "?", location ? location : "?");
+    std::fprintf(stderr, "[libc] guest assertion failed: %s (%s)\n", AssertionText(message).c_str(), AssertionText(location).c_str());
     std::fflush(stderr);
     std::abort();
 }
 
+extern "C" FileStream* __stderrp_nid_postfix;
+
+[[noreturn]] void APS5_VABI _ZSt14_Atomic_assertPKcS0__nid_postfix(const char* expression, const char* function) {
+    fputs_nid_postfix(expression, __stderrp_nid_postfix);
+    if (function) {
+        fputs_nid_postfix(" in function ", __stderrp_nid_postfix);
+        fputs_nid_postfix(function, __stderrp_nid_postfix);
+    }
+    fputs_nid_postfix("\n", __stderrp_nid_postfix);
+    fflush_nid_postfix(__stderrp_nid_postfix);
+    std::abort();
+}
+
 // Only the "C" locale exists.
-const char* APS5_VABI setlocale_nid_postfix(int category, const char* locale) {
-    if (category < 0 || category > 6) return nullptr;
-    if (locale == nullptr || locale[0] == 0 || std::strcmp(locale, "C") == 0 || std::strcmp(locale, "POSIX") == 0) return "C";
+const char* APS5_VABI setlocale_nid_postfix(int, const char* locale) {
+    if (locale == nullptr) return "C";
+    std::string name;
+    if (CopyGuestString_nid_no_patch(locale, 2, name) == 0 && (name.empty() || name == "C")) return "C";
     return nullptr;
 }
 
@@ -131,6 +141,11 @@ void APS5_VABI _ZdlPv_nid_postfix(void* pointer) {
     if (pointer != nullptr) ApplicationHeapFree_nid_no_patch(pointer);
 }
 
+void APS5_VABI _ZdlPvRKSt9nothrow_t_nid_postfix(void* pointer, const void*) noexcept {
+    _ZdlPv_nid_postfix(pointer);
+
+}
+
 void APS5_VABI _ZdaPv_nid_postfix(void* pointer) {
     if (pointer != nullptr) ApplicationHeapFree_nid_no_patch(pointer);
 }
@@ -151,6 +166,54 @@ void APS5_VABI _ZdlPvSt11align_val_t_nid_postfix(void* pointer, std::size_t alig
 void APS5_VABI _ZdlPvmSt11align_val_t_nid_postfix(void* pointer, std::size_t, std::size_t alignment) {
     (void)alignment;
     if (pointer != nullptr) ApplicationHeapFree_nid_no_patch(pointer);
+}
+
+void* APS5_VABI _ZnwmSt11align_val_tRKSt9nothrow_t_nid_postfix(std::size_t size, std::size_t alignment, const void*) noexcept {
+    try {
+        return _ZnwmSt11align_val_t_nid_postfix(size, alignment);
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+}
+
+void* APS5_VABI _ZnamSt11align_val_t_nid_postfix(std::size_t size, std::size_t alignment) {
+    return _ZnwmSt11align_val_t_nid_postfix(size, alignment);
+}
+
+void* AlignedArrayNewNothrow_nid_no_patch(std::size_t size, std::size_t alignment, const void*) noexcept {
+    try {
+        return _ZnamSt11align_val_t_nid_postfix(size, alignment);
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+}
+
+void* APS5_VABI _ZnamSt11align_val_tRKSt9nothrow_t_nid_postfix(std::size_t size, std::size_t alignment, const void* tag) noexcept {
+    return AlignedArrayNewNothrow_nid_no_patch(size, alignment, tag);
+}
+
+void APS5_VABI _ZdaPvRKSt9nothrow_t_nid_postfix(void* pointer, const void*) noexcept {
+    _ZdaPv_nid_postfix(pointer);
+}
+
+void APS5_VABI _ZdlPvSt11align_val_tRKSt9nothrow_t_nid_postfix(void* pointer, std::size_t alignment, const void*) noexcept {
+    _ZdlPvSt11align_val_t_nid_postfix(pointer, alignment);
+}
+
+void AlignedArrayDelete_nid_no_patch(void* pointer, std::size_t alignment) {
+    _ZdlPvSt11align_val_t_nid_postfix(pointer, alignment);
+}
+
+void APS5_VABI _ZdaPvSt11align_val_t_nid_postfix(void* pointer, std::size_t alignment) {
+    AlignedArrayDelete_nid_no_patch(pointer, alignment);
+}
+
+void APS5_VABI _ZdaPvmSt11align_val_t_nid_postfix(void* pointer, std::size_t, std::size_t alignment) {
+    _ZdaPvSt11align_val_t_nid_postfix(pointer, alignment);
+}
+
+void APS5_VABI _ZdaPvSt11align_val_tRKSt9nothrow_t_nid_postfix(void* pointer, std::size_t alignment, const void*) noexcept {
+    _ZdaPvSt11align_val_t_nid_postfix(pointer, alignment);
 }
 
 }

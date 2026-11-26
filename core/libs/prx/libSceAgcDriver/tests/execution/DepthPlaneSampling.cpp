@@ -3,6 +3,8 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
@@ -22,10 +24,12 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -48,6 +52,9 @@ using DepthFastClearHarness::VertexCode;
 using ShaderRecompiler::ShaderStage;
 
 constexpr std::uint32_t Threads = 32;
+constexpr std::uint32_t Format8Unorm = 1;
+constexpr std::uint32_t Format8Uint = 5;
+constexpr std::uint32_t Format8Sint = 6;
 constexpr std::uint32_t Format16Unorm = 7;
 constexpr std::uint32_t Format16Uint = 11;
 constexpr std::uint32_t Format32Uint = 20;
@@ -58,7 +65,7 @@ constexpr std::uint32_t Type2DArray = 13;
 constexpr std::uint32_t Swizzle64KbS = 9;
 constexpr std::uint32_t Swizzle64KbZX = 24;
 constexpr std::uint64_t SliceBytes = 65536;
-constexpr std::size_t BlockBytes = 8u << 20u;
+constexpr std::size_t BlockBytes = 10u << 20u;
 constexpr std::size_t OutputOffset = 0;
 constexpr std::size_t ArrayOffset = 0x10000;
 constexpr std::size_t CubeOffset = 0x40000;
@@ -70,6 +77,14 @@ constexpr std::size_t PaddedCubeOffset = 0x120000;
 constexpr std::size_t SmallCubeOffset = 0x180000;
 constexpr std::size_t LargeCubeOffset = 0x200000;
 constexpr std::size_t GuestDepthBitsOffset = 0x480000;
+constexpr std::size_t FrameCopiesOffset = 0x520000;
+constexpr std::size_t ReloadOffset = 0x700000;
+constexpr std::size_t StencilArrayDepthOffset = 0x720000;
+constexpr std::size_t StencilArrayOffset = 0x780000;
+constexpr std::size_t StencilUnormDepthOffset = 0x7c0000;
+constexpr std::size_t StencilUnormOffset = 0x7e0000;
+constexpr std::size_t StencilCubeDepthOffset = 0x800000;
+constexpr std::size_t StencilCubeOffset = 0x820000;
 constexpr float DrawnDepth = 0.25f;
 constexpr float DrawnD16Depth = 0.2f;
 constexpr std::uint32_t DrawnD16Bits = 13107;
@@ -172,7 +187,7 @@ std::uint32_t Bits(float value) {
 
 // Draws a full-target triangle at depth `z` into the depth surface at `address`, which makes the driver create the
 // surface (the base slice a later plane copy reads from the surface instead of from guest memory).
-void DrawDepth(AgcDriver::VulkanDevice& device, std::uint64_t address, VkExtent2D extent, VkFormat format, float z) {
+void DrawDepth(AgcDriver::VulkanDevice& device, std::uint64_t address, VkExtent2D extent, VkFormat format, float z, std::uint32_t swizzle = 0, std::uint64_t stencilAddress = 0, std::optional<std::uint8_t> stencilValue = std::nullopt) {
     static std::deque<std::vector<std::array<float, 4>>> vertexData;
     vertexData.push_back({{-1.0f, -1.0f, z, 1.0f}, {3.0f, -1.0f, z, 1.0f}, {-1.0f, 3.0f, z, 1.0f}});
     const auto& vertices = vertexData.back();
@@ -216,10 +231,16 @@ void DrawDepth(AgcDriver::VulkanDevice& device, std::uint64_t address, VkExtent2
     state.color = {reinterpret_cast<std::uintptr_t>(Pixels.data()), extent, VK_FORMAT_R8G8B8A8_UNORM, AgcDriver::Graphics::ColorTargetLayout(extent.width, extent.height, AgcDriver::Graphics::ColorTileMode::Linear).Bytes(), 0xe4u};
     state.colors = {state.color};
     state.hasColorTarget = true;
-    state.depth = AgcDriver::Graphics::DepthTarget{address, 0, extent, format, 1.0f, 0};
+    state.depth = AgcDriver::Graphics::DepthTarget{address, stencilAddress, extent, format, 1.0f, 0};
+    state.depth->depthSwizzle = swizzle;
     state.depthTest = true;
     state.depthWrite = true;
     state.depthCompare = VK_COMPARE_OP_ALWAYS;
+    if (stencilValue.has_value()) {
+        state.stencilTest = true;
+        state.stencilFront = {VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS, 0xffu, 0xffu, *stencilValue};
+        state.stencilBack = state.stencilFront;
+    }
     state.renderExtent = extent;
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     state.viewport = {0, static_cast<float>(extent.height), static_cast<float>(extent.width), -static_cast<float>(extent.height), 0, 1};
@@ -338,6 +359,21 @@ void GuestDepthBitsCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std:
     }
 }
 
+void GuestWriteAfterDrawCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std::span<std::uint32_t> output) {
+    auto* base = block.At(ReloadOffset);
+    if (!AgcDriver::GuestMemory::WriteWatched() || !AgcDriver::GuestMemory::Watched(reinterpret_cast<std::uintptr_t>(base), SliceBytes)) {
+        std::puts("guest memory has no write watch: the guest write after a draw is not checked");
+        return;
+    }
+    const Shape shape{Format32Float, 128, 128, Type2D, 0, Swizzle64KbZX};
+    DrawDepth(device, reinterpret_cast<std::uintptr_t>(base), {128, 128}, VK_FORMAT_D32_SFLOAT, DrawnDepth, AgcDriver::Graphics::XorSwizzleMode(AgcDriver::Graphics::TextureTileMode::kZ64KBX));
+    Load(device, base, shape, 0, output);
+    Expect(output, Bits(DrawnDepth), "D32 plane sampled after a draw");
+    FillSlice(base, SliceBytes, Bits(0.75f), 4u);
+    Load(device, base, shape, 0, output);
+    Expect(output, Bits(0.75f), "D32 plane the guest wrote after a draw, sampled before its surface is bound again");
+}
+
 void FirstSliceCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std::span<std::uint32_t> output) {
     auto* one = block.At(OneSliceOffset);
     DrawDepth(device, reinterpret_cast<std::uintptr_t>(one), {128, 128}, VK_FORMAT_D32_SFLOAT, DrawnDepth);
@@ -414,6 +450,67 @@ void BaseSliceCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std::span
     Expect(output, Bits(0.5f), "D32 2D array from base slice 1 through a 2D shader image");
 }
 
+void ReuseCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std::span<std::uint32_t> output) {
+    auto* base = block.At(ArrayOffset);
+    const Shape shape{Format32Float, 128, 128, Type2DArray, 2, Swizzle64KbZX};
+    DrawDepth(device, reinterpret_cast<std::uintptr_t>(base), {128, 128}, VK_FORMAT_D32_SFLOAT, 0.375f);
+    Load(device, base, shape, 0, output);
+    Expect(output, Bits(0.375f), "D32 2D array slice 0 before the repeated lookup");
+    const bool reuse = std::getenv("APS5_NO_DEPTH_PLANE_REUSE") == nullptr;
+    const auto words = TextureDescriptor(base, shape);
+    const auto resource = AgcDriver::Graphics::DecodeTextureResource(words);
+    const auto texture = AgcDriver::Graphics::DepthSurfaceTexture(AgcDriver::VulkanDeviceTestAccess::ContextOf(device), words, resource, {});
+    Require(texture->HasReuseLookup() == reuse && texture->RefreshedPerUse() != reuse, reuse ? "a depth plane copy's texture carries no lookup to repeat, or is still remade per use" : "APS5_NO_DEPTH_PLANE_REUSE left a depth plane copy's texture reusable");
+    if (reuse) {
+        AgcDriver::Graphics::Texture::TakeReuseLookupCounts();
+        DrawDepth(device, reinterpret_cast<std::uintptr_t>(base), {128, 128}, VK_FORMAT_D32_SFLOAT, 0.625f);
+        Require(texture->ReuseLookupHolds(), "the repeated lookup of a depth plane copy returned another texture after its slice was drawn again");
+        const auto counts = AgcDriver::Graphics::Texture::TakeReuseLookupCounts();
+        Require(counts.held == 1 && counts.changed == 0, "one repeated lookup counted " + std::to_string(counts.held) + " held and " + std::to_string(counts.changed) + " changed, expected 1 and 0");
+    } else {
+        DrawDepth(device, reinterpret_cast<std::uintptr_t>(base), {128, 128}, VK_FORMAT_D32_SFLOAT, 0.625f);
+    }
+    Load(device, base, shape, 0, output);
+    Expect(output, Bits(0.625f), "D32 2D array slice 0 drawn again after the first lookup");
+}
+
+void FrameCopiesCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std::span<std::uint32_t> output) {
+    constexpr VkExtent2D extent{128, 256};
+    constexpr VkDeviceSize budget = 1u << 20u;
+    const auto stride = AgcDriver::Graphics::DepthSliceBytes(extent, 4u);
+    Require(FrameCopiesOffset + 9u * stride <= BlockBytes, "the three 3-slice 128x256 D32 arrays must fit the guest block");
+    const std::array<std::uint8_t*, 3> bases{block.At(FrameCopiesOffset), block.At(FrameCopiesOffset + 3u * stride), block.At(FrameCopiesOffset + 6u * stride)};
+    const std::array<float, 3> expected{0.375f, 0.625f, 0.875f};
+    for (std::size_t copy = 0; copy < bases.size(); ++copy) {
+        DrawDepth(device, reinterpret_cast<std::uintptr_t>(bases[copy]), extent, VK_FORMAT_D32_SFLOAT, DrawnDepth);
+        for (std::uint32_t slice = 1; slice < 3u; ++slice) FillSlice(bases[copy] + slice * stride, stride, Bits(expected[copy]), 4u);
+    }
+    const Shape shape{Format32Float, extent.width, extent.height, Type2DArray, 2, Swizzle64KbZX};
+    const auto sample = [&](std::size_t copy) {
+        Load(device, bases[copy], shape, 2, output);
+        Expect(output, Bits(expected[copy]), "D32 2D array " + std::to_string(copy) + " slice 2");
+    };
+    AgcDriver::Graphics::Recorder::CountPresent();
+    AgcDriver::Graphics::Recorder::CountPresent();
+    sample(0);
+    sample(1);
+    sample(0);
+    sample(1);
+    const auto kept = AgcDriver::Graphics::DepthPlaneCopyCount();
+    Require(kept == 2, std::to_string(kept) + " depth plane copies were kept after two copies over the 1 MiB budget were sampled in one present, expected both");
+    const auto pair = AgcDriver::Graphics::DepthPlaneCopyBytes();
+    Require(pair > budget && pair <= 2u * budget, "the two copies sampled in one present hold " + std::to_string(pair) + " bytes, the case needs more than the 1 MiB budget and no more than twice it");
+    sample(2);
+    const auto capped = AgcDriver::Graphics::DepthPlaneCopyBytes();
+    Require(capped <= 2u * budget, "the depth plane copies sampled in one present hold " + std::to_string(capped) + " bytes in " + std::to_string(AgcDriver::Graphics::DepthPlaneCopyCount()) + " copies, more than twice the 1 MiB budget");
+    Require(AgcDriver::Graphics::DepthPlaneCopyCount() == 2, std::to_string(AgcDriver::Graphics::DepthPlaneCopyCount()) + " depth plane copies were kept after a third copy took the ones sampled in one present past twice the budget, expected the two most recently used");
+    AgcDriver::Graphics::Recorder::CountPresent();
+    AgcDriver::Graphics::Recorder::CountPresent();
+    sample(1);
+    const auto left = AgcDriver::Graphics::DepthPlaneCopyCount();
+    Require(left == 1, std::to_string(left) + " depth plane copies were kept two presents after the other copy was last sampled, expected only the newest");
+}
+
 void ExpectRefusal(AgcDriver::VulkanDevice& device, GuestBlock& block, std::size_t offset, const Shape& shape, std::uint32_t baseArray, const std::string& expected, const std::string& what) {
     const auto words = TextureDescriptor(block.At(offset), shape);
     auto resource = AgcDriver::Graphics::DecodeTextureResource(words);
@@ -427,31 +524,134 @@ void ExpectRefusal(AgcDriver::VulkanDevice& device, GuestBlock& block, std::size
     Require(false, what + " was not refused");
 }
 
+void StencilArrayCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std::span<std::uint32_t> output) {
+    constexpr VkExtent2D extent{160, 90};
+    const auto depthStride = AgcDriver::Graphics::DepthSliceBytes(extent, 4u);
+    const auto stencilStride = AgcDriver::Graphics::DepthSliceBytes(extent, 1u);
+    auto* depthBase = block.At(StencilArrayDepthOffset);
+    auto* stencilBase = block.At(StencilArrayOffset);
+    DrawDepth(device, reinterpret_cast<std::uintptr_t>(depthBase), extent, VK_FORMAT_D32_SFLOAT_S8_UINT, DrawnDepth, 0, reinterpret_cast<std::uintptr_t>(stencilBase), 0x5au);
+    DrawDepth(device, reinterpret_cast<std::uintptr_t>(depthBase + depthStride), extent, VK_FORMAT_D32_SFLOAT_S8_UINT, DrawnDepth, 0, reinterpret_cast<std::uintptr_t>(stencilBase + stencilStride), 0xa5u);
+    FillSlice(stencilBase + 2u * stencilStride, stencilStride, 0x3cu, 1u);
+    const Shape shape{Format8Uint, extent.width, extent.height, Type2DArray, 2, Swizzle64KbZX};
+    const std::array<std::uint32_t, 3> expected{0x5au, 0xa5u, 0x3cu};
+    for (std::uint32_t slice = 0; slice < 3u; ++slice) {
+        Load(device, stencilBase, shape, slice, output);
+        Expect(output, expected[slice], "stencil R8_UINT 2D array slice " + std::to_string(slice));
+    }
+    Shape shifted = shape;
+    shifted.baseArray = 1;
+    Load(device, stencilBase, shifted, 0, output);
+    Expect(output, 0xa5u, "stencil R8_UINT 2D array from base slice 1, slice 0");
+    Load(device, stencilBase, shifted, 1, output);
+    Expect(output, 0x3cu, "stencil R8_UINT 2D array from base slice 1, slice 1");
+    DrawDepth(device, reinterpret_cast<std::uintptr_t>(depthBase), extent, VK_FORMAT_D32_SFLOAT_S8_UINT, DrawnDepth, 0, reinterpret_cast<std::uintptr_t>(stencilBase), 0x7eu);
+    Load(device, stencilBase, shape, 0, output);
+    Expect(output, 0x7eu, "stencil R8_UINT 2D array slice 0 after redraw");
+    Load(device, stencilBase, shape, 1, output);
+    Expect(output, 0xa5u, "stencil R8_UINT 2D array slice 1 after slice 0 redraw");
+    Load(device, stencilBase, shape, 2, output);
+    Expect(output, 0x3cu, "stencil R8_UINT 2D array slice 2 after slice 0 redraw");
+    Load(device, stencilBase, shape, 0, output, true);
+    Expect(output, 0x7eu, "3-slice stencil R8_UINT 2D array through a 2D shader image");
+    DrawDepth(device, reinterpret_cast<std::uintptr_t>(depthBase + 2u * depthStride), {64, 64}, VK_FORMAT_D32_SFLOAT_S8_UINT, DrawnDepth, 0, reinterpret_cast<std::uintptr_t>(stencilBase + stencilStride), 0x11u);
+    FillSlice(stencilBase + stencilStride, stencilStride, 0x44u, 1u);
+    Load(device, stencilBase, shape, 1, output);
+    Expect(output, 0x44u, "stencil R8_UINT 2D array slice 1 after displacement by another extent");
+}
+
+void StencilCubeCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std::span<std::uint32_t> output) {
+    constexpr VkExtent2D extent{128, 128};
+    const auto stencilStride = AgcDriver::Graphics::DepthSliceBytes(extent, 1u);
+    auto* depthBase = block.At(StencilCubeDepthOffset);
+    auto* stencilBase = block.At(StencilCubeOffset);
+    DrawDepth(device, reinterpret_cast<std::uintptr_t>(depthBase), extent, VK_FORMAT_D32_SFLOAT_S8_UINT, DrawnDepth, 0, reinterpret_cast<std::uintptr_t>(stencilBase), 0x6bu);
+    for (std::uint32_t face = 1; face < 6u; ++face) FillSlice(stencilBase + face * stencilStride, stencilStride, 0x10u + face, 1u);
+    const Shape shape{Format8Uint, extent.width, extent.height, TypeCube, 0, Swizzle64KbZX};
+    for (std::uint32_t face = 0; face < 6u; ++face) {
+        Load(device, stencilBase, shape, face, output);
+        Expect(output, face == 0 ? 0x6bu : 0x10u + face, "stencil R8_UINT cube face " + std::to_string(face));
+    }
+}
+
+void StencilUnormArrayCase(AgcDriver::VulkanDevice& device, GuestBlock& block, std::span<std::uint32_t> output) {
+    constexpr VkExtent2D extent{128, 128};
+    const auto stencilStride = AgcDriver::Graphics::DepthSliceBytes(extent, 1u);
+    auto* depthBase = block.At(StencilUnormDepthOffset);
+    auto* stencilBase = block.At(StencilUnormOffset);
+    DrawDepth(device, reinterpret_cast<std::uintptr_t>(depthBase), extent, VK_FORMAT_D32_SFLOAT_S8_UINT, DrawnDepth, 0, reinterpret_cast<std::uintptr_t>(stencilBase), 0x80u);
+    FillSlice(stencilBase + stencilStride, stencilStride, 0xffu, 1u);
+    const Shape shape{Format8Unorm, extent.width, extent.height, Type2DArray, 1, Swizzle64KbZX};
+    const std::array<float, 2> expected{128.0f / 255.0f, 1.0f};
+    for (std::uint32_t slice = 0; slice < 2u; ++slice) {
+        Load(device, stencilBase, shape, slice, output);
+        for (std::uint32_t tid = 0; tid < Threads; ++tid) {
+            float actual = 0;
+            std::memcpy(&actual, &output[tid], sizeof actual);
+            char message[160];
+            std::snprintf(message, sizeof message, "stencil R8_UNORM 2D array slice %u texel %u: got %.8f, expected %.8f", slice, tid, actual, expected[slice]);
+            Require(std::abs(actual - expected[slice]) <= 1.0f / 255.0f, message);
+        }
+    }
+}
+
 void RefusalCase(AgcDriver::VulkanDevice& device, GuestBlock& block) {
     ExpectRefusal(device, block, ArrayOffset, {Format32Float, 128, 128, Type2DArray, 2, Swizzle64KbZX}, 3, "base slice 3 is not implemented", "a depth plane array whose base slice is past its last slice");
     ExpectRefusal(device, block, CubeOffset, {Format32Float, 128, 128, TypeCube, 5, Swizzle64KbZX}, 1, "base slice 1 is not implemented", "a depth plane cube from base slice 1");
     ExpectRefusal(device, block, ArrayOffset, {Format32Float, 128, 128, Type2D, 0, Swizzle64KbZX}, 1, "slice 1 is not implemented", "a 2D depth plane view with a base slice");
+    ExpectRefusal(device, block, StencilArrayOffset, {Format8Sint, 160, 90, Type2DArray, 2, Swizzle64KbZX}, 0, "sampling the stencil planes", "an R8_SINT 2D array view of a stencil plane");
+    ExpectRefusal(device, block, StencilArrayOffset, {Format8Uint, 160, 90, Type2DArray, 2, Swizzle64KbZX}, 3, "base slice 3 is not implemented", "a stencil plane array whose base slice is past its last slice");
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        const bool evicting = argc > 1 && std::string(argv[1]) == "--evicting";
         GuestBlock block;
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         const std::span<std::uint32_t> output(reinterpret_cast<std::uint32_t*>(block.At(OutputOffset)), Threads);
+        const auto present = [&] {
+            if (!evicting) return;
+            AgcDriver::Graphics::Recorder::CountPresent();
+            AgcDriver::Graphics::Recorder::CountPresent();
+        };
         ArrayCase(*device, block, output);
+        present();
         CubeCase(*device, block, output);
+        present();
         IntegerCase(*device, block, output);
+        present();
         DepthBitsArrayCase(*device, block, output);
+        present();
         DepthBitsBaseSliceCase(*device, block, output);
+        present();
         GuestDepthBitsCase(*device, block, output);
+        present();
+        GuestWriteAfterDrawCase(*device, block, output);
+        present();
         FirstSliceCase(*device, block, output);
+        present();
         PaddedCubeCase(*device, block, output);
+        present();
         SmallD16CubeCase(*device, block, output);
+        present();
         PaddedD16CubeCase(*device, block, output);
+        present();
+        StencilArrayCase(*device, block, output);
+        present();
+        StencilCubeCase(*device, block, output);
+        present();
+        StencilUnormArrayCase(*device, block, output);
+        present();
         BaseSliceCase(*device, block, output);
+        ReuseCase(*device, block, output);
         RefusalCase(*device, block);
+        if (evicting) {
+            const auto kept = AgcDriver::Graphics::DepthPlaneCopyCount();
+            Require(kept >= 1 && kept < 8, std::to_string(kept) + " depth plane copies were kept with a 1 MiB budget, expected at least the newest and fewer than the 8 an unbounded cache keeps");
+            FrameCopiesCase(*device, block, output);
+        }
         std::puts("depth plane sampling tests passed");
         return 0;
     } catch (const std::exception& error) {

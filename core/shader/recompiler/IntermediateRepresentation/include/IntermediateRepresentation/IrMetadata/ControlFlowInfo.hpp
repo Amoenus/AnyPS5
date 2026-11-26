@@ -44,6 +44,7 @@ struct TableColumn {
     std::uint32_t maxKey = 0xffffffffu;
     bool sampler = false;
     bool address = false;
+    bool buffer = false;
     std::vector<KeyDomain> keyDomains;
     bool unkeyed = false;
     bool indirect = false;
@@ -54,9 +55,10 @@ struct TableColumn {
     std::uint32_t foldedCarry = 0;
     bool selected = false;
     std::uint32_t selection = 0;
+    bool pointerKeyed = false;
 
     bool operator==(const TableColumn& other) const {
-        return heapSource == other.heapSource && stride == other.stride && addend == other.addend && offset == other.offset && dwordCount == other.dwordCount && sampler == other.sampler && address == other.address && indirect == other.indirect && indirectOffset == other.indirectOffset && indirectImmediate == other.indirectImmediate && pointerHops == other.pointerHops && foldedAddend == other.foldedAddend && foldedCarry == other.foldedCarry && selected == other.selected && selection == other.selection;
+        return heapSource == other.heapSource && stride == other.stride && addend == other.addend && offset == other.offset && dwordCount == other.dwordCount && sampler == other.sampler && address == other.address && buffer == other.buffer && indirect == other.indirect && indirectOffset == other.indirectOffset && indirectImmediate == other.indirectImmediate && pointerHops == other.pointerHops && foldedAddend == other.foldedAddend && foldedCarry == other.foldedCarry && selected == other.selected && selection == other.selection && pointerKeyed == other.pointerKeyed;
     }
 };
 
@@ -64,6 +66,7 @@ struct DescriptorSource {
     std::array<IrValue*, 8> dwords {};
     std::uint32_t dwordCount = 0;
     std::optional<TableColumn> tableColumn;
+    std::vector<std::uint32_t> requiredBlocks;
 
     bool operator==(const DescriptorSource& other) const = default;
 };
@@ -88,6 +91,7 @@ struct ResourceBlock {
     std::vector<std::uint32_t> successors;
     std::vector<std::uint32_t> sources;
     std::vector<std::uint32_t> images;
+    std::vector<std::uint32_t> flatSlots;
 };
 
 }

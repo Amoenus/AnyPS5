@@ -1,21 +1,31 @@
+#include "prx/libc/include/Api.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
 #include <algorithm>
 #include <cstdarg>
 #include <cctype>
+#include <initializer_list>
 #include <cstring>
 #include <string>
 #include <cerrno>
 #include <cstdlib>
 #include <memory>
+#include <climits>
+#include <stdexcept>
+#include <cmath>
+#include <limits>
 
 #include "prx/libc/include/General.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
+#include "prx/libc/include/SonyCrt.hpp"
 
 #include "prx/libc/include/WindowsFormatting.hpp"
+#include "prx/libc/include/ScanWideField.hpp"
+#include "prx/libc/include/ScanQuadLength.hpp"
+#include "prx/libc/include/ScanDanglingExponent.hpp"
 
 #ifdef _WIN32
 #include "prx/libc/include/WindowsScanning.hpp"
@@ -30,28 +40,72 @@ int __isoc99_vfscanf(std::FILE*, const char*, std::va_list);
 
 namespace {
 
+constexpr int guestEinval = 22;
+constexpr int guestErange = 34;
+
+void ReportConstraint(const char* message) {
+    SonyInvokeConstraintHandler(message, nullptr, guestEinval);
+}
+
+
+
 #ifndef _WIN32
 bool RequiresGuestFormatting(const char* format) {
     if (format == nullptr) return false;
     while ((format = std::strchr(format, '%')) != nullptr) {
         ++format;
         if (*format == '%') { ++format; continue; }
-        while (*format && std::strchr("-+ #0'0123456789.*$", *format)) ++format;
-        if (*format == 'S' || *format == 'C' || *format == 'm' || *format == 'p' ||
+        bool precision = false;
+        while (*format && std::strchr("-+ #00123456789.*$", *format)) precision |= *format++ == '.';
+        if (*format == 'S' || *format == 'C' || *format == 'p' ||
             (*format == 'l' && (format[1] == 's' || format[1] == 'c' || format[1] == 'p'))) return true;
+        const char* lengthStart = format;
+        while (*format && std::strchr("hljztL", *format)) ++format;
+        if (*format && !std::strchr(LibcDetail::KnownConversions, *format)) return true;
+        const std::string length(lengthStart, format);
+        if (*format && LibcDetail::ApplicableLength(length, *format) != length) return true;
+        if (*format && std::strchr("aAeEfFgG", *format)) return true;
+        if (*format == 'n') return true;
+        if (precision && *format == 's') return true;
         if (*format) ++format;
     }
     return false;
 }
 
-void RejectGuestWideScan(const char* format) {
-    if (format == nullptr) return;
+int FormatBounded(char* buffer, std::size_t size, const char* format, std::va_list arguments) {
+    if (RequiresGuestFormatting(format)) return LibcDetail::FormatWindows(buffer, size, format, arguments);
+
+    const int savedErrno = errno;
+    std::va_list copy;
+    va_copy(copy, arguments);
+    const auto capacity = std::min(size, static_cast<std::size_t>(INT_MAX) + 1);
+    const int result = std::vsnprintf(buffer, capacity, format, copy);
+    va_end(copy);
+    if (result >= 0 || errno != EOVERFLOW) return result;
+
+    errno = savedErrno;
+    try {
+        return LibcDetail::FormatWindows(buffer, size, format, arguments);
+    } catch (const std::overflow_error&) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+}
+#endif
+
+bool IsWideScan(const std::string& length, char conversion) {
+    return conversion == 'S' || conversion == 'C' || (length == "l" && (conversion == 's' || conversion == 'c' || conversion == '['));
+}
+
+bool HasGuestWideScan(const char* format) {
+    if (format == nullptr) return false;
     while ((format = std::strchr(format, '%')) != nullptr) {
         ++format;
         if (*format == '%') { ++format; continue; }
         while (*format && std::strchr("-+ #0'0123456789.*$", *format)) ++format;
-        if (*format == 'S' || *format == 'C' || (*format == 'l' && format[1] != '\0' && std::strchr("sc[", format[1])))
-            NotImplemented_nid_no_patch("scanf 16-bit wide conversion on Linux");
+        const char* length = format;
+        while (*format && std::strchr("hljztL", *format)) ++format;
+        if (*format && IsWideScan(std::string(length, format), *format)) return true;
         if (*format == '[') {
             ++format;
             if (*format == '^') ++format;
@@ -60,21 +114,109 @@ void RejectGuestWideScan(const char* format) {
         }
         if (*format) ++format;
     }
+    return false;
+}
+
+
+bool HasNarrowScan(const char* format, const char* conversions) {
+    if (format == nullptr) return false;
+    while ((format = std::strchr(format, '%')) != nullptr) {
+        ++format;
+        if (*format == '%') { ++format; continue; }
+        const char* digits = format;
+        while (std::isdigit(static_cast<unsigned char>(*format))) ++format;
+        if (*format == '$') ++format;
+        else format = digits;
+        if (*format == '*') ++format;
+        while (std::isdigit(static_cast<unsigned char>(*format))) ++format;
+        const char* length = format;
+        while (*format && std::strchr("hljztL", *format)) ++format;
+        if (*format != '\0' && std::strchr(conversions, *format) != nullptr &&
+                (*format != 'c' || !(format - length == 1 && *length == 'l'))) return true;
+        if (*format == '[') {
+            ++format;
+            if (*format == '^') ++format;
+            if (*format == ']') ++format;
+            while (*format && *format != ']') ++format;
+        }
+        if (*format) ++format;
+    }
+    return false;
+}
+
+#ifndef _WIN32
+bool HasNarrowCharacterScan(const char* format) {
+    return HasNarrowScan(format, "c");
+}
+#else
+bool ScansInProcess(const char* format) {
+    return HasGuestWideScan(format) || HasNarrowScan(format, "cxXip");
 }
 #endif
 
+const char* CutAtQuadScanDirective(const char* format, std::string& head) {
+    const char* const quad = LibcDetail::FindQuadScanDirective(format);
+    if (quad == nullptr) return format;
+    head.assign(format, quad);
+    return head.c_str();
+}
+
 std::string HostLength(const std::string& length, char conversion) {
+    if (std::strchr("sc[", conversion) && length != "l") return {};
 #ifdef _WIN32
     if (length == "l" && std::strchr("diouxXn", conversion) != nullptr) return "ll";
+    if (length != "l" && std::strchr("sc[", conversion) != nullptr) return std::string();
 #else
     (void)conversion;
 #endif
     return length;
 }
 
+const char* ScanLengthEnd(const char* cursor) {
+    if (*cursor == 'h' || *cursor == 'l') {
+        const char first = *cursor++;
+        if (*cursor == first) ++cursor;
+    } else if (*cursor != '\0' && std::strchr("jztL", *cursor)) ++cursor;
+    return cursor;
+}
+
+const char* HostScanFormat(const char* format, std::string& normalized) {
+    if (format == nullptr) return format;
+    const char* copied = format;
+    const char* cursor = format;
+    while ((cursor = std::strchr(cursor, '%')) != nullptr) {
+        ++cursor;
+        if (*cursor == '%') { ++cursor; continue; }
+        while (*cursor && std::strchr("-+ #0'0123456789.*$", *cursor)) ++cursor;
+        const char* const length = cursor;
+        cursor = ScanLengthEnd(cursor);
+        const bool wide = cursor == length + 1 && *length == 'l';
+        if (cursor != length && !wide && *cursor && std::strchr("sc[", *cursor)) {
+            normalized.append(copied, length);
+            copied = cursor;
+        }
+        if (*cursor == '[') {
+            ++cursor;
+            if (*cursor == '^') ++cursor;
+            if (*cursor == ']') ++cursor;
+            while (*cursor && *cursor != ']') ++cursor;
+        }
+        if (*cursor) ++cursor;
+        else break;
+    }
+    if (copied == format) return format;
+    normalized.append(copied);
+    return normalized.c_str();
+}
+
 int HostVsscanf(const char* input, const char* format, std::va_list args) {
+    std::string normalized;
+    format = HostScanFormat(format, normalized);
 #if defined(__GLIBC__)
-    return __isoc99_vsscanf(input, format, args);
+    const int savedError = errno;
+    const int result = __isoc99_vsscanf(input, format, args);
+    if (result == EOF && errno == 0) errno = savedError;
+    return result;
 #else
     return std::vsscanf(input, format, args);
 #endif
@@ -90,18 +232,165 @@ int HostSscanf(const char* input, const char* format, ...) {
 
 #ifndef _WIN32
 int HostVfscanf(std::FILE* stream, const char* format, std::va_list args) {
+    std::string normalized;
+    format = HostScanFormat(format, normalized);
 #if defined(__GLIBC__)
-    return __isoc99_vfscanf(stream, format, args);
+    const int savedError = errno;
+    const int result = __isoc99_vfscanf(stream, format, args);
+    if (result == EOF && errno == 0) errno = savedError;
+    return result;
 #else
     return std::vfscanf(stream, format, args);
 #endif
 }
 #endif
 
-template <typename NextPointer, typename NextCapacity>
-int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer nextPointer, NextCapacity nextCapacity) {
-    if (buffer == nullptr || format == nullptr) return EOF;
-    const char* input = buffer;
+int HostFscanf(std::FILE* stream, const char* format, ...) {
+    std::va_list args;
+    va_start(args, format);
+#ifdef _WIN32
+    const int result = std::vfscanf(stream, format, args);
+#else
+    const int result = HostVfscanf(stream, format, args);
+#endif
+    va_end(args);
+    return result;
+}
+
+enum class HexPrefix { Valid, InputFailure, MatchingFailure };
+
+HexPrefix CheckHexPrefix(const char* field, unsigned long width, bool floating) {
+    const unsigned long limit = width == 0 ? ULONG_MAX : width;
+    const bool sign = field[0] == '+' || field[0] == '-';
+    unsigned long index = sign ? 1 : 0;
+    if (index + 1 >= limit || field[index] != '0' || (field[index + 1] != 'x' && field[index + 1] != 'X')) return HexPrefix::Valid;
+    index += 2;
+    const auto hexDigit = [&](unsigned long at) { return at < limit && std::isxdigit(static_cast<unsigned char>(field[at])) != 0; };
+    if (hexDigit(index)) return HexPrefix::Valid;
+    if (floating) return index < limit && field[index] == '.' && hexDigit(index + 1) ? HexPrefix::Valid : HexPrefix::MatchingFailure;
+    const bool ended = index >= limit || field[index] == '\0';
+    return ended && !sign ? HexPrefix::InputFailure : HexPrefix::MatchingFailure;
+}
+
+bool DecimalOutOfRange(const std::string& field) {
+    if (field.find_first_of("xX") != std::string::npos) return false;
+    if (field.find_first_of("eE") == std::string::npos && field.size() < static_cast<std::size_t>(std::numeric_limits<long double>::max_exponent10)) return false;
+    errno = 0;
+    const long double value = std::strtold(field.c_str(), nullptr);
+    return errno == ERANGE && (std::isinf(value) || value == 0.0L);
+}
+
+template <typename T>
+void StoreDefaultNaN(void* target, std::size_t bytes) {
+    T value{};
+    std::memcpy(&value, target, std::min(bytes, sizeof(value)));
+    if (!std::isnan(value)) return;
+    if (bytes == 10) {
+        constexpr unsigned char quiet[10]{0, 0, 0, 0, 0, 0, 0, 0xc0, 0xff, 0x7f};
+        std::memcpy(target, quiet, sizeof(quiet));
+    } else {
+        value = std::numeric_limits<T>::quiet_NaN();
+        std::memcpy(target, &value, bytes);
+    }
+}
+
+class StringSource {
+    const char* const start;
+    const char* position;
+
+public:
+    static constexpr bool Contiguous = true;
+
+    explicit StringSource(const char* text) : start(text), position(text) {}
+
+    int Peek() const { return *position == '\0' ? EOF : static_cast<unsigned char>(*position); }
+    void Skip() { ++position; }
+    void PutBack(int byte) { if (byte != EOF) --position; }
+    void Advance(std::ptrdiff_t count) { position += count; }
+    std::ptrdiff_t Consumed() const { return position - start; }
+    const char* Remaining() const { return position; }
+
+    int Scan(const char* directive, bool suppress, void* target, int* consumed) const {
+        return suppress ? HostSscanf(position, directive, consumed) : HostSscanf(position, directive, target, consumed);
+    }
+};
+
+class StreamSource {
+    std::FILE* const file;
+    std::ptrdiff_t consumed = 0;
+
+public:
+    static constexpr bool Contiguous = false;
+
+    explicit StreamSource(std::FILE* native) : file(native) {}
+
+    int Peek() const {
+        const int next = std::fgetc(file);
+        if (next != EOF) std::ungetc(next, file);
+        return next;
+    }
+
+    void Skip() {
+        std::fgetc(file);
+        ++consumed;
+    }
+
+    void PutBack(int byte) {
+        if (byte == EOF) return;
+        if (std::ungetc(byte, file) == EOF) throw std::runtime_error("wide scan character pushback failed");
+        --consumed;
+    }
+
+    void Advance(std::ptrdiff_t count) { consumed += count; }
+    std::ptrdiff_t Consumed() const { return consumed; }
+
+    bool MalformedFloatAhead(unsigned long width) const {
+        const unsigned long limit = width == 0 ? ULONG_MAX : width;
+        char ahead[9]{};
+        unsigned long read = 0;
+        const auto next = [&]() -> int {
+            if (read >= sizeof(ahead) || read >= limit) return EOF;
+            const int byte = std::fgetc(file);
+            if (byte != EOF) ahead[read++] = static_cast<char>(byte);
+            return byte;
+        };
+        const auto lower = [](int byte) { return byte == EOF ? EOF : std::tolower(byte); };
+        bool malformed = false;
+        int byte = next();
+        if (byte == '+' || byte == '-') byte = next();
+        if (byte == '0') {
+            byte = next();
+            if (byte == 'x' || byte == 'X') {
+                byte = next();
+                malformed = byte == EOF || (std::isxdigit(byte) == 0 && byte != '.');
+            }
+        } else if (lower(byte) == 'i' && lower(next()) == 'n' && lower(next()) == 'f' && lower(next()) == 'i') {
+            malformed = true;
+            for (const char expected : {'n', 'i', 't', 'y'}) {
+                if (lower(next()) != expected) break;
+                if (expected == 'y') malformed = false;
+            }
+        }
+        for (unsigned long index = read; index > 0; --index) {
+            if (std::ungetc(static_cast<unsigned char>(ahead[index - 1]), file) == EOF) throw std::runtime_error("float scan prefix pushback failed");
+        }
+        return malformed;
+    }
+
+    int Scan(const char* directive, bool suppress, void* target, int* count) const {
+        return suppress ? HostFscanf(file, directive, count) : HostFscanf(file, directive, target, count);
+    }
+};
+
+constexpr std::uint64_t ConsoleScanSizeLimit = std::uint64_t{1} << 61;
+constexpr int ConsoleScanViolation = -23;
+
+template <typename TSource, typename NextPointer, typename NextCapacity>
+int ScanSource(TSource source, const char* format, bool secure, NextPointer nextPointer, NextCapacity nextCapacity, bool consoleSizes = false) {
+    if (format == nullptr) {
+        if (consoleSizes) SonyInvokeConstraintHandler("vsscanf_s: null format", nullptr, EINVAL);
+        return EOF;
+    }
     int assigned = 0;
     bool converted = false;
     const char* cursor = format;
@@ -109,15 +398,16 @@ int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer n
     while (*cursor != '\0') {
         if (std::isspace(static_cast<unsigned char>(*cursor))) {
             while (std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
-            while (std::isspace(static_cast<unsigned char>(*input))) ++input;
+            while (std::isspace(source.Peek())) source.Skip();
             continue;
         }
         if (*cursor != '%' || cursor[1] == '%') {
             const char expected = *cursor == '%' ? '%' : *cursor;
             cursor += *cursor == '%' ? 2 : 1;
-            if (expected == '%') while (std::isspace(static_cast<unsigned char>(*input))) ++input;
-            if (*input != expected) return finish(!converted && *input == '\0' ? EOF : assigned);
-            ++input;
+            if (expected == '%') while (std::isspace(source.Peek())) source.Skip();
+            if (static_cast<unsigned char>(expected) >= 0x80) return finish(assigned);
+            if (source.Peek() != static_cast<unsigned char>(expected)) return finish(!converted && source.Peek() == EOF ? EOF : assigned);
+            source.Skip();
             continue;
         }
         ++cursor;
@@ -126,10 +416,14 @@ int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer n
         unsigned long width = 0;
         while (std::isdigit(static_cast<unsigned char>(*cursor))) width = width * 10 + static_cast<unsigned long>(*cursor++ - '0');
         const char* lengthStart = cursor;
-        while (std::strchr("hljztL", *cursor) != nullptr && *cursor != '\0') ++cursor;
+        if (*cursor != '\0' && std::strchr("hljztL", *cursor)) {
+            const char first = *cursor++;
+            if ((first == 'h' || first == 'l') && *cursor == first) ++cursor;
+        }
         const std::string length(lengthStart, cursor);
         const char conversion = *cursor;
         if (conversion == '\0') return finish(assigned);
+        if (!secure && std::strchr("diouxXaAeEfFgGcspn[SC", conversion) == nullptr) return finish(assigned);
         std::string specifier(1, conversion);
         if (conversion == '[') {
             const char* setStart = cursor++;
@@ -137,14 +431,19 @@ int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer n
             if (*cursor == ']') ++cursor;
             while (*cursor != '\0' && *cursor != ']') ++cursor;
             if (*cursor != ']') return finish(assigned);
+#ifdef _WIN32
+            const bool negated = setStart[1] == '^';
+            specifier = LibcDetail::TitleScanset(setStart + 1 + negated, cursor, negated);
+#else
             specifier.assign(setStart, cursor + 1);
+#endif
         }
         ++cursor;
         if (conversion == 'n') {
             if (!suppress) {
                 void* target = nextPointer();
                 if (target == nullptr) return EOF;
-                const auto count = input - buffer;
+                const auto count = source.Consumed();
                 if (length == "hh") *static_cast<signed char*>(target) = static_cast<signed char>(count);
                 else if (length == "h") *static_cast<short*>(target) = static_cast<short>(count);
                 else if (length.empty()) *static_cast<int*>(target) = static_cast<int>(count);
@@ -153,12 +452,79 @@ int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer n
                     std::memcpy(target, &value, sizeof(value));
                 } else throw std::invalid_argument("Invalid scan count length");
             }
+            converted = true;
             continue;
         }
+        if (IsWideScan(length, conversion)) {
+            if (conversion == 'C') return finish(assigned);
+            const char kind = conversion == 'S' ? 's' : conversion;
+            if (kind == 's') {
+                while (std::isspace(source.Peek())) source.Skip();
+            }
+            if (source.Peek() == EOF) return finish(converted ? assigned : EOF);
+            auto* target = suppress ? nullptr : static_cast<char16_t*>(nextPointer());
+            unsigned long limit = ULONG_MAX;
+            if (secure && !suppress) {
+                const auto capacity = static_cast<unsigned long>(nextCapacity());
+                limit = kind == 'c' ? capacity : (capacity == 0 ? 0 : capacity - 1);
+                if (limit == 0 || (kind == 'c' && (width == 0 ? 1 : width) > limit)) {
+                    if (capacity != 0) target[0] = u'\0';
+                    return finish(assigned);
+                }
+            }
+            const unsigned long wanted = width != 0 ? width : (kind == 'c' ? 1 : ULONG_MAX);
+            const unsigned long taken = std::min(wanted, limit);
+            const auto accepts = [&](int byte) {
+                if (kind == 's') return !std::isspace(byte);
+                if (kind == '[') return LibcDetail::InWideScanset(specifier, static_cast<unsigned char>(byte));
+                return true;
+            };
+            std::u16string text;
+            unsigned char state[16]{};
+            char pending[2]{};
+            std::size_t held = 0;
+            for (unsigned long read = 0; read < wanted; ++read) {
+                const int next = source.Peek();
+                if (next == EOF || !accepts(next) || (held == 0 && text.size() == taken)) break;
+                pending[held] = static_cast<char>(next);
+                std::uint16_t unit = 0;
+                const std::size_t result = mbrtowc_nid_postfix(&unit, pending, held + 1, state);
+                if (result == static_cast<std::size_t>(-1)) {
+                    source.Skip();
+                    source.PutBack(static_cast<signed char>(pending[held]));
+                    if (held != 0) source.PutBack(static_cast<signed char>(pending[0]));
+                    if (target != nullptr) std::memcpy(target, text.data(), text.size() * sizeof(char16_t));
+                    return finish(read == 0 && !converted ? EOF : assigned);
+                }
+                source.Skip();
+                if (result == static_cast<std::size_t>(-2)) {
+                    ++held;
+                    continue;
+                }
+                held = 0;
+                text.push_back(static_cast<char16_t>(unit));
+            }
+            if (target != nullptr) std::memcpy(target, text.data(), text.size() * sizeof(char16_t));
+            if (held != 0) return finish(converted ? assigned : EOF);
+            if (text.empty()) return finish(assigned);
+            if (target != nullptr && kind != 'c' && wanted > limit && text.size() == limit) {
+                const int next = source.Peek();
+                if (next != EOF && accepts(next)) {
+                    target[0] = u'\0';
+                    return finish(assigned);
+                }
+            }
+            if (target != nullptr) {
+                if (kind != 'c') target[text.size()] = u'\0';
+                ++assigned;
+            }
+            converted = true;
+            continue;
+        }
+        if (!std::strchr("diouxXaAeEfFgGcspn[SC", conversion)) return finish(assigned);
         if (conversion != 'c' && conversion != '[') {
-            const char* probe = input;
-            while (std::isspace(static_cast<unsigned char>(*probe))) ++probe;
-            if (*probe == '\0') return finish(converted ? assigned : EOF);
+            while (std::isspace(source.Peek())) source.Skip();
+            if (source.Peek() == EOF) return finish(converted ? assigned : EOF);
         }
         const bool sized = secure && (conversion == 's' || conversion == 'c' || conversion == '[');
         bool capped = false;
@@ -167,45 +533,150 @@ int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer n
         if (suppress) directive += '*';
         else {
             target = nextPointer();
-            if (target == nullptr) return EOF;
+            if (target == nullptr) {
+                if (consoleSizes && sized) {
+                    SonyInvokeConstraintHandler("vsscanf_s: null destination", nullptr, EINVAL);
+                    return ConsoleScanViolation;
+                }
+                return EOF;
+            }
         }
+        if (conversion == 'c' && length != "l" && (!TSource::Contiguous || !secure || consoleSizes)) {
+            const auto narrowWidth = static_cast<std::uint32_t>(width);
+            unsigned long wanted = secure ? (width == 0 ? 1 : width) : (narrowWidth == 0 || narrowWidth > INT_MAX ? 1 : narrowWidth);
+            if (secure && !suppress) {
+                const std::uint64_t capacity = nextCapacity();
+                if (consoleSizes) {
+                    if (capacity >= ConsoleScanSizeLimit) {
+                        SonyInvokeConstraintHandler("vsscanf_s: size above RSIZE_MAX", nullptr, EINVAL);
+                        return ConsoleScanViolation;
+                    }
+                    if (capacity == 0) return finish(assigned);
+                    if (wanted > capacity) wanted = static_cast<unsigned long>(capacity);
+                } else if (capacity == 0 || wanted > static_cast<unsigned long>(capacity)) {
+                    if (capacity != 0) static_cast<char*>(target)[0] = '\0';
+                    return finish(assigned);
+                }
+            }
+            unsigned long taken = 0;
+            while (taken < wanted) {
+                const int next = source.Peek();
+                if (next == EOF) break;
+                if (!suppress) static_cast<char*>(target)[taken] = static_cast<char>(next);
+                source.Skip();
+                ++taken;
+            }
+            if (taken == 0) return finish(converted ? assigned : EOF);
+            converted = true;
+            if (!suppress) ++assigned;
+            continue;
+        }
+        std::uint64_t terminatorAt = 0;
         if (sized && !suppress) {
-            const auto capacity = static_cast<unsigned long>(nextCapacity());
-            const unsigned long limit = conversion == 'c' ? capacity : (capacity == 0 ? 0 : capacity - 1);
-            const unsigned long wanted = conversion == 'c' ? (width == 0 ? 1 : width) : width;
+            const std::uint64_t capacity = nextCapacity();
+            if (consoleSizes && capacity >= ConsoleScanSizeLimit) {
+                SonyInvokeConstraintHandler("vsscanf_s: size above RSIZE_MAX", nullptr, EINVAL);
+                return ConsoleScanViolation;
+            }
+            const std::uint64_t limit = conversion == 'c' ? capacity : (capacity == 0 ? 0 : capacity - 1);
+            const std::uint64_t wanted = conversion == 'c' ? (width == 0 ? 1 : width) : width;
             if (limit == 0 || (conversion == 'c' && wanted > limit)) {
                 if (capacity != 0) static_cast<char*>(target)[0] = '\0';
                 return finish(assigned);
             }
             capped = wanted == 0 || wanted > limit;
-            width = wanted == 0 ? limit : std::min(wanted, limit);
+            terminatorAt = limit;
+            const std::uint64_t scanWidth = wanted == 0 ? limit : std::min(wanted, limit);
+            std::uint64_t hostWidth = std::min<std::uint64_t>(scanWidth, consoleSizes ? static_cast<std::uint64_t>(INT_MAX) : std::uint64_t{ULONG_MAX});
+            if constexpr (TSource::Contiguous) if (conversion != 'c') hostWidth = std::min<std::uint64_t>(hostWidth, std::strlen(source.Remaining()));
+            width = static_cast<unsigned long>(hostWidth);
         }
+        const bool narrowInteger = !suppress && std::strchr("diouxX", conversion) != nullptr && (length.empty() || length == "h" || length == "hh");
+        std::uint64_t wideInteger = 0;
         if (width != 0) directive += std::to_string(width);
-        directive += HostLength(length, conversion);
+        directive += narrowInteger ? std::string("ll") : HostLength(length, conversion);
         directive += specifier;
         directive += "%n";
+        const bool floating = std::strchr("aAeEfFgG", conversion) != nullptr;
+        if constexpr (TSource::Contiguous) if (floating || std::strchr("xXip", conversion) != nullptr) {
+            const HexPrefix prefix = CheckHexPrefix(source.Remaining(), width, floating);
+            if (prefix == HexPrefix::InputFailure) return finish(converted ? assigned : EOF);
+            if (prefix == HexPrefix::MatchingFailure) return finish(assigned);
+        }
+        if constexpr (!TSource::Contiguous) if (floating && source.MalformedFloatAhead(width)) return finish(assigned);
+        const int savedError = errno;
         int consumed = -1;
-        const int matched = suppress ? HostSscanf(input, directive.c_str(), &consumed) : HostSscanf(input, directive.c_str(), target, &consumed);
-        if (consumed < 0 || (!suppress && matched != 1)) return finish(!converted && *input == '\0' ? EOF : assigned);
+        int matched = 0;
+        bool scanned = false;
+        if constexpr (TSource::Contiguous) if (floating) {
+            std::size_t span = 0;
+            if (const std::size_t mantissa = LibcDetail::DanglingExponentMantissa(source.Remaining(), width, span); mantissa != 0) {
+                const std::string field(source.Remaining(), mantissa);
+                matched = suppress ? HostSscanf(field.c_str(), directive.c_str(), &consumed) : HostSscanf(field.c_str(), directive.c_str(), target, &consumed);
+                if (consumed >= 0) consumed = static_cast<int>(span);
+                scanned = true;
+            }
+        }
+        if (!scanned) matched = source.Scan(directive.c_str(), suppress, narrowInteger ? &wideInteger : target, &consumed);
+        if constexpr (TSource::Contiguous) if (floating) {
+            const bool outOfRange = consumed > 0 && DecimalOutOfRange(std::string(source.Remaining(), static_cast<std::size_t>(consumed)));
+            errno = outOfRange ? ERANGE : savedError;
+        }
+        if (consumed < 0 || (!suppress && matched != 1)) {
+            const bool inputFailure = TSource::Contiguous ? source.Peek() == EOF : matched == EOF;
+            return finish(!converted && inputFailure ? EOF : assigned);
+        }
+        source.Advance(consumed);
+        if (narrowInteger) std::memcpy(target, &wideInteger, length == "hh" ? 1 : length == "h" ? 2 : 4);
+        if (floating && !suppress) {
+            if (length == "L") StoreDefaultNaN<long double>(target, 10);
+            else if (length == "l") StoreDefaultNaN<double>(target, sizeof(double));
+            else StoreDefaultNaN<float>(target, sizeof(float));
+        }
         if (capped && conversion != 'c') {
-            const char next = input[consumed];
+            const int next = source.Peek();
             bool overflow = false;
-            if (conversion == 's') overflow = next != '\0' && !std::isspace(static_cast<unsigned char>(next));
-            else if (next != '\0') {
+            if (conversion == 's') overflow = next != EOF && !std::isspace(next);
+            else if (next != EOF) {
                 char probe[2];
+                const char text[2] = {static_cast<char>(next), '\0'};
                 const std::string test = "%1" + specifier;
-                overflow = std::sscanf(input + consumed, test.c_str(), probe) == 1;
+                overflow = std::sscanf(text, test.c_str(), probe) == 1;
             }
             if (overflow) {
-                static_cast<char*>(target)[0] = '\0';
+                if (consoleSizes) static_cast<char*>(target)[terminatorAt] = static_cast<char>(next);
+                else static_cast<char*>(target)[0] = '\0';
                 return finish(assigned);
             }
         }
-        input += consumed;
         converted = true;
         if (!suppress) ++assigned;
     }
     return finish(assigned);
+}
+
+template <typename NextPointer, typename NextCapacity>
+int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer nextPointer, NextCapacity nextCapacity, bool consoleSizes = false) {
+    if (buffer == nullptr) return EOF;
+    return ScanSource(StringSource(buffer), format, secure, nextPointer, nextCapacity, consoleSizes);
+}
+
+template <typename NextPointer, typename NextCapacity>
+int ScanGuestStream(FileStream* stream, const char* format, NextPointer nextPointer, NextCapacity nextCapacity, bool secure = true) {
+    if (stream == nullptr || format == nullptr) return EOF;
+    if (!stream->IsOpen()) { errno = 9; return EOF; }
+    flockfile_nid_postfix(stream);
+    struct Unlock {
+        FileStream* stream;
+        ~Unlock() { funlockfile_nid_postfix(stream); }
+    } unlock{stream};
+    auto* native = GetNativeStream(stream);
+    stream->Orientation(-1);
+    if (!stream->SwitchToReading()) return EOF;
+    const int result = ScanSource(StreamSource(native), format, secure, nextPointer, nextCapacity);
+    stream->SyncStatus();
+    stream->KeepDirectoryReadError(result == -1);
+    return result;
 }
 
 }
@@ -214,7 +685,11 @@ extern "C" {
 
 int APS5_VABI vasprintf_nid_postfix(char** destination, const char* format, VaList* args) {
     if (!destination) { errno = 22; return -1; }
-    *destination = nullptr;
+    char* nullOutput = nullptr;
+    const int savedErrno = errno;
+    const bool probed = GuestCopyOut_nid_no_patch(destination, &nullOutput, sizeof(nullOutput));
+    errno = savedErrno;
+    if (!probed) { errno = 22; return -1; }
     if (!format || !args) { errno = 22; return -1; }
     try {
 #ifdef _WIN32
@@ -239,7 +714,11 @@ int APS5_VABI vasprintf_nid_postfix(char** destination, const char* format, VaLi
             return -1;
         }
         std::memcpy(output, source, static_cast<size_t>(count) + 1);
-        *destination = output;
+        if (!GuestCopyOut_nid_no_patch(destination, &output, sizeof(output))) {
+            ApplicationHeapFree_nid_no_patch(output);
+            errno = 22;
+            return -1;
+        }
         return count;
     } catch (const std::bad_alloc&) {
         errno = 12;
@@ -250,6 +729,8 @@ int APS5_VABI vasprintf_nid_postfix(char** destination, const char* format, VaLi
 int APS5_VABI vfprintf_nid_postfix(FileStream* stream, const char* format, VaList* args) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
     auto* native = GetNativeStream(stream);
+    stream->Orientation(-1);
+    if (!stream->SwitchToWriting()) return -1;
 #ifdef _WIN32
     std::string buffer;
     const int count = LibcDetail::FormatWindows(nullptr, 0, format, args, &buffer);
@@ -290,21 +771,36 @@ int APS5_VABI fprintf_nid_postfix(FileStream* stream, const char* format, ...) {
 }
 
 int APS5_VABI fscanf_nid_postfix(FileStream* stream, const char* format, ...) {
+    std::string quadHead;
+    format = CutAtQuadScanDirective(format, quadHead);
+#ifndef _WIN32
+    if (HasNarrowCharacterScan(format)) {
+        std::va_list args;
+        va_start(args, format);
+        const int result = ScanGuestStream(stream, format, [&] { return va_arg(args, void*); }, [] { return 0u; }, false);
+        va_end(args);
+        return result;
+    }
+#endif
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
     auto* native = GetNativeStream(stream);
+    stream->Orientation(-1);
+    if (!stream->SwitchToReading()) return EOF;
 #ifdef _WIN32
     __builtin_sysv_va_list args;
     __builtin_sysv_va_start(args, format);
-    const int result = LibcDetail::ScanFileWindows_nid_no_patch(native, format, args);
+    const int result = HasGuestWideScan(format) ? ScanSource(StreamSource(native), format, false, [&] { return __builtin_va_arg(args, void*); }, [] { return 0u; })
+                                                : LibcDetail::ScanFileWindows_nid_no_patch(native, format, args);
     __builtin_sysv_va_end(args);
 #else
-    RejectGuestWideScan(format);
     std::va_list args;
     va_start(args, format);
-    const int result = HostVfscanf(native, format, args);
+    const int result = HasGuestWideScan(format) ? ScanSource(StreamSource(native), format, false, [&] { return va_arg(args, void*); }, [] { return 0u; })
+                                                : HostVfscanf(native, format, args);
     va_end(args);
 #endif
     stream->SyncStatus();
+    stream->KeepDirectoryReadError(result == -1);
     return result;
 }
 
@@ -314,6 +810,7 @@ int APS5_VABI printf_nid_postfix(const char* format, ...) {
     if (!_Stdout_nid_postfix.IsOpen()) { errno = 9; return -1; }
     __builtin_sysv_va_list args;
     __builtin_sysv_va_start(args, format);
+    _Stdout_nid_postfix.Orientation(-1);
     const int result = LibcDetail::PrintWindows(format, args);
     __builtin_sysv_va_end(args);
     return result;
@@ -323,6 +820,7 @@ int APS5_VABI libc_printf_nid_postfix(const char* format, ...) {
     if (!_Stdout_nid_postfix.IsOpen()) { errno = 9; return -1; }
     __builtin_sysv_va_list args;
     __builtin_sysv_va_start(args, format);
+    _Stdout_nid_postfix.Orientation(-1);
     const int result = LibcDetail::PrintWindows(format, args);
     __builtin_sysv_va_end(args);
     return result;
@@ -350,7 +848,8 @@ int APS5_VABI printf_nid_postfix(const char* format, ...) {
     if (!_Stdout_nid_postfix.IsOpen()) { errno = 9; return -1; }
     std::va_list args;
     va_start(args, format);
-    const int result = RequiresGuestFormatting(format) ? LibcDetail::PrintWindows(format, args) : std::vprintf(format, args);
+    _Stdout_nid_postfix.Orientation(-1);
+    const int result = RequiresGuestFormatting(format) ? LibcDetail::PrintWindows(format, args) : std::vfprintf(GuestStandardOutputFile_nid_no_patch(), format, args);
     va_end(args);
     return result;
 }
@@ -359,7 +858,8 @@ int APS5_VABI libc_printf_nid_postfix(const char* format, ...) {
     if (!_Stdout_nid_postfix.IsOpen()) { errno = 9; return -1; }
     std::va_list args;
     va_start(args, format);
-    const int result = RequiresGuestFormatting(format) ? LibcDetail::PrintWindows(format, args) : std::vprintf(format, args);
+    _Stdout_nid_postfix.Orientation(-1);
+    const int result = RequiresGuestFormatting(format) ? LibcDetail::PrintWindows(format, args) : std::vfprintf(GuestStandardOutputFile_nid_no_patch(), format, args);
     va_end(args);
     return result;
 }
@@ -367,7 +867,7 @@ int APS5_VABI libc_printf_nid_postfix(const char* format, ...) {
 int APS5_VABI snprintf_nid_postfix(char* buffer, size_t size, const char* format, ...) {
     std::va_list args;
     va_start(args, format);
-    const int result = RequiresGuestFormatting(format) ? LibcDetail::FormatWindows(buffer, size, format, args) : std::vsnprintf(buffer, size, format, args);
+    const int result = FormatBounded(buffer, size, format, args);
     va_end(args);
     return result;
 }
@@ -383,16 +883,13 @@ int APS5_VABI sprintf_nid_postfix(char* buffer, const char* format, ...) {
 #endif
 
 int APS5_VABI vsscanf_nid_postfix(const char* input, const char* format, VaList* args) {
+    std::string head;
+    format = CutAtQuadScanDirective(format, head);
 #ifdef _WIN32
-    return LibcDetail::ScanWindows(input, format, args);
-#else
-    RejectGuestWideScan(format);
-    std::va_list copy;
-    va_copy(copy, *reinterpret_cast<std::va_list*>(args));
-    const int result = HostVsscanf(input, format, copy);
-    va_end(copy);
-    return result;
+    if (!ScansInProcess(format)) return LibcDetail::ScanWindows(input, format, args);
 #endif
+    LibcDetail::FormatArguments arguments(args);
+    return ScanGuest(input, format, false, [&] { return arguments.Next<void*>(); }, [] { return 0u; });
 }
 
 #ifdef _WIN32
@@ -405,10 +902,11 @@ int APS5_VABI sscanf_nid_postfix(const char* input, const char* format, ...) {
 }
 #else
 int APS5_VABI sscanf_nid_postfix(const char* input, const char* format, ...) {
-    RejectGuestWideScan(format);
     std::va_list args;
     va_start(args, format);
-    const int result = HostVsscanf(input, format, args);
+    std::string head;
+    format = CutAtQuadScanDirective(format, head);
+    const int result = ScanGuest(input, format, false, [&] { return va_arg(args, void*); }, [] { return 0u; });
     va_end(args);
     return result;
 }
@@ -427,7 +925,6 @@ int APS5_VABI sscanf_s_nid_postfix(const char* buffer, const char* format, ...) 
 #else
 
 int APS5_VABI sscanf_s_nid_postfix(const char* buffer, const char* format, ...) {
-    RejectGuestWideScan(format);
     std::va_list args;
     va_start(args, format);
     const int result = ScanGuest(buffer, format, true, [&] { return va_arg(args, void*); }, [&] { return va_arg(args, unsigned int); });
@@ -440,12 +937,14 @@ int APS5_VABI sscanf_s_nid_postfix(const char* buffer, const char* format, ...) 
 int APS5_VABI vprintf_nid_postfix(const char* str, VaList* c) {
     if (!_Stdout_nid_postfix.IsOpen()) { errno = 9; return -1; }
 #ifdef _WIN32
+    _Stdout_nid_postfix.Orientation(-1);
     return LibcDetail::PrintWindows(str, c);
 #else
+    _Stdout_nid_postfix.Orientation(-1);
     if (RequiresGuestFormatting(str)) return LibcDetail::PrintWindows(str, c);
     std::va_list copy;
     va_copy(copy, *reinterpret_cast<std::va_list*>(c));
-    const int result = std::vprintf(str, copy);
+    const int result = std::vfprintf(GuestStandardOutputFile_nid_no_patch(), str, copy);
     va_end(copy);
     return result;
 #endif
@@ -468,13 +967,40 @@ int APS5_VABI vsnprintf_nid_postfix(char* str, size_t size, const char* format, 
 #ifdef _WIN32
     return LibcDetail::FormatWindows(str, size, format, c);
 #else
-    if (RequiresGuestFormatting(format)) return LibcDetail::FormatWindows(str, size, format, c);
-    std::va_list copy;
-    va_copy(copy, *reinterpret_cast<std::va_list*>(c));
-    const int result = std::vsnprintf(str, size, format, copy);
-    va_end(copy);
-    return result;
+    return FormatBounded(str, size, format, *reinterpret_cast<std::va_list*>(c));
 #endif
+}
+
+static int FormatTerminated(const char* badArgument, const char* badFormat, const char* overflow, char* buffer, size_t size, const char* format, const void* args) {
+    if (buffer == nullptr || size == 0 || size > SonyRsizeMax) {
+        ReportConstraint(badArgument);
+        return 0;
+    }
+    if (format == nullptr) {
+        buffer[0] = 0;
+        ReportConstraint(badFormat);
+        return 0;
+    }
+    std::string text;
+    bool violated = false;
+    try {
+        LibcDetail::FormatWindows(nullptr, 0, format, args, &text, true);
+    } catch (const LibcDetail::FormatConstraintViolation& violation) {
+        std::memcpy(buffer, text.data(), std::min(text.size(), size - 1));
+        buffer[0] = 0;
+        ReportConstraint(violation.what());
+        violated = true;
+    }
+    if (!violated && text.size() < size) {
+        std::memcpy(buffer, text.c_str(), text.size() + 1);
+        return static_cast<int>(text.size());
+    }
+    if (!violated) {
+        std::memcpy(buffer, text.data(), size - 1);
+        buffer[0] = 0;
+    }
+    if (!violated || text.size() >= size) SonyInvokeConstraintHandler(overflow, nullptr, guestErange);
+    return 0;
 }
 
 static int FormatSecure(char* buffer, size_t size, const char* format, const void* args) {
@@ -494,11 +1020,66 @@ int APS5_VABI vsnprintf_s_nid_postfix(char* buffer, size_t size, const char* for
     return FormatSecure(buffer, size, format, args);
 }
 
+static int WriteSecure(FileStream* stream, const char* format, const void* args) {
+    if (stream == nullptr || format == nullptr || args == nullptr) return -1;
+    if (!stream->IsOpen()) { errno = 9; return -1; }
+    auto* native = GetNativeStream(stream);
+    stream->Orientation(-1);
+    if (!stream->SwitchToWriting()) return -1;
+    std::string text;
+    int count;
+    try {
+        count = LibcDetail::FormatWindows(nullptr, 0, format, args, &text, true);
+    } catch (const LibcDetail::FormatConstraintViolation&) {
+        return -1;
+    }
+    const int result = std::fwrite(text.data(), 1, static_cast<size_t>(count), native) == static_cast<size_t>(count) ? count : -1;
+    stream->SyncStatus();
+    return result;
+}
+
+int APS5_VABI vfprintf_s_nid_postfix(FileStream* stream, const char* format, VaList* args) {
+    return WriteSecure(stream, format, args);
+}
+
+int APS5_VABI vprintf_s_nid_postfix(const char* format, VaList* args) {
+    return WriteSecure(&_Stdout_nid_postfix, format, args);
+}
+
+int APS5_VABI fprintf_s_nid_postfix(FileStream* stream, const char* format, ...) {
+#ifdef _WIN32
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+#else
+    std::va_list args;
+    va_start(args, format);
+#endif
+    const int result = vfprintf_s_nid_postfix(stream, format, reinterpret_cast<VaList*>(args));
+#ifdef _WIN32
+    __builtin_sysv_va_end(args);
+#else
+    va_end(args);
+#endif
+    return result;
+}
+
 #ifdef _WIN32
 
 int APS5_VABI vsscanf_s_nid_postfix(const char* buffer, const char* format, VaList* args) {
     LibcDetail::FormatArguments arguments(args);
-    return ScanGuest(buffer, format, true, [&] { return arguments.Next<void*>(); }, [&] { return arguments.Next<unsigned int>(); });
+    return ScanGuest(buffer, format, true, [&] { return arguments.Next<void*>(); }, [&] { return arguments.Next<unsigned long long>(); }, true);
+}
+
+int APS5_VABI vsprintf_s_nid_postfix(char* buffer, size_t size, const char* format, VaList* args) {
+    return FormatTerminated("vsprintf_s: bad argument", "vsprintf_s: bad format argument", "vsprintf_s: buffer overflow", buffer, size, format, args);
+}
+
+int APS5_VABI sprintf_s_nid_postfix(char* buffer, size_t size, const char* format, ...) {
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+    const int result = FormatTerminated("sprintf_s: bad argument", "sprintf_s: bad format argument", "sprintf_s: buffer overflow", buffer, size, format, args);
+    __builtin_sysv_va_end(args);
+    return result;
 }
 
 int APS5_VABI snprintf_s_nid_postfix(char* buffer, size_t size, const char* format, ...) {
@@ -512,7 +1093,7 @@ int APS5_VABI snprintf_s_nid_postfix(char* buffer, size_t size, const char* form
 int APS5_VABI printf_s_nid_postfix(const char* format, ...) {
     __builtin_sysv_va_list args;
     __builtin_sysv_va_start(args, format);
-    const int result = LibcDetail::PrintWindows(format, args);
+    const int result = WriteSecure(&_Stdout_nid_postfix, format, reinterpret_cast<VaList*>(args));
     __builtin_sysv_va_end(args);
     return result;
 }
@@ -520,24 +1101,18 @@ int APS5_VABI printf_s_nid_postfix(const char* format, ...) {
 #else
 
 int APS5_VABI vsscanf_s_nid_postfix(const char* buffer, const char* format, VaList* args) {
-    RejectGuestWideScan(format);
     LibcDetail::FormatArguments arguments(args);
-    return ScanGuest(buffer, format, true, [&] { return arguments.Next<void*>(); }, [&] { return arguments.Next<unsigned int>(); });
+    return ScanGuest(buffer, format, true, [&] { return arguments.Next<void*>(); }, [&] { return arguments.Next<unsigned long long>(); }, true);
 }
 
 int APS5_VABI vsprintf_s_nid_postfix(char* buffer, size_t size, const char* format, VaList* args) {
-    if (RequiresGuestFormatting(format)) return LibcDetail::FormatWindows(buffer, size, format, args);
-    std::va_list copy;
-    va_copy(copy, *reinterpret_cast<std::va_list*>(args));
-    const int result = std::vsnprintf(buffer, size, format, copy);
-    va_end(copy);
-    return result;
+    return FormatTerminated("vsprintf_s: bad argument", "vsprintf_s: bad format argument", "vsprintf_s: buffer overflow", buffer, size, format, args);
 }
 
 int APS5_VABI sprintf_s_nid_postfix(char* buffer, size_t size, const char* format, ...) {
     std::va_list args;
     va_start(args, format);
-    const int result = RequiresGuestFormatting(format) ? LibcDetail::FormatWindows(buffer, size, format, args) : std::vsnprintf(buffer, size, format, args);
+    const int result = FormatTerminated("sprintf_s: bad argument", "sprintf_s: bad format argument", "sprintf_s: buffer overflow", buffer, size, format, args);
     va_end(args);
     return result;
 }
@@ -553,7 +1128,7 @@ int APS5_VABI snprintf_s_nid_postfix(char* buffer, size_t size, const char* form
 int APS5_VABI printf_s_nid_postfix(const char* format, ...) {
     std::va_list args;
     va_start(args, format);
-    const int result = RequiresGuestFormatting(format) ? LibcDetail::PrintWindows(format, args) : std::vprintf(format, args);
+    const int result = WriteSecure(&_Stdout_nid_postfix, format, reinterpret_cast<VaList*>(args));
     va_end(args);
     return result;
 }
@@ -562,7 +1137,109 @@ int APS5_VABI printf_s_nid_postfix(const char* format, ...) {
 
 int APS5_VABI puts_nid_postfix(const char* s) {
     if (!_Stdout_nid_postfix.IsOpen()) { errno = 9; return -1; }
-    return std::puts(s);
+    auto* native = GetNativeStream(&_Stdout_nid_postfix);
+    _Stdout_nid_postfix.Orientation(-1);
+    if (!_Stdout_nid_postfix.SwitchToWriting()) return EOF;
+    if (std::fputs(s, native) < 0 || std::fputc('\n', native) == EOF) return EOF;
+    return 0;
+}
+
+extern FileStream* __stdinp_nid_postfix;
+
+int APS5_VABI vfscanf_nid_postfix(FileStream* stream, const char* format, VaList* args) {
+    std::string quadHead;
+    format = CutAtQuadScanDirective(format, quadHead);
+#ifndef _WIN32
+    if (HasNarrowCharacterScan(format)) {
+        LibcDetail::FormatArguments arguments(args);
+        return ScanGuestStream(stream, format, [&] { return arguments.Next<void*>(); }, [] { return 0u; }, false);
+    }
+#endif
+    if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    auto* native = GetNativeStream(stream);
+    stream->Orientation(-1);
+    if (!stream->SwitchToReading()) return EOF;
+    int result = 0;
+    if (HasGuestWideScan(format)) {
+        LibcDetail::FormatArguments arguments(args);
+        result = ScanSource(StreamSource(native), format, false, [&] { return arguments.Next<void*>(); }, [] { return 0u; });
+    } else {
+#ifdef _WIN32
+        result = LibcDetail::ScanFileWindows_nid_no_patch(native, format, args);
+#else
+        std::va_list copy;
+        va_copy(copy, *reinterpret_cast<std::va_list*>(args));
+        result = HostVfscanf(native, format, copy);
+        va_end(copy);
+#endif
+    }
+    stream->SyncStatus();
+    stream->KeepDirectoryReadError(result == -1);
+    return result;
+}
+
+int APS5_VABI vscanf_nid_postfix(const char* format, VaList* args) {
+    return vfscanf_nid_postfix(__stdinp_nid_postfix, format, args);
+}
+
+int APS5_VABI scanf_nid_postfix(const char* format, ...) {
+#ifdef _WIN32
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+#else
+    std::va_list args;
+    va_start(args, format);
+#endif
+    const int result = vfscanf_nid_postfix(__stdinp_nid_postfix, format, reinterpret_cast<VaList*>(args));
+#ifdef _WIN32
+    __builtin_sysv_va_end(args);
+#else
+    va_end(args);
+#endif
+    return result;
+}
+
+int APS5_VABI vfscanf_s_nid_postfix(FileStream* stream, const char* format, VaList* args) {
+    LibcDetail::FormatArguments arguments(args);
+    return ScanGuestStream(stream, format, [&] { return arguments.Next<void*>(); }, [&] { return arguments.Next<unsigned int>(); });
+}
+
+int APS5_VABI vscanf_s_nid_postfix(const char* format, VaList* args) {
+    return vfscanf_s_nid_postfix(__stdinp_nid_postfix, format, args);
+}
+
+int APS5_VABI fscanf_s_nid_postfix(FileStream* stream, const char* format, ...) {
+#ifdef _WIN32
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+#else
+    std::va_list args;
+    va_start(args, format);
+#endif
+    const int result = vfscanf_s_nid_postfix(stream, format, reinterpret_cast<VaList*>(args));
+#ifdef _WIN32
+    __builtin_sysv_va_end(args);
+#else
+    va_end(args);
+#endif
+    return result;
+}
+
+int APS5_VABI scanf_s_nid_postfix(const char* format, ...) {
+#ifdef _WIN32
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+#else
+    std::va_list args;
+    va_start(args, format);
+#endif
+    const int result = vfscanf_s_nid_postfix(__stdinp_nid_postfix, format, reinterpret_cast<VaList*>(args));
+#ifdef _WIN32
+    __builtin_sysv_va_end(args);
+#else
+    va_end(args);
+#endif
+    return result;
 }
 
 }

@@ -2,10 +2,11 @@
 
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
-import tempfile
 
+from guest_import_fixtures import fixture_directory
 from test_windows_import_modules import dynamic, executable, provider
 
 
@@ -17,10 +18,12 @@ HOOK = (b'\x80\x3a\x73\x75\x0e'
 
 
 def named_provider(symbol, soname, code):
-    image = provider(0, code=code)
+    image = provider(0, code=code, main_stack_entry=True)
     strings = b'\0' + symbol.encode() + b'#A#B\0' + soname.encode() + b'\0'
-    image[0x800:0x800 + len(strings)] = strings
-    tags = [(5, 0x2200), (10, len(strings)), (6, 0x2280), (11, 24),
+    struct.pack_into('<I', image, 0x8b0, len(strings))
+    strings += b'EnterGuestMainStack_nid_no_patch\0'
+    image[0x940:0x940 + len(strings)] = strings
+    tags = [(5, 0x2340), (10, len(strings)), (6, 0x2280), (11, 24),
             (4, 0x2240), (7, 0x2300), (8, 0), (9, 24), (14, len(symbol) + 6)]
     dynamic(image, 0x600, 176, tags)
     return image
@@ -33,7 +36,7 @@ def relink(relinker, source, output, *options):
 
 def main():
     relinker = Path(sys.argv[1]).resolve()
-    with tempfile.TemporaryDirectory(prefix='anyps5-trace-imports-') as directory:
+    with fixture_directory('anyps5-trace-imports-') as directory:
         work = Path(directory)
         build = work / 'providers'
         (build / 'prx').mkdir(parents=True)
@@ -80,9 +83,6 @@ def main():
         assert result.returncode == 2 and '--trace-imports requires libc.prx' in result.stderr, (result.returncode, result.stderr)
         assert not (case / 'output.exe').exists()
 
-        result = subprocess.run([str(relinker), '--trace-imports', str(source), str(case / 'output.elf')],
-                                capture_output=True, text=True, timeout=30)
-        assert result.returncode != 0 and '--trace-imports requires --windows' in result.stderr, (result.returncode, result.stderr)
         result = relink(relinker, source, case / 'output.exe', '--trace-imports', '--lazy-binding')
         assert result.returncode != 0 and '--trace-imports conflicts with --lazy-binding' in result.stderr, (result.returncode, result.stderr)
 

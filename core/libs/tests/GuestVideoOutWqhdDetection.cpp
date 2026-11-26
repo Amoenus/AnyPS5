@@ -1,3 +1,4 @@
+#include "prx/libSceVideoOut/include/Output.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "tests/VideoOutTestEnvironment.hpp"
@@ -5,13 +6,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
-
-extern "C" {
-int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* param);
-int APS5_VABI sceVideoOutClose(int handle);
-int APS5_VABI sceVideoOutGetOutputStatus(int handle, VideoOutOutputStatus* status);
-int APS5_VABI sceVideoOutAllowOutputResolutionWqhdDetection(int handle);
-}
 
 static constexpr int SYSTEM_USER = 255;
 static constexpr int MAIN_BUS = 0;
@@ -51,6 +45,9 @@ int main() {
     VideoOutOutputStatus after{};
     Require(sceVideoOutGetOutputStatus(handle, &after) == 0);
     Require(SameStatus(before, after));
+    Require(before.refreshRate == 3 || before.refreshRate == 13);
+    Require(before.resolution == 1 || before.resolution == 2);
+    Require(before.flags == 0);
 
     Require(RejectsHandle(0));
     Require(RejectsHandle(-1));

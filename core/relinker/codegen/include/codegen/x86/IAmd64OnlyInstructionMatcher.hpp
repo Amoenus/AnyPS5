@@ -17,7 +17,8 @@ public:
     [[nodiscard]] virtual std::optional<Amd64OnlyMatch> Match(
         const std::uint8_t* data,
         std::size_t length,
-        std::span<const std::uint8_t> trailing = {}
+        std::span<const std::uint8_t> trailing = {},
+        std::span<const std::uint8_t> following = {}
     ) const = 0;
 
     [[nodiscard]] virtual std::optional<Amd64OnlyMatch> MatchSequence(
@@ -27,7 +28,8 @@ public:
 
     virtual void EmitOutOfLine(
         StubBodyBuilder& body,
-        std::span<const std::uint8_t> instruction
+        std::span<const std::uint8_t> instruction,
+        bool allowInPlace = false
     ) const = 0;
 };
 

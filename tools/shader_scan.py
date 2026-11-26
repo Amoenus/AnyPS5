@@ -1,0 +1,459 @@
+import functools
+import os
+import re
+from pathlib import Path
+
+RECOMPILER = "core/shader/recompiler/"
+DECODER = f"{RECOMPILER}RdnaDecoder/src/"
+AGC_DRIVER = "core/libs/prx/libSceAgcDriver/"
+TEXTURE_FORMATS = f"{AGC_DRIVER}Graphics/src/TextureFormat.cpp"
+SCANNED_DIRECTORIES = (RECOMPILER.rstrip("/"), AGC_DRIVER.rstrip("/"))
+FORMS = ("base", "vop3", "dpp16", "dpp8")
+TEST_PATH = re.compile(r"/tests?/")
+COMMENT_OR_LITERAL = re.compile(r'//|/\*|["\']')
+_BRACE_OR_QUOTE = re.compile(r'[{}"\']')
+_RAW_PREFIX = re.compile(r"(?<![\w.])(?:u8|[uUL])?R$")
+_RAW_OPENING = re.compile(r'"([^ ()\\\s]{0,16})\(')
+_DECODE_PREFIX = re.compile(r"^(?:decode|lookup)")
+_HEX_WORD = re.compile(r"\b0x([0-9a-fA-F]+)u?\b")
+_OPCODE_REF = re.compile(r"RdnaOpcode::(\w+)")
+_FAMILY_CASE = re.compile(r"case\s+RdnaInstructionFamily::(\w+)\s*:")
+_EXP_CASE = re.compile(r"case\s+RdnaInstructionFamily::EXP\s*:")
+_STRING_LITERAL = re.compile(r'"((?:\\.|[^"\\])*)"')
+_WHITESPACE = re.compile(r"\s+")
+_ENUM_ENTRY = re.compile(r"(\w+)\s*=\s*(\d+)")
+_RANGE_ENTRY = re.compile(r"\{\s*(\d+)u?\s*,\s*(\d+)u?\s*\}")
+_SAMPLED_ENTRY = re.compile(r"\{\s*IrBufferFormat::(\w+)\s*,\s*true\b")
+_FORMAT_LOOKUP = re.compile(r"\{\s*(\d+)\s*,\s*VK_FORMAT_")
+_REMAP_TARGET = re.compile(r"\?\s*(\d+)\s*:")
+_REMAP_EQ = re.compile(r"==\s*(\d+)")
+
+
+class ScanError(Exception):
+    def __init__(self, what):
+        super().__init__(f"shader scan: {what}. The recompiler source may have been restructured; update tools/shader_scan.py.")
+
+
+def skip_literal(source, start):
+    quote = source[start]
+    if quote == '"' and start and source[start - 1] == "R":
+        if _RAW_PREFIX.search(source, max(start - 4, 0), start):
+            opening = _RAW_OPENING.match(source, start)
+            if opening:
+                closing = ")" + opening.group(1) + '"'
+                end = source.find(closing, opening.end())
+                if end >= 0:
+                    return end + len(closing) - 1
+    if quote == "'" and start + 1 < len(source) and source[start + 1] in "0123456789abcdefABCDEF":
+        begin = start
+        while begin and (source[begin - 1].isalnum() or source[begin - 1] in "_.'"):
+            begin -= 1
+        if begin < start and (source[begin].isdigit() or (source[begin] == "." and source[begin + 1].isdigit())):
+            return start
+    j = start + 1
+    while j < len(source) and source[j] != quote and source[j] != "\n":
+        j += 2 if source[j] == "\\" else 1
+    return j
+
+
+@functools.cache
+def strip_comments(source):
+    out = []
+    pos = 0
+    i = 0
+    n = len(source)
+    while i < n:
+        match = COMMENT_OR_LITERAL.search(source, i)
+        if match is None:
+            break
+        start = match.start()
+        token = match.group()
+        if token == "//":
+            end = source.find("\n", start + 2)
+            stop = n if end < 0 else end
+            out.append(source[pos:start])
+            out.append(" " * (stop - start))
+            pos = i = stop
+        elif token == "/*":
+            end = source.find("*/", start + 2)
+            stop = n if end < 0 else end + 2
+            out.append(source[pos:start])
+            span = source[start:stop]
+            if "\n" not in span:
+                out.append(" " * (stop - start))
+            else:
+                out.append("\n".join(" " * len(line) for line in span.split("\n")))
+            pos = i = stop
+        else:
+            j = skip_literal(source, start)
+            i = j + 1
+    if not out:
+        return source
+    out.append(source[pos:])
+    return "".join(out)
+
+
+def body_after(source, header):
+    match = header.search(source)
+    if not match:
+        return None
+    opening = source.find("{", match.end() - 1)
+    if opening < 0:
+        return None
+    depth = 0
+    i = opening
+    while True:
+        hit = _BRACE_OR_QUOTE.search(source, i)
+        if hit is None:
+            return None
+        pos = hit.start()
+        c = hit.group()
+        if c == "{":
+            depth += 1
+            i = pos + 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1:pos]
+            i = pos + 1
+        else:
+            i = skip_literal(source, pos) + 1
+
+
+@functools.cache
+def _function_pattern(name):
+    return re.compile(rf"\b{name}\s*\([^)]*\)\s*(?:const\s*)?\{{")
+
+
+@functools.cache
+def _array_pattern(name):
+    return re.compile(rf"\b{name}\s*(?:\[[^\]]*\])?\s*=?\s*\{{")
+
+
+@functools.cache
+def _case_pattern(kind):
+    return re.compile(rf"case\s+{kind}::(\w+)\s*:")
+
+
+@functools.cache
+def _emit_pattern(emit):
+    return re.compile(rf"\bTranslationContext::{emit}\s*\(")
+
+
+def function_body(source, name):
+    return body_after(source, _function_pattern(name))
+
+
+def array_body(source, name):
+    return body_after(source, _array_pattern(name))
+
+
+def case_names(body, kind):
+    return set(_case_pattern(kind).findall(body))
+
+
+def need(value, what):
+    if value is None:
+        raise ScanError(f"no {what}")
+    return value
+
+
+def joined(files, prefix):
+    return "\n".join(strip_comments(text) for path, text in files.items()
+                     if path.startswith(prefix) and not TEST_PATH.search(path))
+
+
+def search(files, what, extract, needle=None):
+    for path, raw in files.items():
+        if TEST_PATH.search(path):
+            continue
+        if needle is not None and needle not in raw:
+            continue
+        found = extract(strip_comments(raw))
+        if found is not None:
+            return found
+    raise ScanError(f"no {what}")
+
+
+VECTOR = {"VOP1", "VOP2", "VOPC"}
+
+
+def classify(tag, native):
+    if tag in ("ENC_VOP3", "VOP3_SDST_ENC"):
+        return (native, "vop3") if native in VECTOR else ("VOP3", "base")
+    if tag == "ENC_FLAT_GLBL":
+        return "GLOBAL", "base"
+    if tag == "ENC_FLAT_SCRATCH":
+        return "SCRATCH", "base"
+    own = re.fullmatch(r"ENC_(\w+)", tag)
+    if own:
+        return own.group(1), "base"
+    modified = re.fullmatch(r"(VOP1|VOP2|VOPC)_VOP_(DPP16|DPP8)", tag)
+    if modified:
+        return modified.group(1), modified.group(2).lower()
+    return None
+
+
+def parse_isa_xml(xml):
+    start = xml.find("<Instructions>")
+    if start < 0:
+        raise ScanError("the ISA XML has no <Instructions>")
+    forms = []
+    for instruction in re.finditer(r"<InstructionName>(\w+)</InstructionName>([\s\S]*?)</InstructionEncodings>", xml[start:]):
+        name = instruction.group(1)
+        encodings = [(m.group(1), int(m.group(2))) for m in
+                     re.finditer(r'<EncodingName>(\w+)</EncodingName>[\s\S]*?<Opcode Radix="10">(\d+)</Opcode>', instruction.group(2))]
+        native = next((m.group(1) for tag, _ in encodings
+                       if (m := re.fullmatch(r"ENC_(\w+)", tag)) and m.group(1) != "VOP3"), None)
+        for tag, opcode in encodings:
+            kind = classify(tag, native)
+            if kind:
+                forms.append((name, kind[0], kind[1], opcode))
+    return forms
+
+
+def load_isa_forms(path):
+    forms = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            name, encoding, form, opcode = line.split()
+            forms.append((name, encoding, form, int(opcode)))
+    return forms
+
+
+TABLE_KEYS = ("vop3encodedvop1", "vop3p", "vop3", "vopc", "vop2", "vop1", "vintrp", "sop1", "sop2", "sopc", "sopk", "sopp",
+              "smem", "mubuf", "mtbuf", "flat", "ds", "image")
+TABLE_ENCODING = {"vop3encodedvop1": "VOP3:VOP1", "image": "MIMG"}
+BLOCK = re.compile(r"^(?![\s}#])(?:[\w:<>&*,]+[ \t]+)*?(\w+)\s*(?:\[\]\s*=|\()", re.M)
+PAIR = re.compile(r"(?:\{\s*|case\s+)0x([0-9a-fA-F]+)u?\s*(?:,|:\s*return)\s*RdnaOpcode::(\w+)")
+CASE_RUN = re.compile(r"((?:\bcase\s+0x[0-9a-fA-F]+u?\s*:\s*)+)return\s+RdnaOpcode::(\w+)")
+CASE_NUMBER = re.compile(r"0x([0-9a-fA-F]+)u?")
+REQUIRED_TABLES = ("SOP1", "SOP2", "SOPC", "SOPK", "SOPP", "VOP1", "VOP2", "VOPC", "VOP3", "VOP3:VOP1", "VOP3P",
+                   "SMEM", "MUBUF", "MTBUF", "FLAT", "DS", "MIMG")
+
+
+class Decoder:
+    def __init__(self):
+        self.tables = {}
+        self.loose = {}
+        self.vop3_vop2_refused = set()
+        self.families = set()
+        self.no_dpp = set()
+        self.no_dpp8 = set()
+
+
+def scan_decoder(files):
+    d = Decoder()
+    for path, raw in files.items():
+        if not path.startswith(DECODER) or not path.endswith(".cpp"):
+            continue
+        text = strip_comments(raw)
+        starts = [(m.start(), m.group(1)) for m in BLOCK.finditer(text)] + [(len(text), "")]
+        for (at, name), (stop, _) in zip(starts, starts[1:]):
+            block = text[at:stop]
+            key = _DECODE_PREFIX.sub("", name.lower())
+            table = next((k for k in TABLE_KEYS if key.startswith(k)), None)
+            if table:
+                entries = d.tables.setdefault(TABLE_ENCODING.get(table, table.upper()), {})
+                for m in CASE_RUN.finditer(block):
+                    for number in CASE_NUMBER.finditer(m.group(1)):
+                        entries[int(number.group(1), 16)] = m.group(2)
+                for m in PAIR.finditer(block):
+                    entries[int(m.group(1), 16)] = m.group(2)
+            elif "RdnaOpcode::" in block:
+                numbers = [int(m.group(1), 16) for m in _HEX_WORD.finditer(block)]
+                if numbers:
+                    for opcode in _OPCODE_REF.findall(block):
+                        d.loose.setdefault(opcode, set()).update(numbers)
+    d.tables = {k: v for k, v in d.tables.items() if v}
+    for encoding in REQUIRED_TABLES:
+        if not d.tables.get(encoding):
+            raise ScanError(f"no {encoding} opcode table")
+
+    def required(name):
+        return search(files, f"{name}()", lambda text: function_body(text, name), needle=name)
+
+    for name in ("isUnsupportedVop3EncodedVop2Alias", "isVop2LiteralMadOpcode"):
+        d.vop3_vop2_refused.update(int(m, 16) for m in CASE_NUMBER.findall(required(name)))
+    dispatch = joined(files, DECODER)
+    d.families = set(_FAMILY_CASE.findall(dispatch))
+    d.no_dpp = case_names(required("hasDppForm"), "RdnaOpcode")
+    d.no_dpp8 = case_names(required("acceptsDpp8"), "RdnaOpcode")
+    return d
+
+
+def camel(name):
+    return "".join(part[:1] + part[1:].lower() for part in name.split("_"))
+
+
+def decodes(d, name, encoding, form, opcode):
+    def table(table_encoding, number):
+        return d.tables.get(table_encoding, {}).get(number)
+
+    def base():
+        if encoding in ("GLOBAL", "SCRATCH"):
+            return table("FLAT", opcode)
+        if encoding == "EXP":
+            return "Exp" if "EXP" in d.families else None
+        hit = table(encoding, opcode)
+        if hit:
+            return hit
+        loose = camel(name)
+        return loose if opcode in d.loose.get(loose, ()) else None
+
+    if form == "base":
+        return base()
+    if form == "vop3":
+        direct = table("VOP3", opcode)
+        if direct:
+            return direct
+        if encoding == "VOPC" and opcode <= 0xFF:
+            return table("VOPC", opcode)
+        if encoding == "VOP2" and 0x100 <= opcode <= 0x13F:
+            return None if opcode - 0x100 in d.vop3_vop2_refused else table("VOP2", opcode - 0x100)
+        if encoding == "VOP1" and 0x180 <= opcode <= 0x1FF:
+            return table("VOP3:VOP1", opcode - 0x180)
+        return None
+    op = base()
+    if not op or op in d.no_dpp or (form == "dpp8" and op in d.no_dpp8):
+        return None
+    return op
+
+
+def translator_cases(files):
+    text = joined(files, f"{RECOMPILER}Translation/")
+    names = set()
+    for emit in ("emitScalar", "emitVector", "emitMemory", "emitInterpolation"):
+        body = need(body_after(text, _emit_pattern(emit)), f"TranslationContext::{emit}()")
+        names |= case_names(body, "RdnaOpcode")
+    if not names:
+        raise ScanError("no RdnaOpcode cases in the translator")
+    if _EXP_CASE.search(text):
+        names.add("Exp")
+    return names
+
+
+def measure_forms(files, isa, decoder=None, translated=None):
+    decoder = scan_decoder(files) if decoder is None else decoder
+    translated = translator_cases(files) if translated is None else translated
+    groups, untranslated = {}, set()
+    for name, encoding, form, opcode in isa:
+        group = groups.setdefault((encoding, form), {"encoding": encoding, "form": form, "total": 0, "decoded": 0, "translated": 0, "missing": [], "untranslated": []})
+        group["total"] += 1
+        op = decodes(decoder, name, encoding, form, opcode)
+        if not op:
+            group["missing"].append(name)
+            continue
+        group["decoded"] += 1
+        if op in translated:
+            group["translated"] += 1
+        else:
+            group["untranslated"].append(name)
+            untranslated.add(name)
+    ordered = sorted(groups.values(), key=lambda g: (g["encoding"], FORMS.index(g["form"])))
+    return ordered, sorted(untranslated)
+
+
+UNSUPPORTED = re.compile(r"unsupported|not (?:yet )?(?:implemented|supported)|unimplemented", re.I)
+UNSUPPORTED_TYPES = re.compile(r"^throw\s+(?:\w+::)*(?:UnsupportedInstructionError|\w*Unsupported\w*)\b")
+THROW = re.compile(r"""\bthrow\b(?:[^;"']|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')*;""")
+
+
+def unsupported_throws(files):
+    sites = []
+    for path, raw in files.items():
+        if not path.startswith(RECOMPILER) or TEST_PATH.search(path) or "throw" not in raw:
+            continue
+        text = strip_comments(raw)
+        for m in THROW.finditer(text):
+            statement = m.group(0)
+            if statement == "throw;":
+                continue
+            message = "…".join(_STRING_LITERAL.findall(statement))
+            if not UNSUPPORTED.search(message) and not UNSUPPORTED_TYPES.search(statement):
+                continue
+            sites.append({"file": path[len(RECOMPILER):], "line": text.count("\n", 0, m.start()) + 1,
+                          "message": message or _WHITESPACE.sub(" ", statement)})
+    return sorted(sites, key=lambda s: (s["file"], s["line"]))
+
+
+def image_formats(files):
+    enum_text = search(files, "IrBufferFormat enum", lambda text: array_body(text, r"enum\s+class\s+IrBufferFormat\s*:\s*[\w:]+"), needle="IrBufferFormat")
+    names = {int(m.group(2)): m.group(1) for m in _ENUM_ENTRY.finditer(enum_text)}
+    defined = search(files, "DefinedImageFormats", lambda text: array_body(text, "DefinedImageFormats"), needle="DefinedImageFormats")
+    ranges = [(int(m.group(1)), int(m.group(2))) for m in _RANGE_ENTRY.finditer(defined)]
+    if not ranges:
+        raise ScanError("no DefinedImageFormats ranges")
+    info_table = search(files, "kFormatInfoTable", lambda text: array_body(text, "kFormatInfoTable"), needle="kFormatInfoTable")
+    sampled = set(_SAMPLED_ENTRY.findall(info_table))
+    buffer = case_names(search(files, "GetFormatInfo()", lambda text: function_body(text, "GetFormatInfo"), needle="GetFormatInfo"), "IrBufferFormat")
+    if TEXTURE_FORMATS not in files:
+        raise ScanError(TEXTURE_FORMATS)
+    text = strip_comments(files[TEXTURE_FORMATS])
+    host = {int(n) for n in _FORMAT_LOOKUP.findall(array_body(text, "kFormatLookup") or "")}
+    remap = function_body(text, "remapGuestFormat") or ""
+    target = _REMAP_TARGET.search(remap)
+    if target and int(target.group(1)) in host:
+        host.update(int(n) for n in _REMAP_EQ.findall(remap))
+    if not host:
+        raise ScanError("no kFormatLookup entries")
+    values = [value for first, last in ranges for value in range(first, last + 1)]
+    return {"total": len(values),
+            "sampled": sum(1 for v in values if names.get(v) in sampled),
+            "buffer": sum(1 for v in values if names.get(v) in buffer),
+            "host": sum(1 for v in values if v in host)}
+
+
+def throw_areas(sites):
+    counts = {}
+    for site in sites:
+        name = site["file"].split("/", 1)[0] if "/" in site["file"] else "Recompiler"
+        counts[name] = counts.get(name, 0) + 1
+    return [{"name": name, "count": count} for name, count in sorted(counts.items(), key=lambda item: -item[1])]
+
+
+def read_tree(root):
+    files = {}
+    root_path = Path(root)
+    for directory in SCANNED_DIRECTORIES:
+        base = root_path / directory
+        if not base.exists():
+            continue
+        stack = [(os.fspath(base), directory)]
+        while stack:
+            current_dir, rel_dir = stack.pop()
+            with os.scandir(current_dir) as entries:
+                for entry in entries:
+                    rel_path = f"{rel_dir}/{entry.name}"
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append((entry.path, rel_path))
+                    elif entry.is_file():
+                        with open(entry.path, encoding="utf-8", errors="replace") as handle:
+                            files[rel_path] = handle.read()
+    return dict(sorted(files.items()))
+
+
+def measure_profile(files, isa, decoder=None, translated=None):
+    forms, untranslated = measure_forms(files, isa, decoder, translated)
+    plain = [f for f in forms if f["form"] in ("base", "vop3")]
+    dpp = [f for f in forms if f["form"] in ("dpp16", "dpp8")]
+    total = lambda rows, key: sum(r[key] for r in rows)
+    return {
+        "instructions": {"total": total(plain, "total"), "decoded": total(plain, "decoded"), "translated": total(plain, "translated")},
+        "dpp": {"total": total(dpp, "total"), "decoded": total(dpp, "decoded")},
+        "forms": forms,
+        "untranslated": untranslated,
+    }
+
+
+def measure(root, isa, profiles=None):
+    files = read_tree(root)
+    decoder, translated = scan_decoder(files), translator_cases(files)
+    result = measure_profile(files, isa, decoder, translated)
+    throws = unsupported_throws(files)
+    result.update({"isa": "AMD RDNA 2", "unsupported_throws": len(throws), "throw_areas": throw_areas(throws),
+                   "throw_sites": throws, "formats": image_formats(files)})
+    if profiles:
+        result["profiles"] = {key: {"isa": label, **measure_profile(files, forms, decoder, translated)}
+                              for key, (label, forms) in profiles.items()}
+    return result

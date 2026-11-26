@@ -68,7 +68,7 @@ std::array<std::uint32_t, 4> Buffer(const void* base, std::uint32_t bytes) {
 
 std::byte* Reserve() {
 #ifdef _WIN32
-    auto* base = static_cast<std::byte*>(VirtualAlloc(nullptr, ReservedBytes, MEM_RESERVE, PAGE_NOACCESS));
+    auto* base = static_cast<std::byte*>(VirtualAlloc(nullptr, ReservedBytes, MEM_RESERVE | MEM_TOP_DOWN, PAGE_NOACCESS));
 #else
     auto* mapped = mmap(nullptr, ReservedBytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     auto* base = mapped == MAP_FAILED ? nullptr : static_cast<std::byte*>(mapped);
@@ -131,7 +131,7 @@ Captured Capture(std::byte* table) {
     result.memory = std::make_unique<AgcDriver::ShaderMemory>(std::span<const MemoryRegion>{});
     result.capture = result.memory->Capture(request);
     result.regions = result.memory->TakeRecentRegions();
-    request.context.memory = result.memory->Regions();
+    request.context.memory = result.regions;
     result.compiled = Recompile(request, *result.capture);
     return result;
 }

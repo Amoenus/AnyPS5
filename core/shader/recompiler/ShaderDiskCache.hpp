@@ -13,7 +13,7 @@
 
 namespace ShaderRecompiler::ShaderDiskCache {
 
-inline constexpr std::uint32_t FormatVersion = 41;
+inline constexpr std::uint32_t FormatVersion = 109;
 
 enum class LoadStatus {
     Loaded,
@@ -34,6 +34,10 @@ struct Counters {
     std::uint64_t planMisses = 0;
     std::uint64_t planWrites = 0;
     std::uint64_t planLoadFailures = 0;
+    std::uint64_t specializedHits = 0;
+    std::uint64_t specializedMisses = 0;
+    std::uint64_t specializedWrites = 0;
+    std::uint64_t specializedLoadFailures = 0;
     std::uint64_t prebuiltHits = 0;
     std::uint64_t prebuiltMisses = 0;
     std::uint64_t prebuiltRejected = 0;
@@ -71,8 +75,12 @@ void BuildPlanKey(const RecompileRequest& request, std::uint32_t hostSubgroupSiz
 void Store(std::vector<std::byte> key, std::shared_ptr<const CompiledVariant> variant);
 [[nodiscard]] std::shared_ptr<const CompiledVariant> Persist(std::span<const std::byte> key, const CompiledVariant& variant);
 [[nodiscard]] bool LoadPlan(std::span<const std::byte> key, IrResourcePlan& plan);
+[[nodiscard]] std::shared_ptr<const IrResourcePlan> LoadSharedPlan(std::span<const std::byte> key, std::uint64_t shaderHash);
 void StorePlan(std::vector<std::byte> key, std::shared_ptr<const IrResourcePlan> plan);
+[[nodiscard]] bool LoadSpecialized(std::span<const std::byte> key, std::vector<std::uint32_t>& words);
+void StoreSpecialized(std::vector<std::byte> key, std::vector<std::uint32_t> words);
 void Flush();
+void ReleaseMapped(const SharedSpirv& spirv) noexcept;
 void Shutdown();
 [[nodiscard]] unsigned Writers();
 [[nodiscard]] Counters Totals();

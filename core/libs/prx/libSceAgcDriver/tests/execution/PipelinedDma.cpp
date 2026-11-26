@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -43,13 +44,13 @@ void Submit(std::vector<std::uint32_t>& words) {
 }
 
 struct Gate {
-    std::atomic<bool> release{false};
-    ~Gate() { release.store(true, std::memory_order_release); }
+    std::shared_ptr<std::atomic<bool>> release = std::make_shared<std::atomic<bool>>(false);
+    ~Gate() { release->store(true, std::memory_order_release); }
 };
 
 void Hold(Gate& gate, std::uint64_t address, std::size_t bytes) {
-    DrawPipeline::Queue0().Enqueue([&gate] {
-        while (!gate.release.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    DrawPipeline::Queue0().Enqueue([release = gate.release] {
+        while (!release->load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }, {{address, address + bytes}});
 }
 
@@ -58,7 +59,7 @@ void ExpectDrains(std::vector<std::uint32_t>& words, std::uint32_t opcode, Gate&
     std::thread releaser([&] {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         while (DrawPipeline::DrainRequestsByOpcode(opcode) == before && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        gate.release.store(true, std::memory_order_release);
+        gate.release->store(true, std::memory_order_release);
     });
     Submit(words);
     releaser.join();
@@ -74,10 +75,8 @@ void ExpectNoDrain(std::uint32_t opcode, std::uint64_t before, const char* what)
 int main() {
 #ifdef _WIN32
     _putenv_s("APS5_PIPELINED_DRAWS", "1");
-    _putenv_s("APS5_PIPELINE_DMA", "1");
 #else
     setenv("APS5_PIPELINED_DRAWS", "1", 1);
-    setenv("APS5_PIPELINE_DMA", "1", 1);
 #endif
     try {
         alignas(256) static std::array<std::uint32_t, 1024> first{};
@@ -90,7 +89,7 @@ int main() {
         elsewhere.fill(0);
         using namespace AgcDriver::DriverDetail;
         const auto drainedBefore = storesDrained.load();
-        const auto cpuBefore = storesOnCpu.load() + storesOnGpu.load() + storesBehindCompletions.load();
+        const auto cpuBefore = storesOnCpu.load() + storesSyncedUnimported.load() + storesOnGpu.load() + storesBehindCompletions.load();
         std::vector<std::uint32_t> words;
         const auto fill = DmaData(true, 0, 0x5eed1234u, reinterpret_cast<std::uintptr_t>(first.data()), static_cast<std::uint32_t>(sizeof(first)));
         const auto copy = DmaData(false, reinterpret_cast<std::uintptr_t>(first.data()), 0, reinterpret_cast<std::uintptr_t>(second.data()), 512);
@@ -100,7 +99,7 @@ int main() {
         AgcDriverWaitIdle_nid_postfix();
         for (const auto word : first) check(word == 0x5eed1234u, "the immediate fill did not land");
         for (std::size_t i = 0; i < second.size(); ++i) check(second[i] == (i < 128 ? 0x5eed1234u : 0u), "the copy did not see the fill before it, or wrote past its bytes");
-        const auto stores = storesOnCpu.load() + storesOnGpu.load() + storesBehindCompletions.load() - cpuBefore;
+        const auto stores = storesOnCpu.load() + storesSyncedUnimported.load() + storesOnGpu.load() + storesBehindCompletions.load() - cpuBefore;
         check(stores == 2, "the DMA_DATA packets were not committed (" + std::to_string(stores) + " committed stores)");
         check(storesDrained.load() == drainedBefore, "a DMA_DATA packet still drained");
 

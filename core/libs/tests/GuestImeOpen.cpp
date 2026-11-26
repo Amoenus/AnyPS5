@@ -1,7 +1,9 @@
+#include "prx/libSceIme/include/Api.hpp"
 #include "SceTypes.hpp"
 #include "prx/libSceIme/include/ImeInput.hpp"
 #include "prx/libSceVideoOut/include/ImeTextInput.hpp"
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -9,16 +11,15 @@
 #include <exception>
 #include <string>
 #include <vector>
-
-extern "C" {
-int APS5_VABI sceImeOpen_nid_postfix(const Param* param, const ExtendedParam* extended);
-int APS5_VABI sceImeClose_nid_postfix(void);
-int APS5_VABI sceImeUpdate(EventHandler handler);
-int APS5_VABI sceImeSetText(const char16_t* text, uint32_t length);
-int APS5_VABI sceImeSetCaret(const Caret* caret);
-int APS5_VABI sceImeGetPanelPositionAndForm(PositionAndForm* form);
-void APS5_VABI sceImeParamInit(Param* param);
-}
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -69,8 +70,101 @@ void APS5_VABI Record(void* arg, const ImeEvent* event) {
     if (g_closeOnPressClose && event->id == EventPressClose) g_reentrantClose = sceImeClose_nid_postfix();
 }
 
+std::int32_t APS5_VABI TextFilter(char16_t*, std::uint32_t*, const char16_t*, std::uint32_t) {
+    std::abort();
+}
+
 void APS5_VABI Other(void*, const ImeEvent*) {
     std::abort();
+}
+
+int32_t APS5_VABI UpperFilter(char16_t* outText, uint32_t* outTextLength, const char16_t* sourceText, uint32_t sourceTextLength) {
+    for (uint32_t i = 0; i < sourceTextLength; ++i) {
+        const char16_t unit = sourceText[i];
+        outText[i] = unit >= u'a' && unit <= u'z' ? static_cast<char16_t>(unit - u'a' + u'A') : unit;
+    }
+    *outTextLength = sourceTextLength;
+    return 0;
+}
+
+int32_t APS5_VABI FailingFilter(char16_t*, uint32_t*, const char16_t*, uint32_t) {
+    return 1;
+}
+
+int32_t APS5_VABI StripXFilter(char16_t* outText, uint32_t* outTextLength, const char16_t* sourceText, uint32_t sourceTextLength) {
+    uint32_t length = 0;
+    for (uint32_t i = 0; i < sourceTextLength; ++i) {
+        if (sourceText[i] != u'x') outText[length++] = sourceText[i];
+    }
+    *outTextLength = length;
+    return 0;
+}
+
+int32_t APS5_VABI InvalidOutputFilter(char16_t* outText, uint32_t* outTextLength, const char16_t*, uint32_t) {
+    outText[0] = 0xdc00;
+    *outTextLength = 1;
+    return 0;
+}
+
+int32_t APS5_VABI TooLongFilter(char16_t*, uint32_t* outTextLength, const char16_t*, uint32_t) {
+    *outTextLength = 9;
+    return 0;
+}
+
+int32_t APS5_VABI ShortenFilter(char16_t* outText, uint32_t* outTextLength, const char16_t*, uint32_t) {
+    outText[0] = u'a';
+    *outTextLength = 1;
+    return 0;
+}
+
+int32_t APS5_VABI PairAtCaretFilter(char16_t* outText, uint32_t* outTextLength, const char16_t*, uint32_t) {
+    outText[0] = u'a';
+    outText[1] = u'b';
+    outText[2] = 0xd83d;
+    outText[3] = 0xde00;
+    *outTextLength = 4;
+    return 0;
+}
+
+int APS5_VABI ExtNoop(const ImeKeycode*, std::uint16_t*, std::uint32_t*, void*) {
+    return 0;
+}
+
+bool g_sawCaptureInsideFilter = false;
+int g_setInsideRc = -1;
+
+int32_t APS5_VABI LockingFilter(char16_t* outText, uint32_t* outTextLength, const char16_t* sourceText, uint32_t sourceTextLength) {
+    g_sawCaptureInsideFilter = ImeCapturesKeyboard_nid_postfix();
+    for (uint32_t i = 0; i < sourceTextLength; ++i) {
+        outText[i] = sourceText[i];
+    }
+    *outTextLength = sourceTextLength;
+    return 0;
+}
+
+int32_t APS5_VABI SetInsideFilter(char16_t* outText, uint32_t* outTextLength, const char16_t* sourceText, uint32_t sourceTextLength) {
+    g_setInsideRc = sceImeSetText(u"zz", 2);
+    for (uint32_t i = 0; i < sourceTextLength; ++i) {
+        outText[i] = sourceText[i];
+    }
+    *outTextLength = sourceTextLength;
+    return 0;
+}
+
+bool g_caretInsideFirstCall = true;
+int g_caretInsideRc = -1;
+
+int32_t APS5_VABI SetCaretInsideFilter(char16_t* outText, uint32_t* outTextLength, const char16_t* sourceText, uint32_t sourceTextLength) {
+    if (g_caretInsideFirstCall) {
+        g_caretInsideFirstCall = false;
+        const Caret caret{0.0f, 0.0f, 0, 0};
+        g_caretInsideRc = sceImeSetCaret(&caret);
+    }
+    for (uint32_t i = 0; i < sourceTextLength; ++i) {
+        outText[i] = sourceText[i];
+    }
+    *outTextLength = sourceTextLength;
+    return 0;
 }
 
 void Require(bool value, const char* message) {
@@ -88,6 +182,7 @@ struct Buffers {
 Param MakeParam(Buffers& buffers, uint32_t maxLength) {
     Param param;
     sceImeParamInit(&param);
+
     param.user_id = 1;
     param.max_text_length = maxLength;
     param.input_text_buffer = buffers.text;
@@ -132,6 +227,18 @@ void RequireCaretSteps(const std::vector<Recorded>& events, uint32_t direction, 
 void CheckValidation() {
     Buffers buffers;
     Require(sceImeOpen_nid_postfix(nullptr, nullptr) == InvalidAddress, "null param");
+    errno = 71;
+    Require(sceImeOpen_nid_postfix(reinterpret_cast<const Param*>(0x10), nullptr) == InvalidAddress, "unmapped param");
+    Require(errno == 71, "preserve errno on unmapped param");
+    Param validParam = MakeParam(buffers, 16);
+    errno = 71;
+    Require(sceImeOpen_nid_postfix(&validParam, reinterpret_cast<const ExtendedParam*>(0x10)) == InvalidAddress, "unmapped extended param");
+    Require(errno == 71, "preserve errno on unmapped extended param");
+    validParam.input_text_buffer = reinterpret_cast<char16_t*>(0x10);
+    errno = 71;
+    Require(sceImeOpen_nid_postfix(&validParam, nullptr) == InvalidAddress, "unmapped input text buffer");
+    Require(errno == 71, "preserve errno on unmapped input text buffer");
+    Require(sceImeUpdate(nullptr) == NotOpened, "null handler with nothing open");
     auto expect = [&](auto change, int error, const char* message) {
         Param param = MakeParam(buffers, 16);
         change(param);
@@ -174,15 +281,89 @@ void CheckValidation() {
     Require(sceImeClose_nid_postfix() == 0, "close after over-2K open");
 
     param = MakeParam(buffers, 16);
-    param.filter = reinterpret_cast<ImeTextFilter>(&Record);
-    bool threw = false;
-    try {
-        sceImeOpen_nid_postfix(&param, nullptr);
-    } catch (const std::exception&) {
-        threw = true;
+    param.filter = reinterpret_cast<ImeTextFilter>(&UpperFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a text filter");
+    Require(ImeCapturesKeyboard_nid_postfix(), "text filter session not open");
+    Require(sceImeClose_nid_postfix() == 0, "close the text filter session");
+
+    param = MakeParam(buffers, 16);
+    ExtendedParam extFilters{};
+    extFilters.ext_keyboard_filter = reinterpret_cast<ImeExtKeyboardFilter>(&ExtNoop);
+    Require(sceImeOpen_nid_postfix(&param, &extFilters) == 0, "open with an external keyboard filter");
+    Require(ImeCapturesKeyboard_nid_postfix(), "external keyboard filter session not open");
+    Require(sceImeClose_nid_postfix() == 0, "close the external keyboard filter session");
+}
+
+struct GuardedTextPages {
+    std::uint8_t* base = nullptr;
+    std::size_t pageSize = 0;
+
+    GuardedTextPages() {
+#ifdef _WIN32
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        pageSize = info.dwPageSize;
+        base = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, pageSize * 2, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        Require(base != nullptr, "guarded VirtualAlloc failed");
+        DWORD previous = 0;
+        Require(VirtualProtect(base + pageSize, pageSize, PAGE_NOACCESS, &previous) != 0, "guarded VirtualProtect failed");
+#else
+        const long page = sysconf(_SC_PAGESIZE);
+        Require(page > 0, "sysconf page size failed");
+        pageSize = static_cast<std::size_t>(page);
+        void* mapping = mmap(nullptr, pageSize * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        Require(mapping != MAP_FAILED, "guarded mmap failed");
+        base = static_cast<std::uint8_t*>(mapping);
+        Require(mprotect(base + pageSize, pageSize, PROT_NONE) == 0, "guarded mprotect failed");
+#endif
     }
-    Require(threw, "text filter must throw");
-    Require(!ImeCapturesKeyboard_nid_postfix(), "failed open left a session");
+
+    ~GuardedTextPages() {
+        if (!base) return;
+#ifdef _WIN32
+        VirtualFree(base, 0, MEM_RELEASE);
+#else
+        munmap(base, pageSize * 2);
+#endif
+    }
+
+    char16_t* AtEnd(std::size_t unitsBeforeBoundary) const {
+        return reinterpret_cast<char16_t*>(base + pageSize - unitsBeforeBoundary * sizeof(char16_t));
+    }
+};
+
+void CheckGuardedSetText(Buffers& buffers) {
+    errno = 71;
+    Require(sceImeSetText(reinterpret_cast<const char16_t*>(0x10), 1) == InvalidAddress, "unmapped set text");
+    Require(errno == 71, "preserve errno on unmapped set text");
+    Require(std::u16string(buffers.text) == u"hello", "unmapped set text left input buffer");
+    Require(std::u16string(reinterpret_cast<const char16_t*>(buffers.work)) == u"hello", "unmapped set text left work buffer");
+
+    GuardedTextPages guarded;
+    char16_t* exactEnd = guarded.AtEnd(3);
+    exactEnd[0] = u'a';
+    exactEnd[1] = u'b';
+    exactEnd[2] = u'c';
+    Require(sceImeSetText(exactEnd, 3) == 0, "exact-length set text at page end");
+    Require(std::u16string(buffers.text) == u"abc", "exact-length set text value");
+
+    char16_t* terminatedEnd = guarded.AtEnd(3);
+    terminatedEnd[0] = u'o';
+    terminatedEnd[1] = u'k';
+    terminatedEnd[2] = u'\0';
+    Require(sceImeSetText(terminatedEnd, 16) == 0, "nul-terminated set text at page end");
+    Require(std::u16string(buffers.text) == u"ok", "nul-terminated set text value");
+
+    char16_t* crossing = guarded.AtEnd(2);
+    crossing[0] = u'x';
+    crossing[1] = u'y';
+    errno = EDOM;
+    Require(sceImeSetText(crossing, 4) == InvalidAddress, "crossing set text");
+    Require(errno == EDOM, "preserve errno on crossing set text");
+    Require(std::u16string(buffers.text) == u"ok", "crossing set text left input buffer");
+    Require(std::u16string(reinterpret_cast<const char16_t*>(buffers.work)) == u"ok", "crossing set text left work buffer");
+
+    Require(sceImeSetText(u"hello", 5) == 0, "restore text after guarded set text checks");
 }
 
 void CheckEditing() {
@@ -190,7 +371,7 @@ void CheckEditing() {
     std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
     Param param = MakeParam(buffers, 8);
     Require(!ImeCapturesKeyboard_nid_postfix(), "keyboard captured before open");
-    Require(sceImeUpdate(Record) == 0 && g_events.empty(), "update before open");
+    Require(sceImeUpdate(Record) == NotOpened && g_events.empty(), "update before open");
     Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open");
     Require(sceImeOpen_nid_postfix(&param, nullptr) == Busy, "second open");
     Require(ImeCapturesKeyboard_nid_postfix(), "keyboard not captured");
@@ -259,9 +440,13 @@ void CheckEditing() {
     Require(sceImeSetText(u"hello", 5) == 0, "set text");
     Require(std::u16string(buffers.text) == u"hello", "set text buffer");
     Require(Drain().empty(), "set text queued an event");
+    CheckGuardedSetText(buffers);
     Caret caret{};
     caret.index = 6;
     Require(sceImeSetCaret(nullptr) == InvalidAddress, "null caret");
+    errno = 71;
+    Require(sceImeSetCaret(reinterpret_cast<const Caret*>(0x10)) == InvalidAddress, "unmapped caret");
+    Require(errno == 71, "preserve errno on unmapped caret");
     Require(sceImeSetCaret(&caret) == InvalidParam, "caret past the text");
     caret.index = 1;
     Require(sceImeSetCaret(&caret) == 0, "set caret");
@@ -285,6 +470,7 @@ void CheckEditing() {
     Publish(ImeHostInputKind::Text, "ignored");
     Require(std::u16string(buffers.text) == u"hXello", "input after close");
     Require(sceImeSetText(u"a", 1) == NotOpened, "set text after close");
+    Require(sceImeSetText(reinterpret_cast<const char16_t*>(0x10), 1) == NotOpened, "unmapped set text checks open panel first");
 }
 
 void CheckMultiline() {
@@ -302,6 +488,169 @@ void CheckMultiline() {
     RequireText(events[2], EventUpdateText, u"a\nb\nc", 5, 2, 3);
     Require(sceImeSetText(u"x\ny", 3) == 0, "multiline set text");
     Require(sceImeClose_nid_postfix() == 0, "multiline close");
+}
+
+void CheckCaretSurrogateBoundary() {
+    Buffers buffers;
+    Param param = MakeParam(buffers, 16);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "surrogate caret open");
+    Drain();
+
+    Require(sceImeSetText(u"A\U0001F600B", 4) == 0, "set text with a surrogate pair");
+    Caret caret{};
+    caret.index = 2;
+    Require(sceImeSetCaret(&caret) == 0, "set caret within a surrogate pair");
+    Publish(ImeHostInputKind::Text, "X");
+    auto events = Drain();
+    Require(events.size() == 1, "caret edit event count");
+    RequireText(events[0], EventUpdateText, u"A\U0001F600XB", 4, 3, 1);
+    Require(std::u16string(buffers.text) == u"A\U0001F600XB", "caret edit preserves the surrogate pair");
+
+    Require(sceImeSetText(u"a", 1) == 0, "set short text before a surrogate pair");
+    caret.index = 1;
+    Require(sceImeSetCaret(&caret) == 0, "set caret at the short text end");
+    Require(sceImeSetText(u"\U0001F600", 2) == 0, "replace text around the existing caret");
+    Publish(ImeHostInputKind::Text, "Y");
+    events = Drain();
+    Require(events.size() == 1, "replacement edit event count");
+    RequireText(events[0], EventUpdateText, u"\U0001F600Y", 3, 2, 1);
+    Require(std::u16string(buffers.text) == u"\U0001F600Y", "replacement edit preserves the surrogate pair");
+    Require(sceImeClose_nid_postfix() == 0, "surrogate caret close");
+}
+
+void CheckTextFilter() {
+    Buffers buffers;
+    std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
+    Param param = MakeParam(buffers, 8);
+    param.filter = reinterpret_cast<ImeTextFilter>(&UpperFilter);
+    ExtendedParam extFilters{};
+    extFilters.ext_keyboard_filter = reinterpret_cast<ImeExtKeyboardFilter>(&ExtNoop);
+    Require(sceImeOpen_nid_postfix(&param, &extFilters) == 0, "open with both filters");
+    Drain();
+
+    Publish(ImeHostInputKind::Text, "c");
+    RequireText(Drain().at(0), EventUpdateText, u"ABC", 3, 0, 1);
+    Require(std::u16string(buffers.text) == u"ABC", "filtered input buffer");
+    Require(std::u16string(reinterpret_cast<const char16_t*>(buffers.work)) == u"ABC", "filtered work copy");
+
+    Publish(ImeHostInputKind::Backspace);
+    RequireText(Drain().at(0), EventUpdateText, u"AB", 2, 2, -1);
+
+    Publish(ImeHostInputKind::Left);
+    RequireCaretSteps(Drain(), 1, 1);
+    Publish(ImeHostInputKind::Delete);
+    RequireText(Drain().at(0), EventUpdateText, u"A", 1, 1, -1);
+
+    Require(sceImeSetText(u"xy", 2) == 0, "set text with a filter");
+    Require(std::u16string(buffers.text) == u"xy", "set text is not filtered");
+    Require(Drain().empty(), "set text with a filter queued an event");
+    Require(sceImeClose_nid_postfix() == 0, "close the filtered session");
+
+    buffers = Buffers{};
+    param = MakeParam(buffers, 8);
+    param.filter = reinterpret_cast<ImeTextFilter>(&StripXFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a stripping filter");
+    Drain();
+    Publish(ImeHostInputKind::Text, "x");
+    Require(Drain().empty(), "a stripped edit sends no event");
+    Require(std::u16string(buffers.text).empty(), "a stripped edit leaves the buffers");
+    Publish(ImeHostInputKind::Text, "b");
+    RequireText(Drain().at(0), EventUpdateText, u"b", 1, 0, 1);
+    Publish(ImeHostInputKind::Text, "x");
+    Require(Drain().empty(), "a stripped edit sends no event again");
+    Require(std::u16string(buffers.text) == u"b", "buffers after a stripped edit");
+    Require(sceImeClose_nid_postfix() == 0, "close the stripping session");
+
+    param = MakeParam(buffers, 8);
+    std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
+    param.filter = reinterpret_cast<ImeTextFilter>(&FailingFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a failing filter");
+    Drain();
+    Publish(ImeHostInputKind::Text, "c");
+    RequireText(Drain().at(0), EventUpdateText, u"abc", 3, 2, 1);
+    Require(std::u16string(buffers.text) == u"abc", "a failed filter keeps the edit");
+    Require(sceImeClose_nid_postfix() == 0, "close the failing session");
+
+    param = MakeParam(buffers, 8);
+    std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
+    param.filter = reinterpret_cast<ImeTextFilter>(&InvalidOutputFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with an invalid-output filter");
+    Drain();
+    Publish(ImeHostInputKind::Text, "c");
+    RequireText(Drain().at(0), EventUpdateText, u"abc", 3, 2, 1);
+    Require(std::u16string(buffers.text) == u"abc", "an invalid filter output keeps the edit");
+    Require(sceImeClose_nid_postfix() == 0, "close the invalid-output session");
+
+    param = MakeParam(buffers, 8);
+    std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
+    param.filter = reinterpret_cast<ImeTextFilter>(&TooLongFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a too-long filter");
+    Drain();
+    Publish(ImeHostInputKind::Text, "c");
+    RequireText(Drain().at(0), EventUpdateText, u"abc", 3, 2, 1);
+    Require(std::u16string(buffers.text) == u"abc", "an overlong filter output keeps the edit");
+    Require(sceImeClose_nid_postfix() == 0, "close the too-long session");
+
+    param = MakeParam(buffers, 8);
+    std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
+    param.filter = reinterpret_cast<ImeTextFilter>(&ShortenFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a shortening filter");
+    Drain();
+    Publish(ImeHostInputKind::Text, "c");
+    RequireText(Drain().at(0), EventUpdateText, u"a", 1, 1, -1);
+    Require(sceImeClose_nid_postfix() == 0, "close the shortening session");
+
+    param = MakeParam(buffers, 8);
+    std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
+    param.filter = reinterpret_cast<ImeTextFilter>(&PairAtCaretFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a pair filter");
+    Drain();
+    Publish(ImeHostInputKind::Text, "c");
+    RequireText(Drain().at(0), EventUpdateText, u"ab\U0001F600", 4, 2, 2);
+    Require(sceImeClose_nid_postfix() == 0, "close the pair session");
+
+    buffers = Buffers{};
+    param = MakeParam(buffers, 8);
+    param.filter = reinterpret_cast<ImeTextFilter>(&LockingFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a filter that calls sceIme*");
+    Drain();
+    g_sawCaptureInsideFilter = false;
+    Publish(ImeHostInputKind::Text, "c");
+    RequireText(Drain().at(0), EventUpdateText, u"c", 1, 0, 1);
+    Require(g_sawCaptureInsideFilter, "the filter can call back into sceIme*");
+    Require(sceImeClose_nid_postfix() == 0, "close the locking session");
+
+    buffers = Buffers{};
+    param = MakeParam(buffers, 8);
+    std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
+    param.filter = reinterpret_cast<ImeTextFilter>(&SetInsideFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a filter that sets the text");
+    Drain();
+    g_setInsideRc = -1;
+    Publish(ImeHostInputKind::Text, "c");
+    Require(Drain().empty(), "an edit whose filter set the text sends no event");
+    Require(g_setInsideRc == 0, "sceImeSetText inside the filter returns 0");
+    Require(std::u16string(buffers.text) == u"zz", "the setText inside the filter wins");
+    Require(std::u16string(reinterpret_cast<const char16_t*>(buffers.work)) == u"zz", "the setText inside the filter wins in the work copy");
+    Require(sceImeClose_nid_postfix() == 0, "close the set-inside session");
+
+    buffers = Buffers{};
+    param = MakeParam(buffers, 8);
+    std::memcpy(buffers.text, u"ab", sizeof(u"ab"));
+    param.filter = reinterpret_cast<ImeTextFilter>(&SetCaretInsideFilter);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "open with a filter that moves the caret");
+    Drain();
+    g_caretInsideFirstCall = true;
+    g_caretInsideRc = -1;
+    Publish(ImeHostInputKind::Text, "c");
+    Require(Drain().empty(), "an edit whose filter moved the caret sends no event");
+    Require(g_caretInsideRc == 0, "sceImeSetCaret inside the filter returns 0");
+    Require(std::u16string(buffers.text) == u"ab", "the discarded edit is not in the buffer");
+    Publish(ImeHostInputKind::Text, "d");
+    RequireText(Drain().at(0), EventUpdateText, u"dab", 1, 0, 1);
+    Require(std::u16string(buffers.text) == u"dab", "the edit after the discard builds on the old text");
+    Require(std::u16string(reinterpret_cast<const char16_t*>(buffers.work)) == u"dab", "the edit after the discard reaches the work copy");
+    Require(sceImeClose_nid_postfix() == 0, "close the caret-inside session");
 }
 
 void CheckHostEvents() {
@@ -340,11 +689,80 @@ void CheckHostEvents() {
     Require(sceImeClose_nid_postfix() == 0, "host events close");
 }
 
+void CheckMultilineHostNavigation() {
+    Buffers buffers;
+    Param param = MakeParam(buffers, 16);
+    param.option = 1;
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "host navigation open");
+    Drain();
+
+    ImeTextInput input;
+    SDL_Event key{};
+    key.type = SDL_KEYDOWN;
+    key.key.windowID = 7;
+    SDL_Event text{};
+    text.type = SDL_TEXTINPUT;
+    text.text.windowID = 7;
+    std::strcpy(text.text.text, "X");
+
+    const auto check = [&](SDL_Scancode scancode, uint16_t mods, const char16_t* expected, const char* message) {
+        Require(sceImeSetText(u"a\r\nbc\nd", 7) == 0, "host navigation set text");
+        Caret caret{};
+        caret.index = 4;
+        Require(sceImeSetCaret(&caret) == 0, "host navigation set caret");
+        key.key.keysym.scancode = scancode;
+        key.key.keysym.mod = mods;
+        input.HandleEvent(key, 7);
+        input.HandleEvent(text, 7);
+        Drain();
+        Require(std::u16string(buffers.text) == expected, message);
+    };
+
+    check(SDL_SCANCODE_HOME, KMOD_NONE, u"a\r\nXbc\nd", "Home moves to the start of the current line");
+    check(SDL_SCANCODE_END, KMOD_NONE, u"a\r\nbcX\nd", "End moves to the end of the current line");
+    check(SDL_SCANCODE_HOME, KMOD_LCTRL, u"Xa\r\nbc\nd", "Ctrl+Home moves to the start of the buffer");
+    check(SDL_SCANCODE_END, KMOD_RCTRL, u"a\r\nbc\ndX", "Ctrl+End moves to the end of the buffer");
+    Require(sceImeClose_nid_postfix() == 0, "host navigation close");
+}
+
+void CheckMalformedHostText() {
+    Buffers buffers;
+    Param param = MakeParam(buffers, 16);
+    Require(sceImeOpen_nid_postfix(&param, nullptr) == 0, "malformed text open");
+    Drain();
+
+    Publish(ImeHostInputKind::Text, "\xc0\x80");
+    auto events = Drain();
+    Require(events.size() == 1, "overlong text event");
+    RequireText(events[0], EventUpdateText, u"\ufffd\ufffd", 2, 0, 2);
+
+    Publish(ImeHostInputKind::Text, "\xed\xa0\x80");
+    events = Drain();
+    Require(events.size() == 1, "surrogate text event");
+    RequireText(events[0], EventUpdateText, u"\ufffd\ufffd\ufffd", 3, 2, 1);
+
+    Publish(ImeHostInputKind::Text, "\xf4\x90\x80\x80");
+    events = Drain();
+    Require(events.size() == 1, "out-of-range text event");
+    RequireText(events[0], EventUpdateText, u"\ufffd\ufffd\ufffd\ufffd", 4, 3, 1);
+
+    Publish(ImeHostInputKind::Text, "\xe3\x81");
+    events = Drain();
+    Require(events.size() == 1, "truncated text event");
+    RequireText(events[0], EventUpdateText, u"\ufffd\ufffd\ufffd\ufffd\ufffd", 5, 4, 1);
+    Require(std::u16string(buffers.text) == u"\ufffd\ufffd\ufffd\ufffd\ufffd", "malformed text buffer");
+    Require(sceImeClose_nid_postfix() == 0, "malformed text close");
+}
+
 }
 
 int main() {
     CheckValidation();
     CheckEditing();
     CheckMultiline();
+    CheckCaretSurrogateBoundary();
+    CheckTextFilter();
     CheckHostEvents();
+    CheckMultilineHostNavigation();
+    CheckMalformedHostText();
 }

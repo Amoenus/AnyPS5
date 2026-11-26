@@ -11,9 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import performance_compare
 
 UNBLOCKS = re.compile(r'Unblocks:[ \t]*([^\r\n]*(?:\r?\n[ \t]*[-*][ \t]+(?!\[[ xX]\])[^\r\n]*)*)')
+CHECKLIST_UNBLOCKS = re.compile(r"^[ \t]*-[ \t]*\[[ xX]\][ \t]*Unblocks:[ \t]*([^\r\n]*(?:\r?\n[ \t]*[-*][ \t]+(?!\[[ xX]\])[^\r\n]*)*)", re.M)
 TITLE_ID = re.compile(r"(?<![A-Za-z0-9])[A-Z]{4}\d{5}(?!\d)")
+NONE = re.compile(r"[-*_ \t\r\n]*none\b", re.I)
 PERF = re.compile(r"perf(\(|!?:)")
-FENCE = re.compile(r"```[^\r\n]*\r?\n(.*?)```", re.S)
+PERF_SCOPE = re.compile(r"perf\(([^)]*)\)")
+UNCAPTURED_SCOPES = {"build", "ci", "tools"}
+FENCE = re.compile(r"(?:```|~~~)[^\r\n]*\r?\n(.*?)(?:```|~~~)", re.S)
+BLOCK_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)")
 MARKER = "<!-- pr-labels-perf -->"
 UNBLOCKS_LABEL = "unblocks title"
 PERF_LABEL = "perf"
@@ -25,8 +30,19 @@ COMMENT = (f"{MARKER}\nThis pull request is labeled `perf`, so it needs the summ
            "Please paste both `aps5-summary.jsonl` lines, attach the two traces and add the output of `tools/trace_digest.py`.")
 
 
-def gh(*args):
-    return subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8", check=True).stdout
+def gh(*args, attempts=3, delay=0.5):
+    for attempt in range(attempts):
+        try:
+            result = subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8")
+        except FileNotFoundError as error:
+            raise ValueError("GitHub CLI 'gh' is required on PATH") from error
+        if result.returncode == 0:
+            return result.stdout
+        transient = any(code in result.stderr for code in ("500", "502", "503", "504", "server error", "connection reset", "Connection reset", "timed out", "i/o timeout", "TLS handshake", "stream error:", "unexpected EOF",
+                                                          "A connection attempt failed because the connected party did not properly respond"))
+        if attempt + 1 == attempts or not transient:
+            raise subprocess.CalledProcessError(result.returncode, ["gh", *args], output=result.stdout, stderr=result.stderr)
+        time.sleep(delay * (2 ** attempt))
 
 
 def repository():
@@ -37,29 +53,62 @@ def strip_comments(body):
     return re.sub(r"<!--.*?-->", "", body or "", flags=re.S)
 
 
+def strip_fenced_blocks(body):
+    outside = []
+    fence = ""
+    for line in body.split("\n"):
+        marker = BLOCK_FENCE.match(line)
+        if fence:
+            if marker and marker[1].startswith(fence) and not marker[2].strip(" \t"):
+                fence = ""
+            outside.append("")
+        elif marker and (marker[1].startswith("~") or "`" not in marker[2]):
+            fence = marker[1]
+            outside.append("")
+        else:
+            outside.append(line)
+    return "\n".join(outside)
+
+
 def title_ids(body):
-    match = UNBLOCKS.search(strip_comments(body))
-    return set(TITLE_ID.findall(match.group(1))) if match else set()
+    body = strip_fenced_blocks(strip_comments(body))
+    checklist = CHECKLIST_UNBLOCKS.search(body)
+    match = checklist if checklist and checklist.group(1).strip() else UNBLOCKS.search(body)
+    return set(TITLE_ID.findall(match.group(1))) if match and not NONE.match(match.group(1)) else set()
 
 
 def is_perf(title):
     return bool(PERF.match(title or ""))
 
 
+def needs_capture(title):
+    if not is_perf(title):
+        return False
+    scope = PERF_SCOPE.match(title or "")
+    if not scope:
+        return True
+    parts = [part.strip().lower() for part in scope.group(1).split(",")]
+    return not (parts and all(part in UNCAPTURED_SCOPES for part in parts))
+
+
 def has_numbers(body):
     body = strip_comments(body)
     candidates = [line.strip() for line in body.splitlines()] + [block.strip() for block in FENCE.findall(body)]
-    commits = set()
+    summaries = []
     for text in candidates:
         if not text.startswith("{"):
             continue
         try:
-            summary = json.loads(text)
+            summary = json.loads(text, object_pairs_hook=performance_compare.unique_json_object)
             if isinstance(summary, dict):
-                commits.add(performance_compare.validate(summary)["commit"])
+                summary = performance_compare.validate(summary)
+                for earlier in summaries:
+                    if earlier["commit"] != summary["commit"] and not performance_compare.compare(earlier, summary)["configuration_differences"]:
+                        return True
+                summaries.append(summary)
         except (ValueError, RecursionError):
             continue
-    return len(commits) >= 2
+    return False
 
 
 def labels_for(pr):
@@ -68,7 +117,7 @@ def labels_for(pr):
         wanted.add(UNBLOCKS_LABEL)
     if is_perf(pr["title"]):
         wanted.add(PERF_LABEL)
-        if not has_numbers(pr["body"]):
+        if needs_capture(pr["title"]) and not has_numbers(pr["body"]):
             wanted.add(MISSING_LABEL)
     current = set(pr["labels"])
     return wanted - current, (MANAGED & current) - wanted
@@ -78,6 +127,7 @@ def decode_pages(out):
     decoder = json.JSONDecoder()
     offset = 0
     items = []
+    pages = 0
     while offset < len(out):
         while offset < len(out) and out[offset].isspace():
             offset += 1
@@ -86,11 +136,25 @@ def decode_pages(out):
         page, offset = decoder.raw_decode(out, offset)
         if not isinstance(page, list):
             raise ValueError("gh api --paginate returned a non-array page")
+        pages += 1
         items.extend(page)
+    if not pages:
+        raise ValueError("gh api --paginate returned no JSON pages")
     return items
 
 
 def pull(data):
+    if not isinstance(data, dict):
+        raise ValueError("pull request must be an object")
+    if type(data.get("number")) is not int or data["number"] <= 0:
+        raise ValueError("pull request number must be a positive integer")
+    if not isinstance(data.get("title"), str) or data.get("state") not in ("open", "closed"):
+        raise ValueError("pull request needs a string title and an open or closed state")
+    if "body" not in data or (data["body"] is not None and not isinstance(data["body"], str)):
+        raise ValueError("pull request body must be a string or null")
+    labels = data.get("labels")
+    if not isinstance(labels, list) or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels):
+        raise ValueError("pull request labels must be objects with string names")
     return {"number": data["number"], "title": data["title"], "body": data["body"] or "",
             "labels": [label["name"] for label in data["labels"]], "state": data["state"]}
 
@@ -116,38 +180,59 @@ def process(repo, pr, dry_run, comment=True):
                 args += ["--remove-label", ",".join(sorted(remove))]
             gh(*args)
         if post:
-            gh("api", "-X", "POST", f"repos/{repo}/issues/{pr['number']}/comments", "-f", f"body={COMMENT}")
+            gh("api", "-X", "POST", f"repos/{repo}/issues/{pr['number']}/comments", "-f", f"body={COMMENT}", attempts=1)
     return add, remove, post
 
 
-def main():
+def main(argv=None):
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(description="Label pull requests from their title and template fields.")
     which = parser.add_mutually_exclusive_group(required=True)
     which.add_argument("--pr", type=int, help="label one pull request")
     which.add_argument("--all", action="store_true", help="label every open pull request")
     parser.add_argument("--dry-run", action="store_true", help="print the planned changes and write nothing")
-    args = parser.parse_args()
-    repo = repository()
-    if args.pr is not None:
-        prs = [pull(json.loads(gh("api", f"repos/{repo}/pulls/{args.pr}")))]
-    else:
-        prs = [pull(data) for data in decode_pages(gh("api", "--paginate", f"repos/{repo}/pulls?state=open&base=main&per_page=100"))]
-    failed = []
+    parser.add_argument("--json", action="store_true", help="emit a dry-run plan as JSON")
+    args = parser.parse_args(argv)
+    if args.json and not args.dry_run:
+        parser.error("--json requires --dry-run")
+    try:
+        repo = repository()
+        if args.pr is not None:
+            prs = [pull(json.loads(gh("api", f"repos/{repo}/pulls/{args.pr}")))]
+        else:
+            prs = [pull(data) for data in decode_pages(gh("api", "--paginate", f"repos/{repo}/pulls?state=open&base=main&per_page=100"))]
+    except subprocess.CalledProcessError as error:
+        parser.error((error.stderr or str(error)).strip())
+    except (ValueError, RecursionError) as error:
+        parser.error(f"cannot read pull requests: {error}")
+    failed, plans = [], []
     for pr in prs:
         try:
             add, remove, post = process(repo, pr, args.dry_run, comment=args.pr is not None)
         except subprocess.CalledProcessError as error:
             failed.append(pr["number"])
+            plans.append({"number": pr["number"], "error": (error.stderr or str(error)).strip()})
             print(f"cannot label #{pr['number']}: {(error.stderr or '').strip()}", file=sys.stderr)
+            continue
+        plans.append({"number": pr["number"], "add": sorted(add), "remove": sorted(remove),
+                      "comment_marker": MARKER if post else None})
+        if args.json:
             continue
         if add or remove or post:
             plan = [f"+{label}" for label in sorted(add)] + [f"-{label}" for label in sorted(remove)] + (["comment"] if post else [])
             print(f"{'would change' if args.dry_run else 'changed'} #{pr['number']}: {' '.join(plan)}")
             if args.all and not args.dry_run:
                 time.sleep(WRITE_PAUSE)
+    if args.json:
+        print(json.dumps({"repository": repo, "plans": plans, "failed": failed}, sort_keys=True))
+        return int(bool(failed))
     if failed:
         sys.exit(f"{len(failed)} pull requests not labeled: {', '.join(f'#{number}' for number in failed)}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

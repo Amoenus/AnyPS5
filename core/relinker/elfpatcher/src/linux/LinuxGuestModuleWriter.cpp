@@ -1,35 +1,123 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
+#include <elfpatcher/general/AddressDistance.hpp>
 #include <elfpatcher/general/ElfConstants.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <codegen/x86/StubBodyBuilder.hpp>
 #include <io/BufferUtils.hpp>
 #include <algorithm>
+#include <bit>
 #include <limits>
+#include <set>
 #include <span>
+#include <utility>
+#include <vector>
 
 namespace Elfpatcher {
 
-std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestImage& image, const std::vector<std::string>& dependencies, const std::string& runPath) const {
+namespace {
+
+void validateRelroCoverage(
+    const std::vector<Domain::ProgramHeader>& inputHeaders,
+    Domain::ProgramHeader& relro
+) {
+    if (relro.FileSize > relro.MemorySize)
+        throw Domain::RelinkerException("PT_GNU_RELRO file size exceeds memory size", relro.MappedAddress);
+    if (relro.MemorySize == 0)
+        return;
+    if (relro.MemorySize > std::numeric_limits<std::uint64_t>::max() - relro.MappedAddress)
+        throw Domain::RelinkerException("PT_GNU_RELRO virtual address overflow", relro.MappedAddress);
+    constexpr std::uint64_t pageMask = kDefaultLoadAlignment - 1;
+    const auto relroStart = relro.MappedAddress & ~pageMask;
+    const auto relroEnd = (relro.MappedAddress + relro.MemorySize) & ~pageMask;
+    if (relroStart == relroEnd) return;
+
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> mappedRanges;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> paddedRanges;
+    for (const auto& header : inputHeaders) {
+        if (header.Type != PT_LOAD || header.MemorySize == 0 || header.Flags == 0) continue;
+        const auto size = std::max(header.FileSize, header.MemorySize);
+        if (size > std::numeric_limits<std::uint64_t>::max() - header.MappedAddress) continue;
+        const auto start = header.MappedAddress & ~pageMask;
+        const auto endBytes = header.MappedAddress + size;
+        if (endBytes > std::numeric_limits<std::uint64_t>::max() - pageMask) continue;
+        const auto end = (endBytes + pageMask) & ~pageMask;
+        if (start < end)
+            mappedRanges.emplace_back(start, end);
+        const auto alignment = header.Alignment > pageMask + 1 && std::has_single_bit(header.Alignment) ? header.Alignment : pageMask + 1;
+        if (start < end && end <= std::numeric_limits<std::uint64_t>::max() - (alignment - 1))
+            paddedRanges.emplace_back(start, (end + alignment - 1) & ~(alignment - 1));
+    }
+    std::sort(mappedRanges.begin(), mappedRanges.end());
+    auto coveredUntil = relroStart;
+    for (const auto& [start, end] : mappedRanges) {
+        if (start > coveredUntil) break;
+        if (end > coveredUntil) coveredUntil = end;
+        if (coveredUntil >= relroEnd) return;
+    }
+    std::sort(paddedRanges.begin(), paddedRanges.end());
+    auto paddedUntil = relroStart;
+    for (const auto& [start, end] : paddedRanges) {
+        if (start > paddedUntil) break;
+        if (end > paddedUntil) paddedUntil = end;
+    }
+    const bool mappedInTail = std::any_of(mappedRanges.begin(), mappedRanges.end(), [&](const auto& range) { return range.first >= coveredUntil && range.first < relroEnd; });
+    if (coveredUntil <= relro.MappedAddress || paddedUntil < relroEnd || mappedInTail)
+        throw Domain::RelinkerException("PT_GNU_RELRO is not covered by PT_LOAD pages", relro.MappedAddress);
+    relro.MemorySize = coveredUntil - relro.MappedAddress;
+    relro.FileSize = std::min(relro.FileSize, relro.MemorySize);
+}
+
+}
+
+std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestImage& image, const std::vector<std::string>& dependencies, const std::string& runPath, const bool deferInitialization) const {
     auto bytes = image.Bytes;
     std::vector<Domain::ProgramHeader> headers;
     std::uint64_t end = 0;
+    bool hasRelro = false;
     for (auto header : image.Headers) {
+        if (header.Type == PT_GNU_RELRO) {
+            validateRelroCoverage(image.Headers, header);
+            if (header.MemorySize == 0) continue;
+            if (hasRelro)
+                throw Domain::RelinkerException("Multiple RELRO ranges are not supported on Linux output: the loader only protects one PT_GNU_RELRO segment", header.MappedAddress);
+            hasRelro = true;
+            headers.push_back(header);
+            continue;
+        }
         if (header.Type != 1 && header.Type != 7 && header.Type != 0x6474e550 && header.Type != PT_GNU_STACK) continue;
         if (header.Type == 1) {
             end = std::max(end, header.MappedAddress + header.MemorySize);
             if (header.Flags == 0) continue;
             header.Flags |= 4;
         }
+        if (header.Type == 7) header.Alignment = std::max<std::uint64_t>(header.Alignment, 1);
         headers.push_back(header);
     }
-    if (std::none_of(headers.begin(), headers.end(), [&](const auto& header) { return header.Type == PT_GNU_STACK; }))
+    const auto lastStack = std::find_if(headers.rbegin(), headers.rend(), [](const auto& header) { return header.Type == PT_GNU_STACK; });
+    if (lastStack == headers.rend()) {
         headers.push_back({PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0, 16});
-    if (end > std::numeric_limits<std::uint64_t>::max() - 0x4000) throw Domain::RelinkerException("Guest virtual address overflow");
+    } else {
+        auto lastIndex = static_cast<std::size_t>(std::distance(lastStack, headers.rend()) - 1);
+        for (std::size_t i = 0; i < lastIndex; ++i) {
+            if (headers[i].Type == PT_GNU_STACK) {
+                headers.erase(headers.begin() + static_cast<std::ptrdiff_t>(i));
+                --i;
+                --lastIndex;
+            }
+        }
+    }
+    std::vector<Domain::ProgramHeader> loads;
+    for (const auto& header : headers)
+        if (header.Type == 1) loads.push_back(header);
+    std::stable_sort(loads.begin(), loads.end(), [](const auto& left, const auto& right) { return left.MappedAddress < right.MappedAddress; });
+    for (std::size_t index = 0, next = 0; index < headers.size(); ++index)
+        if (headers[index].Type == 1) headers[index] = loads[next++];
+    if (end >std::numeric_limits<std::uint64_t>::max() - 0x4000) throw Domain::RelinkerException("Guest virtual address overflow");
     Io::AlignBuffer(bytes, 0x4000);
     const auto extraOffset = bytes.size();
     const auto extraAddress = Io::AlignUp64(end, 0x4000);
     const auto address = [&] { return extraAddress + bytes.size() - extraOffset; };
-    const bool passesModuleArgs = image.Init != 0;
+    const bool passesModuleArgs = image.HasInit && !deferInitialization;
     std::uint64_t argsSlot = 0;
     std::uint64_t resultSlot = 0;
     if (passesModuleArgs) {
@@ -56,6 +144,44 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
             needsTlsResolver = true;
         }
     }
+    for (std::size_t index = 1; index < image.Symbols.size(); ++index) {
+        const auto& symbol = image.Symbols[index];
+        if (symbol.Value != 0 || symbol.Section == 0 || symbol.Section >= 0xff00 || (symbol.Info >> 4) == 0 ||
+            (symbol.Info & 15) != 2 || symbol.Visibility == 1 || symbol.Visibility == 2) continue;
+        const auto thunk = address();
+        if (thunk > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) - 5)
+            throw Domain::RelinkerException("Guest export at address 0 exceeds relative branch range");
+        bytes.push_back(0xe9);
+        Io::AppendU32(bytes, static_cast<std::uint32_t>(-static_cast<std::int32_t>(thunk + 5)));
+        Io::WriteU64(symbols, index * 24 + 8, thunk);
+    }
+    if (!image.BindingAliases.empty()) {
+        if (symbols.size() % 24 != 0) throw Domain::RelinkerException("Invalid guest symbol table for binding aliases");
+        const auto originalCount = symbols.size() / 24;
+        std::set<std::string> names;
+        for (std::size_t index = 0; index < originalCount; ++index) {
+            const auto offset = Io::ReadU32(symbols, index * 24);
+            if (offset >= strings.size()) throw Domain::RelinkerException("Invalid guest binding alias string offset");
+            const auto start = strings.begin() + offset;
+            const auto end = std::find(start, strings.end(), 0);
+            if (end == strings.end()) throw Domain::RelinkerException("Unterminated guest binding alias string");
+            if (Io::ReadU16(symbols, index * 24 + 6) != 0) names.emplace(start, end);
+        }
+        for (const auto& [index, name] : image.BindingAliases) {
+            if (index == 0 || index >= originalCount) throw Domain::RelinkerException("Invalid guest binding alias symbol index");
+            const auto offset = index * 24;
+            const auto visibility = symbols[offset + 5] & 3;
+            if (Io::ReadU16(symbols, offset + 6) == 0 || (symbols[offset + 4] >> 4) == 0 || visibility == 1 || visibility == 2)
+                throw Domain::RelinkerException("Guest binding alias requires an exported definition");
+            if (name.empty() || name.find('\0') != std::string::npos || !names.insert(name).second)
+                throw Domain::RelinkerException("Duplicate or empty guest binding alias: " + name);
+            if (symbols.size() / 24 >= std::numeric_limits<std::uint32_t>::max()) throw Domain::RelinkerException("Guest binding alias symbol table too large");
+            const std::vector<std::uint8_t> symbol(symbols.begin() + offset, symbols.begin() + offset + 24);
+            const auto entry = symbols.size();
+            symbols.insert(symbols.end(), symbol.begin(), symbol.end());
+            Io::WriteU32(symbols, entry, addString(name));
+        }
+    }
     std::vector<std::uint64_t> needed;
     for (const auto& dependency : dependencies) needed.push_back(addString(dependency));
     if (needsTlsResolver) needed.push_back(addString("ld-linux-x86-64.so.2"));
@@ -77,6 +203,39 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
         Io::WriteU64(relaData, entry, slot);
         Io::WriteU64(relaData, entry + 8, (symbol << 32) | kGlobDat);
     };
+    std::uint64_t lifecycleTable = 0;
+    if (deferInitialization) {
+        constexpr char exportName[] = "__aps5_guest_lifecycle_nid_no_patch";
+        if (std::any_of(image.Symbols.begin(), image.Symbols.end(), [&](const auto& symbol) { return symbol.Name == exportName; }))
+            throw Domain::RelinkerException("Reserved guest lifecycle export is already present");
+        Io::AlignBuffer(bytes, 8);
+        lifecycleTable = address();
+        const auto pointer = [&](std::uint64_t target, bool relocate = true) {
+            const auto slot = address();
+            Io::AppendU64(bytes, 0);
+            if (!relocate) return;
+            Io::AppendU64(relaData, slot);
+            Io::AppendU64(relaData, 8);
+            Io::AppendU64(relaData, target);
+        };
+        Io::AppendU64(bytes, 0x415053354c494658ull);
+        pointer(0);
+        pointer(image.Init, image.HasInit);
+        pointer(image.Fini, image.HasFini);
+        Io::AppendU64(bytes, image.InitArray.size());
+        Io::AppendU64(bytes, image.FiniArray.size());
+        Io::AppendU64(bytes, 0);
+        Io::AppendU64(bytes, 0);
+        for (const auto slot : image.InitArray) pointer(slot);
+        for (const auto slot : image.FiniArray) pointer(slot);
+        const auto entry = symbols.size();
+        symbols.resize(entry + 24, 0);
+        Io::WriteU32(symbols, entry, addString(exportName));
+        symbols[entry + 4] = 0x11;
+        Io::WriteU16(symbols, entry + 6, 1);
+        Io::WriteU64(symbols, entry + 8, lifecycleTable);
+        Io::WriteU64(symbols, entry + 16, address() - lifecycleTable);
+    }
     if (passesModuleArgs) {
         argsImport = addUndefinedImport("__aps5_get_pending_module_args_nid_no_patch");
         resultImport = addUndefinedImport("__aps5_set_module_init_result_nid_no_patch");
@@ -115,13 +274,13 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
     constexpr std::size_t kArgsDisplacement = 3, kTargetDisplacement = 0x11, kResultDisplacement = 0x19;
     constexpr std::size_t kStubSize = 0x1f;
     const auto stubDisplacement = [](std::uint64_t target, std::uint64_t next) {
-        const auto distance = static_cast<std::int64_t>(target) - static_cast<std::int64_t>(next);
-        if (distance < std::numeric_limits<std::int32_t>::min() || distance > std::numeric_limits<std::int32_t>::max())
+        std::int64_t distance = 0;
+        if (!SignedDistance(target, next, distance) || distance < std::numeric_limits<std::int32_t>::min() || distance > std::numeric_limits<std::int32_t>::max())
             throw Domain::RelinkerException("Guest initializer exceeds relative branch range");
         return static_cast<std::uint32_t>(static_cast<std::int32_t>(distance));
     };
     const auto lifecycle = [&](std::uint64_t target) {
-        if (target == 0) return std::uint64_t{};
+        if (!image.HasInit) return std::uint64_t{};
         const auto start = address();
         std::vector<std::uint8_t> stub(kStubSize, 0xc3);
         stub[0x00] = 0x50;
@@ -141,17 +300,42 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
         return start;
     };
     const auto finalizer = [&](std::uint64_t target) {
-        if (target == 0) return std::uint64_t{};
+        if (!image.HasFini) return std::uint64_t{};
         const auto start = address();
-        const auto distance = static_cast<std::int64_t>(target) - static_cast<std::int64_t>(start + 11);
-        if (distance < std::numeric_limits<std::int32_t>::min() || distance > std::numeric_limits<std::int32_t>::max())
+        std::int64_t distance = 0;
+        if (!SignedDistance(target, start + 11, distance) || distance < std::numeric_limits<std::int32_t>::min() || distance > std::numeric_limits<std::int32_t>::max())
             throw Domain::RelinkerException("Guest finaliser exceeds relative branch range");
         bytes.insert(bytes.end(), {0x31, 0xff, 0x31, 0xf6, 0x31, 0xd2, 0xe9});
         Io::AppendU32(bytes, static_cast<std::uint32_t>(distance));
         return start;
     };
-    const auto init = lifecycle(image.Init);
-    const auto fini = finalizer(image.Fini);
+    const auto init = deferInitialization ? 0 : lifecycle(image.Init);
+    auto fini = deferInitialization ? 0 : finalizer(image.Fini);
+    if (deferInitialization && (image.HasFini || !image.FiniArray.empty())) {
+        fini = address();
+        bytes.insert(bytes.end(), {0x48, 0x83, 0x3d});
+        Io::AppendU32(bytes, stubDisplacement(lifecycleTable + 48, address() + 5));
+        bytes.push_back(2);
+        bytes.insert(bytes.end(), {0x0f, 0x85});
+        const auto skip = bytes.size();
+        Io::AppendU32(bytes, 0);
+        bytes.insert(bytes.end(), {0x48, 0xc7, 0x05});
+        Io::AppendU32(bytes, stubDisplacement(lifecycleTable + 48, address() + 8));
+        Io::AppendU32(bytes, 4);
+        bytes.insert(bytes.end(), {0x48, 0x83, 0xec, 8});
+        for (auto slot = image.FiniArray.rbegin(); slot != image.FiniArray.rend(); ++slot) {
+            bytes.insert(bytes.end(), {0x48, 0x8b, 0x05});
+            Io::AppendU32(bytes, stubDisplacement(*slot, address() + 4));
+            bytes.insert(bytes.end(), {0x48, 0x85, 0xc0, 0x74, 8, 0x31, 0xff, 0x31, 0xf6, 0x31, 0xd2, 0xff, 0xd0});
+        }
+        if (image.HasFini) {
+            bytes.insert(bytes.end(), {0x31, 0xff, 0x31, 0xf6, 0x31, 0xd2, 0xe8});
+            Io::AppendU32(bytes, stubDisplacement(image.Fini, address() + 4));
+        }
+        bytes.insert(bytes.end(), {0x48, 0x83, 0xc4, 8});
+        Io::WriteU32(bytes, skip, static_cast<std::uint32_t>(bytes.size() - skip - 4));
+        bytes.push_back(0xc3);
+    }
     Io::AlignBuffer(bytes, 8);
     const auto dynamicOffset = bytes.size();
     const auto dynamicAddress = address();
@@ -175,8 +359,8 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
         tag(20, 7);
         tag(3, image.Got);
     }
-    if (!image.InitArray.empty()) { tag(25, image.InitArray.front()); tag(27, image.InitArray.size() * 8); }
-    if (!image.FiniArray.empty()) { tag(26, image.FiniArray.front()); tag(28, image.FiniArray.size() * 8); }
+    if (!deferInitialization && !image.InitArray.empty()) { tag(25, image.InitArray.front()); tag(27, image.InitArray.size() * 8); }
+    if (!deferInitialization && !image.FiniArray.empty()) { tag(26, image.FiniArray.front()); tag(28, image.FiniArray.size() * 8); }
     if (init != 0) tag(12, init);
     if (fini != 0) tag(13, fini);
     tag(30, DF_BIND_NOW | (image.Symbolic ? DF_SYMBOLIC : 0));
@@ -244,6 +428,46 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
     const auto phCount = headers.size() + 2;
     if (phCount > std::numeric_limits<std::uint16_t>::max()) throw Domain::RelinkerException("Too many guest program headers");
     const auto extraSize = bytes.size() + phCount * 56 - extraOffset;
+    const auto sources = headers;
+    std::vector<std::size_t> order;
+    for (std::size_t index = 0; index < headers.size(); ++index)
+        if (headers[index].Type == 1) order.push_back(index);
+    std::vector<std::vector<std::uint8_t>> prefixes(headers.size());
+    std::vector<bool> moved(headers.size(), false);
+    auto cursor = static_cast<std::uint64_t>(bytes.size() + phCount * 56);
+    for (std::size_t position = 0; position < order.size(); ++position) {
+        auto& load = headers[order[position]];
+        const auto prefix = load.MappedAddress % kDefaultLoadAlignment;
+        const bool congruent = load.Offset % kDefaultLoadAlignment == prefix;
+        if (congruent && prefix == 0) continue;
+        const auto pageStart = load.MappedAddress - prefix;
+        std::vector<std::uint8_t> page(static_cast<std::size_t>(prefix), 0);
+        std::vector<bool> covered(static_cast<std::size_t>(prefix), false);
+        bool sharesMoved = false;
+        for (std::size_t below = 0; below < position; ++below) {
+            const auto& other = sources[order[below]];
+            const auto start = std::max(other.MappedAddress, pageStart);
+            const auto end = std::min(other.MappedAddress + other.MemorySize, load.MappedAddress);
+            if (start < end && moved[order[below]]) sharesMoved = true;
+            for (auto address = start; address < end; ++address) {
+                const auto relative = address - other.MappedAddress;
+                covered[static_cast<std::size_t>(address - pageStart)] = true;
+                page[static_cast<std::size_t>(address - pageStart)] = relative < other.FileSize ? bytes[static_cast<std::size_t>(other.Offset + relative)] : 0;
+            }
+        }
+        const auto mapped = load.Offset - prefix;
+        bool differs = !congruent;
+        for (std::size_t index = 0; index < page.size() && !differs && sharesMoved; ++index)
+            differs = covered[index] && bytes[static_cast<std::size_t>(mapped) + index] != page[index];
+        if (!differs) continue;
+        if (load.Alignment > kDefaultLoadAlignment)
+            throw Domain::RelinkerException("Guest PT_LOAD sharing a page with a moved load is aligned above the page", load.MappedAddress);
+        cursor = Io::AlignUp64(cursor, kDefaultLoadAlignment) + prefix;
+        load.Offset = cursor;
+        cursor += load.FileSize;
+        prefixes[order[position]] = std::move(page);
+        moved[order[position]] = true;
+    }
     headers.push_back({1, 7, extraOffset, extraAddress, extraAddress, extraSize, extraSize, 0x4000});
     headers.push_back({2, 6, dynamicOffset, dynamicAddress, dynamicAddress, dynamicSize, dynamicSize, 8});
     for (const auto& header : headers) {
@@ -256,8 +480,15 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
         Io::AppendU64(bytes, header.MemorySize);
         Io::AppendU64(bytes, header.Alignment);
     }
-    bytes[7] = 0;
-    bytes[8] = 0;
+    for (const auto index : order) {
+        if (!moved[index]) continue;
+        Io::AlignBuffer(bytes, static_cast<std::size_t>(kDefaultLoadAlignment));
+        bytes.insert(bytes.end(), prefixes[index].begin(), prefixes[index].end());
+        const auto offset = bytes.size();
+        bytes.resize(offset + static_cast<std::size_t>(sources[index].FileSize));
+        std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(sources[index].Offset), static_cast<std::size_t>(sources[index].FileSize), bytes.begin() + static_cast<std::ptrdiff_t>(offset));
+    }
+    std::fill_n(bytes.begin() + 7, 9, std::uint8_t{0});
     Io::WriteU16(bytes, 16, 3);
     Io::WriteU64(bytes, 24, 0);
     Io::WriteU64(bytes, 32, phOffset);

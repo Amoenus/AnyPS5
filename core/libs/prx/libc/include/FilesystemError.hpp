@@ -2,6 +2,10 @@
 #define CORE_LIBS_PRX_LIBC_INCLUDE_FILESYSTEMERROR_HPP
 
 #include <system_error>
+#ifdef _WIN32
+#include <windows.h>
+#include "prx/libkernel/File/include/WindowsSymbolicLink.hpp"
+#endif
 #include "General.hpp"
 
 inline int FilesystemError(const std::error_code& error) {
@@ -23,7 +27,96 @@ inline int FilesystemError(const std::error_code& error) {
     return 5;
 }
 
+enum class LinkPrefix_nid_no_patch { Resolves, Missing, BlockedByFile, TooManyLinks };
+
+inline int PrefixError_nid_no_patch(const std::filesystem::path& native);
+inline bool HasNonDirectoryPrefix_nid_no_patch(const std::filesystem::path& native);
+
+#ifdef _WIN32
+inline std::filesystem::path FinalDirectory_nid_no_patch(const std::filesystem::path& directory) {
+    const HANDLE handle = CreateFileW(directory.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return directory;
+    std::wstring name(MAX_PATH, L'\0');
+    DWORD length = GetFinalPathNameByHandleW(handle, name.data(), static_cast<DWORD>(name.size()), VOLUME_NAME_DOS);
+    if (length >= name.size()) {
+        name.resize(length + 1);
+        length = GetFinalPathNameByHandleW(handle, name.data(), static_cast<DWORD>(name.size()), VOLUME_NAME_DOS);
+    }
+    CloseHandle(handle);
+    if (length == 0 || length >= name.size()) return directory;
+    name.resize(length);
+    if (name.rfind(L"\\\\?\\UNC\\", 0) == 0) name.replace(0, 7, L"\\");
+    else if (name.rfind(L"\\\\?\\", 0) == 0) name.erase(0, 4);
+    return name;
+}
+#endif
+
+inline LinkPrefix_nid_no_patch LinkPrefixState_nid_no_patch(const std::filesystem::path& prefix) {
+#ifdef _WIN32
+    constexpr unsigned MaxDepth = 32;
+    thread_local unsigned depth = 0;
+    const DWORD attributes = GetFileAttributesW(prefix.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) return LinkPrefix_nid_no_patch::Resolves;
+    const HANDLE handle = CreateFileW(prefix.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(handle);
+        return LinkPrefix_nid_no_patch::Resolves;
+    }
+    const DWORD code = GetLastError();
+    if (code == ERROR_CANT_RESOLVE_FILENAME) return LinkPrefix_nid_no_patch::TooManyLinks;
+    if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND && code != ERROR_DIRECTORY) return LinkPrefix_nid_no_patch::Resolves;
+    std::string text;
+    try {
+        if (!File::WindowsSymbolicLink::Read(prefix, text, "lookup")) return LinkPrefix_nid_no_patch::Resolves;
+    } catch (const std::system_error&) {
+        return LinkPrefix_nid_no_patch::Resolves;
+    }
+    if (depth >= MaxDepth) return LinkPrefix_nid_no_patch::TooManyLinks;
+    const std::filesystem::path target(text);
+    struct DepthGuard {
+        explicit DepthGuard(unsigned& value) : value(value) { ++value; }
+        ~DepthGuard() { --value; }
+        unsigned& value;
+    } guard(depth);
+    const int nested = PrefixError_nid_no_patch((target.is_absolute() ? target : FinalDirectory_nid_no_patch(prefix.parent_path()) / target) / ".");
+    if (nested == 62) return LinkPrefix_nid_no_patch::TooManyLinks;
+    return nested == 20 ? LinkPrefix_nid_no_patch::BlockedByFile : LinkPrefix_nid_no_patch::Missing;
+#else
+    (void)prefix;
+    return LinkPrefix_nid_no_patch::Resolves;
+#endif
+}
+
+inline int PrefixError_nid_no_patch(const std::filesystem::path& native) {
+    std::error_code error;
+    const auto trimmed = native.has_filename() ? native : native.parent_path();
+    for (auto prefix = trimmed.parent_path(); prefix.has_relative_path(); prefix = prefix.parent_path()) {
+        const auto link = LinkPrefixState_nid_no_patch(prefix);
+        if (link == LinkPrefix_nid_no_patch::TooManyLinks) return 62;
+        if (link == LinkPrefix_nid_no_patch::BlockedByFile) return 20;
+        if (link == LinkPrefix_nid_no_patch::Missing) return 2;
+        error.clear();
+        const auto status = std::filesystem::status(prefix, error);
+        if (error == std::errc::too_many_symbolic_link_levels) return 62;
+        if (std::filesystem::exists(status)) return std::filesystem::is_directory(status) ? 0 : 20;
+    }
+    return 0;
+}
+
+inline bool HasNonDirectoryPrefix_nid_no_patch(const std::filesystem::path& native) {
+    return PrefixError_nid_no_patch(native) == 20;
+}
+
+inline int NotFoundError_nid_no_patch(const std::filesystem::path& native) {
+    const int error = PrefixError_nid_no_patch(native);
+    return error != 0 ? error : 2;
+}
+
 std::error_code RenameNative_nid_no_patch(const std::filesystem::path& source, const std::filesystem::path& destination, bool replacesExisting);
+
+extern "C" bool ExecutePermission_nid_no_patch(const std::filesystem::path& native);
 
 inline int ResolvePathError_nid_no_patch(const char* path, std::filesystem::path& resolved, bool module = false, bool archived = false) {
     try {

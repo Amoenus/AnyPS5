@@ -3,8 +3,12 @@
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libc/include/HostThreadLocal.hpp"
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
+#include <limits>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +22,9 @@ namespace {
 constexpr std::uint32_t computeNumThreadX = 0x207;
 constexpr std::uint32_t computeNumThreadY = 0x208;
 constexpr std::uint32_t computeNumThreadZ = 0x209;
+constexpr std::uint32_t computePgmRsrc1 = 0x212;
 constexpr std::uint32_t computePgmRsrc2 = 0x213;
+constexpr std::uint32_t computePgmRsrc3 = 0x228;
 
 constexpr std::uint32_t spiPsInputCntl0 = 0x191;
 constexpr std::uint32_t spiPsInputEna = 0x1B3;
@@ -26,6 +32,9 @@ constexpr std::uint32_t spiPsInputAddr = 0x1B4;
 constexpr std::uint32_t spiPsInControl = 0x1B6;
 constexpr std::uint32_t spiBarycCntl = 0x1B8;
 constexpr std::uint32_t dbShaderControl = 0x203;
+constexpr std::uint32_t dbRenderOverride = 0x003;
+constexpr std::uint32_t paScVportZmin0 = 0x0B4;
+constexpr std::uint32_t paScVportZmax0 = 0x0B5;
 constexpr std::uint32_t spiShaderColFormat = 0x1C5;
 constexpr std::uint32_t defaultPixelInputs = 0x2u;
 
@@ -80,6 +89,10 @@ ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers&
         scratchDwords = agcShader.scratch_size_dw_per_thread;
         if (scratchDwords == 0) throw std::runtime_error("AGC graphics: COMPUTE_PGM_RSRC2.SCRATCH_EN with a zero scratch size");
     }
+    NoteRegisterRead(RegisterBank::Shader, computePgmRsrc3);
+    const auto rsrc3 = shader.find(computePgmRsrc3);
+    const std::uint32_t sharedVgprBlocks = rsrc3 == shader.end() ? 0u : rsrc3->second & 0xfu;
+    const std::uint32_t granulatedVgprCount = sharedVgprBlocks == 0u ? 0u : read(shader, computePgmRsrc1, RegisterBank::Shader) & 0x3fu;
     // Debug aid: APS5_LDS_SLACK=<dwords> grows every dispatch's LDS allocation by that much, to tell
     // whether a program depends on addresses past its declared allocation.
     static const std::uint32_t ldsSlack = [] { const char* text = std::getenv("APS5_LDS_SLACK"); return text ? static_cast<std::uint32_t>(std::strtoul(text, nullptr, 0)) : 0u; }();
@@ -90,7 +103,9 @@ ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers&
         ((rsrc2 >> 10u) & 0x1u) != 0,
         ((rsrc2 >> 11u) & 0x3u) + 1u,
         {},
-        scratchDwords
+        scratchDwords,
+        granulatedVgprCount,
+        sharedVgprBlocks
     };
 }
 
@@ -104,11 +119,25 @@ ShaderRecompiler::ShaderPixelStageInfo DefaultUnexportedInputs(ShaderRecompiler:
     return pixel;
 }
 
-ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& context, const std::array<std::uint8_t, 8>& exportMappings, bool nullProgram) {
+ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& context, const std::array<std::uint8_t, 8>& exportMappings, bool nullProgram, std::span<const std::byte> shaderHeader) {
     const auto inControl = nullProgram ? 0u : read(context, spiPsInControl, RegisterBank::Context);
-    const auto inputNum = inControl & 0x3Fu;
-    if (inputNum > 32u) {
+    const auto stateInputNum = inControl & 0x3Fu;
+    if (stateInputNum > 32u) {
         throw std::runtime_error("AGC graphics: SPI_PS_IN_CONTROL input count exceeds 32");
+    }
+    const auto primitiveInputNum = (inControl >> 9u) & 0x1Fu;
+    if (primitiveInputNum != 0) {
+        throw std::runtime_error("AGC graphics: SPI_PS_IN_CONTROL declares per-primitive pixel inputs");
+    }
+    std::uint32_t headerInputNum = 0;
+    if (!nullProgram && shaderHeader.size() >= sizeof(Shader)) {
+        Shader shader;
+        std::memcpy(&shader, shaderHeader.data(), sizeof(Shader));
+        headerInputNum = shader.num_input_semantics;
+    }
+    const auto inputNum = std::max(stateInputNum, headerInputNum);
+    if (inputNum > 32u) {
+        throw std::runtime_error("AGC graphics: pixel shader input count exceeds 32");
     }
     const auto ena = nullProgram ? defaultPixelInputs : read(context, spiPsInputEna, RegisterBank::Context);
     const auto addr = nullProgram ? defaultPixelInputs : read(context, spiPsInputAddr, RegisterBank::Context);
@@ -126,7 +155,13 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     }
     std::array<std::uint32_t, 32> interpolatorSettings{};
     for (std::uint32_t i = 0; i < inputNum; ++i) {
-        interpolatorSettings[i] = read(context, spiPsInputCntl0 + i, RegisterBank::Context);
+        if (i < stateInputNum) {
+            interpolatorSettings[i] = read(context, spiPsInputCntl0 + i, RegisterBank::Context);
+            continue;
+        }
+        NoteRegisterRead(RegisterBank::Context, spiPsInputCntl0 + i);
+        const auto control = context.find(spiPsInputCntl0 + i);
+        interpolatorSettings[i] = control == context.end() ? i : control->second;
     }
     const auto shaderControl = nullProgram ? 0u : read(context, dbShaderControl, RegisterBank::Context);
     // Bits 9 and 11 are EXEC_ON_HIER_FAIL and ALPHA_TO_MASK_DISABLE on GFX10; neither changes what the
@@ -142,8 +177,24 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     }
     const bool pixelKillEnable = ((shaderControl >> 6u) & 0x1u) != 0;
     const bool depthExportEnable = (shaderControl & 0x1u) != 0;
+    float depthExportMin = 0.0f;
+    float depthExportMax = 1.0f;
+    if (depthExportEnable) {
+        if ((read(context, dbRenderOverride, RegisterBank::Context) & 0x10000u) != 0) {
+            depthExportMin = -std::numeric_limits<float>::infinity();
+            depthExportMax = std::numeric_limits<float>::infinity();
+        } else {
+            depthExportMin = std::bit_cast<float>(read(context, paScVportZmin0, RegisterBank::Context));
+            depthExportMax = std::bit_cast<float>(read(context, paScVportZmax0, RegisterBank::Context));
+            if (!std::isfinite(depthExportMin) || !std::isfinite(depthExportMax) || depthExportMin > depthExportMax) {
+                throw std::runtime_error("AGC graphics: invalid viewport depth clamp bounds for depth export");
+            }
+        }
+    }
     const bool sampleMaskExportEnable = ((shaderControl >> 8u) & 0x1u) != 0;
-    const bool stencilRefExportEnable = ((shaderControl >> 1u) & 0x1u) != 0;
+    const bool stencilOperationValue = !nullProgram && StencilOperationValueReplaces(context);
+    const bool stencilRefExportEnable = ((shaderControl >> 1u) & 0x1u) != 0 || stencilOperationValue;
+    if (stencilOperationValue && PixelEarlyZ(shaderControl)) throw std::runtime_error("AGC graphics: early tests with a pixel shader that exports the stencil operation value are unsupported");
     const auto loaded = [&](PixelInput input) { return (activeInputs & PixelInputBit(input)) != 0; };
     std::uint32_t positionControl = 0;
     if (loaded(PixelInput::PositionX) || loaded(PixelInput::PositionY)) {
@@ -173,6 +224,8 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         .linearCentroid = loaded(PixelInput::LinearCentroid),
         .pixelKillEnable = pixelKillEnable,
         .depthExportEnable = depthExportEnable,
+        .depthExportMin = depthExportMin,
+        .depthExportMax = depthExportMax,
         .sampleMaskExportEnable = sampleMaskExportEnable,
         .earlyZ = PixelEarlyZ(shaderControl),
         .executeOnNoop = ((shaderControl >> 10u) & 0x1u) != 0,
@@ -181,6 +234,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         .targetOutputMode = targetOutputMode,
         .targetExportMapping = nullProgram ? std::array<std::uint8_t, 8>{} : exportMappings,
         .stencilRefExportEnable = stencilRefExportEnable,
+        .stencilOperationValueExport = stencilOperationValue,
         .positionLocation = (positionControl & 0x100000u) != 0u ? ShaderRecompiler::PixelPositionLocation::UpperLeft : static_cast<ShaderRecompiler::PixelPositionLocation>(floatLocation)
     };
 }
@@ -241,6 +295,48 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
         read.size = static_cast<std::uint32_t>(bytes.size());
     };
     if (reads != nullptr) reads->reserve(reads->size() + 2u * shader.num_input_semantics);
+    std::array<std::uint32_t, ShaderRecompiler::ShaderVertexStageInfo::MaxResources> attribWords{};
+    std::array<std::array<std::uint32_t, 4>, ShaderRecompiler::ShaderVertexStageInfo::MaxResources> sharpWords{};
+    if (!staticAbi) {
+        std::uint32_t firstSemantic = ~0u, lastSemantic = 0;
+        for (std::uint32_t i = 0; i < shader.num_input_semantics; ++i) {
+            firstSemantic = std::min<std::uint32_t>(firstSemantic, semantics[i].semantic);
+            lastSemantic = std::max<std::uint32_t>(lastSemantic, semantics[i].semantic);
+        }
+        const auto readWords = [](std::uint64_t base, std::uint32_t stride, std::uint32_t first, std::uint32_t last, std::vector<std::uint32_t>& words, auto&& wanted) {
+            const auto wordsPer = stride / 4u;
+            words.assign(static_cast<std::size_t>(last - first + 1u) * wordsPer, 0u);
+            const auto begin = base + static_cast<std::uint64_t>(first) * stride;
+            if (AgcDriver::GuestMemory::Accessible(reinterpret_cast<const void*>(begin), words.size() * 4u)) {
+                AgcDriver::GuestMemory::Read(begin, std::as_writable_bytes(std::span(words)), 4);
+                return;
+            }
+            for (std::uint32_t entry = first; entry <= last; ++entry) {
+                if (!wanted(entry)) continue;
+                AgcDriver::GuestMemory::Read(base + static_cast<std::uint64_t>(entry) * stride, std::as_writable_bytes(std::span(words).subspan(static_cast<std::size_t>(entry - first) * wordsPer, wordsPer)), 4);
+            }
+        };
+        struct TableStorage {};
+        auto& table = HostThreadLocal<std::vector<std::uint32_t>, TableStorage>();
+        readWords(attribTableAddr, 4u, firstSemantic, lastSemantic, table, [&](std::uint32_t semantic) { return std::any_of(semantics.begin(), semantics.begin() + shader.num_input_semantics, [&](const ShaderSemantic& candidate) { return candidate.semantic == semantic; }); });
+        std::uint32_t firstIndex = ~0u, lastIndex = 0;
+        for (std::uint32_t i = 0; i < shader.num_input_semantics; ++i) {
+            attribWords[i] = table[semantics[i].semantic - firstSemantic];
+            const auto index = attribWords[i] & 0x1fu;
+            if (index >= ShaderRecompiler::ShaderVertexStageInfo::MaxResources) throw std::runtime_error("AGC graphics: vertex buffer index exceeds the supported domain");
+            firstIndex = std::min(firstIndex, index);
+            lastIndex = std::max(lastIndex, index);
+        }
+        if (shader.num_input_semantics != 0) {
+            struct SharpsStorage {};
+            auto& sharps = HostThreadLocal<std::vector<std::uint32_t>, SharpsStorage>();
+            readWords(bufferTableAddr, 16u, firstIndex, lastIndex, sharps, [&](std::uint32_t index) { return std::any_of(attribWords.begin(), attribWords.begin() + shader.num_input_semantics, [&](std::uint32_t word) { return (word & 0x1fu) == index; }); });
+            for (std::uint32_t i = 0; i < shader.num_input_semantics; ++i) {
+                const auto index = attribWords[i] & 0x1fu;
+                std::copy_n(sharps.begin() + static_cast<std::ptrdiff_t>((index - firstIndex) * 4u), 4, sharpWords[i].begin());
+            }
+        }
+    }
     for (std::uint32_t i = 0; i < shader.num_input_semantics; ++i) {
         const auto& semantic = semantics[i];
         if (semantic.static_vb_index == 1 || semantic.static_attribute == 1) throw std::runtime_error("AGC graphics: statically bound vertex attributes are not implemented");
@@ -253,10 +349,9 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
         }
         std::array<std::byte, 4> attribWordBytes{};
         const auto attribWordAddress = attribTableAddr + static_cast<std::uint64_t>(semantic.semantic) * 4u;
-        AgcDriver::GuestMemory::Read(attribWordAddress, attribWordBytes, 4);
+        std::memcpy(attribWordBytes.data(), &attribWords[i], 4);
         record(attribWordAddress, attribWordBytes);
-        std::uint32_t attribWord;
-        std::memcpy(&attribWord, attribWordBytes.data(), 4);
+        const std::uint32_t attribWord = attribWords[i];
         const auto index = attribWord & 0x1fu;
         const auto format = (attribWord >> 5u) & 0x1ffu;
         const auto offset = (attribWord >> 14u) & 0xfffu;
@@ -264,7 +359,7 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
         if (index >= ShaderRecompiler::ShaderVertexStageInfo::MaxResources) throw std::runtime_error("AGC graphics: vertex buffer index exceeds the supported domain");
         std::array<std::byte, 16> sharpBytes{};
         const auto sharpAddress = bufferTableAddr + static_cast<std::uint64_t>(index) * 16u;
-        AgcDriver::GuestMemory::Read(sharpAddress, sharpBytes, 4);
+        std::memcpy(sharpBytes.data(), sharpWords[i].data(), 16);
         record(sharpAddress, sharpBytes);
         std::array<std::uint32_t, 4> sharp{};
         std::memcpy(sharp.data(), sharpBytes.data(), 16);

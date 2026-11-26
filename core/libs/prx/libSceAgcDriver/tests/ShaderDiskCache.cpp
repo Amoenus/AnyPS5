@@ -1,4 +1,5 @@
 #include "ShaderDiskCache.hpp"
+#include "ImageTableAbi.hpp"
 #include "CacheKey.hpp"
 #include "ShaderCachePack.hpp"
 #include "VertexInputSpecialization.hpp"
@@ -41,6 +42,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include "prx/libc/include/General.hpp"
 #endif
 
 namespace {
@@ -59,6 +63,56 @@ void setEnvironment(const char* name, const std::string& value) {
 #endif
 }
 
+void clearEnvironment(const char* name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+void setPathEnvironment(const char* name, const std::filesystem::path& value) {
+#ifdef _WIN32
+    _wputenv_s(std::filesystem::path(name).wstring().c_str(), value.wstring().c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+#ifdef _WIN32
+void verifyHostStandardError() {
+    const auto directory = std::filesystem::temp_directory_path() / ("aps5-shader-host-stderr-" + std::to_string(std::random_device{}()));
+    setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
+    setPathEnvironment("ANYPS5_SHADER_CACHE_DIR", directory);
+    int capture[2], guest[2];
+    require(::_pipe(capture, 65536, _O_BINARY) == 0, "cannot create host capture");
+    require(::_pipe(guest, 65536, _O_BINARY) == 0, "cannot create guest capture");
+    const int original = ::_dup(2);
+    require(original >= 0 && ::_dup2(capture[1], 2) == 0, "cannot capture initial stderr");
+    const int saved = ::_dup(2);
+    require(saved >= 0 && AdoptHostStandardStream_nid_no_patch(2, saved), "cannot preserve host stderr");
+    require(::_dup2(guest[1], 2) == 0, "cannot redirect guest stderr");
+    require(ShaderDiskCache::Enabled(), "shader disk cache was disabled");
+    ShaderDiskCache::Shutdown();
+    std::fflush(stderr);
+    std::fflush(HostStandardErrorFile_nid_no_patch());
+    require(::_dup2(original, 2) == 0, "cannot restore stderr");
+    ::_close(original);
+    DWORD hostBytes = 0, guestBytes = 0;
+    require(::PeekNamedPipe(reinterpret_cast<HANDLE>(::_get_osfhandle(capture[0])), nullptr, 0, nullptr, &hostBytes, nullptr) != 0, "cannot inspect host capture");
+    require(::PeekNamedPipe(reinterpret_cast<HANDLE>(::_get_osfhandle(guest[0])), nullptr, 0, nullptr, &guestBytes, nullptr) != 0, "cannot inspect guest capture");
+    std::string host(hostBytes, '\0');
+    if (hostBytes != 0) require(::_read(capture[0], host.data(), hostBytes) == static_cast<int>(hostBytes), "cannot read host capture");
+    ::_close(capture[0]);
+    ::_close(capture[1]);
+    ::_close(guest[0]);
+    ::_close(guest[1]);
+    std::filesystem::remove_all(directory);
+    require(guestBytes == 0, "shader cache diagnostic entered the guest stderr pipe");
+    require(host.find("[shader-disk-cache]") != std::string::npos, "shader cache diagnostic did not reach host stderr");
+}
+#endif
+
 void removeCacheDirectory(const std::filesystem::path& directory) {
     std::error_code error;
 #ifdef _WIN32
@@ -68,6 +122,7 @@ void removeCacheDirectory(const std::filesystem::path& directory) {
     }
     constexpr auto dispositionInfoEx = static_cast<FILE_INFO_BY_HANDLE_CLASS>(21);
     constexpr DWORD deleteFile = 0x00000001, posixSemantics = 0x00000002;
+    bool pendingDeletes = false;
     for (const auto& file : files) {
         const auto handle = CreateFileW(file.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -75,11 +130,26 @@ void removeCacheDirectory(const std::filesystem::path& directory) {
         require(!error, "cannot open " + file.string() + " for deletion: " + error.message());
         struct Close { HANDLE file; ~Close() { CloseHandle(file); } } close{handle};
         DWORD flags = deleteFile | posixSemantics;
-        if (!SetFileInformationByHandle(handle, dispositionInfoEx, &flags, sizeof(flags))) error.assign(static_cast<int>(GetLastError()), std::system_category());
+        if (!SetFileInformationByHandle(handle, dispositionInfoEx, &flags, sizeof(flags))) {
+            const DWORD failure = GetLastError();
+            FILE_DISPOSITION_INFO disposition{TRUE};
+            if (failure == ERROR_INVALID_PARAMETER) {
+                SetFileInformationByHandle(handle, FileDispositionInfo, &disposition, sizeof(disposition));
+                pendingDeletes = true;
+            } else {
+                error.assign(static_cast<int>(failure), std::system_category());
+            }
+        }
         require(!error, "cannot delete " + file.string() + ": " + error.message());
     }
-#endif
     std::filesystem::remove_all(directory, error);
+    if (error && pendingDeletes) {
+        std::fprintf(stderr, "shader disk cache: %s has no POSIX delete (ERROR_INVALID_PARAMETER); entries the cache still maps cannot be deleted there, so the directory was left behind\n", directory.string().c_str());
+        return;
+    }
+#else
+    std::filesystem::remove_all(directory, error);
+#endif
     require(!error, "cannot remove the shader cache test directory: " + error.message());
 }
 
@@ -98,7 +168,10 @@ bool sameBindings(const std::vector<DescriptorBinding>& left, const std::vector<
 void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShaderArtifact& right, const char* what) {
     const std::string prefix = std::string(what) + ": ";
     require(left.spirv == right.spirv, prefix + "SPIR-V differs");
+    require(left.meshWindowBuffer == right.meshWindowBuffer, prefix + "mesh window buffer flags differ");
     require(left.bdaAbiVersion == right.bdaAbiVersion, prefix + "BDA ABI version differs");
+    require(left.descriptorFaults == right.descriptorFaults, prefix + "descriptor fault count differs");
+    require(left.windowLaneGuards == right.windowLaneGuards, prefix + "window lane guards differ");
     require(left.runtimeAbiVersion == right.runtimeAbiVersion, prefix + "runtime ABI version differs");
     require(left.memoryOffsetDword == right.memoryOffsetDword, prefix + "memory offset differs");
     require(left.shaderDataDwords == right.shaderDataDwords && left.imageMetadataDword == right.imageMetadataDword && left.runtimeImageCount == right.runtimeImageCount && left.runtimeImageResources == right.runtimeImageResources, prefix + "compact data layout differs");
@@ -111,6 +184,8 @@ void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShade
     require(left.parameterExports == right.parameterExports, prefix + "parameter exports differ");
     require(left.stencilReferences == right.stencilReferences, prefix + "stencil reference set differs");
     require(left.stencilReplaySafe == right.stencilReplaySafe, prefix + "stencil replay proof differs");
+    require(left.bdaWrites == right.bdaWrites, prefix + "BDA write flag differs");
+    require(left.layerReplaySafe == right.layerReplaySafe, prefix + "layer replay proof differs");
     require(left.stencilReferenceDword == right.stencilReferenceDword, prefix + "stencil replay push offset differs");
     require(left.fragmentParameters.size() == right.fragmentParameters.size(), prefix + "fragment parameter count differs");
     for (std::size_t i = 0; i < left.fragmentParameters.size(); ++i) {
@@ -132,6 +207,7 @@ void requireSameResult(const RecompileResult& left, const RecompileResult& right
     require(left.shaderDataUserWords == right.shaderDataUserWords, prefix + "shader-data user words differ");
     require(left.imageTableRanges == right.imageTableRanges && left.imageTableShader == right.imageTableShader && left.imageTableFaults == right.imageTableFaults && left.imageTablePoison.size() == right.imageTablePoison.size(), prefix + "image table invocation data differs");
     require(left.imageTableReadRanges == right.imageTableReadRanges, prefix + "image table read ranges differ");
+    require(left.userDataRegisterReads == right.userDataRegisterReads, prefix + "user data register read mask differs");
     for (std::size_t i = 0; i < left.imageTablePoison.size(); ++i) {
         const auto& a = left.imageTablePoison[i];
         const auto& b = right.imageTablePoison[i];
@@ -144,6 +220,7 @@ void requireSameResult(const RecompileResult& left, const RecompileResult& right
         require(a.location == b.location && a.components == b.components && a.resource.fields == b.resource.fields && a.fetchIndex == b.fetchIndex && a.formatComponents == b.formatComponents, prefix + "vertex attribute differs");
     }
     require(left.barycentricEmulation.active == right.barycentricEmulation.active && left.barycentricEmulation.smooth == right.barycentricEmulation.smooth && left.barycentricEmulation.linear == right.barycentricEmulation.linear, prefix + "barycentric emulation differs");
+    require(left.meshBarycentrics == right.meshBarycentrics, prefix + "mesh barycentric layout differs");
 }
 
 void requireSameVariant(const CompiledVariant& left, const CompiledVariant& right, const char* what) {
@@ -180,7 +257,7 @@ DescriptorBinding sampleBinding(std::uint32_t seed) {
     binding.samplerCoordinatesIgnored = {false, seed % 2 == 0, true};
     binding.imageUnnormalized = {true, false, seed % 2 == 0};
     binding.imageUnnormalizedBaseLevel = {false, true, seed % 3 == 0};
-    binding.imageSamplers = {0x5u, 0u, 0x80000000u};
+    binding.imageSamplers = {0x5u, 0u, 0x8000000080000000u};
     binding.bufferRead = {true, false, false, true, true, false};
     binding.bufferExtent = {32, 0, 16, 4096, 8, 0};
     return binding;
@@ -188,6 +265,7 @@ DescriptorBinding sampleBinding(std::uint32_t seed) {
 
 RecompileResult sampleResult() {
     RecompileResult result;
+    result.meshWindowBuffer = true;
     std::vector<std::uint32_t> words(1000);
     for (std::size_t i = 0; i < words.size(); ++i) words[i] = static_cast<std::uint32_t>(i * 2654435761u);
     words[0] = 0x07230203u;
@@ -199,6 +277,8 @@ RecompileResult sampleResult() {
     result.pushConstants = {std::byte{1}, std::byte{0xff}, std::byte{0}, std::byte{0x80}, std::byte{7}};
     result.readsDepthRemapPush = true;
     result.bdaAbiVersion = 3;
+    result.descriptorFaults = 2;
+    result.windowLaneGuards = 7u;
     result.memoryOffsetDword = 7;
     result.hostSubgroupSize = 32;
     result.fullSubgroups = true;
@@ -220,16 +300,20 @@ RecompileResult sampleResult() {
     result.fragmentParameters = {{0, 1, true, false, true}, {2, 3, false, true}};
     result.stencilReferences = {0u, 17u, 255u};
     result.stencilReplaySafe = true;
+    result.bdaWrites = true;
+    result.layerReplaySafe = true;
     result.stencilReferenceDword = 23u;
     result.poisonedSrtReads = 3;
     result.shaderDataUserWords = {2u, 0xffffffffu, 9u};
     result.barycentricEmulation = {true, false, true};
+    result.meshBarycentrics = MeshBarycentricLayout{{true, true, false}, {FragmentParameter{0, 2, false, true}, FragmentParameter{3, 3, false, false}}};
     result.variantId = 99;
     result.imageTablePoison = {{{1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u}, 8u, 2u, 6u}, {{9u, 0u, 0u, 0u, 0u, 0u, 0u, 0u}, 4u, 0xffffffffu, 19u}};
     result.imageTableRanges = {{0x1000u, 0x200u}, {0x5000000000ull, 48u}};
     result.imageTableReadRanges = {{{0x1000u, 32u}, {0x1040u, 32u}}, {}, {{0x5000000000ull, 16u}}};
     result.imageTableShader = 0x80003aa700ull;
     result.imageTableFaults = 3u;
+    result.userDataRegisterReads = (std::uint64_t{1} << 63u) | (std::uint64_t{1} << 32u) | 0x25u;
     return result;
 }
 
@@ -278,15 +362,25 @@ CompiledVariant sampleVariant() {
     image.cubeFaceCompatible = false;
     image.flatVolumeCompatible = false;
     image.singleMipPlaneBiasCompatible = true;
+    image.volumeArraySampleCompatible = true;
     image.flatLineCompatible = false;
     image.flatVolumeLineCompatible = false;
+    image.dimensionQueryOnly = false;
+    image.sampledOnly = false;
     image.foldTexelOffsetsOnly = true;
+    image.remappedDepth1D = true;
+    image.gathered = true;
+    image.layerRowsCompatible = false;
+    image.layerRows = true;
+    image.maxArrayLayers = 0x01020304u;
+    image.optionalDescriptor = true;
     image.byElements = 4;
     image.byComponents = 1;
     image.emulatedCompare = 0x1a07u;
     image.table = 0;
     image.tableOperation = TableOperation::Unsupported;
     image.levelUses = ImageLevelUseQuery | ImageLevelUseMipLoad;
+    image.targetMerge = true;
     info.info.images = {image};
     ResourceMaterializer::PrepareImageModes(info.info);
     info.info.samplers = {{7, 0x10, 3, true, false, SamplerUseExplicitLod | SamplerUseGather, true, 1}};
@@ -369,6 +463,13 @@ void verifyResultRoundTrip() {
     require(ShaderDiskCache::DecodeResult(bytes, decoded), "an encoded result does not decode");
     requireSameResult(result, decoded, "result round trip");
     require(decoded.variantId == 0 && !decoded.cacheHit, "the per-process fields were stored");
+    auto memoized = result;
+    memoized.drawKeyMemo.words.store(std::make_shared<const std::vector<std::uint32_t>>(std::vector<std::uint32_t>{1u, 2u, 3u}));
+    std::vector<std::byte> memoizedBytes;
+    ShaderDiskCache::EncodeResult(memoized, memoizedBytes);
+    require(memoizedBytes == bytes, "the draw key memo was stored");
+    RecompileResult memoizedDecoded;
+    require(ShaderDiskCache::DecodeResult(memoizedBytes, memoizedDecoded) && !memoizedDecoded.drawKeyMemo.words.load(), "a decoded result has a draw key memo");
     for (std::size_t size = 0; size < bytes.size(); size += size < 256 ? 1 : 97) {
         RecompileResult partial;
         require(!ShaderDiskCache::DecodeResult(std::span(bytes).first(size), partial), "a result truncated to " + std::to_string(size) + " bytes decodes");
@@ -385,6 +486,43 @@ void verifyResultRoundTrip() {
     bytes.clear();
     ShaderDiskCache::EncodeResult(incompatible, bytes);
     require(!ShaderDiskCache::DecodeResult(bytes, decoded), "an incompatible runtime ABI result decodes");
+}
+
+void verifyElementFlags() {
+    ElementFlags flags;
+    flags.reserve(256);
+    require(flags.empty(), "reserving element flags changed their size");
+    std::vector<bool> expected;
+    for (std::size_t index = 0; index < 70; ++index) {
+        flags.push_back(index % 3 == 0);
+        expected.push_back(index % 3 == 0);
+        require(flags == expected, "element flags differ from a vector after " + std::to_string(index + 1) + " entries");
+    }
+    flags.reserve(512);
+    const auto copy = flags;
+    require(copy == flags && copy.size() == 70 && copy.at(69) && !copy.at(68), "a copy of spilled element flags differs");
+    require(std::count(flags.begin(), flags.end(), true) == 24, "spilled element flags do not iterate");
+    auto writable = flags;
+    writable[69] = false;
+    writable.back().flip();
+    writable[0] = writable[1];
+    require(writable.size() == 70 && writable.back() && !writable[0] && writable[3], "a write through a spilled flag was lost");
+    writable.resize(3);
+    require(writable == std::vector<bool>{false, false, false}, "shrinking spilled element flags kept the wrong entries");
+    writable.resize(5, true);
+    writable[1] = true;
+    writable.back().flip();
+    require(writable == std::vector<bool>{false, true, false, true, false}, "a write through an inline flag was lost");
+    auto result = sampleResult();
+    result.bindings[1].bufferWritten = flags;
+    std::vector<std::byte> bytes;
+    ShaderDiskCache::EncodeResult(result, bytes);
+    RecompileResult decoded;
+    require(ShaderDiskCache::DecodeResult(bytes, decoded) && decoded.bindings[1].bufferWritten == expected, "spilled element flags do not round trip");
+    flags.assign(3, true);
+    require(flags == std::vector<bool>{true, true, true}, "assigned element flags kept spilled entries");
+    flags.clear();
+    require(flags.empty() && flags == ElementFlags{}, "cleared element flags are not empty");
 }
 
 void verifyEntryRoundTrip() {
@@ -452,6 +590,62 @@ std::vector<std::byte> packBytes(const std::vector<std::pair<std::vector<std::by
         at += entry.size();
     }
     return bytes;
+}
+
+void verifyPrebuiltPackOwnership(const std::filesystem::path& directory) {
+    using namespace ShaderRecompiler::ShaderDiskCache;
+    SampleRequest sample;
+    const auto key = sample.Key();
+    const auto variant = sampleVariant();
+    const auto path = directory / "ownership.pack";
+    require(WriteFileAtomically(path, packBytes({{key, EncodeEntry(key, variant)}})), "cannot write the ownership test pack");
+    CompiledVariant first, second;
+    PackLoadTimings timings;
+    const std::uint32_t* words = nullptr;
+    {
+        CachePack pack(path);
+        require(pack.Valid(), "the ownership test pack is invalid");
+        require(pack.Load(key, first, timings) == LoadStatus::Loaded, "cannot load the first packed variant");
+        require(pack.Load(key, second, timings) == LoadStatus::Loaded, "cannot load the second packed variant");
+        words = first.artifact.spirv.Words().data();
+        require(!first.artifact.spirv.empty() && words == second.artifact.spirv.Words().data(), "packed SPIR-V was copied instead of sharing its mapping");
+    }
+    requireSameVariant(variant, first, "packed variant outlives its pack");
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION region{};
+    require(VirtualQuery(words, &region, sizeof(region)) == sizeof(region) && region.Type == MEM_MAPPED, "packed SPIR-V lost its mapping after pack destruction");
+#endif
+    auto edited = first.artifact.spirv;
+    edited[0] ^= 1u;
+    require(edited.Words().data() != words && edited.Words()[0] != first.artifact.spirv.Words()[0], "editing packed SPIR-V modified the shared mapping");
+    first = {};
+    requireSameVariant(variant, second, "last packed variant retains its mapping");
+    std::vector<std::byte> published;
+    require(ReadWholeFile(path, published) && published == packBytes({{key, EncodeEntry(key, variant)}}), "editing packed SPIR-V modified the cache file");
+    second = {};
+#ifdef _WIN32
+    require(VirtualQuery(words, &region, sizeof(region)) == sizeof(region) && region.State == MEM_FREE, "the final packed variant did not release its mapping");
+#endif
+    const auto offset = sizeof(PackHeader) + sizeof(PackRecord);
+    published.insert(published.begin() + offset, std::byte{});
+    PackHeader header;
+    PackRecord record;
+    std::memcpy(&header, published.data(), sizeof(header));
+    std::memcpy(&record, published.data() + sizeof(header), sizeof(record));
+    ++header.fileBytes;
+    ++record.offset;
+    std::memcpy(published.data() + sizeof(header), &record, sizeof(record));
+    header.indexHash = ShaderRecompiler::HashBytes(std::span<const std::byte>(published).subspan(sizeof(header), sizeof(record)));
+    std::memcpy(published.data(), &header, sizeof(header));
+    require(WriteFileAtomically(path, published), "cannot publish an unaligned packed entry");
+    {
+        CachePack pack(path);
+        require(pack.Valid(), "an unaligned packed entry was rejected");
+        require(pack.Load(key, first, timings) == LoadStatus::Loaded && pack.Load(key, second, timings) == LoadStatus::Loaded, "an unaligned packed entry did not load");
+        require(first.artifact.spirv.Words().data() != second.artifact.spirv.Words().data(), "an unaligned packed module did not use aligned owned storage");
+    }
+    requireSameVariant(variant, first, "unaligned packed variant outlives its pack");
+    requireSameVariant(variant, second, "second unaligned packed variant outlives its pack");
 }
 
 void refreshIndexHash(std::vector<std::byte>& pack, std::size_t entries) {
@@ -594,6 +788,43 @@ void verifyPrebuiltAcrossProcesses(const char* self, const std::filesystem::path
     require(std::system(command.c_str()) == 0, "the prebuilt loading process failed");
 }
 
+void verifyPrebuiltDiscovery(std::string_view layout, bool seed) {
+    using namespace ShaderRecompiler::ShaderDiskCache;
+    require(layout == "pack" || layout == "loose" || layout == "versioned" || layout == "file" || layout == "empty" || layout == "missing", "unknown prebuilt discovery layout");
+    Shutdown();
+    SampleRequest sample = prebuiltSample();
+    const auto key = sample.Key();
+    const auto variant = sampleVariant();
+    if (seed) {
+        const auto directory = ShaderRecompiler::ShaderCacheDirectory() / "prebuilt";
+        const auto entry = EncodeEntry(key, variant);
+        if (layout == "pack") {
+            auto otherKey = key;
+            otherKey.back() ^= std::byte{1};
+            require(WriteFileAtomically(directory / "a.pack", packBytes({{key, entry}})), "cannot seed the matching prebuilt pack");
+            require(WriteFileAtomically(directory / "z.pack", packBytes({{otherKey, EncodeEntry(otherKey, variant)}})), "cannot seed the other prebuilt pack");
+        } else if (layout == "loose") {
+            require(WriteFileAtomically(directory / EntryName(key), entry), "cannot seed the loose prebuilt entry");
+        } else if (layout == "versioned") {
+            require(WriteFileAtomically(directory / EntryDirectory().filename() / EntryName(key), entry), "cannot seed the versioned prebuilt entry");
+        } else if (layout == "file") {
+            require(WriteFileAtomically(directory, packBytes({{key, entry}})), "cannot seed the direct prebuilt pack");
+        } else if (layout == "empty") {
+            require(WriteFileAtomically(directory / "ignored.txt", entry), "cannot seed the ignored prebuilt file");
+        }
+        std::cout << "prebuilt discovery seeded " << layout << '\n';
+        return;
+    }
+    CompiledVariant loaded;
+    const bool expected = layout != "empty" && layout != "missing";
+    require(Load(key, loaded) == expected, "prebuilt discovery returned the wrong result for " + std::string(layout));
+    if (expected) requireSameVariant(variant, loaded, "prebuilt discovery");
+    const auto totals = Totals();
+    require(totals.prebuiltHits == (expected ? 1u : 0u) && totals.hits == 0 && totals.writes == 0 && Writers() == 0,
+            "prebuilt discovery did not remain a read-only prebuilt lookup");
+    std::cout << "prebuilt discovery verified " << layout << '\n';
+}
+
 void verifyArtifactStorageIsolation() {
     SampleRequest sample;
     const auto key = sample.Key();
@@ -609,6 +840,41 @@ void verifyArtifactStorageIsolation() {
     result.vertexInputs[0].components = 2;
     variant.artifact = result;
     require(ShaderDiskCache::EncodeEntry(key, variant) != before, "the stored artifact ignores vertex input metadata");
+}
+
+void verifyMeshBarycentricRequestSerialization() {
+    for (const auto& layout : {std::optional<MeshBarycentricLayout>{}, std::optional<MeshBarycentricLayout>{MeshBarycentricLayout{{true, true, true}, {FragmentParameter{0, 2, false, true}, FragmentParameter{4, 4, false, false}}}}}) {
+        SampleRequest sample;
+        sample.request.shader.stage = ShaderStage::Mesh;
+        sample.request.context.compute.reset();
+        sample.request.graphics = GraphicsCompileContext{0, {}, MeshConfiguration{4u, 4u, 12u, 12u, 4u, 64u, 1024u, 0u, 4u}, std::nullopt, {}, layout};
+        const auto text = RequestSerializer{}.Serialize(sample.request);
+        const auto restored = RequestSerializer{}.Deserialize(text);
+        require(restored.request.graphics.has_value() && restored.request.graphics->meshBarycentrics == layout, "a captured mesh request lost its barycentric layout");
+    }
+}
+
+void verifyHashBytes() {
+    constexpr std::array<std::array<std::uint64_t, 3>, 8> expected{{
+        {0u, 0x840bc8c130ceedb6ull, 0x7e0452fcbd09083dull},
+        {1u, 0x2bb08a6e94d5ffabull, 0xe3641007415d06d1ull},
+        {7u, 0xd0ec3c76aa3e2e44ull, 0x345f41799c18a2b1ull},
+        {8u, 0xa0c4caa4a9025c5aull, 0xa3829d1fdbcf4aebull},
+        {9u, 0x5976a0604c948110ull, 0xeaeed8d5500a97a2ull},
+        {15u, 0x55bbcd3fcf37abd7ull, 0x420b82b607b1d4f9ull},
+        {16u, 0x731681f2dbac64e8ull, 0x4a9c1f25580b95a4ull},
+        {17u, 0x31a156cfac950b79ull, 0xac0b4579d052a463ull},
+    }};
+    std::array<std::byte, 17> bytes{};
+    for (std::size_t index = 0; index < bytes.size(); ++index) bytes[index] = static_cast<std::byte>(index);
+    for (const auto& sample : expected) {
+        const auto input = std::span<const std::byte>(bytes).first(sample[0]);
+        const auto hashes = ShaderRecompiler::ShaderDiskCache::PackKeyHash(input);
+        require(hashes == std::array{sample[1], sample[2]}, "paired cache hashes changed");
+        require(ShaderRecompiler::HashBytes(input, 0x5eed0001ull) == sample[1] && ShaderRecompiler::HashBytes(input, 0x5eed0002ull) == sample[2], "scalar cache hashes changed");
+    }
+    require(ShaderRecompiler::HashBytes({}) == 0u, "empty cache checksum changed");
+    require(ShaderRecompiler::ShaderDiskCache::EntryName(bytes) == "31a156cfac950b79ac0b4579d052a463.bin", "cache entry name changed");
 }
 
 void verifyKeySensitivity() {
@@ -653,8 +919,17 @@ void verifyKeySensitivity() {
     changes("the narrow subgroup clock", [](SampleRequest& sample) { sample.request.target.narrowSubgroupClock = true; });
     changes("f64 denormal preservation", [](SampleRequest& sample) { sample.request.target.float64DenormPreserve = true; });
     changes("f16 denormal preservation", [](SampleRequest& sample) { sample.request.target.float16DenormPreserve = true; });
+    changes("f32 denormal preservation", [](SampleRequest& sample) { sample.request.target.float32DenormPreserve = true; });
     changes("spanned waves", [](SampleRequest& sample) { sample.request.target.spannedWaves = true; });
     changes("robust buffer access 2", [](SampleRequest& sample) { sample.request.target.robustBufferAccess2 = true; });
+    changes("exact robust loads", [](SampleRequest& sample) { sample.request.target.exactRobustLoads = true; });
+    changes("wave LDS memory barriers", [](SampleRequest& sample) { sample.request.target.waveLdsMemoryBarriers = true; });
+    changes("device-scope LDS memory barriers", [](SampleRequest& sample) { sample.request.target.deviceScopeLdsMemoryBarriers = true; });
+    changes("LDS lock fences", [](SampleRequest& sample) { sample.request.target.ldsLockFences = true; });
+    changes("device-atomic workgroup memory barriers", [](SampleRequest& sample) { sample.request.target.deviceAtomicWorkgroupMemoryBarriers = true; });
+    changes("mesh window buffers", [](SampleRequest& sample) { sample.request.target.meshWindowBuffer = true; });
+    changes("mesh function inlining", [](SampleRequest& sample) { sample.request.target.meshInlineFunctions = true; });
+    changes("spanned shuffles through workgroup memory", [](SampleRequest& sample) { sample.request.target.spannedShuffleThroughMemory = true; });
     changes("the workgroup size limit", [](SampleRequest& sample) { sample.request.target.maxWorkgroupSize[2] = 128; });
     changes("the invocation limit", [](SampleRequest& sample) { sample.request.target.maxWorkgroupInvocations = 512; });
     changes("the shared memory limit", [](SampleRequest& sample) { sample.request.target.maxWorkgroupSharedMemoryBytes = 32768; });
@@ -678,6 +953,40 @@ void verifyKeySensitivity() {
         const auto changed = withMode(mode);
         require(changed.first != astro.first && changed.second != astro.second, std::string("the key ignores ") + what);
     }
+
+    const auto meshKeys = [&](const std::optional<MeshBarycentricLayout>& layout) {
+        SampleRequest sample;
+        sample.request.shader.stage = ShaderStage::Mesh;
+        sample.request.context.compute.reset();
+        sample.request.graphics = GraphicsCompileContext{0, {}, MeshConfiguration{4u, 4u, 12u, 12u, 4u, 64u, 1024u, 0u, 4u}, std::nullopt, {}, layout};
+        return std::pair{sample.Key(), RecompileCacheKey::ContextHash(sample.request)};
+    };
+    const std::vector<std::pair<const char*, std::optional<MeshBarycentricLayout>>> meshLayouts{
+        {"no mesh barycentric layout", std::nullopt},
+        {"smooth mesh barycentrics", MeshBarycentricLayout{{true, true, false}, {}}},
+        {"linear mesh barycentrics", MeshBarycentricLayout{{true, false, true}, {}}},
+        {"smooth and linear mesh barycentrics", MeshBarycentricLayout{{true, true, true}, {}}},
+        {"a per-vertex mesh parameter", MeshBarycentricLayout{{true, true, false}, {FragmentParameter{0, 0, false, true}}}},
+        {"another per-vertex mesh parameter source", MeshBarycentricLayout{{true, true, false}, {FragmentParameter{0, 1, false, true}}}},
+        {"a flat mesh parameter", MeshBarycentricLayout{{true, true, false}, {FragmentParameter{0, 0, false, false}}}},
+    };
+    for (std::size_t i = 0; i < meshLayouts.size(); ++i) {
+        require(meshKeys(meshLayouts[i].second) == meshKeys(meshLayouts[i].second), std::string("the key of ") + meshLayouts[i].first + " is not deterministic");
+        for (std::size_t j = i + 1; j < meshLayouts.size(); ++j) {
+            const auto left = meshKeys(meshLayouts[i].second);
+            const auto right = meshKeys(meshLayouts[j].second);
+            require(left.first != right.first && left.second != right.second, std::string("the mesh key confuses ") + meshLayouts[i].first + " with " + meshLayouts[j].first);
+        }
+    }
+
+    const auto pixelKeys = [&](bool meshPath) {
+        SampleRequest sample;
+        sample.request.shader.stage = ShaderStage::Fragment;
+        sample.request.context.compute.reset();
+        sample.request.graphics = GraphicsCompileContext{0, {}, meshPath ? std::optional(MeshConfiguration{4u, 4u, 12u, 12u, 4u, 64u, 1024u, 0u, 4u}) : std::nullopt, std::nullopt, {}, std::nullopt};
+        return std::pair{sample.Key(), RecompileCacheKey::ContextHash(sample.request)};
+    };
+    require(pixelKeys(true).first != pixelKeys(false).first && pixelKeys(true).second != pixelKeys(false).second, "a pixel shader on the mesh path shares a key with the vertex path");
 
     SampleRequest moved;
     moved.userData[0] ^= 0x10000u;
@@ -745,16 +1054,23 @@ int runLargeFileWrite() {
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     std::filesystem::create_directories(directory, error);
+    struct Cleanup {
+        std::filesystem::path directory;
+        ~Cleanup() {
+            std::error_code error;
+            std::filesystem::remove_all(directory, error);
+        }
+    } cleanup{directory};
     const auto space = std::filesystem::space(directory, error);
     if (error || space.available < size + (std::uintmax_t{1} << 30u)) {
-        std::cout << "skipping: not enough free disk space for a file of more than 2 GiB\n";
+        std::cout << "skipped, the host has not enough free disk space for a file of more than 2 GiB\n";
         return 77;
     }
     std::vector<std::byte> bytes;
     try {
         bytes.resize(size);
     } catch (const std::bad_alloc&) {
-        std::cout << "skipping: cannot allocate a buffer of more than 2 GiB\n";
+        std::cout << "skipped, the host cannot allocate a buffer of more than 2 GiB\n";
         return 77;
     }
     const std::array<std::size_t, 6> samples{0u, (std::size_t{1} << 30u) - 1u, std::size_t{1} << 30u, (std::size_t{2} << 30u) - 1u, std::size_t{2} << 30u, size - 1u};
@@ -771,10 +1087,20 @@ int runLargeFileWrite() {
     }).detach();
     if (result.wait_for(std::chrono::seconds(200)) != std::future_status::ready) {
         std::cerr << "WriteFileAtomically did not return within 200 s for a file of more than 2 GiB\n";
+        std::filesystem::remove_all(directory, error);
+        if (error) std::cerr << "cannot remove the large file test directory: " << error.message() << '\n';
         std::cerr.flush();
         std::_Exit(1);
     }
-    require(result.get(), "cannot write a cache file of more than 2 GiB");
+    if (!result.get()) {
+        std::error_code spaceError;
+        const auto after = std::filesystem::space(directory, spaceError);
+        if (!spaceError && after.available < size) {
+            std::cout << "skipped, the disk filled up while the file was written: " << after.available << " bytes free afterwards, " << space.available << " before\n";
+            return 77;
+        }
+        require(false, "cannot write a cache file of more than 2 GiB (" + std::to_string(space.available) + " bytes free before, " + (spaceError ? spaceError.message() : std::to_string(after.available) + " bytes free after") + ")");
+    }
     require(std::filesystem::file_size(path) == size, "the cache file of more than 2 GiB has the wrong size");
     {
         std::ifstream file(path, std::ios::binary);
@@ -846,6 +1172,13 @@ void verifyAtomicReplacement(const std::filesystem::path& directory) {
         std::vector<std::byte> bytes;
         require(ReadWholeFile(path, bytes) && bytes == original, "cache reader failed while the published entry retained its rename handle");
     }
+    if (PosixReplaceUnsupported(root)) {
+        std::fprintf(stderr, "shader disk cache: %s has no POSIX rename (ERROR_INVALID_PARAMETER), so an entry another reader holds open cannot be replaced there; skipping that case\n", root.string().c_str());
+        require(std::filesystem::remove(path), "cannot remove the cache entry");
+        require(std::filesystem::is_empty(root), "atomic replacement left a temporary file behind");
+        require(std::filesystem::remove(root), "cannot remove the empty replacement directory");
+        return;
+    }
 #endif
     {
         Reader old(path);
@@ -883,6 +1216,12 @@ void verifyStore() {
 
     std::vector<std::byte> file;
     require(ReadWholeFile(path, file), "cannot read the entry back");
+#ifdef _WIN32
+    if (PosixReplaceUnsupported(path.parent_path())) {
+        std::fprintf(stderr, "shader disk cache: %s has no POSIX rename (ERROR_INVALID_PARAMETER), so the entry the cache has mapped cannot be replaced there; skipping the damaged-entry checks\n", path.parent_path().string().c_str());
+        return;
+    }
+#endif
     require(WriteFileAtomically(path, std::span(file).first(file.size() / 2)), "cannot truncate the entry");
     require(!ShaderDiskCache::Load(key, loaded), "a truncated entry loads");
     auto corrupt = file;
@@ -893,6 +1232,66 @@ void verifyStore() {
     ShaderDiskCache::Store(key, variant);
     ShaderDiskCache::Flush();
     require(ShaderDiskCache::Load(key, loaded), "a rewritten entry does not load");
+}
+
+void verifySpecializedStore() {
+    require(ShaderDiskCache::Enabled(), "the disk cache is not enabled");
+    const std::vector<std::byte> key{std::byte{0x73}, std::byte{0x70}, std::byte{0x65}, std::byte{0x63}, std::byte{0x01}};
+    auto other = key;
+    other.back() = std::byte{0x02};
+    const std::vector<std::uint32_t> words{0x07230203u, 0x00010600u, 0u, 16u, 0u, 0x00020011u, 1u};
+    const auto before = ShaderDiskCache::Totals();
+    std::vector<std::uint32_t> loaded;
+    require(!ShaderDiskCache::LoadSpecialized(key, loaded), "a specialized module loads before it was stored");
+    ShaderDiskCache::StoreSpecialized(key, words);
+    ShaderDiskCache::Flush();
+    require(ShaderDiskCache::Totals().specializedWrites == before.specializedWrites + 1, "the store did not write the specialized module");
+    require(ShaderDiskCache::LoadSpecialized(key, loaded) && loaded == words, "a stored specialized module does not load back unchanged");
+    require(!ShaderDiskCache::LoadSpecialized(other, loaded), "another key loads the stored specialized module");
+    const auto after = ShaderDiskCache::Totals();
+    require(after.specializedHits == before.specializedHits + 1 && after.specializedMisses == before.specializedMisses + 2, "the specialized loads were not counted");
+    require(after.writes == before.writes && after.planWrites == before.planWrites, "a specialized module was counted as another entry kind");
+
+    const auto path = ShaderDiskCache::EntryDirectory() / ShaderDiskCache::EntryName(key);
+    std::vector<std::byte> file;
+    require(ReadWholeFile(path, file), "cannot read the specialized entry back");
+#ifdef _WIN32
+    if (PosixReplaceUnsupported(path.parent_path())) return;
+#endif
+    require(WriteFileAtomically(path, std::span(file).first(file.size() - 2)), "cannot truncate the specialized entry");
+    require(!ShaderDiskCache::LoadSpecialized(key, loaded), "a truncated specialized entry loads");
+    auto corrupt = file;
+    corrupt[corrupt.size() - 3] ^= std::byte{0x40};
+    require(WriteFileAtomically(path, corrupt), "cannot damage the specialized entry");
+    require(!ShaderDiskCache::LoadSpecialized(key, loaded), "a corrupt specialized entry loads");
+    require(ShaderDiskCache::Totals().specializedLoadFailures == after.specializedLoadFailures + 2, "the rejected specialized entries were not counted");
+}
+
+const std::vector<std::byte> SwitchedSpecializedKey{std::byte{0x73}, std::byte{0x70}, std::byte{0x65}, std::byte{0x63}, std::byte{0x03}};
+const std::vector<std::uint32_t> SwitchedSpecializedWords{0x07230203u, 0x00010600u, 0u, 16u, 0u, 0x00020011u, 2u};
+
+int runSwitchedSpecialized() {
+    const auto before = ShaderDiskCache::Totals();
+    std::vector<std::uint32_t> loaded;
+    require(!ShaderDiskCache::LoadSpecialized(SwitchedSpecializedKey, loaded), "a specialized module stored without APS5_NO_NAN_PAYLOAD_ELIMINATION loads with it");
+    const auto after = ShaderDiskCache::Totals();
+    require(after.specializedMisses == before.specializedMisses + 1 && after.specializedLoadFailures == before.specializedLoadFailures, "the switched lookup was not a miss");
+    ShaderDiskCache::StoreSpecialized(SwitchedSpecializedKey, std::vector<std::uint32_t>(SwitchedSpecializedWords.begin(), SwitchedSpecializedWords.end() - 1));
+    ShaderDiskCache::Flush();
+    std::cout << "APS5_NO_NAN_PAYLOAD_ELIMINATION=1 keeps its own specialized modules\n";
+    return 0;
+}
+
+void verifySpecializedSwitch(const char* self) {
+    ShaderDiskCache::StoreSpecialized(SwitchedSpecializedKey, SwitchedSpecializedWords);
+    ShaderDiskCache::Flush();
+    setEnvironment("APS5_NO_NAN_PAYLOAD_ELIMINATION", "1");
+    const std::string command = "\"" + std::string(self) + "\" --specialized-switch";
+    const auto status = std::system(command.c_str());
+    clearEnvironment("APS5_NO_NAN_PAYLOAD_ELIMINATION");
+    require(status == 0, "the process with APS5_NO_NAN_PAYLOAD_ELIMINATION=1 failed");
+    std::vector<std::uint32_t> loaded;
+    require(ShaderDiskCache::LoadSpecialized(SwitchedSpecializedKey, loaded) && loaded == SwitchedSpecializedWords, "a run with APS5_NO_NAN_PAYLOAD_ELIMINATION=1 replaced the default specialized module");
 }
 
 void verifyPersist() {
@@ -918,12 +1317,92 @@ void verifyPersist() {
     auto detached = persisted->artifact.spirv;
     detached[0] ^= 1u;
     require(detached[0] != persisted->artifact.spirv[0], "changing a copied mapped module changed its owner");
+#ifdef _WIN32
+    if (PosixReplaceUnsupported(path.parent_path())) {
+        std::fprintf(stderr, "shader disk cache: %s has no POSIX rename (ERROR_INVALID_PARAMETER), so a mapped persisted entry cannot be replaced there; skipping that check\n", path.parent_path().string().c_str());
+        return;
+    }
+#endif
     require(WriteFileAtomically(path, std::vector<std::byte>(64, std::byte{0x5a})), "cannot replace the persisted entry");
     std::error_code error;
     std::filesystem::remove(path, error);
     require(!error, "cannot remove the replaced cache entry");
     requireSameArtifact(variant.artifact, persisted->artifact, "a persisted entry whose file was replaced and removed");
 }
+
+void verifyReleaseMapped() {
+    const std::vector<std::uint32_t> words{0x07230203u, 0x00010000u, 1u, 2u, 3u};
+    const SharedSpirv owned(words);
+    ShaderDiskCache::ReleaseMapped(owned);
+    require(!owned.Mapped() && std::ranges::equal(words, owned.Words()), "releasing an owned module changed its words");
+    SampleRequest sample;
+    const auto key = sample.Key();
+    const auto variant = sampleVariant();
+    const auto persisted = ShaderDiskCache::Persist(key, variant);
+    require(persisted != nullptr, "a persisted entry was not read back");
+#ifdef _WIN32
+    require(persisted->artifact.spirv.Mapped(), "persisted SPIR-V is not a mapped cache entry");
+#endif
+    ShaderDiskCache::ReleaseMapped(persisted->artifact.spirv);
+    ShaderDiskCache::ReleaseMapped(persisted->artifact.spirv);
+    requireSameArtifact(variant.artifact, persisted->artifact, "a mapped entry whose pages were released");
+}
+
+#ifdef _WIN32
+void verifyLongHostPaths() {
+    using namespace ShaderRecompiler::ShaderDiskCache;
+    auto directory = std::filesystem::temp_directory_path() / ("aps5-cache-long-" + std::to_string(std::random_device{}()));
+    require(directory.native().size() < 224, "temporary path is too long for the cache control");
+    directory /= std::wstring(224 - directory.native().size(), L'd');
+    const auto extended = [](const auto& path) { return std::filesystem::path(L"\\\\?\\" + path.native()); };
+    std::filesystem::create_directories(extended(directory));
+    setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
+    setPathEnvironment("ANYPS5_SHADER_CACHE_DIR", directory);
+    std::vector<std::filesystem::path> files;
+    std::filesystem::path entries;
+    struct Cleanup {
+        const std::filesystem::path& directory;
+        const std::vector<std::filesystem::path>& files;
+        const std::filesystem::path& entries;
+        ~Cleanup() {
+            ShaderRecompiler::ShaderDiskCache::Shutdown();
+            std::error_code error;
+            for (const auto& file : files) std::filesystem::remove(std::filesystem::path(L"\\\\?\\" + file.native()), error);
+            if (!entries.empty()) std::filesystem::remove(std::filesystem::path(L"\\\\?\\" + entries.native()), error);
+            std::filesystem::remove(std::filesystem::path(L"\\\\?\\" + directory.native()), error);
+        }
+    } cleanup{directory, files, entries};
+    SampleRequest sample;
+    const auto key = sample.Key();
+    const auto variant = sampleVariant();
+    entries = ShaderDiskCache::EntryDirectory();
+    files.push_back(entries / EntryName(key));
+    files.push_back(entries / "last-used");
+    require(files.front().native().size() >= MAX_PATH, "the cache persistence control did not cross MAX_PATH");
+    const auto persisted = ShaderDiskCache::Persist(key, variant);
+    std::vector<std::byte> published;
+    require(ReadWholeFile(files.front(), published) && published == EncodeEntry(key, variant),
+            "the long-path cache entry was not correctly published before mapping");
+    require(persisted != nullptr, "a long-path cache entry was not persisted and mapped");
+    MEMORY_BASIC_INFORMATION region{};
+    require(VirtualQuery(persisted->artifact.spirv.data(), &region, sizeof(region)) == sizeof(region) && region.Type == MEM_MAPPED,
+            "long-path persisted SPIR-V is not mapped");
+    requireSameVariant(variant, *persisted, "long-path persist round trip");
+    CompiledVariant loaded;
+    require(ShaderDiskCache::Load(key, loaded), "a long-path persisted cache entry did not load");
+    requireSameVariant(variant, loaded, "long-path load round trip");
+    const auto packPath = directory / (std::wstring(75, L'p') + L".pack");
+    files.push_back(packPath);
+    require(WriteFileAtomically(packPath, packBytes({{key, EncodeEntry(key, variant)}})), "cannot publish the long-path cache pack");
+    CachePack pack(packPath);
+    require(pack.Valid(), "a long-path cache pack was rejected: " + pack.Error());
+    PackLoadTimings timings;
+    CompiledVariant decoded;
+    require(pack.Load(key, decoded, timings) == LoadStatus::Loaded, "a long-path cache pack entry did not load");
+    requireSameVariant(variant, decoded, "long-path cache pack round trip");
+    std::cout << "long-path shader cache persistence and pack tests passed\n";
+}
+#endif
 
 struct ComputeRequest {
     std::vector<std::uint32_t> code{0xe0700000u, 0x80000000u, 0xbf810000u};
@@ -1099,6 +1578,10 @@ void verifyInvocationIsolation() {
         require(changed.cacheHit && first.variantId == changed.variantId, "buffer metadata changed the compiled variant");
         if ((descriptor[0] & 3u) == (original[0] & 3u) && (descriptor[1] & 0xffff0000u) == (original[1] & 0xffff0000u) && descriptor[3] == original[3] && (descriptor[0] != 0u || (descriptor[1] & 0xffffu) != 0u)) {
             require(first.spirv.data() == changed.spirv.data() && first.PipelineVariantId() == changed.PipelineVariantId(), "buffer address or size rebuilt the specialized module");
+        }
+        if (descriptor[2] == 0u) {
+            require(first.spirv.data() == changed.spirv.data() && first.PipelineVariantId() == changed.PipelineVariantId(), "a null V# did not specialize with the bound slot's substitute");
+            continue;
         }
         ComputeRequest fresh(false);
         fresh.userData = descriptor;
@@ -1434,6 +1917,7 @@ struct PlanFixture {
     ShaderStage stage = ShaderStage::Compute;
     std::uint64_t codeAddress = 0;
     std::uint32_t waveSize = 64;
+    bool groupId = false;
     std::vector<std::uint32_t> code;
     std::vector<std::uint32_t> userData;
     std::vector<std::pair<std::uint64_t, std::vector<std::uint32_t>>> regions;
@@ -1450,7 +1934,7 @@ struct PlanFixture {
         request.context.waveSize = waveSize;
         request.context.userDataBaseRegister = 0;
         request.context.userData = userData;
-        if (stage == ShaderStage::Compute) request.context.compute = ShaderComputeStageInfo{{waveSize, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+        if (stage == ShaderStage::Compute) request.context.compute = ShaderComputeStageInfo{{waveSize, 1u, 1u}, 0u, {groupId, false, false}, false, 1u};
         request.context.pixel = pixel;
         request.context.memory = memory;
         request.target.vulkanVersion = 0x00401000u;
@@ -1549,6 +2033,61 @@ std::vector<PlanFixture> planFixtures() {
     place(palette, 0x10u, imageWords(PlanTextureAddress));
     place(palette, 0x18u, imageWords(PlanTextureAddress + 0x100u));
     add("pointer image table", 64, {0xf4080200u, 0xfa000000u, 0xf4080700u, 0xfa000010u, 0xf4080800u, 0xfa000020u, 0x7e200500u, 0x8f108210u, 0xf4200444u, 0x20000000u, 0x8711ff11u, 0x000000ffu, 0x8f128511u, 0xf40c0900u, 0x24000040u, 0xf09c0f08u, 0x01090000u, 0xe0700000u, 0x80070000u, 0xbf810000u}, srtPointer, {{PlanSrtAddress, palette}, {PlanMaterialAddress, {0u, 1u, 0u, 1u, 0u, 0u, 0u, 0u}}});
+
+    add("descriptor phi deferred sampler", 32, {0xf40c0200u, 0xfa000000u, 0xf4000400u, 0xfa000050u, 0xbf8cc07fu, 0xbf068010u, 0xbf850003u, 0xf4080500u, 0xfa000020u, 0xbf820002u, 0xf4080500u, 0x20000000u, 0xf4080600u, 0xfa000040u, 0xbf8cc07fu, 0xf09c0f08u, 0x00a20000u, 0xbf8c3f70u, 0xe0700000u, 0x80060000u, 0xbf810000u}, srtPointer, {{PlanSrtAddress, guarded}});
+    std::vector<std::uint32_t> nestedSrt(16u, 0u);
+    place(nestedSrt, 0u, bufferWords(PlanTableAddress, 16u, 4u));
+    place(nestedSrt, 4u, bufferWords(PlanMaterialAddress, 0u, 32u));
+    place(nestedSrt, 8u, bufferWords(PlanOutputAddress, 0u, 4096u));
+    std::vector<std::uint32_t> parents(16u, 0u);
+    place(parents, 2u, {static_cast<std::uint32_t>(PlanPointerAddress), static_cast<std::uint32_t>(PlanPointerAddress >> 32u)});
+    place(parents, 6u, {static_cast<std::uint32_t>(PlanPointerAddress + 256u), static_cast<std::uint32_t>(PlanPointerAddress >> 32u)});
+    std::vector<std::uint32_t> nestedBuffers(128u, 0u);
+    place(nestedBuffers, 40u, bufferWords(PlanPayloadAddress, 64u, 1u));
+    place(nestedBuffers, 104u, bufferWords(PlanPayloadAddress + 64u, 64u, 1u));
+    std::vector<std::uint32_t> nestedImages(32u, 0u);
+    place(nestedImages, 0u, imageWords(PlanTextureAddress));
+    place(nestedImages, 8u, imageWords(PlanTextureAddress + 256u));
+    place(nestedImages, 16u, imageWords(PlanTextureAddress + 256u));
+    place(nestedImages, 24u, imageWords(PlanTextureAddress + 512u));
+    std::vector<std::uint32_t> nestedCode{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080700u, 0xfa000020u, 0xf4080800u, 0xfa000030u,
+    0x8f108302u, 0xf4200444u, 0x20000000u, 0xf4200504u, 0x20000004u, 0x8f128411u, 0x8f148514u,
+    0xf4240b02u, 0x24000008u, 0xf4080616u, 0xfa0000a0u, 0xf42c090cu, 0x28000000u,
+    0x360200bfu, 0x7e020d01u, 0x060202f0u, 0x100202ffu, 0x3c800000u, 0x7e0402ffu, 0x3e000000u, 0xf09c0f08u,
+    0x01090401u, 0x7e120202u, 0x34101286u, 0x4a101100u, 0x34101084u, 0xe0781000u, 0x80070408u, 0xbf810000u,};
+    nestedCode.insert(nestedCode.begin() + 13u, 0x87118311u);
+    nestedCode.insert(nestedCode.begin() + 15u, 0x87148114u);
+    add("nested pointer image table", 64u, std::move(nestedCode), srtPointer, {{PlanSrtAddress, nestedSrt}, {PlanTableAddress, parents}, {PlanPointerAddress, nestedBuffers}, {PlanPayloadAddress, nestedImages}, {PlanMaterialAddress, {0u, 0u, 0u, 1u, 1u, 0u, 1u, 1u}}});
+    fixtures.back().groupId = true;
+    std::vector<std::uint32_t> samplerSrt(20u, 0u);
+    std::copy(nestedSrt.begin(), nestedSrt.end(), samplerSrt.begin());
+    place(samplerSrt, 12u, imageWords(PlanTextureAddress));
+    const std::vector<std::uint32_t> pointClamp{0x92u, 0x400000u, 0u, 0u};
+    const std::vector<std::uint32_t> pointWrap{0u, 0x400000u, 1u << 24u, 0u};
+    std::vector<std::uint32_t> nestedSamplers(32u, 0u);
+    place(nestedSamplers, 0u, pointWrap);
+    place(nestedSamplers, 4u, pointClamp);
+    place(nestedSamplers, 16u, pointClamp);
+    place(nestedSamplers, 20u, pointWrap);
+    std::vector<std::uint32_t> samplerCode{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080700u, 0xfa000020u, 0xf40c0900u, 0xfa000030u,
+    0x8f108302u, 0xf4200444u, 0x20000000u, 0xf4200504u, 0x20000004u, 0x8f128411u, 0x8f148414u,
+    0xf4240b02u, 0x24000008u, 0xf4080616u, 0xfa0000a0u, 0xf428080cu, 0x28000000u,
+    0x360200bfu, 0x7e020d01u, 0x060202f0u, 0x100202ffu, 0x3c800000u, 0x060202f2u, 0x7e0402ffu, 0x3e000000u, 0xf09c0f08u,
+    0x01090401u, 0x7e120202u, 0x34101286u, 0x4a101100u, 0x34101084u, 0xe0781000u, 0x80070408u, 0xbf810000u,};
+    samplerCode.insert(samplerCode.begin() + 13u, 0x87118311u);
+    samplerCode.insert(samplerCode.begin() + 15u, 0x87148114u);
+    add("nested pointer sampler table", 64u, std::move(samplerCode), srtPointer, {{PlanSrtAddress, samplerSrt}, {PlanTableAddress, parents}, {PlanPointerAddress, nestedBuffers}, {PlanPayloadAddress, nestedSamplers}, {PlanMaterialAddress, {0u, 0u, 0u, 1u, 1u, 0u, 1u, 1u}}});
+    fixtures.back().groupId = true;
+    std::vector<std::uint32_t> pointees(128u, 0u);
+    place(pointees, 8u, pointWrap);
+    place(pointees, 72u, pointClamp);
+    std::vector<std::uint32_t> pointerCode{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080700u, 0xfa000020u, 0xf40c0900u, 0xfa000030u,
+    0x8f108302u, 0xf4200444u, 0x20000000u, 0x8f128411u, 0xf4240b02u, 0x24000008u, 0xf4080816u, 0xfa000020u,
+    0x360200bfu, 0x7e020d01u, 0x060202f0u, 0x100202ffu, 0x3c800000u, 0x060202f2u, 0x7e0402ffu, 0x3e000000u, 0xf09c0f08u,
+    0x01090401u, 0x7e120202u, 0x34101286u, 0x4a101100u, 0x34101084u, 0xe0781000u, 0x80070408u, 0xbf810000u,};
+    pointerCode.insert(pointerCode.begin() + 14u, {0xbf068011u, 0xbf840002u, 0xbeac03ffu, 0x000000eau});
+    add("pointer phi sampler table", 64u, std::move(pointerCode), srtPointer, {{PlanSrtAddress, samplerSrt}, {PlanTableAddress, parents}, {PlanPointerAddress, pointees}, {PlanMaterialAddress, {1u, 0u, 0u, 0u, 1u, 0u, 0u, 0u}}});
+    fixtures.back().groupId = true;
 
     PlanFixture fragment;
     fragment.name = "fragment parameters";
@@ -1659,7 +2198,7 @@ IrResourcePlan handBuiltPlan() {
     DescriptorSource table;
     table.dwordCount = 8u;
     table.dwords[0] = &readConst(3);
-    table.tableColumn = TableColumn{2u, 32u, 16u, 4u, 8u, 0xffu, false, true, {KeyDomain{3u, 4u, 16u, false}, KeyDomain{2u, 8u, 4u, true}}, false};
+    table.tableColumn = TableColumn{2u, 32u, 16u, 4u, 8u, 0xffu, false, true, false, {KeyDomain{3u, 4u, 16u, false}, KeyDomain{2u, 8u, 4u, true}}, false};
     table.tableColumn->selected = true;
     table.tableColumn->selection = 2u;
     table.tableColumn->pointerHops = {PointerHop{0u, 0x10u}, PointerHop{8u, 0x20u}};
@@ -1673,7 +2212,7 @@ IrResourcePlan handBuiltPlan() {
     wide.SetImmediateU64(0x8000000000000001ull);
     material.dwords[3] = &wide;
     plan.descriptorSources = {buffer, table, heap, material};
-    plan.controlFlow = {{&condition, {1u, 2u}, {0u}, {}}, {nullptr, {2u}, {3u}, {0u}}, {nullptr, {}, {}, {}}};
+    plan.controlFlow = {{&condition, {1u, 2u}, {0u}, {}, {1u}}, {nullptr, {2u}, {3u}, {0u}, {0u, 1u}}, {nullptr, {}, {}, {}, {}}};
     plan.materializationSources = {0u, 2u};
     plan.srtReads = {{&readConst(4), 2u}, {&pointer, 1u}};
     plan.guardedSrtSlots = {1u};
@@ -1747,7 +2286,7 @@ bool samePlan(const IrResourcePlan& left, const IrResourcePlan& right) {
     for (std::size_t index = 0; index < left.descriptorSources.size(); ++index) {
         const auto& a = left.descriptorSources[index];
         const auto& b = right.descriptorSources[index];
-        if (a.dwordCount != b.dwordCount || a.tableColumn != b.tableColumn || (a.tableColumn.has_value() && (a.tableColumn->keyDomains != b.tableColumn->keyDomains || a.tableColumn->unkeyed != b.tableColumn->unkeyed || a.tableColumn->maxKey != b.tableColumn->maxKey))) return false;
+        if (a.dwordCount != b.dwordCount || a.tableColumn != b.tableColumn || a.requiredBlocks != b.requiredBlocks || (a.tableColumn.has_value() && (a.tableColumn->keyDomains != b.tableColumn->keyDomains || a.tableColumn->unkeyed != b.tableColumn->unkeyed || a.tableColumn->maxKey != b.tableColumn->maxKey))) return false;
         for (std::size_t dword = 0; dword < a.dwords.size(); ++dword) {
             if (!sameValue(a.dwords[dword], b.dwords[dword])) return false;
         }
@@ -1755,7 +2294,7 @@ bool samePlan(const IrResourcePlan& left, const IrResourcePlan& right) {
     for (std::size_t index = 0; index < left.controlFlow.size(); ++index) {
         const auto& a = left.controlFlow[index];
         const auto& b = right.controlFlow[index];
-        if (!sameValue(a.condition, b.condition) || a.successors != b.successors || a.sources != b.sources || a.images != b.images) return false;
+        if (!sameValue(a.condition, b.condition) || a.successors != b.successors || a.sources != b.sources || a.images != b.images || a.flatSlots != b.flatSlots) return false;
     }
     for (std::size_t index = 0; index < left.srtReads.size(); ++index) {
         if (!sameValue(left.srtReads[index].value, right.srtReads[index].value) || left.srtReads[index].flatOffset != right.srtReads[index].flatOffset) return false;
@@ -1812,6 +2351,31 @@ void mutateWords(std::vector<std::uint32_t>& words, std::mt19937& random) {
     }
 }
 
+void verifyNestedResolutionReuse(const IrResourcePlan& plan, const ResourceSnapshot& snapshot) {
+    auto info = plan.info;
+    ResourceMaterializer::PrepareImageModes(info);
+    constexpr std::uint64_t MemoKey = 0x6e6573746564u;
+    const auto first = ResourceMaterializer::ResolveImageTablesShared(info, snapshot, MemoKey);
+    const auto same = ResourceMaterializer::ResolveImageTablesShared(info, snapshot, MemoKey);
+    if (std::getenv("APS5_NO_TABLE_RESOLUTION_REUSE") == nullptr) require(first == same, "nested table resolution: an unchanged snapshot was not shared");
+    auto changed = snapshot;
+    auto codes = changed.tables.nested.at(0).codes.Copy();
+    require(!codes.empty(), "nested table resolution: the child fixture is empty");
+    codes[0] = ImageTableAbi::PoisonCode(ImageTableAbi::OutsideDomainPoison);
+    changed.tables.nested[0].codes = SharedValues<std::uint32_t>(std::move(codes));
+    const auto child = ResourceMaterializer::ResolveImageTablesShared(info, changed, MemoKey);
+    const auto freshChild = ResourceMaterializer::ResolveImageTables(info, changed);
+    require(child->map == freshChild.map && child->map != first->map, "nested table resolution: changing only a child reused the old map");
+    changed = snapshot;
+    auto pointers = changed.tables.tables.at(0).pointers.Copy();
+    require(!pointers.empty(), "nested table resolution: the pointer fixture is empty");
+    pointers[0] += 0x120u;
+    changed.tables.tables[0].pointers = SharedValues<std::uint64_t>(std::move(pointers));
+    const auto pointer = ResourceMaterializer::ResolveImageTablesShared(info, changed, MemoKey);
+    const auto freshPointer = ResourceMaterializer::ResolveImageTables(info, changed);
+    require(pointer->map == freshPointer.map && pointer->map != first->map, "nested table resolution: changing only a pointer reused the old map");
+}
+
 std::size_t verifyRoundTripRuntimes(const IrResourcePlan& plan, const IrResourcePlan& decoded, const PlanFixture& fixture, std::uint32_t seed, const std::string& what) {
     std::mt19937 random(seed);
     std::size_t succeeded = 0;
@@ -1830,6 +2394,7 @@ std::size_t verifyRoundTripRuntimes(const IrResourcePlan& plan, const IrResource
         const auto original = materializePlan(plan, runtime);
         const auto loaded = materializePlan(decoded, runtime);
         require(sameMaterialization(original, loaded), what + ": runtime " + std::to_string(run) + " materialized differently from the decoded plan (" + original.error + " / " + loaded.error + ")");
+        if (run == 0u && original.ok && !original.snapshot.tables.nested.empty()) verifyNestedResolutionReuse(plan, original.snapshot);
         if (original.ok) ++succeeded;
     }
     return succeeded;
@@ -1891,6 +2456,41 @@ void verifyPlanPayloadDamage(const IrResourcePlan& plan, const std::string& what
     require(rejected != 0u, what + ": no damaged plan was rejected");
 }
 
+void verifyArgumentDeltaBounds() {
+    const auto encodeSecond = [](bool linked) {
+        IrResourcePlan plan;
+        plan.valueStorage.Reserve(2);
+        auto& first = *plan.valueStorage.Create(IrOpcode::Void, IrType::U32, 0u);
+        auto& second = *plan.valueStorage.Create(IrOpcode::Void, IrType::U32, 1u);
+        second.AddArgument(linked ? &first : nullptr);
+        return encodedPlan(plan);
+    };
+    const auto linked = encodeSecond(true);
+    const auto unlinked = encodeSecond(false);
+    require(linked.size() == unlinked.size(), "the linked and unlinked argument plans differ in size");
+    std::size_t offset = linked.size();
+    for (std::size_t index = 0; index < linked.size(); ++index) {
+        if (linked[index] == unlinked[index]) continue;
+        require(offset == linked.size() && linked[index] == std::byte{2} && unlinked[index] == std::byte{0}, "the argument code of the second record is not where the plan layout puts it");
+        offset = index;
+    }
+    require(offset != linked.size(), "the linked and unlinked argument plans encode the same bytes");
+    IrResourcePlan decoded;
+    require(ShaderDiskCache::DecodePlan(linked, decoded), "the two-value plan with one argument does not decode");
+    const auto withCode = [&](const std::vector<std::byte>& code) {
+        auto bytes = std::vector<std::byte>(linked.begin(), linked.begin() + static_cast<std::ptrdiff_t>(offset));
+        bytes.insert(bytes.end(), code.begin(), code.end());
+        bytes.insert(bytes.end(), linked.begin() + static_cast<std::ptrdiff_t>(offset) + 1, linked.end());
+        return bytes;
+    };
+    IrResourcePlan rejected;
+    std::vector<std::byte> maximal(9, std::byte{0xff});
+    maximal.push_back(std::byte{0x01});
+    require(!ShaderDiskCache::DecodePlan(withCode(maximal), rejected), "an argument code of 2^64-1 (delta INT64_MAX) from the second record decodes");
+    require(!ShaderDiskCache::DecodePlan(withCode({std::byte{4}}), rejected), "an argument before the first record decodes");
+    require(!ShaderDiskCache::DecodePlan(withCode({std::byte{3}}), rejected), "an argument past the last record decodes");
+}
+
 void verifyMalformedPlans() {
     const auto rejects = [](const std::string& what, const std::function<void(IrResourcePlan&)>& damage) {
         auto plan = handBuiltPlan();
@@ -1911,7 +2511,11 @@ void verifyMalformedPlans() {
     rejects("a uniform fill of five words", [](IrResourcePlan& plan) { plan.uniformFill.fill.words = 5u; });
     rejects("an image table heap past the sources", [](IrResourcePlan& plan) { plan.descriptorSources[1].tableColumn->heapSource = 4u; });
     rejects("an image table key past the sources", [](IrResourcePlan& plan) { plan.descriptorSources[1].tableColumn->keyDomains[1].source = 4u; });
+    rejects("a buffer table with eight dwords", [](IrResourcePlan& plan) { plan.descriptorSources[1].tableColumn->buffer = true; });
+    rejects("an image table cycle", [](IrResourcePlan& plan) { plan.descriptorSources[1].tableColumn->heapSource = 1u; });
+    rejects("an image table parent that is not a buffer", [](IrResourcePlan& plan) { plan.descriptorSources[2].tableColumn = *plan.descriptorSources[1].tableColumn; });
     rejects("an image table selection past the sources", [](IrResourcePlan& plan) { plan.descriptorSources[1].tableColumn->selection = 4u; });
+    rejects("a pointer-keyed table that is not indirect", [](IrResourcePlan& plan) { plan.descriptorSources[1].tableColumn->pointerKeyed = true; });
     auto foreign = handBuiltPlan();
     IrValue stray(IrOpcode::Void, IrType::U32, 99u);
     foreign.srtReads[0].value = &stray;
@@ -1923,6 +2527,37 @@ void verifyMalformedPlans() {
     unblocked.srtReads[0].value = &phi;
     bytes.clear();
     require(!ShaderDiskCache::EncodePlan(unblocked, bytes), "a phi without predecessor blocks was encoded");
+    verifyArgumentDeltaBounds();
+}
+
+void verifySharedPlans() {
+    auto fixture = planFixtures().front();
+    const auto request = fixture.Request(false);
+    const auto plan = GetResourcePlan(request);
+    const std::vector<std::byte> first{std::byte{0x5a}, std::byte{0x01}, std::byte{0x02}};
+    const std::vector<std::byte> second{std::byte{0x5a}, std::byte{0x01}, std::byte{0x03}};
+    for (const auto* key : {&first, &second}) {
+        const auto entry = ShaderDiskCache::EncodePlanEntry(*key, *plan);
+        require(WriteFileAtomically(ShaderDiskCache::EntryDirectory() / ShaderDiskCache::EntryName(*key), entry), "cannot write the shared plan entries");
+    }
+    constexpr std::uint64_t address = 0x7000u;
+    IrResourcePlan expected;
+    require(ShaderDiskCache::DecodePlan(encodedPlan(*plan), expected), "the shared plan fixture does not decode");
+    expected.shaderHash = address;
+    const auto hits = ShaderDiskCache::Totals().planHits;
+    auto a = ShaderDiskCache::LoadSharedPlan(first, address);
+    auto b = ShaderDiskCache::LoadSharedPlan(second, address);
+    require(a != nullptr && b != nullptr && ShaderDiskCache::Totals().planHits == hits + 2u, "the shared plan entries did not load");
+    require(a.get() == b.get(), "two plan entries with the same payload for one shader decoded into separate plans");
+    require(samePlan(*a, expected), "a shared plan differs from the stored plan");
+    const auto other = ShaderDiskCache::LoadSharedPlan(second, address + 0x100u);
+    require(other != nullptr && other.get() != a.get() && other->shaderHash == address + 0x100u && a->shaderHash == address, "a plan of another shader address was shared");
+    const std::weak_ptr<const IrResourcePlan> released = a;
+    a.reset();
+    b.reset();
+    require(released.expired(), "the shared plan table kept a plan no source uses");
+    const auto again = ShaderDiskCache::LoadSharedPlan(first, address);
+    require(again != nullptr && samePlan(*again, expected), "a released shared plan did not load again");
 }
 
 void verifyPlanRoundTrip() {
@@ -1935,6 +2570,18 @@ void verifyPlanRoundTrip() {
     require(phi.IsPhi() && phi.PhiBlockCount() == 2u && phi.PhiBlock(0)->Id() == 3u && phi.PhiBlock(1)->Id() == 7u && phi.Argument(1)->ImmediateU32() == 0u, "the decoded phi lost its blocks or operands");
     require(handDecoded.uniformFill.values[0] == handDecoded.uniformFill.values[1] && handDecoded.uniformFill.values[0] != nullptr && handDecoded.uniformFill.values[2] == nullptr, "the decoded uniform fill lost its shared or null values");
     require(samePlan(handBuilt, handDecoded), "the decoded hand-built plan differs from the plan in a field or a value");
+    auto bufferTable = handBuiltPlan();
+    bufferTable.descriptorSources[1].tableColumn->buffer = true;
+    bufferTable.descriptorSources[1].tableColumn->dwordCount = 4u;
+    const auto bufferBytes = encodedPlan(bufferTable);
+    IrResourcePlan bufferDecoded;
+    require(bufferBytes != handBytes && ShaderDiskCache::DecodePlan(bufferBytes, bufferDecoded) && samePlan(bufferTable, bufferDecoded), "the nested buffer column changed in a disk-cache round trip");
+    auto pointerTable = handBuiltPlan();
+    pointerTable.descriptorSources[1].tableColumn->indirect = true;
+    pointerTable.descriptorSources[1].tableColumn->pointerKeyed = true;
+    const auto pointerBytes = encodedPlan(pointerTable);
+    IrResourcePlan pointerDecoded;
+    require(pointerBytes != handBytes && ShaderDiskCache::DecodePlan(pointerBytes, pointerDecoded) && samePlan(pointerTable, pointerDecoded) && pointerDecoded.descriptorSources[1].tableColumn->pointerKeyed, "the pointer-keyed column changed in a disk-cache round trip");
     PlanFixture handFixture;
     handFixture.userData = {static_cast<std::uint32_t>(PlanSrtAddress), static_cast<std::uint32_t>(PlanSrtAddress >> 32u), 0u, 0u};
     std::vector<std::uint32_t> handSrt(16, 0u);
@@ -2039,6 +2686,177 @@ void verifyPlanRoundTrip() {
     require(covers([](const IrResourcePlan& plan) { return std::any_of(plan.valueStorage.begin(), plan.valueStorage.end(), [](const auto& value) { return value.IsPhi(); }); }), "no fixture plans a phi");
     require(covers([](const IrResourcePlan& plan) { return !plan.guardedSrtSlots.empty(); }), "no fixture plans a guarded SRT read");
     require(covers([](const IrResourcePlan& plan) { return std::any_of(plan.pureFlatSlots.begin(), plan.pureFlatSlots.end(), [](std::uint8_t pure) { return pure != 0u; }); }), "no fixture plans a pure flat slot");
+}
+
+void verifyPlanBudget() {
+    auto base = planFixtures().front();
+    base.waveSize = 32u;
+    std::vector<PlanFixture> fixtures;
+    for (std::uint32_t index = 0; index < 4u; ++index) {
+        auto fixture = base;
+        fixture.code.insert(fixture.code.begin(), 0xbf800006u + index);
+        fixture.codeAddress += 0x1000u * (index + 1u);
+        fixtures.push_back(std::move(fixture));
+    }
+    const auto planOf = [&](std::size_t index) { return GetResourcePlan(fixtures[index].Request(true)); };
+    SetResourcePlanBudget(1u);
+    SetResourcePlanBudget(0u);
+    std::vector<std::uint64_t> sizes;
+    std::vector<std::vector<std::byte>> encoded;
+    for (std::size_t index = 0; index < fixtures.size(); ++index) {
+        const auto before = ResourcePlanTotals();
+        const auto plan = planOf(index);
+        const auto after = ResourcePlanTotals();
+        require(after.heldPlans == before.heldPlans + 1u && after.heldBytes > before.heldBytes + plan->valueStorage.Size() * sizeof(IrValue), "plan budget: a loaded plan was not accounted with its values");
+        sizes.push_back(after.heldBytes - before.heldBytes);
+        encoded.push_back(encodedPlan(*plan));
+    }
+    ShaderDiskCache::Flush();
+    static_cast<void>(planOf(0));
+    const auto beforeTrim = ResourcePlanTotals();
+    const auto budget = ((beforeTrim.heldBytes - sizes[1] - sizes[2] + std::min(sizes[1], sizes[2]) / 2u) / 3u + 1u) * 4u;
+    SetResourcePlanBudget(budget);
+    const auto afterTrim = ResourcePlanTotals();
+    require(afterTrim.evictions == beforeTrim.evictions + 2u && afterTrim.heldBytes == beforeTrim.heldBytes - sizes[1] - sizes[2] && afterTrim.heldBytes <= budget / 4u * 3u, "plan budget: the trim did not drop exactly the two least recently used plans down to three quarters of the budget");
+    const auto residentDisk = ShaderDiskCache::Totals();
+    static_cast<void>(planOf(3));
+    static_cast<void>(planOf(0));
+    require(ShaderDiskCache::Totals().planHits == residentDisk.planHits && ResourcePlanTotals().reloads == afterTrim.reloads, "plan budget: a recently used plan was evicted");
+    const auto beforeReload = ShaderDiskCache::Totals();
+    const auto reloaded = planOf(1);
+    const auto afterReload = ShaderDiskCache::Totals();
+    require(afterReload.planHits == beforeReload.planHits + 1u && afterReload.planMisses == beforeReload.planMisses && afterReload.planWrites == beforeReload.planWrites, "plan budget: an evicted plan did not reload as a disk cache hit without a new write");
+    require(ResourcePlanTotals().reloads == afterTrim.reloads + 1u && encodedPlan(*reloaded) == encoded[1], "plan budget: the reloaded plan differs from the evicted one");
+    SetResourcePlanBudget(0u);
+    static_cast<void>(planOf(2));
+    static_cast<void>(planOf(3));
+    const auto owned = planOf(0);
+    const auto beforeOwned = ResourcePlanTotals();
+    SetResourcePlanBudget(1u);
+    const auto afterOwned = ResourcePlanTotals();
+    require(afterOwned.evictions >= beforeOwned.evictions + 2u && afterOwned.heldPlans >= 2u, "plan budget: a budget of one byte did not evict the unowned plans or evicted the owned ones");
+    const auto beforeOwnedHits = ShaderDiskCache::Totals().planHits;
+    require(planOf(0) == owned && planOf(1) == reloaded && ShaderDiskCache::Totals().planHits == beforeOwnedHits, "plan budget: a plan with another owner was evicted");
+    SetResourcePlanBudget(0u);
+    auto preparedFixture = base;
+    preparedFixture.code.insert(preparedFixture.code.begin(), 0xbf80000au);
+    preparedFixture.codeAddress += 0x10000u;
+    const auto preparedRequest = preparedFixture.Request(true);
+    const auto preparedHandle = PrepareShader(preparedRequest);
+    auto drawn = preparedRequest;
+    drawn.layout.pushConstantOffsetBytes = 16u;
+    drawn.layout.pushConstantSizeBytes = 112u;
+    const auto invocation = PreparedShaderInvocation::TryCreate(drawn, preparedHandle);
+    require(invocation.has_value(), "plan budget: the prepared artifact refused a relocated push layout");
+    RequestMemoryView drawnMemory(drawn.context.memory);
+    static_cast<void>(invocation->Capture(drawnMemory.MakeRuntime(drawn.context.userData, drawn.shader.codeAddress)));
+    ShaderDiskCache::Flush();
+    const auto beforePreparedTrim = ResourcePlanTotals();
+    SetResourcePlanBudget(1u);
+    require(ResourcePlanTotals().evictions > beforePreparedTrim.evictions, "plan budget: the captured plan of a prepared shader was not evicted");
+    const auto beforePrepared = ShaderDiskCache::Totals();
+    static_cast<void>(invocation->Capture(drawnMemory.MakeRuntime(drawn.context.userData, drawn.shader.codeAddress)));
+    const auto afterPrepared = ShaderDiskCache::Totals();
+    require(afterPrepared.planHits == beforePrepared.planHits + 1u && afterPrepared.planMisses == beforePrepared.planMisses && afterPrepared.planWrites == beforePrepared.planWrites && afterPrepared.misses == beforePrepared.misses && afterPrepared.writes == beforePrepared.writes && ResourcePlanTotals().reloads == beforePreparedTrim.reloads + 1u, "plan budget: a prepared shader's evicted plan did not reload from its own disk cache entry");
+    SetResourcePlanBudget(0u);
+}
+
+void verifySharedPlanBudget() {
+    auto base = planFixtures().front();
+    base.waveSize = 32u;
+    base.codeAddress += 0x30000u;
+    std::vector<PlanFixture> fixtures;
+    for (std::uint32_t index = 0; index < 2u; ++index) {
+        auto fixture = base;
+        fixture.code.insert(fixture.code.begin(), 0xbf800001u + index);
+        fixtures.push_back(std::move(fixture));
+    }
+    const auto planOf = [&](std::size_t index) { return GetResourcePlan(fixtures[index].Request(true)); };
+    SetResourcePlanBudget(0u);
+    const auto encoded = encodedPlan(*planOf(0));
+    require(encodedPlan(*planOf(1)) == encoded, "shared plan budget: the two sources did not build the same plan");
+    ShaderDiskCache::Flush();
+    SetResourcePlanBudget(1u);
+    SetResourcePlanBudget(0u);
+    auto first = planOf(0);
+    auto second = planOf(1);
+    require(first == second, "shared plan budget: the two sources did not receive one shared plan from the disk cache");
+    const auto heldHits = ShaderDiskCache::Totals().planHits;
+    SetResourcePlanBudget(1u);
+    require(planOf(0) == first && planOf(1) == first && ShaderDiskCache::Totals().planHits == heldHits, "shared plan budget: a shared plan that a caller holds was evicted");
+    SetResourcePlanBudget(0u);
+    first.reset();
+    second.reset();
+    const auto beforeTrim = ResourcePlanTotals();
+    SetResourcePlanBudget(1u);
+    const auto afterTrim = ResourcePlanTotals();
+    require(afterTrim.evictions == beforeTrim.evictions + 2u && afterTrim.heldPlans + 2u == beforeTrim.heldPlans, "shared plan budget: a plan shared by two idle sources was not evicted from both");
+    SetResourcePlanBudget(0u);
+    const auto beforeReload = ShaderDiskCache::Totals();
+    const auto reloadedFirst = planOf(0);
+    const auto reloadedSecond = planOf(1);
+    const auto afterReload = ShaderDiskCache::Totals();
+    require(afterReload.planHits == beforeReload.planHits + 2u && afterReload.planMisses == beforeReload.planMisses && afterReload.planWrites == beforeReload.planWrites && ResourcePlanTotals().reloads == afterTrim.reloads + 2u, "shared plan budget: the evicted shared plan did not reload from the disk cache without a miss or a write");
+    require(reloadedFirst == reloadedSecond && encodedPlan(*reloadedFirst) == encoded, "shared plan budget: the reloaded sources do not share the plan they held before");
+}
+
+void verifyQueuedPlanWrite() {
+    auto fixture = planFixtures().front();
+    fixture.waveSize = 32u;
+    fixture.code.insert(fixture.code.begin(), 0xbf800003u);
+    fixture.codeAddress += 0x40000u;
+    SetResourcePlanBudget(0u);
+    ShaderDiskCache::Flush();
+    const auto filler = GetResourcePlan(planFixtures().front().Request(true));
+    constexpr std::uint32_t fillers = 4096u;
+    const auto writesBefore = ShaderDiskCache::Totals().planWrites;
+    for (std::uint32_t index = 0; index < fillers; ++index) ShaderDiskCache::StorePlan(std::vector<std::byte>(16u, std::byte{0x5a}), filler);
+    static_cast<void>(GetResourcePlan(fixture.Request(true)));
+    const auto beforeTrim = ResourcePlanTotals();
+    SetResourcePlanBudget(1u);
+    const auto trimmed = ShaderDiskCache::Totals();
+    require(trimmed.planWrites < writesBefore + fillers + 1u, "queued plan write: the writer emptied its queue before the trim, so the plan's write was not pending");
+    auto held = GetResourcePlan(fixture.Request(true));
+    require(ShaderDiskCache::Totals().planMisses == trimmed.planMisses && ResourcePlanTotals().reloads == beforeTrim.reloads, "queued plan write: a plan whose disk write was still queued was evicted and missed on its next use");
+    SetResourcePlanBudget(0u);
+    held.reset();
+    ShaderDiskCache::Flush();
+    SetResourcePlanBudget(1u);
+    SetResourcePlanBudget(0u);
+    const auto beforeReload = ShaderDiskCache::Totals();
+    static_cast<void>(GetResourcePlan(fixture.Request(true)));
+    const auto afterReload = ShaderDiskCache::Totals();
+    require(afterReload.planHits == beforeReload.planHits + 1u && afterReload.planMisses == beforeReload.planMisses && afterReload.planWrites == beforeReload.planWrites, "queued plan write: the plan evicted after its write finished did not reload as a disk cache hit");
+}
+
+void verifyPlanReport() {
+    auto fixture = planFixtures().front();
+    fixture.waveSize = 32u;
+    fixture.code.insert(fixture.code.begin(), 0xbf800004u);
+    fixture.codeAddress += 0x50000u;
+    SetResourcePlanBudget(0u);
+    static_cast<void>(GetResourcePlan(fixture.Request(true)));
+    ShaderDiskCache::Flush();
+    static_cast<void>(TakeResourcePlanInterval());
+    const auto before = ResourcePlanTotals();
+    ResourcePlanInterval overlapping;
+    std::future<void> next;
+    SetResourcePlanReportHook([&] {
+        SetResourcePlanBudget(1u);
+        SetResourcePlanBudget(0u);
+        static_cast<void>(GetResourcePlan(fixture.Request(true)));
+        next = std::async(std::launch::async, [&] { overlapping = TakeResourcePlanInterval(); });
+        static_cast<void>(next.wait_for(std::chrono::milliseconds(250)));
+    });
+    const auto delayed = TakeResourcePlanInterval();
+    next.get();
+    const auto after = ResourcePlanTotals();
+    const auto evicted = after.evictions - before.evictions;
+    const auto reloaded = after.reloads - before.reloads;
+    require(evicted != 0u && reloaded == 1u, "plan report: the delayed reporter's hook did not evict and reload a plan");
+    require(delayed.evictions <= evicted && overlapping.evictions <= evicted && delayed.evictions + overlapping.evictions == evicted && delayed.reloads <= reloaded && overlapping.reloads <= reloaded && delayed.reloads + overlapping.reloads == reloaded, "plan report: a reporter delayed past the next interval counted it twice or underflowed");
+    const auto later = TakeResourcePlanInterval();
+    require(later.evictions == 0u && later.reloads == 0u, "plan report: the interval after two overlapping reporters is not empty");
 }
 
 void verifyPlanKey() {
@@ -2212,7 +3030,7 @@ void verifyPlanAcrossProcesses(const char* self) {
     for (std::size_t index = 0; index < outputs.size(); ++index) require(WriteFileAtomically(planOutputPath(index), outputs[index]), "cannot write the first process's output");
     auto refused = fixtures[1];
     refused.codeAddress = 0x200000u;
-    refused.code = {0xf40c0200u, 0xfa000000u, 0xf4000400u, 0xfa000050u, 0xbf8cc07fu, 0xbf068010u, 0xbf850003u, 0xf4080500u, 0xfa000020u, 0xbf820002u, 0xf4080500u, 0x20000000u, 0xf4080600u, 0xfa000040u, 0xbf8cc07fu, 0xf09c0f08u, 0x00a20000u, 0xbf8c3f70u, 0xe0700000u, 0x80060000u, 0xbf810000u};
+    refused.code = {0xf40c0200u};
     bool threw = false;
     try {
         static_cast<void>(PrepareShader(refused.Request(true)));
@@ -2260,6 +3078,21 @@ void verifyDefaultDirectory(const char* self) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--housekeeping-safety") {
+            const auto directory = ShaderDiskCache::EntryDirectory();
+            require(!directory.empty(), "the housekeeping fixture cache is disabled");
+            ShaderDiskCache::Shutdown();
+            require(ShaderDiskCache::Writers() == 0, "the housekeeping writer did not stop");
+            std::cout << "housekeeping version " << directory.filename().string() << '\n';
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--prebuilt-pack-ownership") {
+            const auto directory = std::filesystem::temp_directory_path() / ("aps5-pack-ownership-" + std::to_string(std::random_device{}()));
+            std::filesystem::create_directories(directory);
+            verifyPrebuiltPackOwnership(directory);
+            std::filesystem::remove_all(directory);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--resource-plan-codec") {
             verifyResultRoundTrip();
             verifyEntryRoundTrip();
@@ -2273,27 +3106,49 @@ int main(int argc, char** argv) {
             std::cout << "artifact codec tests passed\n";
             return 0;
         }
+#ifdef _WIN32
+        if (argc == 2 && std::string_view(argv[1]) == "--host-stderr") {
+            verifyHostStandardError();
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--long-host-paths") {
+            verifyLongHostPaths();
+            return 0;
+        }
+#endif
+        if (argc == 3 && (std::string_view(argv[1]) == "--seed-prebuilt-discovery" || std::string_view(argv[1]) == "--verify-prebuilt-discovery")) {
+            verifyPrebuiltDiscovery(argv[2], std::string_view(argv[1]) == "--seed-prebuilt-discovery");
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--large-file") return runLargeFileWrite();
         if (argc == 2 && std::string_view(argv[1]) == "--load") return runLoadingProcess();
         if (argc == 2 && std::string_view(argv[1]) == "--load-prebuilt") return runPrebuiltLoadingProcess();
         if (argc == 2 && std::string_view(argv[1]) == "--no-failure-memo") return runWithoutFailureMemo();
+        if (argc == 2 && std::string_view(argv[1]) == "--specialized-switch") return runSwitchedSpecialized();
         if (argc == 2 && std::string_view(argv[1]).starts_with("--load-plan")) return runPlanLoadingProcess(argv[1]);
         const auto directory = std::filesystem::temp_directory_path() / ("aps5-shader-disk-cache-test-" + std::to_string(std::random_device{}()));
         std::filesystem::remove_all(directory);
         verifyDefaultDirectory(argv[0]);
         setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
-        setEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.string());
+        setPathEnvironment("ANYPS5_SHADER_CACHE_DIR", directory);
         verifyAtomicReplacement(directory);
         verifyResultRoundTrip();
+        verifyElementFlags();
         verifyEntryRoundTrip();
         verifyPrebuiltPack(directory / "packs");
         verifyArtifactStorageIsolation();
+        verifyHashBytes();
         verifyKeySensitivity();
+        verifyMeshBarycentricRequestSerialization();
         verifyFloatModeSerialization();
         verifyPlanRoundTrip();
         verifyPlanKey();
+        verifySharedPlans();
         verifyStore();
+        verifySpecializedStore();
+        verifySpecializedSwitch(argv[0]);
         verifyPersist();
+        verifyReleaseMapped();
         verifyAcrossProcesses(argv[0]);
         verifyPrebuiltAcrossProcesses(argv[0], directory);
         verifyPlanAcrossProcesses(argv[0]);
@@ -2305,6 +3160,10 @@ int main(int argc, char** argv) {
         verifyVertexTypeSpecialization();
         verifyBuiltinSpecialization();
         verifySpecializationLiveness();
+        verifyPlanBudget();
+        verifySharedPlanBudget();
+        verifyQueuedPlanWrite();
+        verifyPlanReport();
         ShaderRecompiler::ShaderDiskCache::Flush();
         removeCacheDirectory(directory);
         std::cout << "shader disk cache tests passed\n";

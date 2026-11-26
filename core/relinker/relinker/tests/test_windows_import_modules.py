@@ -4,6 +4,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -112,7 +113,7 @@ def imported_symbols_by_dll(path):
     return imports
 
 
-def provider(value, soname=None, code=None):
+def provider(value, soname=None, code=None, main_stack_entry=False):
     image = module_with_symbol(True)
     code = code or b'\xb8' + struct.pack('<I', value) + b'\xc3'
     image[0x400:0x400 + len(code)] = code
@@ -123,13 +124,21 @@ def provider(value, soname=None, code=None):
         tags = [(5, 0x2200), (10, len(strings)), (6, 0x2280), (11, 24),
                 (4, 0x2240), (7, 0x2300), (8, 0), (9, 24), (14, 12)]
         dynamic(image, 0x600, 176, tags)
+    if main_stack_entry:
+        assert soname is None
+        strings = b'\0shared#A#B\0EnterGuestMainStack_nid_no_patch\0'
+        image[0x800:0x800 + len(strings)] = strings
+        struct.pack_into('<Q', image, 0x618, len(strings))
+        struct.pack_into('<IIIIII', image, 0x840, 1, 3, 1, 0, 2, 0)
+        struct.pack_into('<IBBHQQ', image, 0x8b0, 12, 0x12, 0, 1, 0x1040, 2)
+        image[0x440:0x442] = b'\xff\xe6'
     return image
 
 
 def check_internal_guest_libc(convert, work, relinker):
-    result, dummy = convert('empty-native-provider', 'c.prx')
+    result, dummy = convert('empty-native-provider', 'c.prx', main_stack_entry=True)
     assert result.returncode == 0, result.stderr
-    result, shared = convert('shared-native-provider', 'a.prx')
+    result, shared = convert('shared-native-provider', 'a.prx', main_stack_entry=True)
     assert result.returncode == 0, result.stderr
     empty_provider = dummy.parent / 'app0' / 'prx' / 'c.prx.guest.prx'
     shared_provider = shared.parent / 'app0' / 'prx' / 'a.prx.guest.prx'
@@ -161,6 +170,14 @@ def check_internal_guest_libc(convert, work, relinker):
                 assert run.returncode != 0 and 'unresolved ELF import ' + symbol.split('#')[0] in run.stderr, (run.returncode, run.stdout, run.stderr)
             else:
                 assert run.returncode == expected, (run.returncode, run.stdout, run.stderr)
+                if name == 'native-libc-first':
+                    native_libc = case / 'libs' / 'libc.prx'
+                    data = native_libc.read_bytes()
+                    export = b'EnterGuestMainStack_nid_no_patch'
+                    assert export in data
+                    native_libc.write_bytes(data.replace(export, b'X' * len(export)))
+                    missing = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+                    assert missing.returncode != 0 and 'host libc does not provide guest main-stack entry' in missing.stderr, (missing.returncode, missing.stdout, missing.stderr)
 
 
 def consumer(owner, symbol='shared#A#B', expected=22, module_name=None, needed_module_tag=0x61000045):
@@ -258,6 +275,195 @@ def exit_code_without_standard_handles(executable_path):
     finally:
         kernel32.CloseHandle(process.hThread)
         kernel32.CloseHandle(process.hProcess)
+
+
+def exit_code_with_preloaded_runtime(executable_path, runtime_library):
+    sem_failcriticalerrors = 0x0001
+    sem_nogpfaulterrorbox = 0x0002
+    startf_usestdhandles = 0x00000100
+    create_suspended = 0x00000004
+    mem_commit_and_reserve = 0x3000
+    mem_release = 0x8000
+    page_readwrite = 0x04
+    wait_object_0 = 0
+    wait_timeout = 0x00000102
+
+    class StartupInfo(ctypes.Structure):
+        _fields_ = [
+            ('cb', wintypes.DWORD),
+            ('lpReserved', wintypes.LPWSTR),
+            ('lpDesktop', wintypes.LPWSTR),
+            ('lpTitle', wintypes.LPWSTR),
+            ('dwX', wintypes.DWORD),
+            ('dwY', wintypes.DWORD),
+            ('dwXSize', wintypes.DWORD),
+            ('dwYSize', wintypes.DWORD),
+            ('dwXCountChars', wintypes.DWORD),
+            ('dwYCountChars', wintypes.DWORD),
+            ('dwFillAttribute', wintypes.DWORD),
+            ('dwFlags', wintypes.DWORD),
+            ('wShowWindow', wintypes.WORD),
+            ('cbReserved2', wintypes.WORD),
+            ('lpReserved2', wintypes.LPVOID),
+            ('hStdInput', wintypes.HANDLE),
+            ('hStdOutput', wintypes.HANDLE),
+            ('hStdError', wintypes.HANDLE),
+        ]
+
+    class ProcessInformation(ctypes.Structure):
+        _fields_ = [
+            ('hProcess', wintypes.HANDLE),
+            ('hThread', wintypes.HANDLE),
+            ('dwProcessId', wintypes.DWORD),
+            ('dwThreadId', wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.GetErrorMode.restype = wintypes.UINT
+    kernel32.SetErrorMode.argtypes = [wintypes.UINT]
+    kernel32.SetErrorMode.restype = wintypes.UINT
+    kernel32.CreateProcessW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.LPVOID, wintypes.LPVOID, wintypes.BOOL,
+                                        wintypes.DWORD, wintypes.LPVOID, wintypes.LPCWSTR, ctypes.POINTER(StartupInfo),
+                                        ctypes.POINTER(ProcessInformation)]
+    kernel32.CreateProcessW.restype = wintypes.BOOL
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
+    kernel32.GetProcAddress.restype = ctypes.c_void_p
+    kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+    kernel32.VirtualAllocEx.restype = ctypes.c_void_p
+    kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD]
+    kernel32.VirtualFreeEx.restype = wintypes.BOOL
+    kernel32.WriteProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t,
+                                            ctypes.POINTER(ctypes.c_size_t)]
+    kernel32.WriteProcessMemory.restype = wintypes.BOOL
+    kernel32.CreateRemoteThread.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p,
+                                            ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+    kernel32.CreateRemoteThread.restype = wintypes.HANDLE
+    kernel32.GetExitCodeThread.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeThread.restype = wintypes.BOOL
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel32.ResumeThread.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.SetErrorMode(kernel32.GetErrorMode() | sem_failcriticalerrors | sem_nogpfaulterrorbox)
+    info = StartupInfo()
+    info.cb = ctypes.sizeof(info)
+    info.dwFlags = startf_usestdhandles
+    process = ProcessInformation()
+    command = ctypes.create_unicode_buffer(f'"{executable_path}"')
+    if not kernel32.CreateProcessW(str(executable_path), command, None, None, False, create_suspended, None, None,
+                                   ctypes.byref(info), ctypes.byref(process)):
+        raise OSError(ctypes.get_last_error(), 'CreateProcessW failed')
+    child_exited = False
+    try:
+        load_library = kernel32.GetProcAddress(kernel32.GetModuleHandleW('kernel32.dll'), b'LoadLibraryA')
+        assert load_library, ctypes.get_last_error()
+        name = runtime_library.encode('ascii') + b'\0'
+        remote_name = kernel32.VirtualAllocEx(process.hProcess, None, len(name), mem_commit_and_reserve, page_readwrite)
+        assert remote_name, ctypes.get_last_error()
+        written = ctypes.c_size_t()
+        assert kernel32.WriteProcessMemory(process.hProcess, remote_name, name, len(name), ctypes.byref(written))
+        assert written.value == len(name), written.value
+        loader = kernel32.CreateRemoteThread(process.hProcess, None, 0, load_library, remote_name, 0, None)
+        assert loader, ctypes.get_last_error()
+        try:
+            if kernel32.WaitForSingleObject(loader, 30_000) != wait_object_0:
+                raise TimeoutError(f'{runtime_library} did not load in the suspended child')
+            loaded = wintypes.DWORD()
+            assert kernel32.GetExitCodeThread(loader, ctypes.byref(loaded))
+            assert loaded.value, (runtime_library, 'LoadLibraryA returned NULL in the suspended child')
+        finally:
+            kernel32.CloseHandle(loader)
+        assert kernel32.VirtualFreeEx(process.hProcess, remote_name, 0, mem_release), ctypes.get_last_error()
+        assert kernel32.ResumeThread(process.hThread) == 1
+        result = kernel32.WaitForSingleObject(process.hProcess, 30_000)
+        if result == wait_timeout:
+            raise TimeoutError('GUI child did not exit')
+        if result != wait_object_0:
+            raise OSError(f'WaitForSingleObject returned {result}')
+        child_exited = True
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(process.hProcess, ctypes.byref(exit_code)):
+            raise OSError(ctypes.get_last_error(), 'GetExitCodeProcess failed')
+        return exit_code.value
+    finally:
+        try:
+            if not child_exited:
+                terminated = kernel32.TerminateProcess(process.hProcess, 0xffffffff)
+                if kernel32.WaitForSingleObject(process.hProcess, 10_000) != wait_object_0:
+                    raise OSError(ctypes.get_last_error(),
+                                  f'child {process.dwProcessId} survived cleanup'
+                                  f' (TerminateProcess returned {terminated})')
+        finally:
+            kernel32.CloseHandle(process.hThread)
+            kernel32.CloseHandle(process.hProcess)
+
+
+def snapshot_children_named(snapshot, executable_name):
+    error_no_more_files = 18
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ('dwSize', wintypes.DWORD),
+            ('cntUsage', wintypes.DWORD),
+            ('th32ProcessID', wintypes.DWORD),
+            ('th32DefaultHeapID', ctypes.c_size_t),
+            ('th32ModuleID', wintypes.DWORD),
+            ('cntThreads', wintypes.DWORD),
+            ('th32ParentProcessID', wintypes.DWORD),
+            ('pcPriClassBase', wintypes.LONG),
+            ('dwFlags', wintypes.DWORD),
+            ('szExeFile', wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessEntry)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    children = []
+    entry = ProcessEntry()
+    entry.dwSize = ctypes.sizeof(entry)
+    found = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+    while found:
+        if entry.th32ParentProcessID == os.getpid() and entry.szExeFile.lower() == executable_name.lower():
+            children.append(entry.th32ProcessID)
+        found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    error = ctypes.get_last_error()
+    if error != error_no_more_files:
+        raise OSError(error, 'process snapshot enumeration failed')
+    return children
+
+
+def live_children_named(executable_name):
+    th32cs_snapprocess = 0x00000002
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
+    assert snapshot not in (None, ctypes.c_void_p(-1).value), ctypes.get_last_error()
+    try:
+        return snapshot_children_named(snapshot, executable_name)
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
+def lingering_children_named(executable_name, timeout_seconds=10.0):
+    deadline = time.monotonic() + timeout_seconds
+    children = live_children_named(executable_name)
+    while children and time.monotonic() < deadline:
+        time.sleep(0.1)
+        children = live_children_named(executable_name)
+    return children
 
 
 def run_with_standard_pipes(executable_path, capture_stdout, capture_stderr):
@@ -387,18 +593,230 @@ def run_with_standard_pipes(executable_path, capture_stdout, capture_stderr):
             kernel32.CloseHandle(handle)
 
 
+def elf_dynamic_tags(image):
+    phoff, = struct.unpack_from('<Q', image, 32)
+    phsize, phcount = struct.unpack_from('<HH', image, 54)
+    loads = []
+    dynamic = None
+    for index in range(phcount):
+        header = struct.unpack_from('<IIQQQQQQ', image, phoff + index * phsize)
+        if header[0] == 1:
+            loads.append(header)
+        elif header[0] == 2:
+            dynamic = header
+    assert dynamic is not None
+    tags = []
+    for position in range(dynamic[2], dynamic[2] + dynamic[5], 16):
+        tag, value = struct.unpack_from('<qQ', image, position)
+        if tag == 0:
+            break
+        tags.append((tag, value))
+    return loads, dynamic, tags
+
+
+def elf_file_offset(loads, address):
+    for header in loads:
+        if header[3] <= address < header[3] + header[5]:
+            return header[2] + address - header[3]
+    raise AssertionError(f'Unmapped address: {address:#x}')
+
+
+def elf_symbol_name(image, loads, tag_map, index):
+    strings = elf_file_offset(loads, tag_map[5])
+    name, = struct.unpack_from('<I', image, elf_file_offset(loads, tag_map[6]) + index * 24)
+    return image[strings + name:image.index(0, strings + name)].decode()
+
+
+def elf_exported_symbols(image):
+    loads, _, tags = elf_dynamic_tags(image)
+    tag_map = {}
+    for tag, value in tags:
+        tag_map.setdefault(tag, value)
+    count, = struct.unpack_from('<I', image, elf_file_offset(loads, tag_map[4]) + 4)
+    return [elf_symbol_name(image, loads, tag_map, index) for index in range(1, count)]
+
+
+def elf_imported_symbols(image):
+    loads, _, tags = elf_dynamic_tags(image)
+    tag_map = {}
+    for tag, value in tags:
+        tag_map.setdefault(tag, value)
+    names = set()
+    for address, size in ((7, 8), (23, 2)):
+        if address not in tag_map or tag_map.get(size, 0) == 0:
+            continue
+        table = elf_file_offset(loads, tag_map[address])
+        for position in range(table, table + tag_map[size], 24):
+            info, = struct.unpack_from('<Q', image, position + 8)
+            if info >> 32:
+                names.add(elf_symbol_name(image, loads, tag_map, info >> 32))
+    return names
+
+
+def patch_executable_needed_modules(image, entries, strsz_delta=0):
+    out = bytearray(image)
+    loads, dynamic, tags = elf_dynamic_tags(out)
+    patched = []
+    for tag, value in tags:
+        if tag == 0x61000045:
+            continue
+        if tag == 10 and strsz_delta:
+            value += strsz_delta
+        patched.append((tag, value))
+    patched.extend(entries)
+    patched.append((0, 0))
+    new_size = len(patched) * 16
+    strtab = elf_file_offset(loads, dict(tags)[5])
+    if dynamic[2] < strtab:
+        assert dynamic[2] + new_size <= strtab
+    if new_size > dynamic[5]:
+        assert not any(out[dynamic[2] + dynamic[5]:dynamic[2] + new_size])
+        phoff, = struct.unpack_from('<Q', out, 32)
+        phsize, phcount = struct.unpack_from('<HH', out, 54)
+        dyn_header = next(phoff + index * phsize for index in range(phcount)
+                          if struct.unpack_from('<I', out, phoff + index * phsize)[0] == 2)
+        struct.pack_into('<QQ', out, dyn_header + 32, new_size, new_size)
+    for index, (tag, value) in enumerate(patched):
+        struct.pack_into('<qQ', out, dynamic[2] + index * 16, tag, value)
+    return bytes(out)
+
+
+def find_dynstr_offset(image, value):
+    loads, _, tags = elf_dynamic_tags(image)
+    tag_map = dict(tags)
+    strtab = elf_file_offset(loads, tag_map[5])
+    strsz = tag_map[10]
+    return strsz, bytes(image[strtab:strtab + strsz]).index(value + b'\0')
+
+
+def check_ps4_import_modules(work, relinker):
+    guest_providers = {}
+    for label, tag, symbol, owner, extra, module_name, module_id, version, target in [
+            ('ps5-b-prx', 0x61000045, 'shared#A#B', 'a.prx', ('b.prx',), None, 1, 0x1234, b'b.prx'),
+            ('ps4-b-prx', 0x6100000f, 'shared#A#B', 'a.prx', ('b.prx',), None, 1, 0x1234, b'b.prx'),
+            ('ps5-alias-id2', 0x61000045, 'shared#A#C', 'a.prx', ('alias.prx',), 'alias', 2, 0x4321, b'alias'),
+            ('ps4-alias-id2', 0x6100000f, 'shared#A#C', 'a.prx', ('alias.prx',), 'alias', 2, 0x4321, b'alias')]:
+        base = executable(owner, symbol, module_name, extra_dependencies=extra)
+        _, mod_offset = find_dynstr_offset(base, target)
+        image = patch_executable_needed_modules(base, [(tag, (module_id << 48) | (version << 32) | mod_offset)])
+        for target_mode in ('win', 'lin'):
+            case = work / f'needed-tag-{label}-{target_mode}'
+            modules = case / 'prx'
+            modules.mkdir(parents=True)
+            (modules / 'a.prx').write_bytes(provider(11))
+            (modules / 'b.prx').write_bytes(provider(22, 'alias.prx'))
+            source = case / 'input.elf'
+            source.write_bytes(image)
+            output = case / ('output.exe' if target_mode == 'win' else 'output.elf')
+            args = [str(relinker)] + (['--windows'] if target_mode == 'win' else []) + [str(source), str(output)]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, (label, target_mode, result.stdout, result.stderr)
+            if target_mode == 'win':
+                if os.name == 'nt':
+                    run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+                    assert run.returncode == 22, (label, run.returncode, run.stdout, run.stderr)
+                if label == 'ps4-b-prx':
+                    guest_providers['a'] = (case / 'app0' / 'prx' / 'a.prx.guest.prx').read_bytes()
+                    guest_providers['b'] = (case / 'app0' / 'prx' / 'b.prx.guest.prx').read_bytes()
+            else:
+                a_aliases = [name for name in elf_exported_symbols((case / 'app0' / 'prx' / 'a.prx.guest.prx').read_bytes())
+                             if name.startswith('shared#module') and name.endswith('#guest')]
+                b_aliases = [name for name in elf_exported_symbols((case / 'app0' / 'prx' / 'b.prx.guest.prx').read_bytes())
+                             if name.startswith('shared#module') and name.endswith('#guest')]
+                assert len(a_aliases) == 1 and len(b_aliases) == 1 and a_aliases[0] != b_aliases[0], (a_aliases, b_aliases)
+                assert elf_imported_symbols(output.read_bytes()) == {b_aliases[0]}, (label, elf_imported_symbols(output.read_bytes()))
+
+    for label, tag in (('ps5-native', 0x61000045), ('ps4-native', 0x6100000f)):
+        case = work / f'needed-tag-{label}'
+        (case / 'prx').mkdir(parents=True)
+        libs = case / 'libs'
+        libs.mkdir()
+        (libs / 'a.prx').write_bytes(guest_providers['a'])
+        (libs / 'b.prx').write_bytes(guest_providers['b'])
+        base = executable('a.prx', 'shared#A#C', module_name='b', extra_dependencies=('b.prx',))
+        _, mod_offset = find_dynstr_offset(base, b'b')
+        source = case / 'input.elf'
+        source.write_bytes(patch_executable_needed_modules(base, [(tag, (2 << 48) | (0x0201 << 32) | mod_offset)]))
+        output = case / 'output.exe'
+        result = subprocess.run([str(relinker), '--windows', str(source), str(output)], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (label, result.stdout, result.stderr)
+        assert 'libs\\b.prx\0'.encode('utf-16le') in output.read_bytes(), (label, output)
+        if os.name == 'nt':
+            run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+            assert run.returncode == 22, (label, run.returncode, run.stdout, run.stderr)
+
+    for label, tag in (('ps5-disjoint', 0x61000045), ('ps4-disjoint', 0x6100000f)):
+        base = executable('a.prx', 'shared#A#B', extra_dependencies=('b.prx',))
+        _, b_offset = find_dynstr_offset(base, b'b.prx')
+        image = patch_executable_needed_modules(base, [(tag, (1 << 48) | b_offset)])
+        for target_mode in ('win', 'lin'):
+            case = work / f'needed-tag-{label}-{target_mode}'
+            modules = case / 'prx'
+            modules.mkdir(parents=True)
+            (modules / 'a.prx').write_bytes(provider(11))
+            other = provider(22)
+            other[0x800:0x80c] = b'\0other#A#B\0\0'
+            (modules / 'b.prx').write_bytes(other)
+            source = case / 'input.elf'
+            source.write_bytes(image)
+            output = case / ('output.exe' if target_mode == 'win' else 'output.elf')
+            args = [str(relinker)] + (['--windows'] if target_mode == 'win' else []) + [str(source), str(output)]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, (label, target_mode, result.stdout, result.stderr)
+            if target_mode == 'win':
+                if os.name == 'nt':
+                    run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+                    assert run.returncode & 0xffffffff == 0xc0000139 and 'unresolved ELF import shared from b.prx' in run.stderr, (
+                        label, hex(run.returncode & 0xffffffff), run.stdout, run.stderr)
+            else:
+                assert elf_imported_symbols(output.read_bytes()) == {'shared'}, (label, elf_imported_symbols(output.read_bytes()))
+
+    base = executable('a.prx', 'shared#A#B', extra_dependencies=('b.prx',))
+    strsz, a_offset = find_dynstr_offset(base, b'a.prx')
+    _, b_offset = find_dynstr_offset(base, b'b.prx')
+    unterminated_base = executable('a.prx', 'shared#A#B', module_name='libBad', extra_dependencies=('b.prx',))
+    _, bad_offset = find_dynstr_offset(unterminated_base, b'libBad')
+    unknown_base = executable('a.prx', 'shared#A#C', extra_dependencies=('b.prx',))
+    _, unknown_b_offset = find_dynstr_offset(unknown_base, b'b.prx')
+
+    error_cases = [
+        ('ps4-duplicate-id', base, [(0x6100000f, (1 << 48) | a_offset), (0x6100000f, (1 << 48) | (0x0101 << 32) | b_offset)], 0, 'Duplicate import module ID'),
+        ('ps4-ps5-mixed-forward', base, [(0x61000045, (1 << 48) | a_offset), (0x6100000f, (2 << 48) | b_offset)], 0, 'mixes PS4 and PS5 needed-module tags'),
+        ('ps4-ps5-mixed-reverse', base, [(0x6100000f, (1 << 48) | a_offset), (0x61000045, (2 << 48) | b_offset)], 0, 'mixes PS4 and PS5 needed-module tags'),
+        ('ps4-str-oob-end', base, [(0x6100000f, (1 << 48) | strsz)], 0, 'Dynamic string offset is outside DT_STRSZ'),
+        ('ps4-str-oob-max', base, [(0x6100000f, (1 << 48) | 0xffffffff)], 0, 'Dynamic string offset is outside DT_STRSZ'),
+        ('ps4-str-unterminated', unterminated_base, [(0x6100000f, (1 << 48) | bad_offset)], -1, 'Dynamic string is not NUL-terminated within DT_STRSZ'),
+        ('ps4-unknown-id', unknown_base, [(0x6100000f, (1 << 48) | unknown_b_offset)], 0, 'Unknown import module ID'),
+    ]
+    for label, template, entries, strsz_delta, message in error_cases:
+        image = patch_executable_needed_modules(template, entries, strsz_delta)
+        for target_mode in ('win', 'lin'):
+            case = work / f'needed-tag-{label}-{target_mode}'
+            modules = case / 'prx'
+            modules.mkdir(parents=True)
+            (modules / 'a.prx').write_bytes(provider(11))
+            (modules / 'b.prx').write_bytes(provider(22))
+            source = case / 'input.elf'
+            source.write_bytes(image)
+            output = case / ('output.exe' if target_mode == 'win' else 'output.elf')
+            args = [str(relinker)] + (['--windows'] if target_mode == 'win' else []) + [str(source), str(output)]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+            assert result.returncode == 2 and message in result.stderr, (label, target_mode, result.returncode, result.stderr)
+            assert not output.exists(), (label, target_mode, output)
+
+
 def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix='anyps5-import-modules-') as directory:
         work = Path(directory)
 
-        def convert(name, owner, symbol='shared#A#B', guest_owner=None, module_name=None, provider_name='b.prx', extra_dependencies=(), windows_gui=False, extra_symbols=()):
+        def convert(name, owner, symbol='shared#A#B', guest_owner=None, module_name=None, provider_name='b.prx', extra_dependencies=(), windows_gui=False, extra_symbols=(), main_stack_entry=False):
             case = work / name
             modules = case / 'prx'
             modules.mkdir(parents=True)
-            (modules / 'a.prx').write_bytes(provider(11))
+            (modules / 'a.prx').write_bytes(provider(11, main_stack_entry=main_stack_entry))
             (modules / provider_name).write_bytes(provider(22, 'alias.prx'))
-            other = provider(33)
+            other = provider(33, main_stack_entry=main_stack_entry)
             other[0x800:0x80c] = b'\0other#A#B\0\0'
             (modules / 'c.prx').write_bytes(other)
             if guest_owner:
@@ -452,6 +870,23 @@ def main():
             run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
             assert run.returncode != 0 and 'Failed to load module:' in run.stderr and 'unused.prx' in run.stderr and 'GetLastError: 126' in run.stderr, (run.returncode, run.stdout, run.stderr)
             assert 'nothing is imported from it' not in run.stderr, run.stderr
+
+        for needed, host_library in (('libSceGnmDriver_padebug.prx', 'libSceGnmDriver'), ('libSceGnmDriver_padebug.sprx', 'libSceGnmDriver'),
+                                     ('libSceSsl2.prx', 'libSceSsl'), ('libSceSsl2.sprx', 'libSceSsl')):
+            case = work / ('alias-' + needed)
+            (case / 'libs').mkdir(parents=True)
+            (case / 'libs' / (host_library + '.prx')).write_bytes(native_provider.read_bytes())
+            source = case / 'input.elf'
+            source.write_bytes(executable(needed, 'shared#A#B', module_name=host_library))
+            output = case / 'output.exe'
+            result = subprocess.run([str(relinker), '--windows', '--skip-sce-module', str(source), str(output)], capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, result.stderr
+            image = output.read_bytes()
+            assert ('libs\\' + host_library + '.prx\0').encode('utf-16le') in image, needed
+            assert needed.rsplit('.', 1)[0].encode('utf-16le') not in image, needed
+            if os.name == 'nt':
+                run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+                assert run.returncode == 22, (needed, run.returncode, run.stdout, run.stderr)
 
         check_internal_guest_libc(convert, work, relinker)
 
@@ -534,6 +969,13 @@ def main():
         assert not output.exists()
 
         if os.name == 'nt':
+            try:
+                snapshot_children_named(ctypes.c_void_p(-1).value, 'output.exe')
+            except OSError as error:
+                assert error.errno, error
+            else:
+                raise AssertionError('planted enumeration failure did not raise')
+
             for host_library in sys.argv[2:]:
                 library = Path(host_library).resolve()
                 runtime = library.stem.removeprefix('windows_stdio_host_')
@@ -543,17 +985,24 @@ def main():
                     imports = imported_symbols_by_dll(library)
                     assert {'__iob_func', 'fputs'} <= imports.get('msvcrt.dll', set()), (library, imports)
                     assert not any(name.startswith('api-ms-win-crt-') for name in imports), (library, imports)
+                elif runtime == 'ucrt':
+                    imports = imported_symbols_by_dll(library)
+                    assert {'__acrt_iob_func', 'fputs', 'fflush'} <= imports.get('ucrtbase.dll', set()), (library, imports)
+                    assert 'msvcrt.dll' not in imports, (library, imports)
 
-                def convert_stdio_case(case_name):
+                def convert_stdio_case(case_name, image=None, lazy_binding=False):
                     case = work / case_name
                     (case / 'prx').mkdir(parents=True)
                     libs = case / 'libs'
                     libs.mkdir()
                     source = case / 'input.elf'
-                    source.write_bytes(executable('a.prx', 'shared'))
+                    source.write_bytes(image if image is not None else executable('a.prx', 'shared'))
                     executable_path = case / 'output.exe'
-                    result = subprocess.run([str(relinker), '--windows', '--windows-gui', str(source), str(executable_path)],
-                                            capture_output=True, text=True, timeout=30)
+                    arguments = [str(relinker), '--windows', '--windows-gui']
+                    if lazy_binding:
+                        arguments.append('--lazy-binding')
+                    arguments.extend([str(source), str(executable_path)])
+                    result = subprocess.run(arguments, capture_output=True, text=True, timeout=30)
                     assert result.returncode == 0, result.stderr
                     (libs / 'a.prx').write_bytes(library.read_bytes())
                     return executable_path, executable_path.parent / 'anyps5.log'
@@ -590,6 +1039,42 @@ def main():
                 assert 'Windows DLL stdout probe' in stdout, (runtime, stdout)
                 assert 'Windows DLL stderr probe' in stderr, (runtime, stderr)
                 assert not log.exists(), (runtime, log)
+
+                preloaded_runtime = {'msvcrt': 'msvcrt.dll', 'ucrt': 'ucrtbase.dll'}.get(runtime)
+                if preloaded_runtime:
+                    executable_path, log = convert_stdio_case(f'gui-dll-{runtime}-preloaded-runtime')
+                    run_status = exit_code_with_preloaded_runtime(executable_path, preloaded_runtime)
+                    assert run_status == 11, (runtime, hex(run_status))
+                    assert log.is_file(), (runtime, log)
+                    content = log.read_text(errors='replace')
+                    assert 'Windows DLL stdout probe' in content, (runtime, content)
+                    assert 'Windows DLL stderr probe' in content, (runtime, content)
+
+                    executable_path, log = convert_stdio_case(f'gui-dll-{runtime}-preloaded-runtime-loader-failure')
+                    try:
+                        exit_code_with_preloaded_runtime(executable_path, 'anyps5_planted_missing_runtime.dll')
+                    except AssertionError as error:
+                        assert 'LoadLibraryA returned NULL' in str(error), error
+                    else:
+                        raise AssertionError('planted loader failure did not raise')
+                    assert not lingering_children_named(executable_path.name), (runtime, executable_path)
+                    assert not log.exists(), (runtime, log)
+
+                    image = executable('a.prx', 'shared', extra_symbols=('absent#A#B',))
+                    image[0x4000:0x4015] = (b'\x48\x83\xec\x08\xff\x15' + struct.pack('<i', 0x4a20 - 0x400a)
+                                            + b'\xff\x15' + struct.pack('<i', 0x4a28 - 0x4010) + b'\x48\x83\xc4\x08\xc3')
+                    executable_path, log = convert_stdio_case(f'gui-dll-{runtime}-preloaded-runtime-stub-after-crt',
+                                                              image=image, lazy_binding=True)
+                    log.write_text('stale previous run', encoding='utf-8')
+                    run_status = exit_code_with_preloaded_runtime(executable_path, preloaded_runtime)
+                    assert run_status == 0xc0000139, (runtime, hex(run_status))
+                    assert log.is_file(), (runtime, log)
+                    content = log.read_text(errors='replace')
+                    assert 'stale previous run' not in content, (runtime, content)
+                    assert 'Transferring control to ELF entry point' in content, (runtime, content)
+                    assert 'Windows DLL stdout probe' in content, (runtime, content)
+                    assert 'Windows DLL stderr probe' in content, (runtime, content)
+                    assert 'unresolved ELF import absent' in content, (runtime, content)
 
             for name, owner, symbol, expected, message in [
                     ('missing-symbol-gui', 'a.prx', 'absent#A#B', 0xc0000139, 'unresolved ELF import absent'),
@@ -659,6 +1144,8 @@ def main():
             if os.name == 'nt':
                 run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
                 assert run.returncode == 11 and 'unused.prx' not in run.stderr, (symbol, module_name, run.returncode, run.stdout, run.stderr)
+
+        check_ps4_import_modules(work, relinker)
 
     print('Windows module-scoped import tests passed')
 

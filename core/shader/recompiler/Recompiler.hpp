@@ -3,15 +3,22 @@
 
 #include "RuntimeAbi.hpp"
 #include "PipelineSpecialization.hpp"
+#include "ImageOverwrite.hpp"
+#include "prx/libc/include/general/AtomicSharedPtr.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
+#include <ranges>
+#include <stdexcept>
+#include <functional>
 #include <utility>
 #include <string_view>
 #include <vector>
@@ -34,6 +41,17 @@ struct MemoryRegion {
     std::span<const std::byte> bytes;
 };
 
+class MemoryRegionView : public std::span<const MemoryRegion> {
+    using Base = std::span<const MemoryRegion>;
+public:
+    using Base::Base;
+    constexpr MemoryRegionView() noexcept = default;
+    constexpr MemoryRegionView(Base value) noexcept : Base(value) {}
+    template <std::ranges::contiguous_range TRange>
+        requires (!std::ranges::borrowed_range<TRange>)
+    MemoryRegionView(TRange&&) = delete;
+};
+
 struct ShaderBinary {
     ShaderStage stage;
     std::uint64_t codeAddress;
@@ -50,6 +68,8 @@ struct ShaderComputeStageInfo {
     std::uint32_t threadIdComponentCount;
     std::array<std::uint32_t, 3> partialThreads;
     std::uint32_t scratchDwords = 0;
+    std::uint32_t granulatedVgprCount = 0;
+    std::uint32_t sharedVgprBlocks = 0;
 
     [[nodiscard]] bool PartialGroups() const {
         return partialThreads != std::array<std::uint32_t, 3>{};
@@ -113,7 +133,15 @@ enum class ConservativeZExport : std::uint8_t {
 enum class ColorExportPacking : std::uint8_t {
     None,
     Unorm10_11_11,
-    Float11_11_10
+    Float11_11_10,
+    Unorm4_4_4_4,
+    Uint,
+    UintClamp8,
+    UintClamp16,
+    UintMask8,
+    UintMask16,
+    UintClamp10_10_10_2,
+    UintMask10_10_10_2
 };
 
 enum class RasterPrimitive : std::uint8_t {
@@ -150,6 +178,44 @@ inline constexpr std::uint32_t One = 3u;
 
 }
 
+struct TargetBlend {
+    bool enabled = false;
+    bool snorm = false;
+    std::uint8_t colorSource = 0;
+    std::uint8_t colorDestination = 0;
+    std::uint8_t colorOperation = 0;
+    std::uint8_t alphaSource = 0;
+    std::uint8_t alphaDestination = 0;
+    std::uint8_t alphaOperation = 0;
+    std::uint8_t writeMask = 0;
+    std::array<std::uint32_t, 4> constants{};
+
+    bool operator==(const TargetBlend&) const = default;
+};
+
+struct TargetMerge {
+    std::uint8_t target = 0;
+    std::uint32_t mask = 0;
+    std::uint8_t samples = 1;
+    ColorExportPacking packing = ColorExportPacking::None;
+    std::uint32_t blendControl = 0;
+    bool layered = false;
+    std::uint32_t firstSlice = 0;
+    std::uint32_t lastSlice = 0;
+    std::array<std::uint32_t, 8> descriptor{};
+    bool depthStencilWrites = false;
+    bool depthStencilTests = false;
+    TargetBlend blend{};
+
+    bool operator==(const TargetMerge&) const = default;
+};
+
+enum class SingleSampleDither : std::uint8_t {
+    None,
+    E701,
+    Rounded18701
+};
+
 struct ShaderPixelStageInfo {
     std::uint32_t interpolatorCount;
     std::array<std::uint32_t, 32> interpolatorSettings;
@@ -169,6 +235,8 @@ struct ShaderPixelStageInfo {
     bool linearCentroid;
     bool pixelKillEnable;
     bool depthExportEnable;
+    float depthExportMin = 0.0f;
+    float depthExportMax = 1.0f;
     bool sampleMaskExportEnable;
     bool earlyZ;
     bool executeOnNoop;
@@ -180,15 +248,20 @@ struct ShaderPixelStageInfo {
     bool dualSourceBlend;
     bool alphaToCoverage;
     bool stencilRefExportEnable;
+    bool stencilOperationValueExport = false;
     RasterPrimitive rasterPrimitive = RasterPrimitive::Triangle;
     bool layerExported = false;
     bool ditheredAlphaToCoverage = false;
+    std::uint8_t ditheredAlphaSamples = 8;
+    SingleSampleDither singleSampleDither = SingleSampleDither::None;
     std::uint8_t quadPixelMask = 0xf;
     std::array<std::uint16_t, 4> quadSampleMask{0xffffu, 0xffffu, 0xffffu, 0xffffu};
     std::uint32_t reversedBlend = 0;
     bool iteratesSamples = false;
     PixelPositionLocation positionLocation = PixelPositionLocation::Center;
     std::array<std::uint8_t, 32> sampleLocations{};
+    std::vector<TargetMerge> targetMerges{};
+    std::array<std::uint32_t, 4> sampleOrder{};
 };
 
 struct ShaderVertexBufferResource {
@@ -212,6 +285,10 @@ struct ShaderVertexStageInfo {
     bool fetchEmbedded;
     std::uint32_t paClVsOutCntl = 0;
     std::uint32_t depthRemapMode = 0;
+    bool pointList = false;
+    float pointSize = 1.0f;
+    float pointSizeMin = 0.0f;
+    float pointSizeMax = 0.0f;
 };
 
 struct ShaderFloatMode {
@@ -223,6 +300,8 @@ struct ShaderFloatMode {
     bool operator==(const ShaderFloatMode&) const = default;
 };
 
+inline constexpr std::uint32_t InterpolationFlushResult32 = 0x80u;
+inline constexpr std::uint32_t InterpolationFlushResult16 = 0x100u;
 inline constexpr std::uint32_t InterpolationQuiet = 1u;
 inline constexpr std::uint32_t InterpolationFlush32 = 2u;
 inline constexpr std::uint32_t InterpolationFlush16 = 4u;
@@ -235,11 +314,20 @@ struct GuestContext {
     std::optional<ShaderComputeStageInfo> compute;
     std::optional<ShaderPixelStageInfo> pixel;
     std::optional<ShaderVertexStageInfo> vertex;
-    std::span<const MemoryRegion> memory;
+    MemoryRegionView memory;
     std::optional<ShaderFloatMode> floatMode;
     std::span<const std::uint32_t> linkedCallFallbacks;
+    std::span<const std::uint32_t> splitState;
     bool convertedSamples = false;
+    bool layerRowSamples = false;
 };
+
+struct SharedVectorRegisters {
+    std::uint32_t base = 0;
+    std::uint32_t count = 0;
+};
+
+[[nodiscard]] SharedVectorRegisters GuestSharedVectorRegisters(const GuestContext& context);
 
 struct MeshTargetLimits {
     std::array<std::uint32_t, 3> maxWorkgroupSize;
@@ -276,25 +364,50 @@ struct SpirvTarget {
     std::uint32_t maxWorkgroupSharedMemoryBytes;
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
+    std::array<std::uint64_t, 2> featureDigest{};
+    std::array<std::uintptr_t, 4> featureDigestSpans{};
+    bool featureDigestSealed = false;
     bool nonConstantImageOffsets = false;
     std::uint32_t srgbDecodeFormats = 0;
+    std::uint32_t maxImageArrayLayers = 0;
     bool narrowSubgroupClock = false;
     bool fixedPushSlots = false;
     bool float64DenormPreserve = false;
     bool registrationModules = false;
     std::uint32_t registrationWordLimit = 200000u;
     bool vertexSubgroups = true;
+    bool tessellationEvaluationSubgroups = true;
     bool float16DenormPreserve = false;
     bool spannedWaves = false;
+    bool spannedAnySubgroup = false;
     bool robustBufferAccess2 = false;
+    bool exactRobustLoads = false;
     bool depthRangeRemap = false;
+    bool float32FlushToZero = false;
+    bool waveLdsMemoryBarriers = false;
+    bool float32DenormPreserve = false;
+    bool fusedExactArithmetic = false;
+    bool largePixelFunctionLdsBuffer = false;
+    std::uint32_t pixelFunctionStorageDwords = 4096u;
+    bool deviceScopeLdsMemoryBarriers = false;
+    bool ldsLockFences = false;
+    bool deviceAtomicWorkgroupMemoryBarriers = false;
+    bool fragmentBarycentricBuiltins = false;
+    bool meshWindowBuffer = false;
+    bool hostInterpolationFirst = false;
+    bool shaderImageMinLod = false;
+    bool float16WidenNans = false;
+    bool float16NarrowNans = false;
+    bool float16HostNans = false;
+    bool meshInlineFunctions = false;
+    bool spannedShuffleThroughMemory = false;
 };
 
 struct BindingLayout {
-    std::uint32_t descriptorSet;
-    std::uint32_t firstBinding;
-    std::uint32_t pushConstantOffsetBytes;
-    std::uint32_t pushConstantSizeBytes;
+    std::uint32_t descriptorSet = 0u;
+    std::uint32_t firstBinding = 0u;
+    std::uint32_t pushConstantOffsetBytes = 0u;
+    std::uint32_t pushConstantSizeBytes = 0u;
 };
 
 enum class ProgramRole {
@@ -338,6 +451,7 @@ struct TessellationConfiguration {
     bool breakAtInstance = false;
     std::uint32_t instancePatches = 0;
     bool drawParameters = false;
+    bool mergedHull = false;
 };
 
 inline constexpr std::uint32_t MeshDrawPushOffsetBytes = 104;
@@ -351,10 +465,18 @@ inline constexpr std::uint32_t MeshArgumentIndexCountDword = 3;
 inline constexpr std::uint32_t MeshArgumentFirstIndexDword = 4;
 inline constexpr std::uint32_t MeshArgumentBytes = 20;
 inline constexpr std::uint32_t MeshIndexRestartTable = 0x100;
+inline constexpr std::uint32_t MeshLayerStrideShift = 16;
+inline constexpr std::uint32_t MeshLayerStrideLimit = 0xffff;
 inline constexpr std::uint32_t MeshRestartLengthDword = MeshArgumentBytes / 4;
 inline constexpr std::uint32_t MeshRestartTableDword = MeshRestartLengthDword + 1;
+inline constexpr std::uint32_t MeshCapturedCounterDword = MeshArgumentBytes / 4;
+inline constexpr std::uint32_t MeshCapturedCapacityDword = MeshCapturedCounterDword + 1;
+inline constexpr std::uint32_t MeshCapturedHeaderBytes = 4 * (MeshCapturedCapacityDword + 1);
+inline constexpr std::uint32_t MeshCapturedItemAddressDword = 0;
+inline constexpr std::uint32_t TessellationCaptureArgumentAddressDword = 2;
 inline constexpr std::uint32_t MeshIndexBufferUserWord = 4;
 inline constexpr std::uint32_t WorkgroupMemoryDescriptorSet = 1;
+inline constexpr std::uint32_t ScratchPoolDescriptorSet = 2;
 
 struct GraphicsDrawParameters {
     std::uint64_t indexAddress;
@@ -363,12 +485,40 @@ struct GraphicsDrawParameters {
     std::uint32_t instanceCount;
 };
 
+struct FragmentParameter {
+    std::uint32_t location;
+    std::uint32_t sourceLocation;
+    bool flat;
+    bool perVertex;
+    bool custom = false;
+    bool flatP10 = false;
+    bool vertexOrder = false;
+    bool flatP20 = false;
+    bool operator==(const FragmentParameter&) const = default;
+};
+
+struct BarycentricEmulation {
+    bool active = false;
+    bool smooth = false;
+    bool linear = false;
+    bool smoothOffset = false;
+    bool operator==(const BarycentricEmulation&) const = default;
+};
+
+struct MeshBarycentricLayout {
+    BarycentricEmulation emulation;
+    std::vector<FragmentParameter> parameters;
+    bool operator==(const MeshBarycentricLayout&) const = default;
+};
+
 struct GraphicsCompileContext {
     std::uint32_t firstUserSgpr;
     std::span<const LinkedProgram> linkedPrograms;
     std::optional<MeshConfiguration> mesh;
     std::optional<TessellationConfiguration> tessellation;
     GraphicsDrawParameters draw;
+    std::optional<MeshBarycentricLayout> meshBarycentrics;
+    bool emulateBarycentrics = false;
 };
 
 struct RecompileRequest {
@@ -381,7 +531,7 @@ struct RecompileRequest {
 };
 
 inline std::uint32_t TessellationInstancePatches(const RecompileRequest& request) {
-    if (!request.graphics || !request.graphics->tessellation || request.graphics->draw.instanceCount <= 1u || request.graphics->tessellation->breakAtInstance) return 0u;
+    if (!request.graphics || !request.graphics->tessellation || request.graphics->draw.instanceCount <= 1u || request.graphics->tessellation->breakAtInstance || request.graphics->tessellation->inputControlPoints == 0u) return 0u;
     return request.graphics->draw.indexCount / request.graphics->tessellation->inputControlPoints;
 }
 
@@ -421,6 +571,137 @@ enum class DescriptorRole {
     ImageStorageTable
 };
 
+class ElementFlags {
+public:
+    class reference {
+    public:
+        reference(ElementFlags& flags, std::size_t index) : flags(flags), index(index) {}
+        operator bool() const { return static_cast<const ElementFlags&>(flags)[index]; }
+        reference& operator=(bool flag) {
+            flags.set(index, flag);
+            return *this;
+        }
+        reference& operator=(const reference& other) { return *this = static_cast<bool>(other); }
+        void flip() { flags.set(index, !static_cast<bool>(*this)); }
+
+    private:
+        ElementFlags& flags;
+        std::size_t index;
+    };
+
+    class const_iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = bool;
+        using difference_type = std::ptrdiff_t;
+        using pointer = void;
+        using reference = bool;
+        const_iterator() = default;
+        const_iterator(const ElementFlags* flags, std::size_t index) : flags(flags), index(index) {}
+        bool operator*() const { return (*flags)[index]; }
+        const_iterator& operator++() {
+            ++index;
+            return *this;
+        }
+        const_iterator operator++(int) {
+            auto previous = *this;
+            ++index;
+            return previous;
+        }
+        bool operator==(const const_iterator& other) const { return index == other.index; }
+        bool operator!=(const const_iterator& other) const { return index != other.index; }
+
+    private:
+        const ElementFlags* flags = nullptr;
+        std::size_t index = 0;
+    };
+
+    ElementFlags() = default;
+    explicit ElementFlags(std::size_t size) : count(size), spill(size > InlineFlags ? size : 0u, false) {}
+    ElementFlags(std::initializer_list<bool> flags) {
+        for (const bool flag : flags) push_back(flag);
+    }
+    std::size_t size() const { return count; }
+    bool empty() const { return count == 0; }
+    void reserve(std::size_t size) {
+        if (size > InlineFlags) spill.reserve(size);
+    }
+    bool operator[](std::size_t index) const { return count <= InlineFlags ? ((bits >> index) & 1u) != 0 : spill[index]; }
+    reference operator[](std::size_t index) { return {*this, index}; }
+    bool back() const { return (*this)[count - 1]; }
+    reference back() { return {*this, count - 1}; }
+    bool at(std::size_t index) const {
+        if (index >= count) throw std::out_of_range("ElementFlags::at");
+        return (*this)[index];
+    }
+    void push_back(bool flag) {
+        if (count < InlineFlags) {
+            if (flag) bits |= std::uint64_t{1} << count;
+            ++count;
+            return;
+        }
+        if (count == InlineFlags) {
+            for (std::size_t index = 0; index < InlineFlags; ++index) spill.push_back(((bits >> index) & 1u) != 0);
+        }
+        spill.push_back(flag);
+        ++count;
+    }
+    void clear() {
+        bits = 0;
+        count = 0;
+        spill.clear();
+    }
+    void assign(std::size_t size, bool flag) {
+        clear();
+        for (std::size_t index = 0; index < size; ++index) push_back(flag);
+    }
+    void resize(std::size_t size, bool flag = false) {
+        if (size < count) {
+            ElementFlags kept;
+            for (std::size_t index = 0; index < size; ++index) kept.push_back((*this)[index]);
+            *this = std::move(kept);
+            return;
+        }
+        while (count < size) push_back(flag);
+    }
+    const_iterator begin() const { return {this, 0}; }
+    const_iterator end() const { return {this, count}; }
+    bool operator==(const ElementFlags& other) const {
+        if (count != other.count) return false;
+        return count <= InlineFlags ? bits == other.bits : spill == other.spill;
+    }
+    bool operator==(const std::vector<bool>& other) const {
+        if (count != other.size()) return false;
+        for (std::size_t index = 0; index < count; ++index) {
+            if ((*this)[index] != other[index]) return false;
+        }
+        return true;
+    }
+    template<typename TVisit>
+    void ForEachSet(TVisit&& visit) const {
+        if (count <= InlineFlags) {
+            for (auto rest = bits; rest != 0; rest &= rest - 1) visit(static_cast<std::size_t>(std::countr_zero(rest)));
+            return;
+        }
+        for (auto it = std::find(spill.begin(), spill.end(), true); it != spill.end(); it = std::find(it + 1, spill.end(), true)) visit(static_cast<std::size_t>(it - spill.begin()));
+    }
+
+private:
+    void set(std::size_t index, bool flag) {
+        if (count > InlineFlags) {
+            spill[index] = flag;
+            return;
+        }
+        const auto bit = std::uint64_t{1} << index;
+        bits = flag ? bits | bit : bits & ~bit;
+    }
+
+    static constexpr std::size_t InlineFlags = 64;
+    std::uint64_t bits = 0;
+    std::size_t count = 0;
+    std::vector<bool> spill;
+};
+
 struct DescriptorBinding {
     DescriptorKind kind;
     DescriptorRole role;
@@ -430,31 +711,33 @@ struct DescriptorBinding {
     std::vector<std::uint32_t> guestDescriptor;
     bool readOnly = false;
     std::optional<DescriptorImageShape> imageShape;
-    std::vector<bool> samplerDepthCompare;
+    ElementFlags samplerDepthCompare;
     // Guest image elements the shader stores to (or updates atomically); the others are only read.
-    std::vector<bool> imageWritten;
-    std::vector<bool> imageDepthCompare;
-    std::vector<bool> imageAtomic;
-    std::vector<bool> imageAtomic64;
+    ElementFlags imageWritten;
+    ElementFlags imageDepthCompare;
+    ElementFlags imageAtomic;
+    ElementFlags imageAtomic64;
+    ElementFlags imageUintStorage;
     std::vector<DescriptorImageShape> imageShapes;
     // Guest buffer elements the shader updates atomically (one entry per element of a GuestBuffers
     // binding, empty otherwise). An atomic on a host-imported range is a serialized PCIe round trip
     // (~0.4-0.5 us each on NVIDIA), so a driver may keep these elements in device-local memory.
-    std::vector<bool> bufferAtomic;
+    ElementFlags bufferAtomic;
     // Guest buffer elements the shader may store to through this V# (any store or atomic in the
     // program, whatever its offset), one entry per element of a GuestBuffers binding, empty
     // otherwise. A false entry is proved: every access of that element is a load. A driver may then
     // skip the write-back and the pending-write note for the element; an element beyond the vector
     // (a producer that does not fill it) must be treated as written.
-    std::vector<bool> bufferWritten;
-    std::vector<bool> samplerUnnormalized;
-    std::vector<bool> samplerIntegerBorder;
-    std::vector<bool> samplerCoordinatesIgnored;
-    std::vector<bool> imageUnnormalized;
-    std::vector<bool> imageUnnormalizedBaseLevel;
-    std::vector<std::uint32_t> imageSamplers;
-    std::vector<bool> bufferRead;
+    ElementFlags bufferWritten;
+    ElementFlags samplerUnnormalized;
+    ElementFlags samplerIntegerBorder;
+    ElementFlags samplerCoordinatesIgnored;
+    ElementFlags imageUnnormalized;
+    ElementFlags imageUnnormalizedBaseLevel;
+    std::vector<std::uint64_t> imageSamplers;
+    ElementFlags bufferRead;
     std::vector<std::uint32_t> bufferExtent;
+    std::vector<ImageOverwrite> imageOverwrites;
 };
 
 struct ImageTableEntryPoison {
@@ -472,30 +755,32 @@ struct VertexAttribute {
     std::uint32_t formatComponents = 0;
 };
 
-struct FragmentParameter {
-    std::uint32_t location;
-    std::uint32_t sourceLocation;
-    bool flat;
-    bool perVertex;
-    bool custom = false;
-    bool flatP10 = false;
-    bool vertexOrder = false;
-};
-
-struct BarycentricEmulation {
-    bool active = false;
-    bool smooth = false;
-    bool linear = false;
-};
-
 struct BarycentricEmulationLayout {
     static constexpr std::uint32_t NoLocation = 0xffffffffu;
     std::uint32_t smoothLocation = NoLocation;
     std::uint32_t linearLocation = NoLocation;
+    std::uint32_t positionsLocation = NoLocation;
+    std::uint32_t reciprocalWLocation = NoLocation;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> perVertexLocations;
 };
 
-[[nodiscard]] BarycentricEmulationLayout LayoutBarycentricEmulation(std::span<const FragmentParameter> parameters, const BarycentricEmulation& emulation);
+[[nodiscard]] BarycentricEmulationLayout LayoutBarycentricEmulation(std::span<const FragmentParameter> parameters, const BarycentricEmulation& emulation, bool meshPositions = false);
+
+struct EmulatedPerVertexParameter {
+    std::uint32_t sourceLocation;
+    std::uint32_t location;
+};
+
+struct EmulatedInterface {
+    std::vector<std::uint32_t> passed;
+    std::vector<bool> passedFlat;
+    std::vector<EmulatedPerVertexParameter> perVertex;
+    BarycentricEmulationLayout layout;
+    std::uint32_t barycentrics = 0;
+    std::uint32_t sources = 0;
+};
+
+[[nodiscard]] EmulatedInterface DescribeEmulatedInterface(std::span<const FragmentParameter> parameters, const BarycentricEmulation& emulation, bool meshPositions = false);
 
 // A 128-bit hash of a module's words (SharedSpirv::ContentHash), zero for an empty module. The
 // mixing is pure integer arithmetic over the words in order, so the value is the same on every run,
@@ -534,6 +819,8 @@ inline std::uint64_t HashSpirvWords(std::span<const std::uint32_t> words, std::u
 // reference, or the per-dispatch copy this class removes comes back without a compiler hint.
 // ContentHash is computed once per shared holder, on first use, and dropped by a write.
 class SharedSpirv {
+    struct Holder;
+
 public:
     SharedSpirv() = default;
     SharedSpirv(std::vector<std::uint32_t> words) : holder(std::make_shared<Holder>(std::move(words), nullptr, std::span<const std::uint32_t>{})) {}
@@ -544,6 +831,7 @@ public:
     }
 
     [[nodiscard]] std::span<const std::uint32_t> Words() const { return holder ? holder->Words() : std::span<const std::uint32_t>{}; }
+    [[nodiscard]] bool Mapped() const { return holder != nullptr && holder->owner != nullptr; }
     [[nodiscard]] SpirvContentHash ContentHash() const {
         if (holder == nullptr) return {};
         if (holder->hashed.load(std::memory_order_acquire)) return {holder->hashLow.load(std::memory_order_relaxed), holder->hashHigh.load(std::memory_order_relaxed)};
@@ -570,6 +858,25 @@ public:
     std::vector<std::uint32_t>::iterator insert(std::vector<std::uint32_t>::const_iterator where, std::initializer_list<std::uint32_t> values) { return Mutable().insert(where, values); }
     friend bool operator==(const SharedSpirv& left, const SharedSpirv& right) { return std::ranges::equal(left.Words(), right.Words()); }
 
+    class Weak {
+    public:
+        [[nodiscard]] SharedSpirv Lock() const {
+            SharedSpirv spirv;
+            spirv.holder = holder.lock();
+            return spirv;
+        }
+        [[nodiscard]] bool Expired() const { return holder.expired(); }
+
+    private:
+        friend class SharedSpirv;
+        std::weak_ptr<Holder> holder;
+    };
+    [[nodiscard]] Weak Weaken() const {
+        Weak weak;
+        weak.holder = holder;
+        return weak;
+    }
+
 private:
     struct Holder {
         Holder(std::vector<std::uint32_t> words, std::shared_ptr<const void> owner, std::span<const std::uint32_t> view) : words(std::move(words)), owner(std::move(owner)), view(view) {}
@@ -593,6 +900,8 @@ private:
 
     std::shared_ptr<Holder> holder;
 };
+
+[[nodiscard]] SharedSpirv InternSpirv(std::vector<std::uint32_t> words);
 
 struct VertexInput {
     std::uint32_t location;
@@ -621,6 +930,8 @@ struct CompiledShaderArtifact {
     std::vector<std::uint32_t> runtimeImageResources;
     bool registrationModule = false;
     std::uint32_t bdaAbiVersion = 0;
+    std::uint32_t windowLaneGuards = 0;
+    std::uint32_t descriptorFaults = 0;
     std::uint32_t runtimeAbiVersion = RuntimeAbi::Version;
     std::vector<VertexInput> vertexInputs;
     std::int32_t vertexOffsetSgpr = -1;
@@ -631,11 +942,19 @@ struct CompiledShaderArtifact {
     bool instanceOffsetConflict = false;
     std::uint32_t hostSubgroupSize = 0;
     bool fullSubgroups = false;
+    bool functionLdsBuffer = false;
+    bool meshWindowBuffer = false;
+    bool dispatchThreadLimit = false;
+    std::uint32_t splitStateLanes = 0;
+    std::uint32_t scratchPoolSlotDwords = 0;
     std::vector<std::uint32_t> parameterExports;
     std::vector<FragmentParameter> fragmentParameters;
     BarycentricEmulation barycentricEmulation;
+    std::optional<MeshBarycentricLayout> meshBarycentrics;
     std::vector<std::uint32_t> stencilReferences;
     bool stencilReplaySafe = false;
+    bool bdaWrites = false;
+    bool layerReplaySafe = false;
     std::uint32_t stencilReferenceDword = 0xffffffffu;
     std::uint64_t variantId = 0;
 };
@@ -647,6 +966,7 @@ struct ShaderInvocation {
     std::vector<std::byte> pushConstants;
     bool readsDepthRemapPush = false;
     std::vector<VertexAttribute> vertexAttributes;
+    std::uint64_t userDataRegisterReads = 0;
     std::uint32_t poisonedSrtReads = 0;
     std::vector<ImageTableEntryPoison> imageTablePoison;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> imageTableRanges;
@@ -669,7 +989,18 @@ struct PipelineIdentity {
     auto operator<=>(const PipelineIdentity&) const = default;
 };
 
+struct ResultKeyMemo {
+    mutable AtomicSharedPtr<const std::vector<std::uint32_t>> words;
+    ResultKeyMemo() = default;
+    ResultKeyMemo(const ResultKeyMemo&) {}
+    ResultKeyMemo& operator=(const ResultKeyMemo&) {
+        words.store(nullptr, std::memory_order_relaxed);
+        return *this;
+    }
+};
+
 struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
+    ResultKeyMemo drawKeyMemo;
     bool cacheHit = false;
     std::uint32_t workgroupMemoryDwords = 0;
     std::vector<std::uint32_t> shaderDataUserWords;
@@ -686,7 +1017,7 @@ struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
         };
         mix(specialization.size());
         for (const auto& constant : specialization) mix(constant.id | (static_cast<std::uint64_t>(constant.value) << 32u));
-        mix(hostSubgroupSize | (fullSubgroups ? 0x10000u : 0u) | (static_cast<std::uint64_t>(workgroupMemoryDwords) << 32u));
+        mix(hostSubgroupSize | (fullSubgroups ? 0x10000u : 0u) | (functionLdsBuffer ? 0x20000u : 0u) | (meshWindowBuffer ? 0x40000u : 0u) | (splitStateLanes != 0u ? 0x80000u : 0u) | (static_cast<std::uint64_t>(workgroupMemoryDwords) << 32u));
         mix(bindings.size());
         for (const auto& binding : bindings) mix(binding.descriptorSet | (static_cast<std::uint64_t>(binding.binding) << 16u) | (static_cast<std::uint64_t>(binding.kind) << 40u) | (static_cast<std::uint64_t>(binding.count) << 48u));
         if (identity.Empty()) identity.low = 1;
@@ -694,10 +1025,47 @@ struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
     }
 };
 
+[[nodiscard]] std::optional<MeshBarycentricLayout> MeshBarycentricLayoutOf(const RecompileResult& fragment);
+
+struct MeshOutputUse {
+    std::uint32_t flatParameters = 0;
+    std::uint32_t perVertexParameters = 0;
+    std::uint32_t clipVaryings = 0;
+    std::uint32_t clipDistances = 0;
+    std::uint32_t cullDistances = 0;
+    bool layer = false;
+};
+
+struct MeshOutputBudget {
+    std::uint32_t vertexLocations = 0;
+    std::uint32_t primitiveLocations = 0;
+    std::uint64_t components = 0;
+    std::uint64_t bytes = 0;
+};
+
+[[nodiscard]] MeshOutputBudget MeshBarycentricOutputBudget(const MeshConfiguration& mesh, const MeshTargetLimits& limits, const MeshOutputUse& use);
+
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);
 
 struct ResourceCapture;
 [[nodiscard]] std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit = nullptr);
+void SetResultMemoBudget(std::uint64_t bytes);
+[[nodiscard]] std::uint64_t ResultMemoBytes();
+void SetResultMemoTrimHook(std::function<void()> hook);
+struct ResourcePlanCounters {
+    std::uint64_t heldBytes = 0;
+    std::uint64_t heldPlans = 0;
+    std::uint64_t evictions = 0;
+    std::uint64_t reloads = 0;
+};
+void SetResourcePlanBudget(std::uint64_t bytes);
+[[nodiscard]] ResourcePlanCounters ResourcePlanTotals();
+struct ResourcePlanInterval {
+    std::uint64_t reloads = 0;
+    std::uint64_t evictions = 0;
+};
+[[nodiscard]] ResourcePlanInterval TakeResourcePlanInterval();
+void SetResourcePlanReportHook(std::function<void()> hook);
 
 // Debug aid (see DebugProbe in Translation/TranslationContext.hpp): the APS5_PROBE register probe is
 // only applied while a driver has it active, so it can be limited to one dispatch; the recompile
@@ -706,6 +1074,7 @@ void SetDebugProbeActive(bool active);
 [[nodiscard]] bool DebugProbeActive();
 [[nodiscard]] bool RayTracingStrict();
 [[nodiscard]] bool RayTracingMiss();
+[[nodiscard]] bool ExactF32Arithmetic();
 
 struct RectListShaders {
     RecompileResult control;
@@ -724,13 +1093,14 @@ struct GeometryStageLimits {
 };
 
 [[nodiscard]] RecompileResult BuildBarycentricGeometryShader(const RecompileResult& vertex, const RecompileResult& fragment, const SpirvTarget& target, const std::optional<GeometryStageLimits>& limits);
+[[nodiscard]] RecompileResult BuildTessellationCaptureGeometryShader(const MeshConfiguration& geometry, const SpirvTarget& target, const std::optional<GeometryStageLimits>& limits);
 
 struct BarycentricTessellationShaders {
     RecompileResult control;
     RecompileResult evaluation;
 };
 
-[[nodiscard]] BarycentricTessellationShaders BuildBarycentricTessellationShaders(const RecompileResult& vertex, const RecompileResult& fragment, const SpirvTarget& target, std::uint32_t maxFragmentInputComponents);
+[[nodiscard]] BarycentricTessellationShaders BuildBarycentricTessellationShaders(const RecompileResult& vertex, const RecompileResult& fragment, const SpirvTarget& target, std::uint32_t maxFragmentInputComponents, std::uint32_t provokingVertex);
 
 }
 

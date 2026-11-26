@@ -1,10 +1,13 @@
 import copy
+from functools import lru_cache
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -22,7 +25,82 @@ SUMMARY = {
 }
 
 
+IDENTITY = {"cpu": 'CPU "X"', "cpu_threads": 16, "memory_mib": 32000,
+            "title_id": "PPSA00000", "title": "Example", "content_version": "01.002.000"}
+
+
+def child_decoder_rejects(text):
+    probe = "import json, sys\ntry:\n    json.loads(sys.stdin.read())\nexcept RecursionError:\n    sys.exit(3)\n"
+    return subprocess.run([sys.executable, "-c", probe], input=text, text=True, encoding="utf-8",
+                          capture_output=True).returncode == 3
+
+
+@lru_cache(maxsize=2)
+def excessive_json_value(opening, closing):
+    depth = sys.getrecursionlimit() + 64
+    for _ in range(8):
+        value = opening * depth + "0" + closing * depth
+        if child_decoder_rejects(value):
+            return opening * (depth + 128) + "0" + closing * (depth + 128)
+        depth *= 2
+    raise AssertionError("JSON decoder accepted every bounded nesting probe")
+
+
+class WorkerComparisonTests(unittest.TestCase):
+    def test_worker_changes_are_percentage_points_with_relative_percentages(self):
+        before, after = copy.deepcopy(SUMMARY), copy.deepcopy(SUMMARY)
+        after["worker_busy_pct"] = {"queue worker 0x0": 75.0}
+        report = performance_compare.compare(before, after)
+        self.assertEqual(report["worker_busy_pct"], {"queue worker 0x0": {
+            "baseline": 50.0, "candidate": 75.0, "change": 25.0, "change_pct": 50.0}})
+        self.assertIn("Change (pp)", performance_compare.markdown(report))
+        self.assertTrue(any("percentage points" in note for note in report["notes"]))
+
+    def test_missing_workers_and_zero_baselines_keep_unavailable_changes(self):
+        before, after = copy.deepcopy(SUMMARY), copy.deepcopy(SUMMARY)
+        before["worker_busy_pct"] = {"old": 40.0, "idle": 0.0}
+        after["worker_busy_pct"] = {"new": 30.0, "idle": 20.0}
+        workers = performance_compare.compare(before, after)["worker_busy_pct"]
+        self.assertEqual(list(workers), ["idle", "new", "old"])
+        self.assertEqual(workers["idle"], {"baseline": 0.0, "candidate": 20.0, "change": 20.0, "change_pct": None})
+        for name in ("new", "old"):
+            self.assertIsNone(workers[name]["change"])
+            self.assertIsNone(workers[name]["change_pct"])
+        self.assertIsNone(workers["new"]["baseline"])
+        self.assertIsNone(workers["old"]["candidate"])
+
+    def test_worker_names_are_escaped_in_markdown(self):
+        before, after = copy.deepcopy(SUMMARY), copy.deepcopy(SUMMARY)
+        before["worker_busy_pct"] = after["worker_busy_pct"] = {"worker|<queue>\nnext": 10.0}
+        text = performance_compare.markdown(performance_compare.compare(before, after))
+        self.assertIn("worker&#124;&lt;queue&gt; next", text)
+
+    def test_json_and_markdown_cli_include_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("before.jsonl", "after.jsonl")]
+            for path in paths:
+                path.write_text(json.dumps(SUMMARY) + "\n", encoding="utf-8")
+            for flags in ([], ["--json"]):
+                result = subprocess.run([sys.executable, str(Path(performance_compare.__file__)),
+                                         *map(str, paths), *flags], capture_output=True, text=True,
+                                        encoding="utf-8", timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if flags:
+                    self.assertEqual(json.loads(result.stdout)["worker_busy_pct"]["queue worker 0x0"]["change"], 0.0)
+                else:
+                    self.assertIn("queue worker 0x0", result.stdout)
+                    self.assertIn("Change (pp)", result.stdout)
+
+
 class PerformanceCompareTests(unittest.TestCase):
+    def test_markdown_distinguishes_missing_context_from_literal_null(self):
+        with_title = dict(SUMMARY, title="null")
+        for before, after, row in (
+                (SUMMARY, with_title, "| title | <em>not recorded</em> | null |"),
+                (with_title, SUMMARY, "| title | null | <em>not recorded</em> |")):
+            with self.subTest(row=row):
+                self.assertIn(row, performance_compare.markdown(performance_compare.compare(before, after)).splitlines())
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -36,6 +114,17 @@ class PerformanceCompareTests(unittest.TestCase):
         path.write_text("\n" + "\n\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
 
     def run_cli(self, *args):
+        argv = [str(self.before), str(self.after), *args]
+        returncode = 0
+        with patch.object(sys, "stdout", new_callable=io.StringIO) as output, \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as errors:
+            try:
+                performance_compare.main(argv)
+            except SystemExit as error:
+                returncode = error.code
+        return subprocess.CompletedProcess(argv, returncode, output.getvalue(), errors.getvalue())
+
+    def run_process(self, *args):
         return subprocess.run([sys.executable, str(Path(performance_compare.__file__)), str(self.before), str(self.after), *args],
                               capture_output=True, text=True, encoding="utf-8", timeout=5,
                               env=dict(os.environ, PYTHONIOENCODING="ascii"))
@@ -113,13 +202,118 @@ class PerformanceCompareTests(unittest.TestCase):
         for text in ("Other GPU", "Driver 2", "source tree is dirty", "trace events were dropped", "do not isolate"):
             self.assertIn(text, rendered)
 
+    def test_trace_loss_and_totals_overflow_are_reported_separately(self):
+        for label in ("baseline", "candidate"):
+            for totals_full in (False, True):
+                for events_lost in (None, 0, 7):
+                    for args in ((), ("--json",)):
+                        with self.subTest(label=label, totals_full=totals_full, events_lost=events_lost, args=args):
+                            baseline = copy.deepcopy(self.baseline)
+                            candidate = copy.deepcopy(self.candidate)
+                            summary = baseline if label == "baseline" else candidate
+                            details = {"totals_full": totals_full}
+                            if events_lost is not None:
+                                details["events_lost"] = events_lost
+                            summary["trace_dropped"] = totals_full or bool(events_lost)
+                            summary["trace_dropped_threads"] = {"queue worker 0x0": details}
+                            self.write(self.before, baseline)
+                            self.write(self.after, candidate)
+                            result = self.run_cli(*args)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            output = "\n".join(json.loads(result.stdout)["notes"]) if args else result.stdout
+                            self.assertEqual(f"{label}: phase totals are incomplete" in output, totals_full)
+                            self.assertEqual(f"{label}: trace events were dropped" in output, bool(events_lost))
+                            if totals_full:
+                                self.assertNotIn("work included in phase totals", output)
+
+    def test_trace_loss_and_totals_overflow_on_different_threads_are_both_reported(self):
+        self.candidate.update(trace_dropped=True, trace_dropped_threads={
+            "gpu": {"events_lost": 3, "totals_full": False},
+            "presenter": {"totals_full": True},
+        })
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        result = self.run_cli("--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        notes = "\n".join(report["notes"])
+        self.assertIn("candidate: phase totals are incomplete", notes)
+        self.assertIn("candidate: trace events were dropped", notes)
+        self.assertNotIn("work included in phase totals", notes)
+        self.assertEqual(report["metrics_ms"]["frame_ms.p50"]["change"], 0)
+        self.assertEqual(report["candidate"], self.candidate)
+
+    def test_thread_loss_cannot_disagree_with_the_aggregate_flag(self):
+        self.write(self.before, self.baseline)
+        for details in ({"events_lost": 3}, {"totals_full": True}):
+            self.candidate.update(trace_dropped=False, trace_dropped_threads={"worker": details})
+            self.write(self.after, self.candidate)
+            for args in ((), ("--json",)):
+                with self.subTest(details=details, args=args):
+                    result = self.run_process(*args)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("after.jsonl:2: trace_dropped_threads.worker disagrees with trace_dropped",
+                                  result.stderr)
+
+    def test_legacy_trace_loss_warning_is_preserved_without_thread_details(self):
+        for dropped in (False, True):
+            with self.subTest(dropped=dropped):
+                self.candidate["trace_dropped"] = dropped
+                report = performance_compare.compare(self.baseline, self.candidate)
+                warning = "candidate: trace events were dropped; the event trace omits some of the work included in phase totals."
+                self.assertEqual(warning in report["notes"], dropped)
+                self.assertNotIn("phase totals are incomplete", "\n".join(report["notes"]))
+
+    def test_invalid_trace_loss_details_are_rejected_with_location(self):
+        for details in (None, [], {"worker": None}, {"worker": {"totals_full": 1}},
+                        {"worker": {"events_lost": True}}, {"worker": {"events_lost": -1}}):
+            with self.subTest(details=details):
+                self.baseline["trace_dropped_threads"] = details
+                self.write(self.before, self.baseline)
+                self.write(self.after, self.candidate)
+                result = self.run_cli("--json")
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("before.jsonl:2:", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_native_summary_field_widths(self):
+        fields = (
+            (("cpu_threads",), 32),
+            (("memory_mib",), 64),
+            (("window", "first_present"), 64),
+            (("presents",), 64),
+            (("graphics_track", "Graphics.Copy"), 64),
+            (("owned_draw_counts", "OwnedDraw.unbound"), 64),
+        )
+        for path, bits in fields:
+            for value in (1 << bits, (1 << bits) + 1, 10**100):
+                with self.subTest(path=path, value=value):
+                    document = copy.deepcopy(self.baseline)
+                    parent = document
+                    for part in path[:-1]:
+                        parent = parent.setdefault(part, {})
+                    parent[path[-1]] = value
+                    with self.assertRaisesRegex(ValueError, rf"{'.'.join(path)}.*unsigned {bits}"):
+                        performance_compare.validate(document)
+
+    def test_native_unsigned_maxima(self):
+        maximum = 2**64 - 1
+        document = dict(self.baseline, cpu_threads=2**32 - 1, memory_mib=maximum, presents=maximum,
+                        window=dict(self.baseline["window"], first_present=maximum),
+                        graphics_track={"Graphics.Copy": maximum}, owned_draw_counts={"OwnedDraw.unbound": maximum})
+        self.assertEqual(performance_compare.validate(document), document)
+
     def test_unknown_metadata_is_not_a_claim_of_equivalent_machines(self):
         self.baseline.update(dirty=None, gpu="", driver="")
         report = performance_compare.compare(self.baseline, self.candidate)
         notes = "\n".join(report["notes"])
         self.assertIn("state is unknown", notes)
         self.assertIn("missing configuration: gpu, driver", notes)
-        self.assertIn("do not record the CPU, title or scene", notes)
+        self.assertIn("cannot verify the physical machine or scene", notes)
+        self.assertIn("cpu", notes)
+        self.assertIn("title_id", notes)
 
     def test_invalid_metric_and_metadata_shapes_are_rejected_with_location(self):
         cases = [(("presents",), value) for value in (0, -1, True, 1.5, 10 ** 400)]
@@ -129,6 +323,10 @@ class PerformanceCompareTests(unittest.TestCase):
                   (("window", "first_present"), True), (("env",), []), (("env",), {"APS5_TRACE_FRAMES": 4}),
                   (("trace_dropped",), "false"), (("dirty",), 1), (("trace",), None),
                   (("top_phases_ms_per_frame",), []), (("top_phases_ms_per_frame",), {"phase": -1})]
+        cases += [((field,), value) for field in ("cpu", "title_id", "title", "content_version")
+                  for value in (None, True, 12, [])]
+        cases += [((field,), value) for field in ("cpu_threads", "memory_mib")
+                  for value in (None, True, -1, 1.5, "16")]
         for path, value in cases:
             with self.subTest(path=path, value=value):
                 invalid = copy.deepcopy(self.baseline)
@@ -139,6 +337,19 @@ class PerformanceCompareTests(unittest.TestCase):
                 self.write(self.before, invalid)
                 with self.assertRaisesRegex(ValueError, r"before.jsonl:2:"):
                     performance_compare.load_summary(self.before)
+
+    def test_invalid_worker_busy_percentages_are_rejected_with_location(self):
+        for workers in (None, [], {"worker": "busy"}, {"worker": True},
+                        {"worker": -1}, {"worker": float("inf")}):
+            with self.subTest(workers=workers):
+                self.baseline["worker_busy_pct"] = workers
+                self.write(self.before, self.baseline)
+                with self.assertRaisesRegex(ValueError, r"before.jsonl:2: worker_busy_pct"):
+                    performance_compare.load_summary(self.before)
+
+    def test_worker_busy_share_above_one_hundred_remains_valid(self):
+        self.baseline["worker_busy_pct"] = {"queue worker 0x0": 125.0}
+        self.assertIs(performance_compare.validate(self.baseline), self.baseline)
 
     def test_bad_json_and_missing_file_produce_only_a_cli_error(self):
         self.write(self.after, self.candidate)
@@ -156,6 +367,35 @@ class PerformanceCompareTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_duplicate_json_fields_are_rejected_at_every_object_level(self):
+        record = json.dumps(self.baseline)
+        duplicates = (
+            (record.replace('"commit": "abc123"', '"commit": "wrong", "commit": "abc123"', 1), "commit"),
+            (record.replace('"spec": "frames 600:4"', '"spec": "seconds 0:1", "spec": "frames 600:4"', 1), "spec"),
+            (record.replace('"Driver.Packet": 12.0', '"Driver.Packet": 1.0, "Driver.Packet": 12.0', 1), "Driver.Packet"),
+        )
+        for content, field in duplicates:
+            with self.subTest(field=field):
+                self.before.write_text(content + "\n", encoding="utf-8")
+                original = self.before.read_bytes()
+                with self.assertRaises(ValueError) as raised:
+                    performance_compare.load_summary(self.before)
+                self.assertIn(f"before.jsonl:1: duplicate JSON field: {field!r}", str(raised.exception))
+                self.assertIsInstance(raised.exception.__cause__, ValueError)
+                self.assertEqual(self.before.read_bytes(), original)
+
+    def test_nonfinite_metadata_reports_the_summary_line_in_both_output_modes(self):
+        self.write(self.after, self.candidate)
+        for token in ("NaN", "Infinity", "-Infinity", "1e309", "-1e309"):
+            record = json.dumps(self.baseline)[:-1] + ', "extra": {"measurements": [' + token + "]}}"
+            self.before.write_text("\n" + record + "\n", encoding="utf-8")
+            for args in ((), ("--json",)):
+                with self.subTest(token=token, args=args):
+                    result = self.run_process(*args)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn(f"{self.before}:2: summary contains a non-finite JSON number", result.stderr)
+
     def test_percentage_overflow_is_an_error(self):
         self.baseline["gpu_busy_ms_per_present"] = 1e-308
         self.candidate["gpu_busy_ms_per_present"] = 1e308
@@ -165,6 +405,58 @@ class PerformanceCompareTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("finite numeric range", result.stderr)
+
+    def test_excessive_json_nesting_reports_the_input_location(self):
+        for opening, closing in (("[", "]"), ('{"nested":', "}")):
+            with self.subTest(opening=opening):
+                record = json.dumps(self.baseline)[:-1] + ', "extra": ' + excessive_json_value(opening, closing) + "}"
+                self.before.write_text("\n\n" + record + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, r"before.jsonl:3:") as error:
+                    performance_compare.load_summary(self.before)
+                self.assertIsInstance(error.exception.__cause__, RecursionError)
+
+    def test_excessive_json_nesting_produces_only_a_cli_error(self):
+        cases = ((self.before, "[", "]", ()), (self.before, '{"nested":', "}", ("--json",)),
+                 (self.after, "[", "]", ("--json",)), (self.after, '{"nested":', "}", ()))
+        for path, opening, closing, args in cases:
+            with self.subTest(path=path.name, opening=opening, args=args):
+                self.write(self.before, self.baseline)
+                self.write(self.after, self.candidate)
+                record = json.dumps(self.baseline)[:-1] + ', "extra": ' + excessive_json_value(opening, closing) + "}"
+                path.write_text("\n\n" + record + "\n", encoding="utf-8")
+                original = (self.before.read_bytes(), self.after.read_bytes())
+                result = self.run_process(*args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"{path}:3:", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual((self.before.read_bytes(), self.after.read_bytes()), original)
+
+    def test_json_report_recursion_produces_only_a_cli_error(self):
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        with patch.object(performance_compare.json, "dumps", side_effect=RecursionError("report nesting is too deep")), \
+                patch.object(sys, "stdout", new_callable=io.StringIO) as output, \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as errors:
+            with self.assertRaises(SystemExit) as error:
+                performance_compare.main([str(self.before), str(self.after), "--json"])
+        self.assertEqual(error.exception.code, 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("JSON report: report nesting is too deep", errors.getvalue())
+        self.assertNotIn("Traceback", errors.getvalue())
+
+    def test_supported_nested_metadata_is_preserved(self):
+        metadata = {"value": 7}
+        for depth in range(16):
+            metadata = {"nested": [metadata]}
+        self.baseline["extra"] = metadata
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        with patch.object(sys, "stdout", new_callable=io.StringIO) as output, \
+                patch.object(sys, "stderr", new_callable=io.StringIO) as errors:
+            performance_compare.main([str(self.before), str(self.after), "--json"])
+            self.assertEqual(errors.getvalue(), "")
+            self.assertEqual(json.loads(output.getvalue())["baseline"]["extra"], metadata)
 
     def test_markdown_reports_deltas_and_escapes_table_values(self):
         self.candidate["frame_ms"]["max"] = 60.0
@@ -185,13 +477,20 @@ class PerformanceCompareTests(unittest.TestCase):
         self.write(self.after, self.candidate)
         for args in ((), ("--json",)):
             with self.subTest(args=args):
-                result = self.run_cli(*args)
+                result = self.run_process(*args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("GPU \u03a9", result.stdout)
         self.before.write_text("bad", encoding="utf-8")
-        result = self.run_cli()
+        result = self.run_process()
         self.assertEqual(result.returncode, 2)
         self.assertIn("avant-\u00e9.jsonl:1:", result.stderr)
+
+    def test_invalid_utf8_identifies_the_summary_file(self):
+        self.write(self.before, self.baseline)
+        self.after.write_bytes(b"\xff")
+        result = self.run_cli("--json")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(self.after.name, result.stderr)
 
     def test_bom_summary_loads(self):
         self.before.write_text(json.dumps(self.baseline) + "\n", encoding="utf-8-sig")
@@ -200,6 +499,329 @@ class PerformanceCompareTests(unittest.TestCase):
         result = self.run_cli("--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["baseline"], self.baseline)
+
+    def test_matching_recorded_machine_and_title_context_is_accepted(self):
+        self.baseline.update(IDENTITY)
+        self.candidate.update(IDENTITY)
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        result = self.run_cli("--require-matching-context", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["configuration_differences"], {})
+        self.assertEqual(report["baseline"], self.baseline)
+        self.assertEqual(report["candidate"], self.candidate)
+        self.assertNotIn("missing configuration", "\n".join(report["notes"]))
+        for key in ("cpu_threads", "memory_mib"):
+            with self.subTest(unknown=key):
+                self.baseline[key] = self.candidate[key] = 0
+                performance_compare.validate(self.baseline)
+                report = performance_compare.compare(self.baseline, self.candidate)
+                self.assertEqual(report["configuration_differences"], {})
+                self.assertIn(key, "\n".join(report["notes"]))
+
+    def test_recorded_identity_differences_are_reported_and_rejected_in_strict_mode(self):
+        self.baseline.update(IDENTITY)
+        self.write(self.before, self.baseline)
+        changes = {"cpu": "Other CPU", "cpu_threads": 8, "memory_mib": 16000,
+                   "title_id": "PPSA00001", "title": "Other title", "content_version": "01.003.000"}
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                candidate = {**self.candidate, **IDENTITY, key: value}
+                expected = {key: {"baseline": IDENTITY[key], "candidate": value}}
+                self.assertEqual(performance_compare.compare(self.baseline, candidate)["configuration_differences"], expected)
+                self.write(self.after, candidate)
+                result = self.run_cli("--json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["configuration_differences"], expected)
+                self.assertEqual(report["metrics_ms"]["frame_ms.p50"]["change"], 0)
+                result = self.run_cli("--require-matching-context", "--json")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"recorded configuration differs: {key}", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_missing_identity_is_distinct_from_known_identity_but_legacy_summaries_still_work(self):
+        for key in IDENTITY:
+            for label in ("baseline", "candidate"):
+                with self.subTest(key=key, missing=label):
+                    baseline = {**self.baseline, **IDENTITY}
+                    candidate = {**self.candidate, **IDENTITY}
+                    (baseline if label == "baseline" else candidate).pop(key)
+                    report = performance_compare.compare(baseline, candidate)
+                    self.assertEqual(report["configuration_differences"],
+                                     {key: {"baseline": baseline.get(key), "candidate": candidate.get(key)}})
+                    self.assertIn(f"{label}: missing configuration: {key}.", report["notes"])
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        result = self.run_cli("--require-matching-context", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["configuration_differences"], {})
+        self.assertIn("cpu", "\n".join(report["notes"]))
+        self.assertIn("title_id", "\n".join(report["notes"]))
+        self.write(self.after, {**self.candidate, **IDENTITY})
+        result = self.run_cli("--require-matching-context")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, "")
+        for key in IDENTITY:
+            self.assertIn(key, result.stderr)
+
+    def test_recorded_identity_differences_are_escaped_in_markdown(self):
+        self.baseline.update(IDENTITY)
+        self.candidate.update(IDENTITY, cpu="CPU | <\u03a9>\nline", title="Other title", content_version="02.000.000")
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CPU &#124; &lt;\u03a9&gt; line", result.stdout)
+        self.assertIn("| title | Example | Other title |", result.stdout)
+        self.assertIn("| content_version | 01.002.000 | 02.000.000 |", result.stdout)
+
+    def test_matching_context_can_be_required_without_a_timing_verdict(self):
+        self.write(self.before, self.baseline)
+        self.candidate["frame_ms"]["max"] = 100.0
+        self.write(self.after, self.candidate)
+        result = self.run_cli("--require-matching-context", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["metrics_ms"]["frame_ms.max"]["change"], 60.0)
+        for field in ("gpu", "driver", "os", "resolution"):
+            with self.subTest(field=field):
+                candidate = copy.deepcopy(self.candidate)
+                candidate[field] += " changed"
+                self.write(self.after, candidate)
+                result = self.run_cli("--require-matching-context")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(field, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(self.run_cli().returncode, 0)
+        for key, value in (("window", dict(self.candidate["window"], first_present=900)),
+                           ("env", {"APS5_TRACE_FRAMES": "900:4"})):
+            with self.subTest(key=key):
+                candidate = copy.deepcopy(self.candidate)
+                candidate[key] = value
+                self.write(self.after, candidate)
+                self.assertEqual(self.run_cli("--require-matching-context").returncode, 2)
+
+    def test_trace_output_directory_does_not_change_the_comparison_context(self):
+        self.write(self.before, self.baseline)
+        self.candidate["env"]["APS5_TRACE_DIR"] = "<path>"
+        self.write(self.after, self.candidate)
+
+        result = self.run_cli("--require-matching-context", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["configuration_differences"], {})
+        self.assertEqual(report["candidate"]["env"]["APS5_TRACE_DIR"], "<path>")
+
+    def test_timed_windows_allow_different_first_present_counters(self):
+        for summary in (self.baseline, self.candidate):
+            summary["env"] = {"APS5_TRACE_SECONDS": "270:20"}
+            summary["window"].update(spec="seconds 270:20", ms=20000.0)
+        self.baseline["window"]["first_present"] = 1010
+        self.candidate["window"]["first_present"] = 700
+        self.baseline["presents"] = 20
+        self.candidate["presents"] = 40
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        result = self.run_cli("--require-matching-context", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["configuration_differences"], {})
+        self.assertEqual(report["baseline"], self.baseline)
+        self.assertEqual(report["candidate"], self.candidate)
+        self.assertEqual(report["metrics_ms"]["mean_frame_ms"]["change_pct"], -50.0)
+
+    def test_timed_windows_still_require_matching_requested_windows(self):
+        for summary in (self.baseline, self.candidate):
+            summary["env"] = {"APS5_TRACE_SECONDS": "270:20"}
+            summary["window"]["spec"] = "seconds 270:20"
+        self.candidate["window"].update(spec="seconds 280:20", first_present=700)
+        report = performance_compare.compare(self.baseline, self.candidate)
+        self.assertEqual(set(report["configuration_differences"]), {"window.spec"})
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        result = self.run_cli("--require-matching-context")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("window.spec", result.stderr)
+
+    def test_periodic_summaries_allow_different_first_present_counters(self):
+        for summary in (self.baseline, self.candidate):
+            summary["env"] = {"APS5_TRACE_SUMMARY_EVERY": "10"}
+            summary["window"].update(spec="summary_every 10", ms=10000.0)
+        self.baseline["window"]["first_present"] = 2932
+        self.candidate["window"]["first_present"] = 2992
+        self.baseline["presents"] = 172
+        self.candidate["presents"] = 176
+        self.write(self.before, self.baseline)
+        self.write(self.after, self.candidate)
+        result = self.run_cli("--require-matching-context", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["configuration_differences"], {})
+
+    def test_periodic_summaries_still_require_the_same_interval(self):
+        for summary in (self.baseline, self.candidate):
+            summary["env"] = {"APS5_TRACE_SUMMARY_EVERY": "10"}
+            summary["window"]["spec"] = "summary_every 10"
+        self.candidate["window"].update(spec="summary_every 30", first_present=700)
+        report = performance_compare.compare(self.baseline, self.candidate)
+        self.assertEqual(set(report["configuration_differences"]), {"window.spec"})
+        self.candidate["window"]["spec"] = "seconds 10:10"
+        report = performance_compare.compare(self.baseline, self.candidate)
+        self.assertEqual(set(report["configuration_differences"]), {"window.spec"})
+
+    def test_malformed_periodic_spec_keeps_first_present_check(self):
+        for summary in (self.baseline, self.candidate):
+            summary["window"]["spec"] = "summary_every ten"
+        self.candidate["window"]["first_present"] = 700
+        report = performance_compare.compare(self.baseline, self.candidate)
+        self.assertEqual(set(report["configuration_differences"]), {"window.first_present"})
+
+    def test_unknown_window_syntax_keeps_first_present_check(self):
+        for summary in (self.baseline, self.candidate):
+            summary["window"]["spec"] = "seconds unknown"
+        self.candidate["window"]["first_present"] = 700
+        report = performance_compare.compare(self.baseline, self.candidate)
+        self.assertEqual(set(report["configuration_differences"]), {"window.first_present"})
+
+
+
+    def test_main_reconfigures_streams(self):
+        class Stream:
+            def __init__(self):
+                self.encoding = None
+                self.errors = None
+
+            def reconfigure(self, encoding=None, errors=None):
+                self.encoding = encoding
+                self.errors = errors
+
+            def write(self, text):
+                pass
+
+            def flush(self):
+                pass
+
+        out, err = Stream(), Stream()
+        with patch.object(performance_compare.sys, "stdout", out), patch.object(performance_compare.sys, "stderr", err):
+            try:
+                performance_compare.main([])
+            except SystemExit:
+                pass
+        self.assertEqual(out.encoding, "utf-8")
+        self.assertEqual(out.errors, "backslashreplace")
+        self.assertEqual(err.encoding, "utf-8")
+        self.assertEqual(err.errors, "backslashreplace")
+
+
+class GraphicsTrackComparisonTests(unittest.TestCase):
+    def test_graphics_track_rates_are_compared_per_present(self):
+        before, after = copy.deepcopy(SUMMARY), copy.deepcopy(SUMMARY)
+        before["graphics_track"] = {"Graphics.RenderPass": 8, "Graphics.RenderPass.Continued": 40,
+                                    "Graphics.Barrier.draw": 80, "Graphics.BarrierMerged.draw": 16,
+                                    "Graphics.Copy": 4, "Graphics.Copy.bytes": 4 * 1024 * 1024}
+        after["graphics_track"] = {"Graphics.RenderPass": 12, "Graphics.RenderPass.Continued": 20,
+                                   "Graphics.Barrier.draw": 120, "Graphics.BarrierMerged.draw": 0,
+                                   "Graphics.Copy": 6, "Graphics.Copy.bytes": 2 * 1024 * 1024}
+        report = performance_compare.compare(before, after)
+        self.assertEqual(report["graphics_track"]["render_passes"],
+                         {"baseline": 2.0, "candidate": 3.0, "change": 1.0, "change_pct": 50.0})
+        self.assertEqual(report["graphics_track"]["continued_draws"],
+                         {"baseline": 10.0, "candidate": 5.0, "change": -5.0, "change_pct": -50.0})
+        self.assertEqual(report["graphics_track"]["barriers"],
+                         {"baseline": 20.0, "candidate": 30.0, "change": 10.0, "change_pct": 50.0})
+        self.assertEqual(report["graphics_track"]["merged_barriers"],
+                         {"baseline": 4.0, "candidate": 0.0, "change": -4.0, "change_pct": -100.0})
+        self.assertEqual(report["graphics_track"]["copies"],
+                         {"baseline": 1.0, "candidate": 1.5, "change": 0.5, "change_pct": 50.0})
+        self.assertEqual(report["graphics_track"]["copy_mib"]["baseline"], 1.0)
+        self.assertEqual(report["graphics_track"]["copy_mib"]["candidate"], 0.5)
+        text = performance_compare.markdown(report)
+        self.assertIn("Graphics track (per present)", text)
+        self.assertIn("| render passes | 2.000 | 3.000 | +1.000 | +50.000 |", text)
+
+    def test_missing_graphics_track_is_unknown_not_zero(self):
+        before, after = copy.deepcopy(SUMMARY), copy.deepcopy(SUMMARY)
+        after["graphics_track"] = {"Graphics.RenderPass": 4}
+        report = performance_compare.compare(before, after)
+        self.assertIsNone(report["graphics_track"]["render_passes"]["baseline"])
+        self.assertIsNone(report["graphics_track"]["render_passes"]["change"])
+        self.assertIn("unknown, not zero", " ".join(report["notes"]))
+
+    def test_absent_graphics_track_adds_no_note_or_table(self):
+        before, after = copy.deepcopy(SUMMARY), copy.deepcopy(SUMMARY)
+        report = performance_compare.compare(before, after)
+        self.assertIsNone(report["graphics_track"]["render_passes"]["baseline"])
+        self.assertNotIn("Graphics track (per present)", performance_compare.markdown(report))
+        self.assertNotIn("unknown, not zero", " ".join(report["notes"]))
+
+    def test_invalid_graphics_track_is_rejected(self):
+        with self.assertRaises(ValueError):
+            performance_compare.validate(dict(SUMMARY, graphics_track={"bad": -1}))
+
+
+class UniqueJsonObjectTests(unittest.TestCase):
+    def test_nested_objects_are_each_checked(self):
+        text = '{"a": {"x": 1}, "b": {"x": 2}}'
+        self.assertEqual(json.loads(text, object_pairs_hook=performance_compare.unique_json_object), {"a": {"x": 1}, "b": {"x": 2}})
+
+    def test_duplicate_field_names_the_field(self):
+        with self.assertRaisesRegex(ValueError, "duplicate JSON field: 'x'"):
+            json.loads('{"a": {"x": 1, "x": 2}}', object_pairs_hook=performance_compare.unique_json_object)
+
+
+class GraphicsMetricsTests(unittest.TestCase):
+    def test_missing_track_gives_none_for_every_label(self):
+        metrics = performance_compare.graphics_metrics({"presents": 4})
+        self.assertEqual(set(metrics), set(performance_compare.GRAPHICS_LABELS))
+        self.assertTrue(all(value is None for value in metrics.values()))
+
+    def test_counters_are_per_present_rates(self):
+        track = {"Graphics.RenderPass": 4, "Graphics.RenderPass.Continued": 2, "Graphics.Barrier.A": 2, "Graphics.Barrier.B": 4,
+                 "Graphics.BarrierMerged.A": 6, "Graphics.Copy": 1, "Graphics.Copy.bytes": 4 * 1024 * 1024}
+        metrics = performance_compare.graphics_metrics({"presents": 2, "graphics_track": track})
+        self.assertEqual(metrics, {"render_passes": 2, "continued_draws": 1, "barriers": 3, "merged_barriers": 3, "copies": 0.5, "copy_mib": 2})
+
+    def test_absent_counters_count_as_zero(self):
+        metrics = performance_compare.graphics_metrics({"presents": 1, "graphics_track": {}})
+        self.assertEqual(set(metrics.values()), {0})
+
+    def test_unrepresentable_rate_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "outside the finite numeric range"):
+            performance_compare.graphics_metrics({"presents": 1, "graphics_track": {"Graphics.Copy": 10 ** 400}})
+
+class CompareHelperTests(unittest.TestCase):
+    def test_delta_gives_absolute_and_percentage_change(self):
+        self.assertEqual(performance_compare.delta(100, 150), {'baseline': 100, 'candidate': 150, 'change': 50, 'change_pct': 50.0})
+        self.assertIsNone(performance_compare.delta(None, 5)['change'])
+        self.assertIsNone(performance_compare.delta(0, 5)['change_pct'])
+
+    def test_delta_refuses_an_overflowing_difference(self):
+        with self.assertRaisesRegex(ValueError, 'finite numeric range'):
+            performance_compare.delta(1e308, -1e308)
+
+    def test_number_accepts_finite_non_negative_numbers_only(self):
+        self.assertEqual(performance_compare.number(3, 'x'), 3)
+        for value in (-1, True, float('nan')):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'x must be'):
+                performance_compare.number(value, 'x')
+
+    def test_unique_json_object_refuses_a_duplicate_field(self):
+        self.assertEqual(performance_compare.unique_json_object([('a', 1), ('b', 2)]), {'a': 1, 'b': 2})
+        with self.assertRaisesRegex(ValueError, 'duplicate JSON field'):
+            performance_compare.unique_json_object([('a', 1), ('a', 2)])
+
+    def test_cell_escapes_table_characters_and_line_breaks(self):
+        self.assertEqual(performance_compare.cell('a|b'), 'a&#124;b')
+        self.assertEqual(performance_compare.cell('<x> & y'), '&lt;x&gt; &amp; y')
+        self.assertEqual(performance_compare.cell('x\ny'), 'x y')
+        self.assertEqual(performance_compare.cell(1.5), '1.5')
+class GraphicsEmptyTests(unittest.TestCase):
+    def test_graphics_metrics_without_a_track_has_every_label_empty(self):
+        metrics = performance_compare.graphics_metrics({'graphics_track': None})
+        self.assertEqual(set(metrics), set(performance_compare.GRAPHICS_LABELS))
+        self.assertTrue(all(value is None for value in metrics.values()))
 
 
 if __name__ == "__main__":

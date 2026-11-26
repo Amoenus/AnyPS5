@@ -8,6 +8,8 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/specifics/itanium/CxxAbi.hpp"
 
+extern "C" [[noreturn]] void APS5_VABI LibcRuntimeAssertion(const char* file, int line, const char* function, const char* condition);
+
 namespace LibcException {
 struct Header {
     std::type_info* type {};
@@ -33,6 +35,7 @@ struct Globals { Header* caught {}; unsigned uncaught {}; };
 inline thread_local Globals globals;
 inline constexpr std::uint64_t PrimaryClass = 0x414e5950432b2b00;
 inline constexpr std::uint64_t DependentClass = PrimaryClass | 1;
+inline constexpr std::uint64_t GnuClass = 0x474e5543432b2b00;
 
 inline Header* FromUnwind(_Unwind_Exception* e) {
     return reinterpret_cast<Header*>(reinterpret_cast<unsigned char*>(e) - offsetof(Header, unwind));
@@ -42,11 +45,22 @@ inline Allocation* AllocationOf(Header* header) {
     return reinterpret_cast<Allocation*>(reinterpret_cast<unsigned char*>(header) - offsetof(Allocation, header));
 }
 inline bool Native(std::uint64_t value) { return (value & ~std::uint64_t(1)) == PrimaryClass; }
+inline bool Gnu(std::uint64_t value) { return (value & ~std::uint64_t(1)) == GnuClass; }
 inline Header* Primary(Header* header) {
     return header->unwind.exception_class == DependentClass ? FromObject(reinterpret_cast<void*>(header->type)) : header;
 }
 const char* Kind(const std::type_info*);
 bool Match(const std::type_info* caught, const std::type_info* thrown, void*& object);
+bool APS5_VABI UpcastTypeInfo(const std::type_info* self, const __cxxabiv1::__class_type_info* destination,
+                              void** object);
+bool APS5_VABI UpcastTypeInfoResult(const __cxxabiv1::__class_type_info* self,
+                                   const __cxxabiv1::__class_type_info* destination, const void* object,
+                                   __cxxabiv1::__class_type_info::__upcast_result& result);
+bool APS5_VABI DynamicCastTypeInfo(const __cxxabiv1::__class_type_info* self, std::ptrdiff_t sourceToDestination,
+                                   __cxxabiv1::__class_type_info::__sub_kind accessPath,
+                                   const __cxxabiv1::__class_type_info* destination, const void* object,
+                                   const __cxxabiv1::__class_type_info* source, const void* sourceObject,
+                                   __cxxabiv1::__class_type_info::__dyncast_result& result);
 void Release(void*);
 [[noreturn]] void Terminate();
 }

@@ -5,6 +5,7 @@
 #include <charconv>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <locale>
 #include <sstream>
 #include <stdexcept>
@@ -16,9 +17,10 @@ namespace {
 enum class JsonType { Null, Boolean, Number, String, Array, Object };
 
 struct JsonValue;
+struct JsonMember;
 
 using JsonArray = std::vector<JsonValue>;
-using JsonObject = std::vector<std::pair<std::string, JsonValue>>;
+using JsonObject = std::vector<JsonMember>;
 
 struct JsonValue {
     JsonType type = JsonType::Null;
@@ -28,6 +30,11 @@ struct JsonValue {
     std::string stringValue;
     JsonArray arrayValue;
     JsonObject objectValue;
+};
+
+struct JsonMember {
+    std::string key;
+    JsonValue value;
 };
 
 std::string readFileToString(const std::filesystem::path& path) {
@@ -179,7 +186,7 @@ JsonValue parseJsonObject(const std::string& text, std::size_t& position, std::s
         skipWhitespace(text, position);
         expectChar(text, position, ':');
         JsonValue member = parseJsonValue(text, position, depth + 1);
-        value.objectValue.emplace_back(std::move(key), std::move(member));
+        value.objectValue.push_back({std::move(key), std::move(member)});
         skipWhitespace(text, position);
         const char next = peekChar(text, position);
         if (next == ',') { ++position; continue; }
@@ -275,7 +282,7 @@ JsonValue parseJsonDocument(const std::string& text) {
 const JsonValue* findObjectMember(const JsonValue& object, const std::string& key) {
     if (object.type != JsonType::Object) throw std::runtime_error("expected JSON object in param.json");
     for (const auto& member : object.objectValue) {
-        if (member.first == key) return &member.second;
+        if (member.key == key) return &member.value;
     }
     return nullptr;
 }
@@ -308,8 +315,8 @@ ParsedParamJson parseParamJson(const std::filesystem::path& paramJsonPath) {
     if (languageObject == nullptr) languageObject = findObjectMember(*localizedParametersValue, "en-US");
     if (languageObject == nullptr) {
         for (const auto& member : localizedParametersValue->objectValue) {
-            if (member.second.type == JsonType::Object) {
-                languageObject = &member.second;
+            if (member.value.type == JsonType::Object) {
+                languageObject = &member.value;
                 break;
             }
         }
@@ -322,6 +329,17 @@ ParsedParamJson parseParamJson(const std::filesystem::path& paramJsonPath) {
     ParsedParamJson result;
     result.title = title;
     result.titleId = titleId;
+    if (const JsonValue* contentVersion = findObjectMember(root, "contentVersion"); contentVersion != nullptr && contentVersion->type == JsonType::String) result.contentVersion = contentVersion->stringValue;
+    if (const JsonValue* categoryType = findObjectMember(root, "applicationCategoryType")) {
+        const auto& number = categoryType->numberText;
+        if (categoryType->type != JsonType::Number || number.find_first_of("-.eE") != std::string::npos)
+            throw std::runtime_error("param.json applicationCategoryType is not an unsigned integer");
+        std::uint32_t value = 0;
+        const auto parsed = std::from_chars(number.data(), number.data() + number.size(), value);
+        if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size())
+            throw std::runtime_error("param.json applicationCategoryType exceeds uint32 range");
+        result.applicationCategoryType = value;
+    }
     if (const JsonValue* attribute = findObjectMember(root, "attribute3")) {
         const auto& number = attribute->numberText;
         if (attribute->type != JsonType::Number || number.find_first_of("-.eE") != std::string::npos) throw std::runtime_error("param.json attribute3 is not an unsigned integer");
@@ -359,8 +377,13 @@ ParsedParamJson parseParamJson(const std::filesystem::path& paramJsonPath) {
         if (param == nullptr) continue;
         const auto& number = param->numberText;
         if (param->type != JsonType::Number || number.find_first_of(".eE") != std::string::npos) throw std::runtime_error("param.json " + key + " is not an integer");
-        const auto parsed = std::from_chars(number.data(), number.data() + number.size(), result.userDefinedParams[index]);
-        if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size()) throw std::runtime_error("param.json " + key + " exceeds int32 range");
+        std::int64_t value = 0;
+        const auto parsed = std::from_chars(number.data(), number.data() + number.size(), value);
+        if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size() || value < std::numeric_limits<std::int32_t>::min() ||
+            value > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("param.json " + key + " exceeds 32-bit range");
+        }
+        result.userDefinedParams[index] = static_cast<std::int32_t>(static_cast<std::uint32_t>(value));
     }
     return result;
 }
