@@ -74,6 +74,13 @@ VKAPI_ATTR void VKAPI_CALL imageMemoryRequirements(VkDevice, VkImage, VkMemoryRe
     *requirements = {65536, 1024, 0x3};
 }
 
+VKAPI_ATTR void VKAPI_CALL imageMemoryRequirements2(VkDevice device, const VkImageMemoryRequirementsInfo2* info, VkMemoryRequirements2* requirements) {
+    imageMemoryRequirements(device, info->image, &requirements->memoryRequirements);
+    auto* dedicated = static_cast<VkMemoryDedicatedRequirements*>(requirements->pNext);
+    dedicated->prefersDedicatedAllocation = VK_FALSE;
+    dedicated->requiresDedicatedAllocation = VK_FALSE;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL bindImageMemory(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize) {
     return VK_SUCCESS;
 }
@@ -214,6 +221,7 @@ PFN_vkVoidFunction VKAPI_CALL deviceProc(VkDevice, const char* name) {
     static const std::map<std::string_view, PFN_vkVoidFunction> table{
         {"vkCreateImage", reinterpret_cast<PFN_vkVoidFunction>(createImage)},
         {"vkGetImageMemoryRequirements", reinterpret_cast<PFN_vkVoidFunction>(imageMemoryRequirements)},
+        {"vkGetImageMemoryRequirements2", reinterpret_cast<PFN_vkVoidFunction>(imageMemoryRequirements2)},
         {"vkBindImageMemory", reinterpret_cast<PFN_vkVoidFunction>(bindImageMemory)},
         {"vkDestroyImage", reinterpret_cast<PFN_vkVoidFunction>(destroyImage)},
         {"vkCreateImageView", reinterpret_cast<PFN_vkVoidFunction>(createImageView)},
