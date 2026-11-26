@@ -371,6 +371,7 @@ void gcnTilingTests() {
         array.gcnPitch = 16u;
         const auto geometry = DescribeSurface(array);
         Require(geometry.levelMajor && geometry.layers == 3u && geometry.guestBytes == 4608u, "PS4 layered mip chain size changed");
+        Require(geometry.imageLevels == 3u, "a three-level PS4 array lost its physical mip levels");
         Require(geometry.mips[1].tiledOffset == 3072u && geometry.mips[2].tiledOffset == 3840u && geometry.mips[1].tiledSize == 256u, "PS4 levels do not follow every slice of the level before");
         Require(geometry.GuestOffset(2u, geometry.mips[1]) == 3584u && geometry.GuestOffset(1u, geometry.mips[0]) == 1024u, "PS4 slice of a level is misplaced");
         Require(geometry.mips[1].linearOffset == 1024u && geometry.mips[2].linearOffset == 1280u, "PS4 linear staging is not per slice");
@@ -384,6 +385,7 @@ void gcnTilingTests() {
         volume.lastLevel = 2u;
         const auto volumeGeometry = DescribeSurface(volume);
         Require(volumeGeometry.levelMajor && volumeGeometry.layers == 4u && volumeGeometry.imageDepth == 4u && volumeGeometry.imageLayers == 1u, "a PS4 volume is not one image of four slices");
+        Require(volumeGeometry.imageLevels == 3u, "a three-level PS4 volume lost its physical mip levels");
         Require(volumeGeometry.mips[1].tiledOffset == 4096u && volumeGeometry.mips[2].tiledOffset == 4608u && volumeGeometry.guestBytes == 4864u, "PS4 volume levels do not halve their slices");
         Require(volumeGeometry.GuestOffset(1u, volumeGeometry.mips[1]) == 4352u, "PS4 slice of a volume level is misplaced");
         Require(volumeGeometry.HasLayer(1u, 1u) && !volumeGeometry.HasLayer(1u, 2u) && volumeGeometry.HasLayer(2u, 0u) && !volumeGeometry.HasLayer(2u, 1u), "PS4 volume levels keep slices they do not have");
